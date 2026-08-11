@@ -1,0 +1,19 @@
+[remap]
+
+importer="oggvorbisstr"
+type="AudioStreamOggVorbis"
+uid="uid://ctrbtj501pbct"
+path="res://.godot/imported/Sword Attack 2.ogg-97ac3a9cc1d4084275d1b84c028439ee.oggvorbisstr"
+
+[deps]
+
+source_file="res://assets/factions/humans/Sounds Human/Sword Attack 2.ogg"
+dest_files=["res://.godot/imported/Sword Attack 2.ogg-97ac3a9cc1d4084275d1b84c028439ee.oggvorbisstr"]
+
+[params]
+
+loop=false
+loop_offset=0
+bpm=0
+beat_count=0
+bar_beats=4

@@ -1,0 +1,14 @@
+# Системный кэш Godot и настройки редактора
+.godot/
+.vscode/
+.claude/
+_trash/
+
+# Готовые сборки, архивы и исполняемые файлы
+*.exe
+*.zip
+Alfa Linux 1.0/
+First Alfa 1.0/
+
+# Файлы экспорта
+export_presets.cfg

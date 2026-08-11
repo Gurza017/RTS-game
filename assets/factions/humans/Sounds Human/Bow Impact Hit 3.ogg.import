@@ -1,0 +1,19 @@
+[remap]
+
+importer="oggvorbisstr"
+type="AudioStreamOggVorbis"
+uid="uid://0nugspyob8kw"
+path="res://.godot/imported/Bow Impact Hit 3.ogg-228e6bb883ae66eca19454f1638baf10.oggvorbisstr"
+
+[deps]
+
+source_file="res://assets/factions/humans/Sounds Human/Bow Impact Hit 3.ogg"
+dest_files=["res://.godot/imported/Bow Impact Hit 3.ogg-228e6bb883ae66eca19454f1638baf10.oggvorbisstr"]
+
+[params]
+
+loop=false
+loop_offset=0
+bpm=0
+beat_count=0
+bar_beats=4

@@ -1,0 +1,871 @@
+extends RefCounted
+## ЕДИНЫЙ КОНФИГ ХАРАКТЕРИСТИК ЮНИТОВ
+## ═══════════════════════════════════════════════════════════════════════════
+## Меняйте числа здесь — они подхватываются при спавне юнита, код трогать не надо.
+## Подключение: const _UStats := preload("res://scripts/unit_stats_config.gd")
+## (файл намеренно без class_name — так он не зависит от кэша глобальных классов)
+##
+## Смысл параметров:
+##   health          — здоровье (HP)
+##   movement_speed  — скорость движения, м/с
+##   attack_1        — урон обычной (слабой) атаки
+##   attack_2        — урон мощной атаки (Warrior бьёт: 3 раза attack_1, затем 1 раз attack_2)
+##   attack_range    — дальность атаки, м (ближний бой ~1.6-1.8, лучник 18)
+##   attack_cooldown — пауза между ударами, сек
+##   defense         — защита: вычитается из входящего урона (растёт апгрейдами кузницы)
+##   armor           — броня: дополнительное плоское снижение урона (базовое, от экипировки)
+##   morale          — мораль 0..100: участвует в силе толкания (morale/100 добавляется к push_force)
+##   push_force      — сила толкания: при ударе в ближнем бою юнит с большей суммой
+##                     (push_force + morale/100) слегка отталкивает противника назад
+##
+## Только для рабочего:
+##   walk_speed_empty  — скорость ходьбы БЕЗ груза
+##   walk_speed_loaded — скорость ходьбы С ресурсами (медленнее)
+##   gather_time       — сколько секунд занимает один цикл добычи
+##   gather_amount     — сколько ресурса приносит за один заход
+##
+## Только для лучника:
+##   arrow_speed — скорость полёта стрелы, м/с (меньше = дольше летит)
+##   arrow_arc   — высота дуги как доля дальности (0.5 = навесная траектория)
+
+## Древо технологий кузницы живёт в отдельном файле: это самостоятельная
+## балансная таблица на 4 вкладки × 20 узлов, и держать её здесь означало бы
+## утопить характеристики юнитов в её объёме. Нужен он только одной функции —
+## get_upgrade_slot(), которая отдаёт узлы древа как обычные слоты улучшений
+const _Forge := preload("res://scripts/forge_config.gd")
+
+const STATS := {
+	# ── МЕЧНИК (Warrior) — тяжёлый боец, сильно толкается ────────────────────
+	"warrior": {
+		"health": 100.0,
+		"movement_speed": 2.0,
+		"attack_1": 25.0,          # три обычных удара...
+		"attack_2": 35.0,          # ...затем один мощный (ротация 3+1)
+		"attack_range": 1.6,
+		"attack_cooldown": 0.55,
+		"defense": 0.0,
+		"armor": 3.0,
+		"morale": 150.0,
+		"push_force": 1.5,         # рыцарь продавливает строй
+		"description": "Heavy melee fighter. Hits hardest in a straight duel and shoves enemy ranks back on contact.",
+	},
+
+	# ── КОПЕЙЩИК (Spearman) — основная пехота ────────────────────────────────
+	"spearman": {
+		"health": 100.0,
+		"movement_speed": 2.0,
+		"attack_1": 15.0,
+		"attack_2": 18.0,           # у копейщика оба удара одинаковые (тычок копьём)
+		"attack_range": 2.5,
+		"attack_cooldown": 2.0,
+		"defense": 0.0,
+		"armor": 0.0,
+		"morale": 100.0,
+		"push_force": 1.0,
+		"description": "Backbone infantry. Holds the line shoulder to shoulder — spears level automatically when the enemy closes in.",
+	},
+
+	# ── ЛУЧНИК (Archer) — стрелок, слаб в ближнем бою ────────────────────────
+	"archer": {
+		"health": 50.0,
+		"movement_speed": 2.0,
+		"attack_1": 15,
+		"attack_2": 20.0,
+		"attack_range": 20.0,
+		"attack_cooldown": 4.0,
+		"defense": 0.0,
+		"armor": 0.0,
+		"morale": 70.0,
+		"push_force": 0.0,
+		"arrow_speed": 20.0,        # замедленная стрела — видно дугу
+		"arrow_arc": 0.20,          # навесная траектория (50% дальности в высоту)
+		"description": "Ranged skirmisher. Long reach and a fast squad, but folds quickly if caught in melee.",
+	},
+
+	# ── МОНАХ (Monk) — вспомогательный юнит, слаб в бою ──────────────────────
+	"monk": {
+		"health": 60.0,
+		"movement_speed": 2.6,
+		"attack_1": 6.0,
+		"attack_2": 6.0,
+		"attack_range": 1.4,
+		"attack_cooldown": 1.2,
+		"defense": 0.0,
+		"armor": 0.0,
+		"morale": 60.0,
+		"push_force": 0.3,
+		"description": "Support unit. Weak in a fight — keep it behind the line.",
+	},
+
+	# ── РАБОЧИЙ (Worker / Pawn) — не боец ────────────────────────────────────
+	"worker": {
+		"health": 40.0,
+		"walk_speed_empty": 3.0,   # налегке бегает быстро
+		"walk_speed_loaded": 2.3,  # с грузом заметно медленнее
+		"defense": 0.0,
+		"armor": 0.0,
+		"morale": 80.0,
+		"push_force": 0.5,
+		"gather_time": 3.45,       # +15% к 3.0 — рубка стала ощутимо неторопливее
+		"gather_amount": 10.0,
+		"description": "Gathers resources and builds structures. Unarmed — keep away from the fighting.",
+	},
+}
+
+## ═══════════════════════════════════════════════════════════════════════════
+## СТОЙКИ ОТРЯДА (STANCES) — кнопки [АТАКА] / [ЗАЩИТА] на панели отряда
+## ═══════════════════════════════════════════════════════════════════════════
+## Стойка переключается у КАЖДОГО юнита выделенной горячей группы и читается
+## вживую при каждом ударе/шаге — как и бонусы кузницы.
+##
+##   push_mult         — множитель силы толкания (0.0 = пуш полностью выключен)
+##   push_resist       — множитель ВХОДЯЩЕГО толчка (0.5 = отбрасывает вдвое слабее)
+##   attack_speed_mult — множитель СКОРОСТИ атаки (кулдаун делится на него)
+##   morale_mult       — множитель морали
+##   defense_bonus     — плоская добавка к защите
+##   holds_ground      — true: юнит не преследует цель и не подаётся вперёд
+##                       при толкании (стоит намертво на своём месте)
+const STANCE_ATTACK  := "attack"
+const STANCE_DEFENSE := "defense"
+
+## ОБЩИЙ МНОЖИТЕЛЬ СИЛЫ ТОЛЧКА (knockback) для всех юнитов.
+## 0.35 = 35% от прежней силы: бойцы больше не разлетаются от каждого тычка,
+## шеренга давит плавно. Крутить баланс толкания следует ЗДЕСЬ.
+const PUSH_GLOBAL_SCALE := 0.35
+
+const STANCES := {
+	"attack": {
+		"name":              "Attack",
+		"push_mult":         1.0,
+		"push_resist":       1.0,
+		"attack_speed_mult": 1.0,
+		"morale_mult":       1.0,
+		"defense_bonus":     0.0,
+		"holds_ground":      false,
+	},
+	"defense": {
+		"name":              "Defend",
+		"push_mult":         0.0,    # своего пуша у фаланги нет вовсе
+		"push_resist":       0.5,    # входящий толчок срезан вдвое (упор щитами)
+		"attack_speed_mult": 1.25,   # +25% скорости атаки
+		"morale_mult":       1.30,   # +30% морали
+		"defense_bonus":     5.0,    # +5 защиты
+		"holds_ground":      true,   # с места не сходят (кроме смыкания рядов)
+	},
+}
+
+## Словарь стойки по id; неизвестная стойка → «атака» (стандартные параметры)
+static func get_stance(stance_id: String) -> Dictionary:
+	return STANCES.get(stance_id, STANCES["attack"])
+
+## Одно поле стойки с дефолтом
+static func stance_stat(stance_id: String, key: String, default: float = 0.0) -> float:
+	var d: Dictionary = get_stance(stance_id)
+	return d.get(key, default)
+
+## Вернуть словарь характеристик юнита ("warrior"/"spearman"/"archer"/"worker")
+static func get_stats(unit_id: String) -> Dictionary:
+	return STATS.get(unit_id, {})
+
+## Одно значение с дефолтом: stat("warrior", "push_force", 1.0)
+static func stat(unit_id: String, key: String, default: float = 0.0) -> float:
+	var d: Dictionary = STATS.get(unit_id, {})
+	return d.get(key, default)
+
+
+## ═══════════════════════════════════════════════════════════════════════════
+## ПОСТРОЙКИ (BUILDINGS) — ЕДИНАЯ ТАБЛИЦА ПАРАМЕТРОВ
+## ═══════════════════════════════════════════════════════════════════════════
+## Здесь крутится ВСЁ по зданиям: запас жизни, темп стройки, цена, габарит.
+## Значения читаются каждым зданием в _ready() и рабочими при заказе стройки —
+## код трогать не надо.
+##
+##   name             — подпись в интерфейсе
+##   max_hp           — запас жизни постройки
+##   build_time       — СЕКУНДЫ работы ОДНОГО рабочего до готовности.
+##                      Артель ускоряет: n рабочих → ×(1 + (n-1)·0.6)
+##                      (см. ConstructionSite.BUILDER_SPEEDUP).
+##                      0.0 = здание не строится рабочими (Замок ставится сразу)
+##   size             — габарит коллизии и спрайта, метры
+##   cost_wood / cost_gold / cost_stone — цена (0.0 = ресурс не тратится)
+##   worker_buildable — true: кнопка появляется на панели рабочего сама
+##   icon             — картинка для кнопки и карточки характеристик
+# ═════════════════════════════════════════════════════════════════════════════
+# ИКОНКИ КУЗНИЦЫ (улучшения и бонусы ветеранства)
+#
+# ЗАЧЕМ ОТДЕЛЬНАЯ КОНСТАНТА. Полный res://-путь, вписанный в каждую строку
+# конфига, ломается от любого переезда папки — и ломается МОЛЧА: load()
+# возвращает null, кнопка остаётся без картинки, ошибки нет. Ровно так и
+# случилось: в VETERAN_LEVEL_BONUSES лежал путь
+#   res://assets/factions/humans/buildings/icons/buildings/icons_for_smith/icon_sword
+# где «buildings/icons» переставлены местами относительно настоящего
+# «icons/buildings», да ещё и без расширения .png.
+#
+# Теперь в конфиге пишется ТОЛЬКО имя файла ("icon_sword.png"), а каталог
+# задаётся здесь одной строкой. Переезд папки — правка одной константы.
+# ═════════════════════════════════════════════════════════════════════════════
+const SMITH_ICONS_DIR := "res://assets/factions/humans/icons/buildings/icons_for_smith/"
+
+## Полный путь к иконке кузницы по ИМЕНИ ФАЙЛА.
+## Принимает и готовый res://-путь: тогда возвращает его как есть — старые
+## записи конфига и чужие иконки продолжают работать без правок.
+## Расширение можно не писать: ".png" подставится само
+static func smith_icon_path(icon_name: String) -> String:
+	if icon_name.is_empty():
+		return ""
+	if icon_name.begins_with("res://") or icon_name.begins_with("user://"):
+		return icon_name
+	var f := icon_name
+	if f.get_extension().is_empty():
+		f += ".png"
+	return SMITH_ICONS_DIR + f
+
+## Текстура иконки кузницы. НИКОГДА не роняет интерфейс: нет файла или опечатка
+## в имени — вернётся null, а в консоль уйдёт предупреждение с путём, по
+## которому искали. Вызывающий рисует кнопку с подписью вместо картинки
+static func smith_icon(icon_name: String) -> Texture2D:
+	var path := smith_icon_path(icon_name)
+	if path.is_empty():
+		return null
+	if not ResourceLoader.exists(path):
+		push_warning("Иконка кузницы не найдена: %s (искали по имени «%s»)"
+			% [path, icon_name])
+		return null
+	var tex := ResourceLoader.load(path) as Texture2D
+	if tex == null:
+		push_warning("Иконка кузницы не читается как текстура: %s" % path)
+	return tex
+
+# ═════════════════════════════════════════════════════════════════════════════
+# СТАРТОВЫЕ РЕСУРСЫ — ОТДЕЛЬНЫМИ БЛОКАМИ ДЛЯ ИГРОКА И ДЛЯ ИИ
+#
+# Раньше эти числа были ЗАШИТЫ в ResourceManager.reset_resources() — то есть
+# балансная настройка жила в коде, а не в балансной таблице, и владельцу
+# приходилось править автозагрузку, чтобы поменять стартовый запас.
+#
+# ДВА БЛОКА, А НЕ ОДИН. До этого запас у ИИ был выражен как
+# `resources[ENEMY] = resources[PLAYER].duplicate()` — «равный старт» намеренно,
+# потому что до этого у ИИ было на 50 дерева и 50 золота больше, и он закладывал
+# постройку раньше, что читалось как «ресурсы падают с неба». Раздельные блоки
+# сами по себе баланс НЕ МЕНЯЮТ: значения ниже одинаковы, равный старт сохранён.
+# Теперь его просто можно настроить — например, дать ИИ форы на высокой сложности,
+# не трогая ни строки кода.
+#
+# Ключи — Constants.RESOURCE_*. Не указанный ресурс считается нулём
+# (см. starting_resources), поэтому убрать позицию можно просто удалив строку
+# ═════════════════════════════════════════════════════════════════════════════
+const PLAYER_STARTING_RESOURCES := {
+	Constants.RESOURCE_WOOD:  450.0,   # хватает на Замок (300) и запас на первую постройку
+	Constants.RESOURCE_GOLD:  250.0,
+	Constants.RESOURCE_STONE: 100.0,
+	Constants.RESOURCE_FOOD:  100.0,
+}
+
+const AI_STARTING_RESOURCES := {
+	Constants.RESOURCE_WOOD:  450.0,
+	Constants.RESOURCE_GOLD:  250.0,
+	Constants.RESOURCE_STONE: 100.0,
+	Constants.RESOURCE_FOOD:  100.0,
+}
+
+## Стартовый запас фракции. ВСЕГДА возвращает полный набор из четырёх ресурсов:
+## в блоке конфига позицию можно опустить, и она будет нулём — иначе пропуск
+## строки означал бы «ключа нет вовсе», и всё, что читает склад по ключу,
+## получало бы отсутствующее значение вместо нуля
+static func starting_resources(faction: int) -> Dictionary:
+	var src: Dictionary = AI_STARTING_RESOURCES if faction == Constants.FACTION_ENEMY \
+		else PLAYER_STARTING_RESOURCES
+	return {
+		Constants.RESOURCE_WOOD:  float(src.get(Constants.RESOURCE_WOOD,  0.0)),
+		Constants.RESOURCE_GOLD:  float(src.get(Constants.RESOURCE_GOLD,  0.0)),
+		Constants.RESOURCE_STONE: float(src.get(Constants.RESOURCE_STONE, 0.0)),
+		Constants.RESOURCE_FOOD:  float(src.get(Constants.RESOURCE_FOOD,  0.0)),
+	}
+
+const BUILDINGS := {
+	"castle": {
+		"name": "Замок", "max_hp": 1800.0,
+		"build_time": 10.0,                       # ставится готовым с первого клика
+		"size": Vector3(8.0, 6.0, 8.0),
+		"cost_wood": 300.0, "cost_gold": .0, "cost_stone": 0.0,
+		"worker_buildable": false,
+		"icon": "res://assets/factions/humans/icons/buildings/Castle.png",
+	},
+	"barracks": {
+		"name": "Бараки", "max_hp": 10.0, "build_time": 10.0,
+		"size": Vector3(3.5, 2.2, 3.5),
+		"cost_wood": 0.0, "cost_gold": 0.0, "cost_stone": 0.0,
+		"worker_buildable": true,
+		"icon": "res://assets/factions/humans/icons/buildings/Barracks.png",
+	},
+	"smithy": {
+		"name": "Кузница", "max_hp": 10.0, "build_time": 10.0,
+		"size": Vector3(4.0, 3.0, 4.0),
+		"cost_wood": 0.0, "cost_gold": 2.0, "cost_stone": .0,
+		"worker_buildable": true,
+		"icon": "res://assets/factions/humans/icons/buildings/Monastery.png",
+	},
+	"mine": {
+		"name": "Рудник", "max_hp": 250.0, "build_time": 10.0,
+		"size": Vector3(3.0, 2.0, 3.0),
+		"cost_wood": .0, "cost_gold": 0.0, "cost_stone": 0.0,
+		"worker_buildable": true,
+		"icon": "res://assets/factions/humans/icons/buildings/Tower.png",
+	},
+	"house": {
+		"name": "Дом", "max_hp": 180.0, "build_time": 10.0,
+		"size": Vector3(2.6, 2.2, 2.6),
+		"cost_wood": 60.0, "cost_gold": 0.0, "cost_stone": 0.0,
+		"worker_buildable": true,
+		"icon": "res://assets/factions/humans/icons/buildings/House1.png",
+	},
+	# Служебные: не строятся рабочими, но запас жизни настраивается так же
+	"town_center": {
+		"name": "Городской центр", "max_hp": 500.0, "build_time": 0.0,
+		"size": Vector3(4.0, 2.5, 4.0),
+		"cost_wood": 0.0, "cost_gold": 0.0, "cost_stone": 0.0,
+		"worker_buildable": false, "icon": "",
+	},
+	"construction_site": {
+		"name": "Стройка", "max_hp": 120.0, "build_time": 0.0,
+		"size": Vector3(3.0, 2.0, 3.0),
+		"cost_wood": 0.0, "cost_gold": 0.0, "cost_stone": 0.0,
+		"worker_buildable": false, "icon": "",
+	},
+}
+
+## ДОМ: сколько еды капает и с каким интервалом (сек)
+const HOUSE_FOOD_INCOME   := 4.0
+const HOUSE_FOOD_INTERVAL := 8.0
+
+## ═══════════════════════════════════════════════════════════════════════════
+## РАЗМЕР ОТРЯДА (SQUAD SIZE) — СКОЛЬКО МОДЕЛЕЙ В ОДНОМ ОТРЯДЕ
+## ═══════════════════════════════════════════════════════════════════════════
+## Одна цифра управляет всем: сколько бойцов выходит за один заказ, что
+## считается «полным отрядом» у ИИ и до какого числа отряд будет пополняться.
+## Меняйте здесь — ни здания, ни HUD, ни ИИ править не нужно.
+const SQUAD_SIZE_SPEARMEN  := 60   # копейщики
+const SQUAD_SIZE_ARCHERS   := 30   # лучники
+const SQUAD_SIZE_SWORDSMEN := 30   # мечники (рыцари)
+const SQUAD_SIZE_MONKS     := 10   # монахи — редкий вспомогательный юнит, малый отряд
+
+## Предохранитель от опечатки: заказ больше этого числа обрезается
+## (Building.queue_unit). Поднимать вместе с SQUAD_SIZE_*.
+const SQUAD_SIZE_HARD_CAP := 60
+
+## ═══════════════════════════════════════════════════════════════════════════
+## ОПЫТ ОТРЯДА (VETERANCY) — ЗВЁЗДОЧКИ ЗА УБИЙСТВА, ОТДЕЛЬНО ПО ТИПАМ ЮНИТОВ
+## ═══════════════════════════════════════════════════════════════════════════
+## Отряд копит убийства ЦЕЛИКОМ: фраг любого бойца идёт в общий счёт.
+## Дошли до очередного порога — над отрядом загорается жёлтая звёздочка,
+## а на его панели игроку предлагают выбрать одно улучшение из пяти.
+##
+## У КАЖДОГО БОЕВОГО ТИПА — СВОЙ БЛОК порогов и бонусов (запрос владельца:
+## "разделить конфиг ветеранства по 4 типам, чтобы настраивать их порознь").
+## Ключ верхнего уровня VET_CONFIG — unit_id, тот же, что в TRAINING/STATS.
+## РАБОЧИЙ (worker) сюда НЕ входит вовсе — он полностью исключён из системы
+## опыта: veteran_level_for_kills("worker", ...) и любые другие обращения с
+## неизвестным/не боевым unit_id ниже просто возвращают "нет ветеранства"
+## (0 / пустой массив), а не ошибку — так отсутствие рабочего в конфиге не
+## обязано быть отдельной веткой в каждом вызывающем коде.
+##
+## Внутри каждого блока пока лежит ОДНА И ТА ЖЕ копия прежних общих чисел —
+## значения ещё предстоит развести (владелец: "скопируй текущие значения как
+## базовые, для будущей точной настройки"). Меняйте их здесь порознь, менять
+## код нигде не нужно.
+##
+## Порогов ровно столько, сколько уровней: седьмой порог — последний.
+## Убрать уровень = убрать число из "thresholds" И соответствующий блок из
+## "bonuses" (длины должны совпадать).
+##
+## СЕМЬ ГРЕЙДОВ (как они выглядят над отрядом — см. VeterancyStar.gd, общие
+## для всех типов, см. VET_STAR_TIERS ниже):
+##   1-3 — одна/две/три БРОНЗОВЫЕ звезды;
+##   4-6 — одна/две/три СЕРЕБРЯНЫЕ;
+##   7   — одна КРАСНАЯ (чуть крупнее остальных).
+##
+## Поля бонуса:
+##   id    — ключ выбора (латиницей)
+##   name  — подпись кнопки
+##   stat  — какая характеристика растёт:
+##           "attack" | "armor" | "defense" | "speed" | "health"
+##   value — на сколько. Бонус выдаётся КАЖДОЙ модели отряда и читается вживую.
+##
+## ВНИМАНИЕ по скорости: базовая скорость юнита ~2-3 м/с, поэтому +5 к скорости
+## это очень много. Значение оставлено как заказано; если бег окажется
+## неиграбельным — правьте value у выбора "speed" здесь, код трогать не надо.
+## Один блок = пороги на 7 уровней + 7×5 бонусов на выбор. Ниже — четыре
+## НЕЗАВИСИМЫХ литерала (не .duplicate() от одного шаблона: GDScript не даёт
+## звать методы в инициализаторе const, да и независимые литералы честнее
+## отражают "4 блока для будущей настройки порознь" — правка одного блока
+## физически не может задеть другой)
+const _VET_BONUS_TEMPLATE := [
+	# Бонус 1
+	[
+		{"id": "attack",  "name": "+ Урон к Атаке",     "stat": "attack",  "value": 2.0, "icon": "icon_sword.png"},
+		{"id": "armor",   "name": "+ к Броне",     "stat": "armor",   "value": 2.0, "icon": "icon_shield.png"},
+		{"id": "defense", "name": "+ к Защите",    "stat": "defense", "value": 2.0, "icon": "icon_might.png"},
+		{"id": "speed",   "name": "+ к Скорости",  "stat": "speed",   "value": 0.5, "icon": "icon_hand.png"},
+		{"id": "health",  "name": "+ HP",  "stat": "health",  "value": 30.0, "icon": "icon_heart.png"},
+	],
+	# Бонус 2
+	[
+		{"id": "attack",  "name": "+ Урон к Атаке",     "stat": "attack",  "value": 3.0, "icon": "icon_sword.png"},
+		{"id": "armor",   "name": "+ к Броне",     "stat": "armor",   "value": 3.0, "icon": "icon_shield.png"},
+		{"id": "defense", "name": "+ к Защите",    "stat": "defense", "value": 3.0, "icon": "icon_might.png"},
+		{"id": "speed",   "name": "+ к Скорости",  "stat": "speed",   "value": 0.5, "icon": "icon_hand.png"},
+		{"id": "health",  "name": "+ HP",  "stat": "health",  "value": 30.0, "icon": "icon_heart.png"},
+	],
+	# Бонус 3
+	[
+		{"id": "attack",  "name": "+ Урон к Атаке",     "stat": "attack",  "value": 5.0, "icon": "icon_sword.png"},
+		{"id": "armor",   "name": "+ к Броне",     "stat": "armor",   "value": 5.0, "icon": "icon_shield.png"},
+		{"id": "defense", "name": "+ к Защите",    "stat": "defense", "value": 5.0, "icon": "icon_might.png"},
+		{"id": "speed",   "name": "+ к Скорости",  "stat": "speed",   "value": 0.3, "icon": "icon_hand.png"},
+		{"id": "health",  "name": "+ HP",  "stat": "health",  "value": 30.0, "icon": "icon_heart.png"},
+	],
+	# Бонус 4
+	[
+		{"id": "attack",  "name": "+ Урон к Атаке",     "stat": "attack",  "value": 5.0, "icon": "icon_sword.png"},
+		{"id": "armor",   "name": "+ к Броне",     "stat": "armor",   "value": 5.0, "icon": "icon_shield.png"},
+		{"id": "defense", "name": "+ к Защите",    "stat": "defense", "value": 5.0, "icon": "icon_might.png"},
+		{"id": "speed",   "name": "+ к Скорости",  "stat": "speed",   "value": 0.3, "icon": "icon_hand.png"},
+		{"id": "health",  "name": "+ HP",  "stat": "health",  "value": 30.0, "icon": "icon_heart.png"},
+	],
+	# Бонус 5
+	[
+		{"id": "attack",  "name": "+ Урон к Атаке",     "stat": "attack",  "value": 5.0, "icon": "icon_sword.png"},
+		{"id": "armor",   "name": "+ к Броне",     "stat": "armor",   "value": 5.0, "icon": "icon_shield.png"},
+		{"id": "defense", "name": "+ к Защите",    "stat": "defense", "value": 5.0, "icon": "icon_might.png"},
+		{"id": "speed",   "name": "+ к Скорости",  "stat": "speed",   "value": 0.3, "icon": "icon_hand.png"},
+		{"id": "health",  "name": "+ HP",  "stat": "health",  "value": 30.0, "icon": "icon_heart.png"},
+	],
+	# Бонус 6 — первый «серебряный» потолок
+	[
+		{"id": "attack",  "name": "+ Урон к Атаке",     "stat": "attack",  "value": 6.0, "icon": "icon_sword.png"},
+		{"id": "armor",   "name": "+ к Броне",     "stat": "armor",   "value": 6.0, "icon": "icon_shield.png"},
+		{"id": "defense", "name": "+ к Защите",    "stat": "defense", "value": 6.0, "icon": "icon_might.png"},
+		{"id": "speed",   "name": "+ к Скорости",  "stat": "speed",   "value": 0.3, "icon": "icon_hand.png"},
+		{"id": "health",  "name": "+ HP",  "stat": "health",  "value": 40.0, "icon": "icon_heart.png"},
+	],
+	# Бонус 7 — «красная звезда», высший грейд
+	[
+		{"id": "attack",  "name": "+ Урон к Атаке",     "stat": "attack",  "value": 8.0, "icon": "icon_sword.png"},
+		{"id": "armor",   "name": "+ к Броне",     "stat": "armor",   "value": 8.0, "icon": "icon_shield.png"},
+		{"id": "defense", "name": "+ к Защите",    "stat": "defense", "value": 8.0, "icon": "icon_might.png"},
+		{"id": "speed",   "name": "+ к Скорости",  "stat": "speed",   "value": 0.4, "icon": "icon_hand.png"},
+		{"id": "health",  "name": "+ HP",  "stat": "health",  "value": 50.0, "icon": "icon_heart.png"},
+	],
+]
+
+## Копейщики / Рыцари (мечники) / Лучники / Монахи — четыре НЕЗАВИСИМЫХ блока.
+## static var, а не const: GDScript не разрешает звать методы (.duplicate) в
+## инициализаторе const, а без глубокой копии все четыре ключа указывали бы
+## на ОДИН И ТОТ ЖЕ вложенный массив _VET_BONUS_TEMPLATE (Array — ссылочный
+## тип), и правка "attack" у Копейщиков задним числом поменяла бы то же
+## число у Рыцарей/Лучников/Монахов. static-инициализатор выполняется один
+## раз при загрузке скрипта, значения дальше можно менять по каждому ключу
+## порознь, ничего не задевая
+static var VET_CONFIG: Dictionary = {
+	"spearman": {"thresholds": [40, 100, 200, 300, 400, 500, 600], "bonuses": _VET_BONUS_TEMPLATE.duplicate(true)},
+	"warrior":  {"thresholds": [40, 100, 200, 300, 400, 500, 600], "bonuses": _VET_BONUS_TEMPLATE.duplicate(true)},
+	"archer":   {"thresholds": [40, 100, 200, 300, 400, 500, 600], "bonuses": _VET_BONUS_TEMPLATE.duplicate(true)},
+	"monk":     {"thresholds": [40, 100, 200, 300, 400, 500, 600], "bonuses": _VET_BONUS_TEMPLATE.duplicate(true)},
+}
+
+## ═══════════════════════════════════════════════════════════════════════════
+## ГРЕЙДЫ ЗВЁЗД (цвет и число звёзд по уровню)
+## ═══════════════════════════════════════════════════════════════════════════
+## Единственный источник правды и для 3D-звезды над отрядом (VeterancyStar.gd),
+## и для строки звёзд на панели (HUD._portrait_stars_lbl). Формат:
+##   count — сколько звёзд рисовать, tier — "bronze" | "silver" | "red"
+## Уровень выше последней записи берёт последнюю (высший грейд не «пропадает»)
+const VET_STAR_TIERS := [
+	{"count": 1, "tier": "bronze"},
+	{"count": 2, "tier": "bronze"},
+	{"count": 3, "tier": "bronze"},
+	{"count": 1, "tier": "silver"},
+	{"count": 2, "tier": "silver"},
+	{"count": 3, "tier": "silver"},
+	{"count": 1, "tier": "red"},
+]
+
+## Цвета грейдов. Бронза — тёмно-рыжая, серебро — холодное белое,
+## красная — бордовая, цвета крови
+const VET_TIER_COLORS := {
+	"bronze": Color(0.72, 0.43, 0.20),
+	"silver": Color(0.78, 0.83, 0.88),
+	"red":    Color(0.95, 0.72, 0.18),
+}
+
+## Во сколько раз звезда грейда крупнее базовой. Красная — заметно больше
+## бронзы и серебра (заказ владельца), остальные в базовом размере
+const VET_TIER_SCALE := {
+	"bronze": 1.0,
+	"silver": 1.0,
+	"red":    1.35,
+}
+
+## Описание грейда уровня lvl: {"count": int, "tier": String,
+## "color": Color, "scale": float}. lvl <= 0 — пусто (не ветеран)
+static func veteran_star_tier(lvl: int) -> Dictionary:
+	if lvl <= 0 or VET_STAR_TIERS.is_empty():
+		return {}
+	var idx: int = mini(lvl, VET_STAR_TIERS.size()) - 1
+	var d: Dictionary = VET_STAR_TIERS[idx]
+	var tier: String = String(d.get("tier", "bronze"))
+	return {
+		"count": int(d.get("count", 1)),
+		"tier":  tier,
+		"color": VET_TIER_COLORS.get(tier, Color.WHITE) as Color,
+		"scale": float(VET_TIER_SCALE.get(tier, 1.0)),
+	}
+
+## Пороги/бонусы конкретного боевого типа. Неизвестный unit_id (в частности
+## "worker" — рабочие исключены из ветеранства навсегда) даёт пустые массивы,
+## и все функции ниже честно возвращают "нет ветеранства", а не падают
+static func _vet_thresholds(unit_type: String) -> Array:
+	return (VET_CONFIG.get(unit_type, {}) as Dictionary).get("thresholds", [])
+
+static func _vet_bonuses(unit_type: String) -> Array:
+	return (VET_CONFIG.get(unit_type, {}) as Dictionary).get("bonuses", [])
+
+## Максимальный уровень ветеранства (= число порогов) у данного типа юнита
+static func max_veteran_level(unit_type: String) -> int:
+	return mini(_vet_thresholds(unit_type).size(), _vet_bonuses(unit_type).size())
+
+## Сколько убийств нужно, чтобы получить уровень level (1..max)
+static func veteran_threshold(unit_type: String, level: int) -> int:
+	var th: Array = _vet_thresholds(unit_type)
+	if level < 1 or level > th.size():
+		return 0
+	return int(th[level - 1])
+
+## Какой уровень заслужен при данном числе убийств (0 — ещё не ветеран)
+static func veteran_level_for_kills(unit_type: String, kills: int) -> int:
+	var th: Array = _vet_thresholds(unit_type)
+	var lvl := 0
+	for i in range(mini(th.size(), max_veteran_level(unit_type))):
+		if kills >= int(th[i]):
+			lvl = i + 1
+	return lvl
+
+## Пять вариантов улучшения на уровне level (1..max) у данного типа юнита
+static func veteran_choices(unit_type: String, level: int) -> Array:
+	var b: Array = _vet_bonuses(unit_type)
+	if level < 1 or level > b.size():
+		return []
+	return b[level - 1]
+
+## Описание конкретного выбора НА КОНКРЕТНОМ УРОВНЕ (нужно, чтобы посчитать,
+## сколько реально дал бонус: value одного и того же id по уровням разное).
+## Пусто — такого id на этом уровне нет
+static func veteran_choice_at(unit_type: String, level: int, choice_id: String) -> Dictionary:
+	for c in veteran_choices(unit_type, level):
+		var d: Dictionary = c
+		if String(d.get("id", "")) == choice_id:
+			return d
+	return {}
+
+## Описание выбора по id БЕЗ привязки к уровню — для картинки и названия
+## (они у одного id одинаковы на всех уровнях). Берётся первое совпадение
+static func veteran_choice_info(unit_type: String, choice_id: String) -> Dictionary:
+	for lvl_list in _vet_bonuses(unit_type):
+		for c in (lvl_list as Array):
+			var d: Dictionary = c
+			if String(d.get("id", "")) == choice_id:
+				return d
+	return {}
+
+## ═══════════════════════════════════════════════════════════════════════════
+## ГАРНИЗОН ЗАМКА (CASTLE REFILL & HEAL)
+## ═══════════════════════════════════════════════════════════════════════════
+## Отряд можно завести внутрь Замка: там раненые лечатся, а погибшие модели
+## медленно восстанавливаются, пока отряд снова не станет полным (до squad_size).
+##
+## РАСЧЁТ ТЕМПА (заказ владельца): отряд из 30 человек, выбитый наполовину
+## (15 потерь), доукомплектуется за 15 × GARRISON_REVIVE_SECONDS = 150 c.
+## Лечение идёт параллельно с пополнением, но заметно медленнее пополнения.
+const GARRISON_SQUAD_LIMIT   := 5     # сколько отрядов помещается в один Замок
+## HP в секунду каждой раненой модели, ОДНОВРЕМЕННО у всех моделей отряда
+const GARRISON_HEAL_PER_SEC  := 1.0
+const GARRISON_REVIVE_SECONDS := 10.0  # секунд на одну восстановленную модель
+## Дистанция до Замка, с которой отряд «входит внутрь»
+const GARRISON_ENTER_RADIUS  := 5.0
+## АВТО-ВЫХОД: отряд, у которого полный состав И полное здоровье, сам
+## выкатывается из Замка наружу. false — сидит внутри до клика по слоту
+const GARRISON_AUTO_RELEASE  := true
+
+## ═══════════════════════════════════════════════════════════════════════════
+## СТРОЙКА И РУИНЫ
+## ═══════════════════════════════════════════════════════════════════════════
+## Сколько минимум секунд видна стройплощадка, даже если build_time постройки
+## равен нулю. Сейчас в BUILDINGS у ВСЕХ зданий build_time = 0 (отладочная
+## настройка «строится мгновенно»), и без этого порога картинку стройки
+## увидеть было бы негде. Поставить 0 — вернуть прежнее мгновенное появление
+const CONSTRUCTION_MIN_SEC := 6.0
+## Замок ставится БЕСПЛАТНО и сразу начинает строиться (заказ владельца).
+## Сколько это занимает, если build_time замка равен нулю
+const CASTLE_BUILD_SEC     := 8.0
+## Сколько секунд лежат руины снесённой постройки. 0 — лежат вечно
+const RUIN_LIFETIME_SEC    := 0.0
+
+## Размер отряда по типу юнита; рабочий — всегда «отряд из одного»
+static func squad_size(unit_id: String) -> int:
+	match unit_id:
+		"spearman": return SQUAD_SIZE_SPEARMEN
+		"archer":   return SQUAD_SIZE_ARCHERS
+		"warrior":  return SQUAD_SIZE_SWORDSMEN
+		"monk":     return SQUAD_SIZE_MONKS
+	return 1
+
+## ═══════════════════════════════════════════════════════════════════════════
+## НАЙМ ЮНИТОВ: где, за сколько и какого размера отряд
+## ═══════════════════════════════════════════════════════════════════════════
+## Ключ первого уровня — building_id, второго — тип юнита.
+##   time  — секунды до выхода отряда
+##   squad — сколько бойцов в одном заказе. Ссылается на SQUAD_SIZE_* выше:
+##           размер отряда задаётся ровно в одном месте
+##   cols  — колонн в строю на выходе
+##   cost_wood / cost_gold / cost_stone — цена заказа
+const TRAINING := {
+	"castle": {
+		"worker":   {"cost_wood":  50.0, "cost_gold":  0.0, "time":  10.0, "squad": 1, "cols": 4},
+		"warrior":  {"cost_wood":  100.0, "cost_gold": 200.0, "time": 30.0, "squad": SQUAD_SIZE_SWORDSMEN, "cols": 5},
+		"monk":     {"cost_wood":  20.0, "cost_gold": 30.0, "time": 14.0, "squad": SQUAD_SIZE_MONKS, "cols": 5},
+		# Оставлено для ИИ: он нанимает копейщиков и лучников прямо в замке
+		"spearman": {"cost_wood": 100.0, "cost_gold": 60.0, "time": 30.0, "squad": SQUAD_SIZE_SPEARMEN, "cols": 5},
+		"archer":   {"cost_wood":  200.0, "cost_gold": 300.0, "time": 30.0, "squad": SQUAD_SIZE_ARCHERS, "cols": 5},
+	},
+	"barracks": {
+		"spearman": {"cost_wood": 100.0, "cost_gold": 60.0, "time": 30.0, "squad": SQUAD_SIZE_SPEARMEN, "cols": 5},
+		"archer":   {"cost_wood":  200.0, "cost_gold":300.0, "time": 30.0, "squad": SQUAD_SIZE_ARCHERS, "cols": 5},
+	},
+	"town_center": {
+		"worker":   {"cost_wood":  10.0, "cost_gold":  0.0, "time":  8.0, "squad": 1, "cols": 4},
+	},
+}
+
+## Настройки одного заказа найма (пустой словарь — здание такого не умеет)
+static func train_cfg(building_id: String, unit_id: String) -> Dictionary:
+	var per_building: Dictionary = TRAINING.get(building_id, {})
+	return per_building.get(unit_id, {})
+
+## Цена заказа найма в формате ResourceManager.spend()
+static func train_cost(building_id: String, unit_id: String) -> Dictionary:
+	var d: Dictionary = train_cfg(building_id, unit_id)
+	var cost: Dictionary = {}
+	var w: float = d.get("cost_wood",  0.0)
+	var g: float = d.get("cost_gold",  0.0)
+	var s: float = d.get("cost_stone", 0.0)
+	if w > 0.0: cost[Constants.RESOURCE_WOOD]  = w
+	if g > 0.0: cost[Constants.RESOURCE_GOLD]  = g
+	if s > 0.0: cost[Constants.RESOURCE_STONE] = s
+	return cost
+
+## Настройки одной постройки (пустой словарь, если id незнаком)
+static func building_cfg(building_id: String) -> Dictionary:
+	return BUILDINGS.get(building_id, {})
+
+## Одно числовое поле постройки с дефолтом
+static func building_stat(building_id: String, key: String, default: float = 0.0) -> float:
+	var d: Dictionary = BUILDINGS.get(building_id, {})
+	return d.get(key, default)
+
+## Габарит постройки
+static func building_size(building_id: String, default: Vector3 = Vector3(3.0, 2.0, 3.0)) -> Vector3:
+	var d: Dictionary = BUILDINGS.get(building_id, {})
+	return d.get("size", default)
+
+## Цена постройки в формате ResourceManager.spend(): {тип_ресурса: количество}
+static func building_cost(building_id: String) -> Dictionary:
+	var d: Dictionary = BUILDINGS.get(building_id, {})
+	var cost: Dictionary = {}
+	var w: float = d.get("cost_wood",  0.0)
+	var g: float = d.get("cost_gold",  0.0)
+	var s: float = d.get("cost_stone", 0.0)
+	if w > 0.0: cost[Constants.RESOURCE_WOOD]  = w
+	if g > 0.0: cost[Constants.RESOURCE_GOLD]  = g
+	if s > 0.0: cost[Constants.RESOURCE_STONE] = s
+	return cost
+
+## Что рабочий может строить: id в порядке объявления BUILDINGS
+static func worker_buildable_ids() -> Array:
+	var out: Array = []
+	for key in BUILDINGS:
+		var bid: String = String(key)
+		var d: Dictionary = BUILDINGS[bid]
+		if bool(d.get("worker_buildable", false)):
+			out.append(bid)
+	return out
+
+
+## ═══════════════════════════════════════════════════════════════════════════
+## КУЗНИЦА (BLACKSMITH)
+## ═══════════════════════════════════════════════════════════════════════════
+## Оставлено для обратной совместимости: параметры самой постройки живут
+## в BUILDINGS["smithy"], здесь только то, что относится к исследованиям.
+const SMITHY := {
+	"name":       "Кузница",
+	"health":     500.0,
+	"cost_wood":  500.0,
+	"cost_stone": 500.0,
+	"cost_gold":  500.0,
+}
+
+## Время исследования по умолчанию, если у слота не задан свой research_time.
+## 0.0 = мгновенная покупка (прежнее поведение).
+const DEFAULT_RESEARCH_TIME := 10.0
+
+
+## ═══════════════════════════════════════════════════════════════════════════
+## СЛОТЫ УЛУЧШЕНИЙ КУЗНИЦЫ (UPGRADE SLOTS)
+## ═══════════════════════════════════════════════════════════════════════════
+## Купленный апгрейд применяется МГНОВЕННО ко всем ТЕКУЩИМ и БУДУЩИМ юнитам
+## указанных типов: бонусы читаются вживую при каждом ударе/шаге.
+##
+## Чтобы добавить своё улучшение — скопируйте любой блок и поменяйте поля:
+##
+##   id          — уникальный строковый ключ (латиницей, без пробелов)
+##   name        — подпись на кнопке в Кузнице
+##   desc        — вторая строка на кнопке (что даёт)
+##   applies_to  — СПИСОК типов юнитов: ["spearman"], ["archer","warrior"]
+##                 или ["all"] — всем боевым юнитам сразу
+##   cost_gold / cost_wood / cost_stone — цена (0.0 = ресурс не тратится)
+##   requires    — id апгрейда, который нужно купить раньше ("" = без условий)
+##   research_time — СЕКУНДЫ исследования в Кузнице. Ресурсы списываются сразу,
+##                 бонус применяется по готовности. Поле можно опустить — тогда
+##                 берётся DEFAULT_RESEARCH_TIME; 0.0 = купить мгновенно.
+##                 Кузница исследует ПО ОДНОЙ технологии за раз.
+##   icon        — картинка кнопки (необязательно; пусто — на кнопке подпись)
+##
+## Бонусы (любой можно опустить — тогда он равен 0):
+##   bonus_attack — + к урону удара
+##   bonus_armor  — + к броне (плоское снижение входящего урона)
+##   bonus_health — + к максимуму HP (текущим юнитам HP поднимается сразу)
+##   bonus_speed  — + к скорости движения, м/с
+##   bonus_push   — + к push_force (сила продавливания вражеской шеренги)
+##   bonus_morale — + к морали (тоже участвует в силе толкания)
+const UPGRADE_SLOTS := [
+	{
+		"id": "spears", "name": "Копья", "desc": "+3 урон копейщикам",
+		"applies_to": ["spearman"], "requires": "Bla bla bla",
+		"cost_gold": 120.0, "cost_wood": 300.0, "cost_stone": 50.0,
+		"research_time": 120.0, "icon": "icon_trap_spears.png",
+		"bonus_attack": 3.0, "bonus_push": 0.5,
+	},
+	{
+		"id": "shields", "name": "Щиты", "desc": "+2 броня пехоте",
+		"applies_to": ["spearman", "warrior"], "requires": "",
+		"cost_gold": 300.0, "cost_wood": 500.0, "cost_stone": 80.0,
+		"research_time": 12.0, "icon": "icon_shield.png",
+		"bonus_armor": 2.0, "bonus_speed": -0.1,
+	},
+	{
+		"id": "helmets", "name": "Шлемы", "desc": "+15 HP всем",
+		"applies_to": ["all"], "requires": "",
+		"cost_gold": 380.0, "cost_wood": 400.0, "cost_stone": 260.0,
+		"research_time": 10.0, "icon": "icon_heart.png",
+		"bonus_health": 10.0, "bonus_morale": 10.0,
+	},
+	{
+		"id": "armor", "name": "Броня", "desc": "+3 броня, чуть медленнее",
+		"applies_to": ["all"], "requires": "shields",
+		"cost_gold": 1150.0, "cost_wood": 1000.0, "cost_stone": 1200.0,
+		"research_time": 20.0, "icon": "icon_broken_sword.png",
+		"bonus_armor": 3.0, "bonus_speed": -0.2, "bonus_health": 10.0,
+	},
+	{
+		"id": "swords", "name": "Мечи", "desc": "+5 урон мечникам",
+		"applies_to": ["warrior"], "requires": "",
+		"cost_gold": 1200.0, "cost_wood": 340.0, "cost_stone": 200.0,
+		"research_time": 18.0, "icon": "icon_dual_sword.png",
+		"bonus_attack": 5.0, "bonus_push": 1.0, "bonus_morale": 15.0,
+	},
+	{
+		"id": "arrows", "name": "Стрелы", "desc": "+4 урон лучникам",
+		"applies_to": ["archer"], "requires": "",
+		"cost_gold": 590.0, "cost_wood": 1000.0, "cost_stone": 0.0,
+		"research_time": 14.0, "icon": "icon_rain_of_arrows.png",
+		"bonus_attack": 4.0,
+	},
+	{
+		"id": "boots", "name": "Сапоги", "desc": "+0.4 скорость всем",
+		"applies_to": ["all"], "requires": "",
+		"cost_gold": 600.0, "cost_wood": 80.0, "cost_stone": 0.0,
+		"research_time": 10.0, "icon": "icon_luck_horseshoe.png",
+		"bonus_speed": 0.4,
+	},
+	{
+		"id": "banner", "name": "Знамя", "desc": "+10 мораль, +2 напор",
+		"applies_to": ["all"], "requires": "helmets",
+		"cost_gold": 1800.0, "cost_wood": 360.0, "cost_stone": 300.0,
+		"research_time": 220.0, "icon": "icon_might.png",
+		"bonus_morale": 10.0, "bonus_push": 2.0,
+	},
+]
+
+## Сколько секунд исследуется слот (поле research_time или DEFAULT_RESEARCH_TIME)
+static func upgrade_research_time(slot: Dictionary) -> float:
+	return maxf(float(slot.get("research_time", DEFAULT_RESEARCH_TIME)), 0.0)
+
+## Все ключи бонусов — по ним GameManager накапливает суммы
+const BONUS_KEYS := ["bonus_attack", "bonus_armor", "bonus_health",
+					 "bonus_speed", "bonus_push", "bonus_morale"]
+
+## ═══════════════════════════════════════════════════════════════════════════
+## ОБЗОР (ТУМАН ВОЙНЫ)
+## ═══════════════════════════════════════════════════════════════════════════
+## Радиус, на котором юнит раскрывает туман, — ТРИ ДАЛЬНОСТИ ЕГО АТАКИ
+## (заказ владельца: у лучника с дальностью 20 обзор 60).
+##
+## VISION_MIN — нижний предел, и он обязателен. У пехоты attack_range ≈ 1.6-1.8,
+## то есть по голой формуле мечник видел бы на 5 метров вокруг себя: армия из
+## одних мечников шла бы по карте 260×146 практически вслепую, не замечая
+## противника, пока тот не упрётся в неё вплотную. Предел не спорит с формулой,
+## а лишь не даёт ей выродиться на ближнем бое; лучник и так далеко выше него.
+const VISION_MULT := 3.0
+const VISION_MIN  := 18.0
+## Обзор постройки. У зданий нет дальности атаки, поэтому число своё —
+## примерно как у стрелка, чтобы база видела свои подступы
+const BUILDING_VISION := 42.0
+
+## Радиус обзора по дальности атаки
+static func vision_radius(attack_range: float) -> float:
+	return maxf(attack_range * VISION_MULT, VISION_MIN)
+
+## Найти слот улучшения по id (пустой словарь, если нет).
+##
+## УЗЛЫ ДРЕВА КУЗНИЦЫ — ТОЖЕ СЛОТЫ. forge_config собирает каждый узел в том же
+## формате, что и запись UPGRADE_SLOTS (id/name/desc/icon/cost_*/research_time/
+## applies_to/bonus_*), поэтому вся машинерия исследований — списание ресурсов,
+## очередь кузницы, накопление бонусов, мгновенная добавка HP — работает с ними
+## без единой отдельной ветки. Разница только в условии доступа: у старого слота
+## это одиночное поле requires, у узла древа — массив prerequisites плюс, для
+## колонки D, полный ряд (разбирается в GameManager.can_research).
+static func get_upgrade_slot(upgrade_id: String) -> Dictionary:
+	for slot in UPGRADE_SLOTS:
+		var d: Dictionary = slot
+		if String(d.get("id", "")) == upgrade_id:
+			return d
+	return _Forge.get_node(upgrade_id)
+
+## Стоимость слота в формате ResourceManager.spend(): {тип_ресурса: количество}
+static func upgrade_cost(slot: Dictionary) -> Dictionary:
+	var cost: Dictionary = {}
+	var g: float = slot.get("cost_gold",  0.0)
+	var w: float = slot.get("cost_wood",  0.0)
+	var s: float = slot.get("cost_stone", 0.0)
+	if g > 0.0: cost[Constants.RESOURCE_GOLD]  = g
+	if w > 0.0: cost[Constants.RESOURCE_WOOD]  = w
+	if s > 0.0: cost[Constants.RESOURCE_STONE] = s
+	return cost
+
+## Действует ли слот на юнита данного типа
+static func slot_applies_to(slot: Dictionary, unit_id: String) -> bool:
+	var lst: Array = slot.get("applies_to", [])
+	for e in lst:
+		var s: String = String(e)
+		if s == "all" or s == unit_id:
+			return true
+	return false

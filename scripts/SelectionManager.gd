@@ -1,0 +1,1441 @@
+extends Node
+class_name SelectionManager
+
+const DRAG_THRESHOLD        := 6.0
+const GROUP_DOUBLE_TAP_TIME := 0.35
+const DOUBLE_CLICK_TIME     := 0.35  # сек — окно двойного клика ЛКМ
+# Строй «плечом к плечу»: интервалы вдвое меньше прежних (было 1.0 / 1.1)
+const UNIT_SPACING          := 0.5   # метров между юнитами в шеренге
+const ROW_DEPTH             := 0.55  # метров между рядами
+
+## Combined Arms: базовый класс раскладки по эшелонам (копейщики/лучники/
+## мечники). Грузится через preload — новый файл, без class_name (см. шапку
+## Formations.gd)
+const _Formations := preload("res://scripts/Formations.gd")
+## Разрыв между эшелонами разных типов войск, метры. Заметно больше ROW_DEPTH
+## между шеренгами ОДНОГО отряда — это разные тактические линии, а не просто
+## соседний ряд
+const RANK_GAP              := 2.2
+
+var camera: Camera3D
+var selected_units: Array  = []
+var drag_start: Vector2    = Vector2.ZERO
+var drag_rect_ui: ColorRect
+
+# ── Горячие группы ────────────────────────────────────────────────────────────
+var _groups: Array = [[], [], [], [], [], [], [], [], []]
+var _last_group_pressed:    int   = -1
+var _last_group_press_time: float = 0.0
+
+# ── ПКМ-формация ─────────────────────────────────────────────────────────────
+var _rmb_down:         bool    = false
+var _rmb_screen_start: Vector2 = Vector2.ZERO
+var _rmb_world_start:  Vector3 = Vector3.ZERO
+
+# ── Двойной ПКМ = БЕГ ────────────────────────────────────────────────────────
+## Время и экранная точка предыдущего одиночного ПКМ-клика. Второй клик в то же
+## место в пределах RMB_DOUBLE_TIME включает бег (Unit.sprinting).
+## Проверяется именно ЭКРАННАЯ точка, а не мировая: камера за 0.35 с сдвинуться
+## успевает, и мировые координаты двух кликов «в одно место» разъезжаются
+var _last_rmb_time: float   = -10.0
+var _last_rmb_pos:  Vector2 = Vector2(-9999.0, -9999.0)
+## Окно двойного клика ПКМ. Отдельная константа, а не общий DOUBLE_CLICK_TIME:
+## это разные жесты, и подкручивать их приходится независимо
+const RMB_DOUBLE_TIME := 0.35
+## Насколько далеко по экрану может уехать второй клик, чтобы он всё ещё считался
+## двойным. Заметно больше DRAG_THRESHOLD — мышь при быстром двойном щелчке
+## всегда чуть смещается
+const RMB_DOUBLE_SLOP := 24.0
+
+# ── Двойной клик ЛКМ ─────────────────────────────────────────────────────────
+var _last_lmb_click_time: float = -10.0
+var _last_lmb_click_id:   int   = 0
+var _fp                        = null   # FormationPreview — нетипизировано, чтобы не зависеть от кэша классов
+
+func setup(p_camera: Camera3D, p_drag_rect: ColorRect) -> void:
+	camera       = p_camera
+	drag_rect_ui = p_drag_rect
+	drag_rect_ui.visible = false
+
+	var cl := CanvasLayer.new()
+	cl.layer = 9
+	add_child(cl)
+	# Грузим скрипт напрямую — не требует FormationPreview в global_script_class_cache
+	var fp_script = load("res://scripts/FormationPreview.gd")
+	if fp_script:
+		_fp = fp_script.new()
+		_fp.visible = false
+		cl.add_child(_fp)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ЖЕСТ, НАЧАВШИЙСЯ НА ИНТЕРФЕЙСЕ, МИРА НЕ КАСАЕТСЯ
+#
+# ЗДЕСЬ БЫЛА ПРИЧИНА «панель кузницы закрывается от любого клика внутри неё».
+#
+# Нажатие по кнопке (вкладка, узел улучшения) или по фону панели ПОГЛОЩАЕТ сам
+# интерфейс, и до _unhandled_input оно не доходит вовсе. А drag_start писался
+# ТОЛЬКО там — то есть оставался от прошлого клика по карте, где-нибудь за
+# полэкрана. Стоило до обработчика добраться отпусканию, как расстояние
+# «начало → конец» оказывалось огромным, клик уезжал в ветку РАМКИ ВЫДЕЛЕНИЯ,
+# а она проверяла «это интерфейс?» по НАЧАЛЬНОЙ точке — то есть по той самой
+# точке на карте. Проверка честно отвечала «нет», рамка отрабатывала, выделение
+# слетало, кузница закрывалась. Геометрия панели тут ни при чём: сравнивалась
+# не та точка.
+#
+# Поэтому точка нажатия пишется в _input(): он получает событие ДО интерфейса и
+# ничего не поглощает, так что drag_start верен ВСЕГДА — и когда нажали по
+# карте, и когда по кнопке. Заодно сразу запоминаем, был ли сам нажим над
+# интерфейсом: этого хватает, чтобы отбросить весь жест целиком, каким бы
+# длинным ни оказалось «перетаскивание».
+# ═════════════════════════════════════════════════════════════════════════════
+## Нажатие ЛКМ пришлось на интерфейс — отпускание мира не касается
+var _press_over_ui: bool = false
+
+func _input(event: InputEvent) -> void:
+	var mb := event as InputEventMouseButton
+	if mb == null or not mb.pressed:
+		return
+	# Никаких set_input_as_handled: здесь только ЗАПОМИНАЕМ, но не перехватываем
+	if mb.button_index == MOUSE_BUTTON_LEFT:
+		drag_start = mb.position
+		_press_over_ui = _over_ui(mb.position)
+	elif mb.button_index == MOUSE_BUTTON_RIGHT:
+		_rmb_press_over_ui = _over_ui(mb.position)
+
+## То же самое для ПКМ: приказ не отдаётся, если жест начался на панели
+var _rmb_press_over_ui: bool = false
+
+func _unhandled_input(event: InputEvent) -> void:
+	if camera == null:
+		return
+
+	# ── Горячие группы ────────────────────────────────────────────────────────
+	if event is InputEventKey and event.pressed and not event.echo:
+		var grp := _key_to_group_index(event.keycode)
+		if grp >= 0:
+			if event.ctrl_pressed:
+				_save_group(grp)
+			else:
+				_recall_group(grp)
+			get_viewport().set_input_as_handled()
+			return
+
+	# ── Мышь ─────────────────────────────────────────────────────────────────
+	if event is InputEventMouseButton:
+		if event.button_index == MOUSE_BUTTON_LEFT:
+			if event.pressed:
+				pass          # точку нажатия уже записал _input() — см. шапку выше
+			else:
+				var drag_end: Vector2 = event.position
+				# ЖЕСТ НАЧАЛСЯ НА ПАНЕЛИ — мира он не касается ни при каком
+				# расстоянии. Именно этот случай и закрывал кузницу: нажатие
+				# съедала кнопка, а отпускание уходило в ветку рамки
+				if _press_over_ui:
+					_press_over_ui = false
+					drag_rect_ui.visible = false
+					return
+				if drag_start.distance_to(drag_end) < DRAG_THRESHOLD:
+					_handle_single_click(drag_end, event.shift_pressed)
+				else:
+					_handle_box_select(drag_start, drag_end, event.shift_pressed)
+				drag_rect_ui.visible = false
+
+		elif event.button_index == MOUSE_BUTTON_RIGHT:
+			if event.pressed:
+				# Нажатие на панели приказом не становится (см. _rmb_press_over_ui)
+				if _rmb_press_over_ui:
+					return
+				_rmb_down = true
+				_rmb_screen_start = event.position
+				var hit := _screen_ray_hit(event.position, Constants.LAYER_GROUND)
+				if hit.has("position"):
+					_rmb_world_start = hit["position"]
+					_rmb_world_start.y = 0.0
+			else:
+				if _fp:
+					_fp.hide_all()
+				# Жест ПКМ, начатый на панели, закончился — снимаем пометку.
+				# Именно здесь, а не в _input: между нажатием и отпусканием
+				# может прийти сколько угодно движений мыши
+				if _rmb_press_over_ui:
+					_rmb_press_over_ui = false
+					_rmb_down = false
+					return
+				if _rmb_down:
+					var drag_dist := _rmb_screen_start.distance_to(event.position)
+					if drag_dist < DRAG_THRESHOLD:
+						_handle_right_click(event.position, _consume_rmb_double(event.position))
+					else:
+						# Протяжка сбрасывает счётчик: строй по линии — это не
+						# половина двойного клика
+						_last_rmb_time = -10.0
+						var hit := _screen_ray_hit(event.position, Constants.LAYER_GROUND)
+						if hit.has("position"):
+							var world_end: Vector3 = hit["position"]
+							world_end.y = 0.0
+							_execute_line_formation(_rmb_world_start, world_end)
+				_rmb_down = false
+
+	elif event is InputEventMouseMotion:
+		# Рамку не рисуем вовсе, если жест начался на панели: иначе игрок,
+		# промахнувшийся мимо кнопки кузницы, видит поверх интерфейса синий
+		# прямоугольник выделения, который заведомо ничего не выделит
+		if Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) and not _press_over_ui:
+			if drag_start.distance_to(event.position) > DRAG_THRESHOLD:
+				_update_drag_rect(drag_start, event.position)
+		if _rmb_down and not selected_units.is_empty():
+			if _rmb_screen_start.distance_to(event.position) > DRAG_THRESHOLD:
+				_update_formation_preview(event.position)
+
+# ─── Горячие группы ──────────────────────────────────────────────────────────
+
+func _key_to_group_index(keycode: Key) -> int:
+	match keycode:
+		KEY_1: return 0
+		KEY_2: return 1
+		KEY_3: return 2
+		KEY_4: return 3
+		KEY_5: return 4
+		KEY_6: return 5
+		KEY_7: return 6
+		KEY_8: return 7
+		KEY_9: return 8
+	return -1
+
+func _save_group(idx: int) -> void:
+	_purge_invalid()
+	_groups[idx] = selected_units.duplicate()
+
+func _recall_group(idx: int) -> void:
+	var now := Time.get_ticks_msec() / 1000.0
+	var double_tap := (_last_group_pressed == idx) and (now - _last_group_press_time < GROUP_DOUBLE_TAP_TIME)
+	_last_group_pressed    = idx
+	_last_group_press_time = now
+
+	var grp: Array = _groups[idx].filter(func(u): return is_instance_valid(u))
+	_groups[idx] = grp
+	if grp.is_empty():
+		return
+
+	_clear_selection()
+	for u in grp:
+		_select(u)
+	GameManager.on_selection_changed(selected_units)
+
+	if double_tap and camera is RTSCamera:
+		var center := Vector3.ZERO
+		for u in grp:
+			center += (u as Node3D).global_position
+		center /= float(grp.size())
+		(camera as RTSCamera).pan_to(center)
+
+# ─── Формация по линии ────────────────────────────────────────────────────────
+
+# Вычисляет слоты в мировом пространстве по нарисованной линии.
+# Длина линии определяет количество юнитов в шеренге → количество рядов.
+func _compute_line_slots(line_start: Vector3, line_end: Vector3, count: int) -> Array:
+	var slots: Array = []
+	if count == 0:
+		return slots
+	var line_vec    := line_end - line_start
+	var line_length := line_vec.length()
+	if line_length < 0.1:
+		return slots
+	var line_dir    := line_vec.normalized()
+	# Юниты стоят на линии и смотрят "вперёд" (перпендикулярно линии, по часовой)
+	var facing_dir  := Vector3(line_dir.z, 0.0, -line_dir.x)
+	# Ряды располагаются ПОЗАДИ фронтальной линии (противоположно facing_dir)
+	var row_offset  := -facing_dir
+
+	# Сколько юнитов помещается в один ряд при данной длине линии
+	var per_row := maxi(1, int(floor(line_length / UNIT_SPACING)))
+	var rows    := int(ceil(float(count) / float(per_row)))
+
+	for i in range(count):
+		var rank := i / per_row
+		var file := i % per_row
+		var t    := (float(file) + 0.5) / float(per_row)
+		var pos  := line_start.lerp(line_end, t) + row_offset * (rank * ROW_DEPTH)
+		pos.y    = 0.0
+		slots.append(pos)
+
+	return slots
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ФОРМАЦИЯ НЕСКОЛЬКИХ ОТРЯДОВ: СЕКЦИИ («КИРПИЧИКИ»)
+#
+# Раньше растянутая линия заполнялась ОДНИМ сплошным потоком: слот i получал
+# боец i, и три отряда по 20 человек перемешивались между собой — в одной
+# шеренге стояли вперемешку копейщики двух разных отрядов и лучники.
+# Теперь линия сначала делится на блоки по числу бойцов в каждом отряде, между
+# блоками оставляется зазор BLOCK_GAP, и КАЖДЫЙ отряд строится внутри своего
+# блока по прежним правилам (шеренги по UNIT_SPACING, ряды по ROW_DEPTH).
+# Порядок блоков — порядок появления отрядов в выделении, поэтому построение
+# повторяемо: один и тот же набор отрядов встаёт одинаково.
+# ─────────────────────────────────────────────────────────────────────────────
+## Просвет между блоками соседних отрядов, метры
+const BLOCK_GAP := 1.6
+
+## Разбить выделение на отряды, сохранив порядок первого появления.
+## Ключ 0 — бойцы вне реестра отрядов, они образуют один общий блок
+func _split_into_blocks(movable: Array) -> Array:
+	var order: Array = []
+	var by_squad: Dictionary = {}
+	for u in movable:
+		var sid: int = (u as Unit).squad_id if u is Unit else 0
+		if not by_squad.has(sid):
+			order.append(sid)
+			by_squad[sid] = []
+		(by_squad[sid] as Array).append(u)
+	var blocks: Array = []
+	for sid in order:
+		blocks.append(by_squad[sid])
+	return blocks
+
+## Слоты для всего выделения: линия делится на секции по отрядам.
+## Возвращает {"slots": Array[Vector3], "rows": Array[int]} — в порядке movable
+func _block_formation_slots(line_start: Vector3, line_end: Vector3, movable: Array) -> Dictionary:
+	var out := {"slots": [], "rows": []}
+	var blocks := _split_into_blocks(movable)
+	var line_vec := line_end - line_start
+	var total_len := line_vec.length()
+	if total_len < 0.1 or blocks.is_empty():
+		return out
+	var dir := line_vec / total_len
+	var total_men := 0
+	for b in blocks:
+		total_men += (b as Array).size()
+	if total_men <= 0:
+		return out
+	# Зазоры съедают часть линии, но не больше её половины — иначе при пяти
+	# отрядах на короткой линии на сами шеренги ничего бы не осталось
+	var gaps: float = minf(float(blocks.size() - 1) * BLOCK_GAP, total_len * 0.5)
+	var usable: float = total_len - gaps
+	var gap_each: float = gaps / maxf(float(blocks.size() - 1), 1.0)
+
+	var cursor := 0.0
+	for b in blocks:
+		var block: Array = b
+		var share: float = usable * float(block.size()) / float(total_men)
+		var b_start := line_start + dir * cursor
+		var b_end   := line_start + dir * (cursor + share)
+		var slots := _compute_line_slots(b_start, b_end, block.size())
+		var per_row := maxi(1, int(floor(share / UNIT_SPACING)))
+		for i in range(block.size()):
+			out["slots"].append(slots[i] if i < slots.size() else b_start)
+			out["rows"].append(i / per_row)
+		cursor += share + gap_each
+	return out
+
+## Порядок бойцов, соответствующий раскладке по блокам
+func _blocks_flat(movable: Array) -> Array:
+	var flat: Array = []
+	for b in _split_into_blocks(movable):
+		flat.append_array(b as Array)
+	return flat
+
+# ─────────────────────────────────────────────────────────────────────────────
+# COMBINED ARMS: РАСКЛАДКА ПО ЭШЕЛОНАМ (см. Formations.gd)
+#
+# Смешанное по типам выделение (копейщики + лучники + мечники) больше не
+# делится на секции ВДОЛЬ линии (это осталось для однотипного выделения) —
+# вместо этого линия целиком отдаётся под ПЕРВЫЙ эшелон (копейщики), а
+# следующие типы строятся ТОЙ ЖЕ секционной раскладкой (свои отряды —
+# side-by-side по ширине линии), но сдвинутой назад вдоль facing_dir на
+# глубину предыдущего эшелона + RANK_GAP. Получается сетка в глубину: по
+# фронту — секции отрядов одного типа, по глубине — сами типы войск.
+# ─────────────────────────────────────────────────────────────────────────────
+## Возвращает {"slots": Array[Vector3], "rows": Array[int], "flat": Array}
+## — все три в одном и том же порядке (rows/slots[i] относятся к flat[i])
+func _layered_formation_slots(line_start: Vector3, line_end: Vector3, movable: Array) -> Dictionary:
+	var out := {"slots": [], "rows": [], "flat": []}
+	var line_vec := line_end - line_start
+	var line_dir := Vector3.FORWARD
+	if line_vec.length() > 0.001:
+		line_dir = line_vec.normalized()
+	var facing_dir := Vector3(line_dir.z, 0.0, -line_dir.x)
+	var back_dir    := -facing_dir
+	var depth_cursor := 0.0
+	for bucket in _Formations.group_by_rank(movable):
+		var b: Array = bucket
+		if b.is_empty():
+			continue
+		var plan := _block_formation_slots(line_start, line_end, b)
+		var b_slots: Array = plan["slots"]
+		var b_rows: Array  = plan["rows"]
+		if b_slots.size() < b.size():
+			continue    # линия слишком короткая для этого эшелона — пропускаем его целиком
+		var max_row := 0
+		for r in b_rows:
+			max_row = maxi(max_row, int(r))
+		for i in range(b.size()):
+			out["slots"].append((b_slots[i] as Vector3) + back_dir * depth_cursor)
+			out["rows"].append(b_rows[i])
+			out["flat"].append(b[i])
+		# Следующий эшелон встаёт позади уже занятой этим эшелоном глубины
+		depth_cursor += float(max_row + 1) * ROW_DEPTH + RANK_GAP
+	return out
+
+func _movable_count() -> int:
+	var c := 0
+	for u in selected_units:
+		if is_instance_valid(u) and u.has_method("command_move"):
+			c += 1
+	return c
+
+func _update_formation_preview(mouse_screen: Vector2) -> void:
+	if _fp == null:
+		return
+	var cnt := _movable_count()
+	if cnt == 0 or _rmb_world_start == Vector3.ZERO:
+		_fp.hide_all()
+		return
+	var hit := _screen_ray_hit(mouse_screen, Constants.LAYER_GROUND)
+	if not hit.has("position"):
+		_fp.hide_all()
+		return
+
+	var world_end: Vector3 = hit["position"]
+	world_end.y = 0.0
+	var line_vec   := world_end - _rmb_world_start
+	if line_vec.length() < 0.1:
+		_fp.hide_all()
+		return
+
+	# Превью считается ТОЙ ЖЕ раскладкой, что и сам приказ (секции или эшелоны
+	# Combined Arms, см. _execute_line_formation), — иначе игрок видел бы одно
+	# построение при растягивании и другое по отпусканию кнопки
+	var movable: Array = []
+	for u in selected_units:
+		if is_instance_valid(u) and u.has_method("command_move"):
+			movable.append(u)
+	var slots: Array
+	if _Formations.is_mixed(movable):
+		slots = _layered_formation_slots(_rmb_world_start, world_end, movable)["slots"]
+	else:
+		slots = _block_formation_slots(_rmb_world_start, world_end, movable)["slots"]
+
+	var line_dir   := line_vec.normalized()
+	var facing_dir := Vector3(line_dir.z, 0.0, -line_dir.x)
+	var mid_world  := (_rmb_world_start + world_end) * 0.5
+	var elev       := Vector3(0, 0.5, 0)
+	var mid_scr    := camera.unproject_position(mid_world + elev)
+	var face_scr   := camera.unproject_position(mid_world + facing_dir * 2.0 + elev)
+	var facing_angle := (face_scr - mid_scr).angle() + PI * 0.5
+
+	var screen_slots: Array = []
+	for slot in slots:
+		screen_slots.append(camera.unproject_position((slot as Vector3) + elev))
+
+	_fp.show_formation(screen_slots, facing_angle, _rmb_screen_start, mouse_screen)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# РАСТЯНУТАЯ ЛИНИЯ = МАРШЕВЫЙ ШАГ СТРОЕМ.
+#
+# Два режима движения различаются ИМЕННО ЖЕСТОМ, а не составом выделения:
+#   • короткий ПКМ по карте  → БЫСТРЫЙ ШАГ: отряд идёт полным ходом, строй
+#     держит вольно (см. _issue_formation_move);
+#   • ПКМ с растягиванием    → МАРШ: игрок сам нарисовал фронт, отряд идёт
+#     шагом и держит нарисованный «кирпичик» на всём пути.
+#
+# РАНЬШЕ БЫЛО НАОБОРОТ: короткий клик уводил отряд маршем на половине скорости,
+# а растянутая линия — бегом врассыпную. То есть жест, которым игрок задаёт
+# строгий строй, этот строй как раз и ломал.
+# ═════════════════════════════════════════════════════════════════════════════
+func _execute_line_formation(line_start: Vector3, line_end: Vector3) -> void:
+	var movable: Array = []
+	for u in selected_units:
+		if is_instance_valid(u) and u.has_method("command_move"):
+			movable.append(u)
+	if movable.is_empty():
+		return
+	if (line_end - line_start).length() < 0.2:
+		_issue_formation_move(line_start)   # клич подаст она сама
+		return
+	_order_battle_cry(movable)   # марш по линии — такой же приказ, те же правила
+	var line_vec := line_end - line_start
+	var flat: Array
+	var slots: Array
+	var rows: Array
+	if _Formations.is_mixed(movable):
+		# COMBINED ARMS: смешанное выделение строится эшелонами по типу войск
+		# (копейщики / лучники / мечники), см. _layered_formation_slots
+		var lplan := _layered_formation_slots(line_start, line_end, movable)
+		flat  = lplan["flat"]
+		slots = lplan["slots"]
+		rows  = lplan["rows"]
+	else:
+		# СЕКЦИИ: каждый отряд получает свой участок линии и не перемешивается
+		# с соседями (см. _block_formation_slots)
+		flat = _blocks_flat(movable)
+		var plan := _block_formation_slots(line_start, line_end, movable)
+		slots = plan["slots"]
+		rows  = plan["rows"]
+	if slots.size() < flat.size():
+		return
+	# ЕДИНЫЙ ФРОНТ: направление взгляда считается ОДИН РАЗ по нарисованной
+	# линии и выдаётся всем бойцам. Тот же вектор рисует превью формации,
+	# так что отряд встаёт ровно так, как игрок видел при растягивании
+	var line_dir   := line_vec.normalized()
+	var facing_dir := Vector3(line_dir.z, 0.0, -line_dir.x)
+	for i in range(flat.size()):
+		# Ряд в фаланге — для порядка построения (глубина в шеренге)
+		flat[i].formation_row = int(rows[i])
+		# player_order = true: приказ игрока непрерываем FORCED_MOVE_SEC секунд
+		# (см. Unit._move_lock) — иначе отряд, которому дали приказ вплотную к
+		# врагу, перехватывается на первом же шаге и с места не уходит
+		flat[i].command_move(slots[i], true, facing_dir, false, true)
+	# РАЗМЕТКА ОСТАЁТСЯ ЗА ОТРЯДОМ. Благодаря ей после потерь можно сомкнуть
+	# ряды: выживших пересаживают на первые места списка, и задняя шеренга
+	# переходит вперёд на места павших (см. GameManager.squad_close_ranks)
+	_remember_formation(flat, slots, facing_dir, true)
+
+# ─── Существующие методы ─────────────────────────────────────────────────────
+
+func _update_drag_rect(a: Vector2, b: Vector2) -> void:
+	drag_rect_ui.visible = true
+	var pos  := Vector2(min(a.x, b.x), min(a.y, b.y))
+	var size := Vector2(abs(a.x - b.x), abs(a.y - b.y))
+	drag_rect_ui.position = pos
+	drag_rect_ui.size     = size
+
+func _screen_ray_hit(screen_pos: Vector2, mask: int) -> Dictionary:
+	var from := camera.project_ray_origin(screen_pos)
+	var to   := from + camera.project_ray_normal(screen_pos) * 1000.0
+	var space_state := camera.get_world_3d().direct_space_state
+	var query := PhysicsRayQueryParameters3D.create(from, to)
+	query.collision_mask = mask
+	return space_state.intersect_ray(query)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ПРИОРИТЕТ КЛИКА: ЧТО ИМЕННО ПОД КУРСОРОМ
+#
+# Коллайдер дерева — цилиндр радиусом 1.35 и ВЫСОТОЙ 4.8 м: он обязан покрывать
+# всю крону, иначе по кроне нельзя кликнуть. Но камера смотрит сверху под углом,
+# поэтому этот столб воздуха накрывает и землю ПЕРЕД деревом: клик по жиле
+# золота, лежащей у ствола, ловил дерево, и рабочий уходил рубить лес.
+#
+# intersect_ray возвращает только БЛИЖАЙШЕЕ попадание, поэтому идём по лучу
+# насквозь (исключая уже найденные тела) и собираем всех кандидатов, пока не
+# упрёмся в землю.
+#
+# ПРАВИЛО ВЫБОРА: побеждает тот, чьё ОСНОВАНИЕ ближе к точке, куда курсор
+# показывает НА ЗЕМЛЕ. Луч продолжается до плоскости грунта, и дальше сравнение
+# идёт в плане (по x/z), а не в воздухе:
+#   • клик по жиле у ствола — точка земли лежит на жиле, она и выигрывает;
+#   • клик по стволу — точка земли уходит за дерево, но комель всё равно ближе
+#     к ней, чем соседняя жила, поэтому дерево остаётся выбранным;
+#   • клик по верхушке крупного здания — из дистанции вычитается его габарит,
+#     поэтому замок не проигрывает случайному бойцу у стены.
+# При равенстве (обе дистанции внутри собственного габарита) выигрывает МЕНЬШИЙ
+# объект: мелкая цель точнее, по крупной попасть проще в другом месте.
+# ─────────────────────────────────────────────────────────────────────────────
+const PICK_MAX_HITS := 8
+## Разница счёта, ниже которой кандидаты считаются равными
+const PICK_TIE := 0.01
+
+## Высота туловища спрайта бойца: на неё считается поправка ракурса
+const UNIT_BODY_H := 1.0
+## Потолок поправки: при совсем пологой камере боец не должен «расползаться»
+const UNIT_PICK_MAX := 2.5
+
+## Габарит объекта в плане: на столько «прощается» промах по земле.
+## unit_slack — габарит бойца с поправкой на наклон камеры (см. _pick_at)
+func _pick_radius(node, unit_slack: float = 0.35) -> float:
+	if node is Building:
+		var s: Vector3 = (node as Building).build_size
+		return maxf(s.x, s.z) * 0.5
+	if node is ResourceNode:
+		var rn := node as ResourceNode
+		if rn.resource_type == Constants.RESOURCE_WOOD:
+			return 1.35
+		return 0.85 * rn.size_scale
+	return unit_slack    # боец
+
+## Кого предпочесть при РАВНОМ счёте. Боец важнее жилы и здания: маски
+## столкновений везде нулевые, поэтому бойцы свободно стоят на габарите
+## построек, и клик по бойцу внутри коробки замка обязан выбрать бойца
+func _pick_rank(node) -> int:
+	if node is Unit:
+		return 0
+	if node is ResourceNode:
+		return 1
+	return 2
+
+## Разбор клика: {"target": Node|null, "position": Vector3}
+## position — точка на земле (или на ближайшем теле, если земли на луче нет)
+func _pick_at(screen_pos: Vector2, mask: int) -> Dictionary:
+	var out := {"target": null, "position": Vector3.ZERO}
+	if camera == null:
+		return out
+	var from  := camera.project_ray_origin(screen_pos)
+	var dirn  := camera.project_ray_normal(screen_pos)
+	var to    := from + dirn * 1000.0
+	var space := camera.get_world_3d().direct_space_state
+	# ── БОЙЦЫ ИЩУТСЯ ПО СЕТКЕ, А НЕ ЛУЧОМ ───────────────────────────────────
+	# У юнитов больше нет физических тел (см. шапку Unit.gd): тело стоило
+	# 5.7 мкс на бойца в кадр только за факт своего существования в
+	# PhysicsServer3D, при том что маски в проекте нулевые и ни с чем оно не
+	# сталкивалось. Единственным его потребителем был вот этот клик.
+	#
+	# Правило выбора при этом не меняется НИ НА ЙОТУ: победитель и раньше
+	# определялся расстоянием ОТ ОСНОВАНИЯ объекта ДО ТОЧКИ ЗЕМЛИ под курсором
+	# (переменная ground ниже), а не геометрией коллайдера — луч лишь собирал
+	# список кандидатов. Теперь тот же список для бойцов даёт запрос к
+	# пространственной сетке вокруг той же самой точки земли.
+	var want_units: bool = (mask & Constants.LAYER_UNITS) != 0
+	var ray_mask: int = mask & ~Constants.LAYER_UNITS
+	var exclude: Array[RID] = []
+	var best: Node = null
+	var best_score := INF
+	var best_radius := INF
+	var best_rank := 99
+	var first_pos := Vector3.ZERO
+	var have_pos  := false
+	# ТОЧКА ЗЕМЛИ ПОД КУРСОРОМ. Грунт плоский (get_terrain_height = 0), поэтому
+	# пересечение с плоскостью y=0 считается аналитически и не зависит от того,
+	# перехватил ли луч коллайдер земли
+	var ground := Vector2(INF, INF)
+	if absf(dirn.y) > 1e-4:
+		var t_g: float = -from.y / dirn.y
+		if t_g > 0.0:
+			var gp := from + dirn * t_g
+			ground = Vector2(gp.x, gp.z)
+	# ПОПРАВКА РАКУРСА ДЛЯ БОЙЦА. Курсор наводят на туловище спрайта, а точка
+	# земли под курсором уходит за спину бойца на высота/tan(наклон камеры) —
+	# при пологой камере это больше метра. Без поправки боец всегда проигрывал
+	# зданию, на габарите которого стоит
+	var unit_slack := 0.35
+	if absf(dirn.y) > 1e-4:
+		var lean: float = Vector2(dirn.x, dirn.z).length() / absf(dirn.y)
+		unit_slack = minf(0.35 + UNIT_BODY_H * lean, UNIT_PICK_MAX)
+	# КАНДИДАТЫ СОБИРАЮТСЯ, ПОТОМ ОЦЕНИВАЮТСЯ. Раньше это был один цикл по лучу;
+	# теперь источников два (луч — для построек, жил и грунта; сетка — для
+	# бойцов), а правило выбора для них общее и должно применяться одинаково
+	var cands: Array = []
+	if ray_mask != 0:
+		for _i in range(PICK_MAX_HITS):
+			var q := PhysicsRayQueryParameters3D.create(from, to)
+			q.collision_mask = ray_mask
+			q.exclude = exclude
+			var hit := space.intersect_ray(q)
+			if not hit.has("collider"):
+				break
+			if hit.has("rid"):
+				exclude.append(hit["rid"])
+			var hit_pos: Vector3 = hit["position"]
+			if not have_pos:
+				first_pos = hit_pos
+				have_pos  = true
+			var node = _resolve_node(hit["collider"])
+			if node == null:
+				# Земля (или что-то, что не является сущностью игры) — за ней
+				# смотреть нечего: всё дальше по лучу скрыто грунтом
+				out["position"] = hit_pos
+				break
+			cands.append(node)
+	# Бойцы вокруг точки земли под курсором. Радиус берётся с запасом на
+	# поправку ракурса (unit_slack): при пологой камере точка земли уходит
+	# за спину бойца больше чем на метр
+	if want_units and ground.x != INF:
+		var gp3 := Vector3(ground.x, 0.0, ground.y)
+		for n in GameManager.unit_grid.query_radius(gp3, unit_slack + 1.0):
+			var u := n as Unit
+			if u != null and not u.is_dead():
+				cands.append(u)
+	for node in cands:
+		var np: Vector3 = (node as Node3D).global_position
+		var radius: float = _pick_radius(node, unit_slack)
+		var rank: int = _pick_rank(node)
+		var score: float
+		if ground.x == INF:
+			# Луч смотрит горизонтально — сравниваем по расстоянию до основания
+			score = maxf(np.distance_to(first_pos if have_pos else from) - radius, 0.0)
+		else:
+			score = maxf(Vector2(np.x, np.z).distance_to(ground) - radius, 0.0)
+		var better := false
+		if score < best_score - PICK_TIE:
+			better = true
+		elif absf(score - best_score) <= PICK_TIE:
+			# Счёт равный (оба накрывают точку земли): решает сначала ранг,
+			# затем размер — по мелкой цели попасть труднее, она и важнее
+			better = rank < best_rank or (rank == best_rank and radius < best_radius)
+		if better:
+			best_score = score
+			best_radius = radius
+			best_rank = rank
+			best = node
+	out["target"] = best
+	if (out["position"] as Vector3) == Vector3.ZERO:
+		if ground.x != INF:
+			out["position"] = Vector3(ground.x, 0.0, ground.y)
+		elif have_pos:
+			out["position"] = first_pos
+	return out
+
+func _resolve_node(collider: Node):
+	var n := collider
+	while n:
+		if n is Unit or n is Building or n is ResourceNode:
+			return n
+		# Руина — не Building (намеренно: ни групп, ни здоровья, ни выделения),
+		# но по ней отдаётся приказ «отстроить заново», поэтому кликом она
+		# обязана распознаваться. Ловим по группе — типа у неё нет
+		if n.is_in_group("ruins"):
+			return n
+		n = n.get_parent()
+	return null
+
+## КЛИК ПО ИНТЕРФЕЙСУ — НЕ КЛИК ПО МИРУ.
+## Панель здания закрывается строго по Escape или по клику ВНЕ её границ
+## (заказ владельца), поэтому любой клик, попавший в видимую панель, до разбора
+## мира не доходит вовсе. Проверка геометрическая: одного лишь MOUSE_FILTER_STOP
+## на кнопках мало — в панели полно прозрачных мест (подписи и иконки стоят в
+## IGNORE, просветы между кнопками не накрыты ничем, у кузницы сетка узлов и
+## холст стрелок — голые Control), и попадание МИМО кнопки проваливалось в мир,
+## где читалось как «клик по пустой земле» и снимало выделение.
+## См. HUD.point_over_ui — там же список панелей, которые держат фокус
+func _over_ui(screen_pos: Vector2) -> bool:
+	var hud = GameManager.main.hud if GameManager.main != null else null
+	if hud == null or not is_instance_valid(hud):
+		return false
+	return hud.point_over_ui(screen_pos)
+
+## Публичное снятие выделения (Escape в HUD). Внутренний _clear_selection
+## только гасит кольца — панель об этом узнаёт из on_selection_changed
+func clear_selection() -> void:
+	_clear_selection()
+	GameManager.on_selection_changed(selected_units)
+
+func _handle_single_click(screen_pos: Vector2, additive: bool) -> void:
+	if _over_ui(screen_pos):
+		return
+	_purge_invalid()
+	if not additive:
+		_clear_selection()
+	var pick := _pick_at(screen_pos, Constants.LAYER_UNITS | Constants.LAYER_BUILDINGS)
+	if pick["target"] != null:
+		var target = pick["target"]
+		if (target is Unit or target is Building) and target.faction == Constants.FACTION_PLAYER:
+			# Двойной клик по юниту → выделить всех однотипных юнитов на экране
+			var now := Time.get_ticks_msec() / 1000.0
+			var is_double: bool = target is Unit \
+				and target.get_instance_id() == _last_lmb_click_id \
+				and (now - _last_lmb_click_time) < DOUBLE_CLICK_TIME
+			_last_lmb_click_time = now
+			_last_lmb_click_id   = target.get_instance_id()
+			if is_double:
+				_select_same_type_on_screen(target)
+			else:
+				_select(target)
+	GameManager.on_selection_changed(selected_units)
+
+# Двойной клик: выделить ВСЕ ОТРЯДЫ этого типа, видимые сейчас на экране
+func _select_same_type_on_screen(sample: Unit) -> void:
+	var vp_rect := get_viewport().get_visible_rect()
+	for u in get_tree().get_nodes_in_group("player_units"):
+		if not is_instance_valid(u):
+			continue
+		if u.get_script() != sample.get_script():
+			continue
+		var world_pos: Vector3 = (u as Node3D).global_position
+		if camera.is_position_behind(world_pos):
+			continue
+		if vp_rect.has_point(camera.unproject_position(world_pos)):
+			_select(u)   # развернётся на весь отряд
+
+# РАМКОЙ ВЫДЕЛЯЮТСЯ ОТРЯДЫ ЦЕЛИКОМ. Достаточно задеть рамкой одного бойца —
+# в выделение попадёт весь его отряд, даже если остальные вне рамки. Иначе
+# игрок отрывал бы от отряда «хвост» и управлял бы половинками строя
+func _handle_box_select(a: Vector2, b: Vector2, additive: bool) -> void:
+	# ПРАВИЛО ДЕРЖИТСЯ НА ОБОИХ КОНЦАХ РАМКИ. Начало на панели — это промах
+	# мимо кнопки; конец на панели — это отпускание внутри «безопасной зоны», и
+	# по требованию владельца оно тоже поглощается, а не сбрасывает выделение.
+	#
+	# Проверка продублирована здесь НАМЕРЕННО, хотя жест уже отсекается по
+	# _press_over_ui в _unhandled_input: та защита знает, где было НАЖАТИЕ, а эта
+	# работает от самих координат и потому верна при любом способе вызова
+	# (в том числе из стендов). Дублирование дешёвое — два сравнения на клик
+	if _over_ui(a) or _over_ui(b):
+		return
+	_purge_invalid()
+	if not additive:
+		_clear_selection()
+	var rect := Rect2(Vector2(min(a.x, b.x), min(a.y, b.y)), Vector2(abs(a.x - b.x), abs(a.y - b.y)))
+	var touched: Array = []      # id уже развёрнутых отрядов
+	for unit in get_tree().get_nodes_in_group("player_units"):
+		if not is_instance_valid(unit):
+			continue
+		if camera.is_position_behind(unit.global_position):
+			continue
+		var screen_pos := camera.unproject_position(unit.global_position)
+		if not rect.has_point(screen_pos):
+			continue
+		var sid: int = (unit as Unit).squad_id
+		if sid > 0:
+			if sid in touched:
+				continue     # отряд уже целиком в выделении
+			touched.append(sid)
+		_select(unit)
+	GameManager.on_selection_changed(selected_units)
+
+func _purge_invalid() -> void:
+	selected_units = selected_units.filter(func(u): return is_instance_valid(u))
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ВЫДЕЛЕНИЕ ИДЁТ ОТРЯДАМИ, А НЕ БОЙЦАМИ
+# Клик по одному солдату разворачивается на ВЕСЬ его отряд; выделить половину
+# отряда невозможно в принципе. Поэтому и все приказы ниже по файлу
+# (формация, марш, атака) всегда получает отряд целиком.
+# Здания отрядами не являются — они выделяются поштучно, как и раньше.
+# ─────────────────────────────────────────────────────────────────────────────
+
+## Выделить ОТРЯД, в котором состоит node (для здания — само здание)
+func _select(node) -> void:
+	if node == null or not is_instance_valid(node):
+		return
+	if not (node is Unit):
+		_select_one(node)
+		return
+	for m in GameManager.squad_of(node):
+		_select_one(m)
+
+## Один узел в выделение, без разворачивания на отряд
+func _select_one(node) -> void:
+	if node in selected_units:
+		return
+	selected_units.append(node)
+	if node.has_method("set_selected"):
+		node.set_selected(true)
+
+## ФИЛЬТР ПО ТИПУ: оставить в выделении только отряды указанного типа.
+## Дёргается кнопкой на панели мульти-выбора (левый нижний угол)
+func keep_only_type(unit_id: String) -> void:
+	_purge_invalid()
+	var keep: Array = []
+	for u in selected_units:
+		if not (u is Unit):
+			# ПОСТРОЙКА В СМЕШАННОМ ВЫДЕЛЕНИИ (её добавляет Shift+клик по зданию)
+			# фильтром по типу войск выбрасывается — и обязана погасить кольцо.
+			# Раньше здесь стоял голый continue: здание пропадало из
+			# selected_units, а подсветка под ним продолжала гореть
+			if u.has_method("set_selected"):
+				u.set_selected(false)
+			continue
+		var sid: int = (u as Unit).squad_id
+		var t: String = GameManager.squad_type(sid) if sid > 0 else (u as Unit).stat_id
+		if t == unit_id:
+			keep.append(u)
+		elif u.has_method("set_selected"):
+			u.set_selected(false)
+	selected_units = keep
+	GameManager.on_selection_changed(selected_units)
+
+## Идентификаторы выделенных отрядов (для панелей интерфейса)
+func selected_squad_ids() -> Array:
+	var ids: Array = []
+	for u in selected_units:
+		if not is_instance_valid(u) or not (u is Unit):
+			continue
+		var sid: int = (u as Unit).squad_id
+		if sid > 0 and not (sid in ids):
+			ids.append(sid)
+	return ids
+
+func _clear_selection() -> void:
+	for u in selected_units:
+		if is_instance_valid(u) and u.has_method("set_selected"):
+			u.set_selected(false)
+	selected_units.clear()
+
+## ЭТО ВТОРОЙ ПКМ ПОДРЯД В ТУ ЖЕ ТОЧКУ?
+## Возвращает true и СБРАСЫВАЕТ счётчик (тройной клик — это не два бега подряд,
+## а бег и новый первый клик). Иначе запоминает клик как первый половину пары
+func _consume_rmb_double(screen_pos: Vector2) -> bool:
+	var now: float = float(Time.get_ticks_msec()) / 1000.0
+	var is_double: bool = (now - _last_rmb_time) <= RMB_DOUBLE_TIME \
+		and _last_rmb_pos.distance_to(screen_pos) <= RMB_DOUBLE_SLOP
+	if is_double:
+		_last_rmb_time = -10.0
+		_last_rmb_pos  = Vector2(-9999.0, -9999.0)
+		return true
+	_last_rmb_time = now
+	_last_rmb_pos  = screen_pos
+	return false
+
+# ═════════════════════════════════════════════════════════════════════════════
+# УМНЫЙ КЛИК ПО ЛЕСУ (SMART TARGETING)
+#
+# Дерево — цель ТОЛЬКО для рабочего. Коллайдер дерева это цилиндр радиусом 1.35
+# и высотой 4.8 м, а камера смотрит под 45°, поэтому столб кроны накрывает
+# несколько метров земли ПЕРЕД стволом. Для отряда солдат это означало, что
+# приказ «иди/атакуй вон туда» в редколесье регулярно упирался в дерево и
+# полностью пропадал: команды «рубить» у мечника нет, и клик просто съедался.
+#
+# Решение — на уровне МАСКИ ЛУЧА, а не фильтра результата: если в выделении нет
+# ни одного рабочего, LAYER_RESOURCES в маску вообще не попадает. Тогда луч
+# проходит сквозь лес до грунта, точка земли считается за деревьями, и вокруг
+# неё как обычно ищутся вражеские бойцы (см. _pick_at) — то есть клик по врагу,
+# стоящему В ЛЕСУ, работает сам собой, без отдельной ветки.
+# ═════════════════════════════════════════════════════════════════════════════
+
+## Есть ли в выделении хоть один рабочий. Публичная — её же читает
+## Main._update_hover_cursor, чтобы курсор сбора показывался ровно тогда, когда
+## клик по дереву действительно что-то сделает
+func selection_has_worker() -> bool:
+	for u in selected_units:
+		if is_instance_valid(u) and u is Worker:
+			return true
+	return false
+
+## НАСКОЛЬКО ДАЛЕКО ОТ ТОЧКИ КЛИКА ИЩЕТСЯ ЧУЖОЙ СТРОЙ.
+## Отряд — это блок из 20 моделей с интервалом 0.5 м, то есть плотное пятно
+## примерно 3×2 м. Игрок целится «в отряд», а не в пиксель конкретного бойца, и
+## промах на полтора шага мимо силуэта обязан читаться как приказ атаки, а не
+## как «идите в эту точку» (после чего отряд встаёт вплотную к врагу и ждёт).
+## 2.5 м = расстояние до соседней модели в блоке с запасом; больше брать нельзя,
+## иначе станет невозможно приказать «встать РЯДОМ с врагом»
+const SQUAD_CLICK_REACH := 2.5
+
+## Ближайший ЧУЖОЙ боец в пределах SQUAD_CLICK_REACH от точки на земле.
+## null — рядом никого, клик остаётся приказом движения.
+## Через сетку, а не через группы: у юнитов нет физических тел (см. Unit.gd),
+## и это тот же источник кандидатов, которым пользуется _pick_at
+func _enemy_in_squad_zone(ground: Vector3) -> Node3D:
+	if not _selection_can_attack():
+		return null
+	var best: Node3D = null
+	var best_d := SQUAD_CLICK_REACH * SQUAD_CLICK_REACH
+	for n in GameManager.unit_grid.query_radius(ground, SQUAD_CLICK_REACH):
+		var u := n as Unit
+		if u == null or u.is_dead() or u.faction == Constants.FACTION_PLAYER:
+			continue
+		var dx: float = u.global_position.x - ground.x
+		var dz: float = u.global_position.z - ground.z
+		var d2: float = dx * dx + dz * dz
+		if d2 < best_d:
+			best_d = d2
+			best   = u
+	return best
+
+## Есть ли в выделении хоть кто-то, кому приказ атаки вообще осмыслен.
+## Артель рабочих не должна превращать клик у вражеского строя в самоубийство:
+## у рабочего attack_damage = 0, приказ атаки для него бессмыслен
+func _selection_can_attack() -> bool:
+	for u in selected_units:
+		if not is_instance_valid(u) or not (u is Unit):
+			continue
+		if (u as Unit).attack_damage > 0.0:
+			return true
+	return false
+
+func _handle_right_click(screen_pos: Vector2, run: bool = false) -> void:
+	# ПКМ по панели — тоже не приказ миру (см. _over_ui): иначе правый клик по
+	# ячейке очереди, снимающий заказ, заодно гнал бы выделенный отряд в точку
+	# «под панелью», куда игрок вообще не показывал
+	if _over_ui(screen_pos):
+		return
+	_purge_invalid()
+	if selected_units.is_empty():
+		return
+	# LAYER_RUINS есть ТОЛЬКО в маске правого клика: руину нельзя выделить,
+	# но по ней можно отдать приказ «отстроить» (см. _try_rebuild_ruin)
+	#
+	# LAYER_RESOURCES — ТОЛЬКО ЕСЛИ В ВЫДЕЛЕНИИ ЕСТЬ РАБОЧИЙ (см. selection_has_worker)
+	var mask: int = Constants.LAYER_UNITS | Constants.LAYER_BUILDINGS \
+		| Constants.LAYER_RUINS | Constants.LAYER_GROUND
+	if selection_has_worker():
+		mask |= Constants.LAYER_RESOURCES
+	var pick := _pick_at(screen_pos, mask)
+	var target = pick["target"]
+	var pos: Vector3 = pick["position"]
+	if target == null and pos == Vector3.ZERO:
+		return
+	pos.y = 0.0
+	# ── КЛИК ПО ХИТБОКСУ ОТРЯДА, А НЕ ПО ЧЕЛОВЕЧКУ ──────────────────────────
+	# Луч/сетка нашли под курсором только грунт (или своего), а рядом с этой
+	# точкой стоит чужой строй — значит игрок целился в отряд и промазал мимо
+	# конкретной модели на полтора шага. Это приказ атаки (см. SQUAD_CLICK_REACH)
+	if target == null or (target is Unit and target.faction == Constants.FACTION_PLAYER):
+		var zone := _enemy_in_squad_zone(pos)
+		if zone != null:
+			target = zone
+
+	# ПКМ ОТРЯДОМ ПО СВОЕМУ ЗАМКУ — завести отряд в гарнизон: там его лечат
+	# и доукомплектовывают. Рабочих это не касается — им замок нужен как склад
+	if target is Castle and target.faction == Constants.FACTION_PLAYER:
+		if _try_garrison(target as Castle):
+			return
+
+	# ПКМ ПО РУИНЕ — отстроить заново: на её месте сразу встаёт стройплощадка,
+	# и вся выделенная артель бежит туда с молотками
+	if _try_rebuild_ruin(target):
+		return
+
+	# ПКМ ПО СТРОЙПЛОЩАДКЕ — поставить выделенных рабочих на стройку.
+	# Раньше недострой был обычным своим зданием: приказ проваливался в
+	# «идти в точку», рабочий доходил до фундамента и вставал рядом без дела
+	if _try_join_construction(target):
+		return
+
+	# ТОЧКА СБОРА ЗДАНИЯ: выделена своя постройка — ПКМ по карте назначает,
+	# куда пойдут новые отряды (см. Building.set_rally_point)
+	if _try_set_rally(pos, target):
+		return
+
+	var is_gather_cmd: bool = target != null and target is ResourceNode
+	var is_attack_cmd: bool = target != null and (target is Unit or target is Building) and target.faction != Constants.FACTION_PLAYER
+
+	if is_gather_cmd or is_attack_cmd:
+		# ═══════════════════════════════════════════════════════════════════════
+		# ПРИКАЗ АТАКИ = ЗАМОК НА УКАЗАННЫЙ ОТРЯД (приоритет №1, см. Unit.target_lock)
+		#
+		# ЗДЕСЬ БЫЛ ГЛАВНЫЙ ИСТОЧНИК «ОТРЯД ДЕЛИТСЯ И РАЗБЕГАЕТСЯ»: для каждого
+		# выделенного бойца собирался ПОЛНЫЙ список врагов на карте (все юниты +
+		# все здания вражеской фракции), и боец получал приказ на СВОЮ ближайшую
+		# цель из него. Кликнув по одному отряду противника, игрок фактически
+		# отдавал N разных приказов: фланговые бойцы уходили на соседние отряды,
+		# на пробегающего рабочего, на здание за спиной. Указанная цель при этом
+		# могла не получить вообще никого.
+		#
+		# Теперь цель ОДНА для всех, а разбор чужого строя по моделям делает сам
+		# Unit.command_attack через GameManager.squad_pick_member — то есть отряд
+		# бьёт назначенный отряд сообща, но не сваливается всей толпой на одну модель
+		# ═══════════════════════════════════════════════════════════════════════
+		var atk_squads: Array = []
+		for u in selected_units:
+			if not is_instance_valid(u): continue
+			if is_gather_cmd and u is Worker:
+				u.command_gather(target)
+			elif is_attack_cmd and u.has_method("command_attack"):
+				# lock = true — приказ игрока, держится до истребления цели
+				u.command_attack(target, true, true, true)
+				var sid: int = (u as Unit).squad_id if u is Unit else 0
+				if sid > 0 and not (sid in atk_squads):
+					atk_squads.append(sid)
+			elif is_gather_cmd and u.has_method("command_move"):
+				# СОЛДАТ В СМЕШАННОМ ВЫДЕЛЕНИИ (рабочие + войска) по клику в лес
+				# не остаётся без приказа: рубить он не умеет, значит идёт туда,
+				# куда показали. Раньше такой боец просто игнорировал клик
+				u.command_move(pos, false, Vector3.ZERO, false, true, run)
+		# Приказ АТАКИ горячей группе — такой же повод крикнуть, как и марш
+		# (см. _order_battle_cry). Сбор ресурсов поводом не является
+		if is_attack_cmd:
+			_order_battle_cry(selected_units)
+		# РАЗМЕТКУ СТРОЯ НА ВРЕМЯ АТАКИ НЕ СТИРАЕМ — ОНА ПРОСТО НЕ ДЕЙСТВУЕТ.
+		# Смыкание рядов зовёт command_move каждому бойцу и сняло бы замок цели
+		# посреди исполнения приказа, поэтому оно заблокировано, пока замок жив
+		# (см. GameManager.squad_close_ranks). Но именно ЗАБЛОКИРОВАНО, а не
+		# «слоты удалены»: форма строя нужна целой, чтобы отряд вернулся в неё
+		# после боя (заказ владельца — «никаких застрявших фантомных солдат»).
+		# Раньше здесь стоял squad_clear_formation, и отряд, сходивший в атаку,
+		# терял свой строй навсегда
+		return
+
+	_issue_formation_move(pos, run)
+
+# ОБЫЧНЫЙ ПКМ В ТОЧКУ = БЫСТРЫЙ ШАГ.
+# Отряд идёт на полной скорости, форма строя переносится как есть, но держится
+# вольно: это команда «быстро туда», а не «маршируйте». Строгий марш «кирпичиком»
+# отдаётся другим жестом — растягиванием ПКМ (см. _execute_line_formation).
+## run = true — ДВОЙНОЙ ПКМ: отряд бежит (Unit.SPRINT_SPEED_FACTOR), фаланга
+## на время бега распускается, авто-бой игнорируется. Сбрасывается сам по
+## прибытии (см. Unit._set_sprinting)
+func _issue_formation_move(center: Vector3, run: bool = false) -> void:
+	var movable: Array = []
+	for u in selected_units:
+		if is_instance_valid(u) and u.has_method("command_move"):
+			movable.append(u)
+	if movable.is_empty():
+		return
+	_order_battle_cry(movable)
+	var count := movable.size()
+	# ОТРЯД (Ctrl+1..9) ИДЁТ МАРШЕМ, СОХРАНЯЯ СВОЙ СТРОЙ.
+	# Раньше здесь всегда строилась заново квадратная сетка ceil(√N), и
+	# прямоугольник 30 копейщиков в 3 ряда по обычному ПКМ схлопывался
+	# в квадрат 6×5. Теперь строй переносится КАК ЕСТЬ: у каждого бойца
+	# берётся его смещение от центра отряда, и весь блок сдвигается в точку
+	# приказа. Форма, интервалы и номера рядов сохраняются в точности.
+	# ОТРЯД ИДЁТ МАРШЕМ, СОХРАНЯЯ СВОЙ СТРОЙ. Признак — выделен именно отряд,
+	# а не сохранённая горячая группа: теперь выделение ВСЕГДА отрядное, и
+	# требовать Ctrl+1..9 больше незачем (раньше строй 30 копейщиков по
+	# обычному ПКМ схлопывался в квадрат, если группа не была назначена)
+	# НЕСКОЛЬКО ОТРЯДОВ — СЕТКА БЛОКОВ, А НЕ ОБЩАЯ КУЧА (см. _issue_group_grid_move)
+	if _issue_group_grid_move(movable, center, run):
+		return
+	if _selection_is_squad():
+		_issue_march_keeping_shape(movable, center, false, run)   # false = быстрым шагом
+		return
+
+	var cols := maxi(1, int(ceil(sqrt(float(count)))))
+	# Вдвое плотнее прежнего (было 1.0): по ПКМ отряд сбивается в тесную кучу
+	var spacing := UNIT_SPACING
+	# Курс движения = общее направление взгляда для всей кучи
+	var course := _group_course(movable, center)
+	for i in range(count):
+		var col := i % cols
+		var row := i / cols
+		var offset_x := (col - (cols - 1) * 0.5) * spacing
+		var offset_z := row * spacing
+		movable[i].formation_row = row
+		movable[i].command_move(center + Vector3(offset_x, 0.0, offset_z), false, course,
+			false, true, run)     # player_order — см. Unit._move_lock
+
+# ═════════════════════════════════════════════════════════════════════════════
+# СЕТКА ОТРЯДОВ: НЕСКОЛЬКО БЛОКОВ НЕ СВАЛИВАЮТСЯ В ОДНУ КУЧУ
+#
+# Жалоба владельца: выделяешь 2-5 отрядов, кликаешь в точку — и они лезут все в
+# одно место. Так и было: приказ уводил ВСЁ выделение одним «кирпичом»
+# (_issue_march_keeping_shape переносит общий центр масс), то есть форма группы
+# бралась ИЗ ТОГО, КАК ОТРЯДЫ СТОЯЛИ ДО ПРИКАЗА. Стояли они друг на друге —
+# придут друг на друга; шли из боя вперемешку — так и встанут.
+#
+# Теперь точка клика — это ЦЕНТР ГРУППЫ, а отряды раскладываются по ячейкам
+# сетки, каждый СО СВОИМ строем внутри (внутренняя форма переносится как есть,
+# см. _issue_march_keeping_shape):
+#   • 1-2 отряда  — в один ряд: два блока встают бок о бок;
+#   • 3-4 отряда  — ряд из трёх (центральный ровно в точке клика, соседи слева
+#                   и справа), четвёртый уходит во второй ряд, назад;
+#   • 5 и больше  — прямоугольник ceil(√n) в ширину: 3×2, 3×3 и так далее.
+# Ряды центрируются каждый по себе, поэтому неполный последний ряд стоит
+# посередине, а не прижимается к флангу.
+# ═════════════════════════════════════════════════════════════════════════════
+
+## Просвет между соседними блоками отрядов, метры. Заметно больше интервала
+## между шеренгами ВНУТРИ отряда (ROW_DEPTH): это граница между отрядами, и
+## по ней должно быть видно, где кончается один блок и начинается другой
+const GROUP_CELL_GAP := 3.0
+
+## Сколько блоков в ряду сетки. 3 для трёх-четырёх отрядов — это прямое
+## требование задания («центральный в точку клика, остальные слева, справа и
+## сзади»), а не общая формула: при ceil(√4) = 2 четыре отряда встали бы
+## квадратом 2×2, и НИ ОДИН не оказался бы в точке клика
+func _group_grid_cols(n: int) -> int:
+	if n <= 2:
+		return maxi(n, 1)
+	if n <= 4:
+		return 3
+	return int(ceil(sqrt(float(n))))
+
+## Габарит отряда в системе координат марша: [ширина поперёк курса, глубина вдоль].
+## Меряется по РЕАЛЬНЫМ позициям бойцов, а не по их числу: отряд, растянутый
+## игроком в длинную шеренгу, и он же, сбитый в квадрат, требуют разного места
+func _squad_extent(men: Array, course: Vector3, across: Vector3) -> Vector2:
+	if men.is_empty():
+		return Vector2.ZERO
+	var min_a := INF; var max_a := -INF
+	var min_c := INF; var max_c := -INF
+	for u in men:
+		var p: Vector3 = (u as Node3D).global_position
+		var a: float = p.dot(across)
+		var c: float = p.dot(course)
+		min_a = minf(min_a, a); max_a = maxf(max_a, a)
+		min_c = minf(min_c, c); max_c = maxf(max_c, c)
+	return Vector2(max_a - min_a, max_c - min_c)
+
+## Расставить выделенные отряды сеткой вокруг точки клика.
+## false — отрядов меньше двух, и раскладывать нечего: приказ отрабатывает
+## прежним путём (перенос общего строя)
+func _issue_group_grid_move(movable: Array, center: Vector3, run: bool) -> bool:
+	var blocks := _split_into_blocks(movable)
+	# Блок с sid = 0 — это бойцы вне реестра отрядов (одиночки, рабочие).
+	# Сеткой их не строим: у них нет ни своего строя, ни курса
+	var squads: Array = []
+	for b in blocks:
+		var arr: Array = b
+		if arr.is_empty():
+			continue
+		var sid: int = (arr[0] as Unit).squad_id if arr[0] is Unit else 0
+		if sid > 0:
+			squads.append(arr)
+	if squads.size() < 2:
+		return false
+
+	# ЕДИНЫЙ КУРС ВСЕЙ ГРУППЫ: от общего центра масс к точке приказа. По нему
+	# же ориентируется сетка, поэтому «слева/справа/сзади» — это слева, справа
+	# и сзади ОТНОСИТЕЛЬНО ХОДА ГРУППЫ, а не сторон света
+	var course := _group_course(movable, center)
+	if course.length_squared() < 1e-6:
+		course = Vector3.FORWARD
+	var across := Vector3(-course.z, 0.0, course.x)
+
+	# Ячейка одна на всех — по самому крупному отряду: разные размеры ячеек
+	# развалили бы ряды, а одинаковые дают ровную сетку при любом составе
+	var cell_w := 0.0
+	var cell_d := 0.0
+	for s in squads:
+		var e := _squad_extent(s as Array, course, across)
+		cell_w = maxf(cell_w, e.x)
+		cell_d = maxf(cell_d, e.y)
+	cell_w += GROUP_CELL_GAP
+	cell_d += GROUP_CELL_GAP
+
+	var n: int = squads.size()
+	var cols: int = mini(_group_grid_cols(n), n)
+
+	for i in range(n):
+		var row: int = i / cols
+		var col: int = i % cols
+		# Сколько блоков реально стоит в ЭТОМ ряду — по нему ряд и центрируется,
+		# поэтому неполный последний ряд стоит посередине, а не с краю
+		var in_row: int = mini(cols, n - row * cols)
+		var off_a: float = (float(col) - float(in_row - 1) * 0.5) * cell_w
+		# ПЕРВЫЙ РЯД ВСТАЁТ РОВНО В ТОЧКУ КЛИКА, следующие — позади него.
+		# Именно поэтому при трёх отрядах центральный оказывается точно там,
+		# куда показал игрок, а не «где-то в середине общей кучи»
+		var cell_centre: Vector3 = center + across * off_a - course * (float(row) * cell_d)
+		# Внутренний строй отряда переносится как есть; курс — общий на группу,
+		# иначе фланговые блоки пришли бы веером (см. course_override)
+		_issue_march_keeping_shape(squads[i] as Array, cell_centre, false, run, course)
+	return true
+
+## ЗАПОМНИТЬ РАЗМЕТКУ ЗА КАЖДЫМ ОТРЯДОМ ВЫДЕЛЕНИЯ.
+## Выделение может состоять из нескольких отрядов (построение секциями), и
+## каждому достаётся ТОЛЬКО его кусок общего списка мест — иначе при потерях
+## копейщики полезли бы смыкать ряды на слоты лучников
+func _remember_formation(flat: Array, slots: Array, course: Vector3, slow: bool) -> void:
+	var by_squad: Dictionary = {}
+	for i in range(flat.size()):
+		if i >= slots.size():
+			break
+		var u = flat[i]
+		if not (u is Unit):
+			continue
+		var sid: int = (u as Unit).squad_id
+		if sid <= 0:
+			continue
+		if not by_squad.has(sid):
+			by_squad[sid] = []
+		(by_squad[sid] as Array).append(slots[i])
+	for sid in by_squad:
+		GameManager.squad_set_formation(int(sid), by_squad[sid], course, slow)
+
+# Общее направление движения отряда: от его центра масс к точке приказа.
+# Нужно, чтобы после прихода ВСЕ смотрели одинаково, а не каждый в свой слот
+func _group_course(movable: Array, center: Vector3) -> Vector3:
+	var centroid := Vector3.ZERO
+	for u in movable:
+		centroid += (u as Node3D).global_position
+	centroid /= float(movable.size())
+	var course := center - centroid
+	course.y = 0.0
+	if course.length() < 0.01:
+		return Vector3.ZERO
+	return course.normalized()
+
+# Перенос строя без изменения его формы: смещения относительно центра отряда
+# сохраняются, номер ряда пересчитывается по глубине вдоль курса марша.
+# slow = true — маршевый шаг (половина скорости, строй держится жёстко),
+# slow = false — быстрый шаг по обычному ПКМ
+## course_override — ЕДИНЫЙ ФРОНТ ДЛЯ ВСЕЙ ГРУППЫ. Когда отряды расставляются
+## сеткой (см. _issue_group_grid_move), каждый идёт в СВОЮ ячейку, и курс
+## «от своего центра к своей точке» у фланговых отрядов расходится с курсом
+## центрального на десятки градусов — группа приходит веером вместо строя.
+## Пустой вектор = прежнее поведение (курс считает сам)
+func _issue_march_keeping_shape(movable: Array, center: Vector3,
+		slow: bool = true, run: bool = false,
+		course_override: Vector3 = Vector3.ZERO) -> void:
+	var centroid := Vector3.ZERO
+	for u in movable:
+		centroid += (u as Node3D).global_position
+	centroid /= float(movable.size())
+	centroid.y = 0.0
+
+	var course := center - centroid
+	if course_override.length_squared() > 1e-6:
+		course = course_override
+	course.y = 0.0
+	if course.length() < 0.01:
+		course = Vector3.FORWARD
+	course = course.normalized()
+
+	# Порядок ОТ ПЕРЕДОВОЙ К ТЫЛУ: разметка отряда обязана начинаться с первой
+	# шеренги, иначе смыкание рядов (SquadFormation.close_ranks) подтянет
+	# выживших не вперёд, а назад
+	var ordered: Array = movable.duplicate()
+	ordered.sort_custom(func(a, b):
+		return (a as Node3D).global_position.dot(course) \
+			> (b as Node3D).global_position.dot(course))
+
+	var slots: Array = []
+	for u in ordered:
+		var offset: Vector3 = (u as Node3D).global_position - centroid
+		offset.y = 0.0
+		# Ряд = глубина юнита вдоль курса: те, кто впереди по ходу марша,
+		# получают ряд 0-1 и несут копья наперевес
+		var depth: float = -offset.dot(course)
+		u.formation_row = maxi(0, int(round((depth + ROW_DEPTH * 0.5) / ROW_DEPTH)))
+		var slot: Vector3 = center + offset
+		slots.append(slot)
+		# Весь отряд смотрит по курсу марша — единым фронтом
+		u.command_move(slot, slow, course, false, true, run)   # player_order
+	_remember_formation(ordered, slots, course, slow)
+
+# ─── Горячая группа: стойки и признак «выделен именно отряд» ─────────────────
+
+## Индекс горячей группы, совпадающей с текущим выделением (-1 — не группа).
+## Совпадением считается: все выделенные юниты входят в группу и наоборот.
+func current_group_index() -> int:
+	if selected_units.is_empty():
+		return -1
+	for idx in range(_groups.size()):
+		var grp: Array = _groups[idx]
+		if grp.is_empty() or grp.size() != selected_units.size():
+			continue
+		var same := true
+		for u in selected_units:
+			if not (u in grp):
+				same = false
+				break
+		if same:
+			return idx
+	return -1
+
+## Завести выделенные БОЕВЫЕ отряды в гарнизон замка.
+## false — ни один отряд не годится (одни рабочие) или гарнизон полон,
+## тогда правый клик отрабатывает как обычный приказ движения
+func _try_garrison(castle: Castle) -> bool:
+	var sent := 0
+	for sid in selected_squad_ids():
+		var members := GameManager.squad_members(int(sid))
+		if members.is_empty():
+			continue
+		if members[0] is Worker:
+			continue                       # рабочему в гарнизоне делать нечего
+		if castle.request_garrison(int(sid)):
+			sent += 1
+	return sent > 0
+
+## ПОДКЛЮЧИТЬ РАБОЧИХ К СТРОЙКЕ. Возвращает true, если приказ отдан хотя бы
+## одному — тогда обычный приказ движения уже не нужен.
+## Недострой опознаётся по группе construction_sites, а не по классу:
+## ConstructionSite намеренно живёт без class_name (грузится через load)
+## ПКМ РАБОЧИМИ ПО РУИНЕ: заменить её стройплощадкой и отправить туда артель.
+##
+## false — цель не руина, не своя, рабочих в выделении нет или не хватило
+## ресурсов. В последнем случае приказ намеренно ПРОВАЛИВАЕТСЯ ДАЛЬШЕ и
+## становится обычным «идти туда»: молча съесть клик хуже, чем сходить на место
+func _try_rebuild_ruin(target) -> bool:
+	if target == null or not is_instance_valid(target):
+		return false
+	if not (target is Node) or not (target as Node).is_in_group("ruins"):
+		return false
+	if int((target as Node).get_meta("ruin_faction", -1)) != Constants.FACTION_PLAYER:
+		return false
+	var crew: Array = []
+	for u in selected_units:
+		if is_instance_valid(u) and u is Worker:
+			crew.append(u)
+	if crew.is_empty():
+		return false
+	var site = GameManager.rebuild_ruin(target as Node)
+	if site == null:
+		return false
+	for w in crew:
+		(w as Worker).command_build(site as Node3D)
+	return true
+
+func _try_join_construction(target) -> bool:
+	if target == null or not is_instance_valid(target):
+		return false
+	if not (target is Node) or not (target as Node).is_in_group("construction_sites"):
+		return false
+	if (target as Building).faction != Constants.FACTION_PLAYER:
+		return false
+	var sent := 0
+	for u in selected_units:
+		if is_instance_valid(u) and u is Worker:
+			(u as Worker).command_build(target as Node3D)
+			sent += 1
+	return sent > 0
+
+## ТОЧКА СБОРА: если выделены ТОЛЬКО свои постройки, ПКМ по карте назначает им
+## точку сбора, а не отдаёт приказ движения (двигать здание всё равно нечем).
+## Клик по вражескому объекту сюда не попадает — там обычная логика атаки
+func _try_set_rally(pos: Vector3, target) -> bool:
+	if target != null and (target is Unit or target is ResourceNode):
+		return false
+	var buildings: Array = []
+	for u in selected_units:
+		if not is_instance_valid(u):
+			continue
+		if not (u is Building) or (u as Building).faction != Constants.FACTION_PLAYER:
+			return false          # в выделении есть кто-то кроме своих зданий
+		buildings.append(u)
+	if buildings.is_empty():
+		return false
+	for b in buildings:
+		(b as Building).set_rally_point(pos)
+	return true
+
+func _selection_is_hotkey_group() -> bool:
+	return current_group_index() >= 0
+
+# ═════════════════════════════════════════════════════════════════════════════
+# БОЕВОЙ КЛИЧ НА ПРИКАЗ — ТОЛЬКО ГОРЯЧИМ ГРУППАМ И ЧЕРЕЗ РАЗ
+#
+# Раньше клич звучал на КАЖДЫЙ приказ движения любому выделению. Обычный
+# микроконтроль — это десятки кликов по земле в минуту, и солдаты орали не
+# замолкая; из «переклички перед атакой» звук превратился в фон, который
+# хочется выключить.
+#
+# Теперь клич — признак ОСМЫСЛЕННОГО манёвра, а не любого клика:
+#   • отряды должны быть сведены в горячую группу (Ctrl+1..9). Разовое
+#     выделение рамкой командует молча — им игрок и пользуется чаще всего;
+#   • даже у группы клич идёт с шансом и длинным откатом
+#     (GameManager.CRY_ORDER_CHANCE / CRY_ORDER_COOLDOWN_MS).
+#
+# Смена стойки под это правило НЕ подпадает: она нажимается кнопкой, случается
+# редко и отвечать на неё звуком нужно каждый раз (см. set_selection_stance).
+# ═════════════════════════════════════════════════════════════════════════════
+func _order_battle_cry(movable: Array) -> int:
+	if not _selection_is_hotkey_group():
+		return 0
+	return GameManager.order_battle_cry(movable)
+
+## Выделен ли настоящий отряд (а не одиночка вне реестра). Боевые отряды
+## всегда состоят больше чем из одного бойца, рабочий — отряд из одного,
+## поэтому марш строем осмыслен от двух человек
+func _selection_is_squad() -> bool:
+	if selected_units.size() < 2:
+		return false
+	for u in selected_units:
+		if not is_instance_valid(u) or not (u is Unit):
+			return false
+		if (u as Unit).squad_id <= 0:
+			return false
+	return true
+
+## Переключить стойку всему текущему выделению (кнопки [АТАКА]/[ЗАЩИТА])
+func set_selection_stance(stance_id: String) -> void:
+	_purge_invalid()
+	# КЛИЧ — ТОЛЬКО НА РЕАЛЬНУЮ СМЕНУ СТОЙКИ. Игрок, повторно ткнувший в уже
+	# активную кнопку, ничего не переключает — и орать по этому поводу нечего.
+	# Состояние снимаем ДО переключения, по каждому отряду отдельно: в выделении
+	# отряды могут стоять в разных стойках, и «сменилось» у них тоже своё
+	var was: Dictionary = {}
+	for u in selected_units:
+		if not is_instance_valid(u) or not (u is Unit):
+			continue
+		var sid: int = (u as Unit).squad_id
+		if sid > 0 and not was.has(sid):
+			was[sid] = (u as Unit).stance
+	for u in selected_units:
+		if is_instance_valid(u) and u.has_method("set_stance"):
+			u.set_stance(stance_id)
+	for sid2 in was:
+		if String(was[sid2]) != stance_id:
+			GameManager.squad_battle_cry(int(sid2))
+
+## Стойка выделения: общая, если у всех одна; иначе пустая строка
+func selection_stance() -> String:
+	var result := ""
+	for u in selected_units:
+		if not is_instance_valid(u) or not ("stance" in u):
+			continue
+		var s: String = u.stance
+		if result == "":
+			result = s
+		elif result != s:
+			return ""
+	return result

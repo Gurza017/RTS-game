@@ -1,0 +1,19 @@
+[remap]
+
+importer="mp3"
+type="AudioStreamMP3"
+uid="uid://cu6ohiqsjlxpo"
+path="res://.godot/imported/Sword_hit_armor 1.mp3-b628fd808a05182ec2f950c47432c8bf.mp3str"
+
+[deps]
+
+source_file="res://assets/factions/humans/Sounds Human/Sword_hit_armor 1.mp3"
+dest_files=["res://.godot/imported/Sword_hit_armor 1.mp3-b628fd808a05182ec2f950c47432c8bf.mp3str"]
+
+[params]
+
+loop=false
+loop_offset=0
+bpm=0
+beat_count=0
+bar_beats=4
