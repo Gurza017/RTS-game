@@ -609,7 +609,12 @@ func _test_stars() -> void:
 		acc += (men[i] as Node3D).global_position
 	var want: Vector3 = acc / float(men.size())
 	# Обновление идёт раз в STAR_UPDATE_FRAMES кадров — дадим ему сработать
-	await frames(GameManager.STAR_UPDATE_FRAMES * 2 + 2)
+	# ЗВЕЗДА ТЕПЕРЬ ДОГОНЯЕТ ЦЕНТР, А НЕ ПРЫГАЕТ В НЕГО (заказ владельца:
+	# «должна плавно перемещаться, а не дёргаться» — см.
+	# GameManager.STAR_FOLLOW). Значит ждать надо не один такт пересчёта, а
+	# схождение сглаживания: 60 кадров при коэффициенте 0.18 — это больше
+	# 99.99% пути
+	await frames(60)
 	var got: Vector3 = (star as Node3D).global_position
 	var dxz: float = Vector2(got.x - want.x, got.z - want.z).length()
 	verdict("E6 звезда стоит строго по центру масс выживших",
@@ -627,7 +632,7 @@ func _test_stars() -> void:
 		acc2 += (m as Node3D).global_position
 		alive_n += 1
 	dead.take_damage(dead.max_health * 3.0, null)
-	await frames(GameManager.STAR_UPDATE_FRAMES * 2 + 4)
+	await frames(60)
 	var want2: Vector3 = acc2 / float(alive_n)
 	var got2: Vector3 = (star as Node3D).global_position
 	var dxz2: float = Vector2(got2.x - want2.x, got2.z - want2.z).length()

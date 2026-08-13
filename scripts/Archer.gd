@@ -4,6 +4,8 @@ class_name Archer
 const GLB_PATH    := "res://assets/models/archer.glb"
 const SPRITE_PATH := "res://assets/sprites/units/Archer_Idle.png"
 const MODEL_SCALE := 0.75
+# Сама стрела берётся из общего пула (GameManager.spawn_arrow); ссылка на
+# скрипт нужна только затем, чтобы стенды могли выйти на класс через лучника
 const _Arrow      := preload("res://scripts/Arrow.gd")
 const _SSParser   := preload("res://scripts/SpriteSheetParser.gd")
 
@@ -165,19 +167,12 @@ func _on_attack_fired(target: Node3D, damage: float) -> void:
 	aim += Vector3(cos(ang) * off, 0.0, sin(ang) * off)
 
 	var dist: float = from_pos.distance_to(aim)
-	var a: Node3D = _Arrow.new()
-	a.set("_start_pos", from_pos)
-	a.set("_end_pos",   aim)
-	a.set("_dist",      dist)
-	# Скорость и высота дуги — из unit_stats_config.gd (навесная траектория)
-	a.set("_speed",      speed)
-	a.set("_arc_factor", _UStats.stat("archer", "arrow_arc",   0.5))
-	# Урон летит вместе со стрелой и списывается только при попадании
-	a.set("damage",  damage)
-	a.set("shooter", self)
-	a.set("faction", faction)
-	parent.add_child(a)
-	a.global_position = from_pos
+	# СТРЕЛА БЕРЁТСЯ ИЗ ПУЛА, а не создаётся заново (см. GameManager.spawn_arrow):
+	# комплект из узлов, меша и материала переживает выстрел и идёт в следующий.
+	# Скорость и высота дуги — из unit_stats_config.gd (навесная траектория);
+	# урон летит вместе со стрелой и списывается только при попадании
+	GameManager.spawn_arrow(parent, from_pos, aim, dist, speed,
+		_UStats.stat("archer", "arrow_arc", 0.5), damage, self, faction)
 
 func _add_bow_procedural() -> void:
 	var bow := MeshInstance3D.new()

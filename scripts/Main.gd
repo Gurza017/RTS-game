@@ -117,6 +117,18 @@ func _ready() -> void:
 	_world = Node3D.new()
 	_world.name = "World"
 	add_child(_world)
+	# РЕЕСТР РАСТИТЕЛЬНОСТИ ОБНУЛЯЕТСЯ ИМЕННО ЗДЕСЬ, а не в start_game(): лес и
+	# кусты сажаются из _setup_terrain/_setup_environment, то есть ДО
+	# start_game() (тот же порядок, из-за которого регистрация стволов сделана
+	# отложенной — см. ResourceNode._register_trunk). Чистка после посадки
+	# оставила бы бакеты прошлой карты висеть в мире вторым комплектом.
+	# Сами MultiMeshInstance3D уходят вместе со старым World; здесь снимается
+	# только учёт занятых мест, который живёт в автозагрузке
+	GameManager.veg.clear_bookkeeping()
+	# И ядро армии: строки прошлой партии освобождаются в _exit_tree каждого
+	# бойца, но старую сцену выгружают ДО построения новой, поэтому здесь
+	# реестр уже пуст — сброс лишь гарантирует это на случай аварийного выхода
+	GameManager.army.clear()
 	# Пределы карты снимаются ОДИН РАЗ и дальше живут числами в GameManager:
 	# зажим границ стоит на самом горячем пути (шаг каждого бойца)
 	GameManager.refresh_map_bounds()
@@ -139,6 +151,9 @@ func start_game() -> void:
 	# бое его надо обнулить руками — иначе на карте останутся невидимые
 	# препятствия от прошлого леса
 	GameManager.clear_trunks()
+	# Пул стрел тоже переживает сцену (GameManager — автозагрузка), а лежащие в
+	# нём узлы принадлежали прошлой карте
+	GameManager.clear_arrow_pool()
 	_setup_reserved_zones()
 	ResourceManager.reset_resources()
 	GameManager.reset_squads()
@@ -1039,6 +1054,45 @@ const CLUSTER_PRESETS := [
 	{"big": 4, "mid": 2, "small": 10},
 ]
 
+# ═════════════════════════════════════════════════════════════════════════════
+# ФИКСИРОВАННЫЕ ШАБЛОНЫ КУЧИ (заказ владельца: «не сплошная куча, а отдельные
+# читаемые куски рядом»)
+# ═════════════════════════════════════════════════════════════════════════════
+# ЧТО БЫЛО. Куски раскидывались случайно по диску (r = R·√u) с проверкой
+# просвета в PIECE_MIN_GAP = 0.42 м — заведомо МЕНЬШЕ их собственных радиусов,
+# то есть перекрытие было целью. Плюс на золоте радиус дополнительно сжимался
+# (GOLD_SPREAD_TIGHTEN). В сумме полтора десятка квадов ложились друг на друга
+# и читались как нагромождение, а не как месторождение.
+#
+# ЧТО СТАЛО. Раскладка — РУЧНАЯ и постоянная: каждый шаблон это готовая
+# композиция «крупные в ядре, средние по бокам, мелочь по краям», где расстояния
+# между центрами заведомо больше половины ширины соседей. Куски соприкасаются,
+# но ни один не наезжает на другой. Разнообразие даётся не случайным разбросом,
+# а выбором шаблона, поворотом всей композиции и зеркалом — форма кучи при этом
+# остаётся опрятной при любом розыгрыше.
+#
+# Координаты в метрах относительно центра кучи: [x, z, класс].
+const CLUSTER_LAYOUTS := [
+	# «Гряда» — вытянутая жила, как на эталонном скриншоте
+	[
+		[-1.75,  0.30, "small"], [-0.90, -0.10, "mid"],  [ 0.05,  0.15, "big"],
+		[ 1.15, -0.10, "big"],   [ 2.10,  0.35, "mid"],  [ 0.60,  0.95, "mid"],
+		[-0.30,  0.95, "small"], [ 2.70, -0.25, "small"],
+	],
+	# «Гнездо» — компактное ядро с осыпью
+	[
+		[ 0.00,  0.00, "big"],   [ 1.20,  0.30, "big"],  [ 0.60, -0.95, "mid"],
+		[-1.00,  0.40, "mid"],   [ 1.95, -0.50, "small"],[-0.55, -0.85, "small"],
+		[ 1.65,  1.10, "mid"],   [-1.75, -0.35, "small"],
+	],
+	# «Россыпь» — редкая цепочка вдоль склона
+	[
+		[-2.15, -0.20, "mid"],   [-1.10,  0.35, "big"],  [ 0.10, -0.25, "big"],
+		[ 1.25,  0.40, "mid"],   [ 2.25, -0.15, "mid"],  [-0.50,  1.05, "small"],
+		[ 1.75,  1.05, "small"], [ 3.05,  0.40, "small"],
+	],
+]
+
 # Размер и запас по классу куска. Разброс масштаба добавляется сверху,
 # поэтому двух одинаковых камней в куче не бывает
 # ЗАПАС ×3 к прежнему: жилы золота и каменоломни выдыхались слишком быстро,
@@ -1070,8 +1124,13 @@ const PIECE_MIN_GAP := 0.42
 ## размера независимо от того, сколько пустого поля вокруг него на холсте —
 ## лекарство от «искр» больше не нужно радиусу, только просвету между
 ## центрами (перекрытие спрайтов по-прежнему нужно для читаемости навала)
-const GOLD_SPREAD_TIGHTEN := 0.85   # было 0.55 — тесный радиус и давал столб
-const GOLD_GAP_TIGHTEN    := 0.55   # просвет между кусками — держим плотным
+## РАЗМАХ ГОТОВОЙ КОМПОЗИЦИИ (см. CLUSTER_LAYOUTS). Заменил прежние
+## GOLD_SPREAD_TIGHTEN / GOLD_GAP_TIGHTEN: сжимать было нечего — раскладка
+## теперь не случайная, и «просвета между центрами» как параметра не
+## существует. Осталось одно число на тип: у золота куски мельче, поэтому и
+## композиция чуть плотнее
+const LAYOUT_SPAN_STONE := 1.0
+const LAYOUT_SPAN_GOLD  := 0.82
 
 # ── РЕСУРСЫ БАЗЫ ─────────────────────────────────────────────────────────────
 # Золото и камень стоят РЯДОМ с замком, но на расчищенном кольце: достаточно
@@ -1201,70 +1260,50 @@ func _add_corner_resource_clusters() -> void:
 # спавнятся СВОИ базовые жилы: их пятачок занят специально под них (лес туда
 # не лезет), и общая проверка _is_reserved отвергла бы каждый кусок.
 func _spawn_resource_cluster(center: Vector3, res_type: int, ignore_reserved: bool = false) -> void:
-	var preset: Dictionary = CLUSTER_PRESETS[randi() % CLUSTER_PRESETS.size()]
-	# Ориентация и сплюснутость кучи — свои у каждой
-	var ell_ang   := randf() * TAU
-	var squash    := randf_range(0.62, 1.0)
-	var placed_pts: Array = []
-	# Золото собираем теснее камня — см. GOLD_SPREAD_TIGHTEN/GOLD_GAP_TIGHTEN
-	var spread_tighten: float = GOLD_SPREAD_TIGHTEN \
-		if res_type == Constants.RESOURCE_GOLD else 1.0
-	var gap_tighten: float = GOLD_GAP_TIGHTEN \
-		if res_type == Constants.RESOURCE_GOLD else 1.0
+	# ── РАСКЛАДКА БЕРЁТСЯ ИЗ ГОТОВОГО ШАБЛОНА (см. CLUSTER_LAYOUTS) ─────────
+	# Разнообразие даёт выбор шаблона, поворот всей композиции и зеркало по X —
+	# но НЕ случайный разброс кусков: именно он и сваливал их в кашу
+	var layout: Array = CLUSTER_LAYOUTS[randi() % CLUSTER_LAYOUTS.size()]
+	var rot: float = randf() * TAU
+	var mirror: float = -1.0 if randf() < 0.5 else 1.0
+	var ca := cos(rot)
+	var sa := sin(rot)
+	# Золото нарисовано мельче камня, поэтому его композиция чуть теснее.
+	# Это ОДИН множитель на всю раскладку — форма кучи от него не меняется,
+	# меняется только её общий размах
+	var span: float = LAYOUT_SPAN_GOLD if res_type == Constants.RESOURCE_GOLD \
+		else LAYOUT_SPAN_STONE
 
-	for cls in ["big", "mid", "small"]:
-		var cls_id: String = cls
-		var n: int = int(preset.get(cls_id, 0))
-		if n <= 0:
-			continue
+	for entry in layout:
+		var e: Array = entry
+		var lx: float = float(e[0]) * mirror * span
+		var lz: float = float(e[1]) * span
+		var cls_id: String = e[2]
 		var pc: Dictionary = PIECE_CLASSES[cls_id]
-		var base_scale: float = pc.get("scale", 1.0)
-		var amount: float     = pc.get("amount", 200.0)
-		var jitter: float     = pc.get("jitter", 0.2)
-		var spread: float     = float(pc.get("spread", 1.5)) * spread_tighten
-
-		for i in range(n):
-			var pt := Vector2.ZERO
-			# Несколько попыток найти точку, не совпадающую с уже занятой.
-			# Порог маленький (PIECE_MIN_GAP) — перекрытие спрайтов ЖЕЛАТЕЛЬНО.
-			# Просвет ужимается СВОИМ множителем (gap_tighten), НЕЗАВИСИМО от
-			# радиуса разброса: иначе на тесном круге золота ни одна точка не
-			# проходит проверку, цикл отваливается по числу попыток и валит
-			# все куски в Vector2.ZERO — то есть стопкой
-			var min_gap: float = PIECE_MIN_GAP * gap_tighten
-			for _try in range(14):
-				var ang := randf() * TAU
-				# r = R·√u даёт равномерное заполнение диска, а не сгусток в центре
-				var r   := sqrt(randf()) * spread
-				var cand := Vector2(cos(ang) * r, sin(ang) * r * squash).rotated(ell_ang)
-				var ok := true
-				for q in placed_pts:
-					if cand.distance_to(q) < min_gap:
-						ok = false
-						break
-				if ok:
-					pt = cand
-					break
-			placed_pts.append(pt)
-
-			var px: float = center.x + pt.x
-			var pz: float = center.z + pt.y
-			if is_water(px, pz):
-				continue
-			# Куски, попавшие на пятачок базы, не ставим — замок не должен
-			# торчать из кучи камней
-			if not ignore_reserved and _is_reserved(px, pz):
-				continue
-			var node := ResourceNode.new()
-			node.resource_type = res_type
-			# Разброс масштаба: одинаковых кусков в куче не бывает
-			var sc: float = base_scale * randf_range(1.0 - jitter, 1.0 + jitter)
-			node.size_scale  = sc
-			# Запас пропорционален размеру — крупный самородок и даёт больше
-			node.remaining   = amount * (sc / base_scale)
-			node.res_variant = 0     # 0 = вариант спрайта выберется случайно
-			_world.add_child(node)
-			node.global_position = Vector3(px, get_terrain_height(px, pz), pz)
+		# Поворот композиции целиком
+		var px: float = center.x + lx * ca - lz * sa
+		var pz: float = center.z + lx * sa + lz * ca
+		if is_water(px, pz):
+			continue
+		# Куски, попавшие на пятачок базы, не ставим — замок не должен
+		# торчать из кучи камней
+		if not ignore_reserved and _is_reserved(px, pz):
+			continue
+		var node := ResourceNode.new()
+		node.resource_type = res_type
+		# ── РАЗМЕР СТРОГО ПО КЛАССУ, БЕЗ СЛУЧАЙНОГО РАЗБРОСА ───────────────
+		# Здесь стоял `base_scale * randf_range(1 - jitter, 1 + jitter)`, то
+		# есть каждый кусок домножался на своё случайное число. Для пиксельного
+		# арта это ровно то «процедурное масштабирование», от которого рисунок
+		# и плыл: дробный масштаб пересэмплирует текселы неравномерно.
+		# Разными куски делают ТРИ КЛАССА и 4-6 вариантов рисунка в каждом —
+		# этого хватает, чтобы двух одинаковых рядом не стояло
+		var sc: float = pc.get("scale", 1.0)
+		node.size_scale  = sc
+		node.remaining   = float(pc.get("amount", 200.0))
+		node.res_variant = 0     # 0 = вариант спрайта выберется случайно
+		_world.add_child(node)
+		node.global_position = Vector3(px, get_terrain_height(px, pz), pz)
 
 func _spawn_enemy_base() -> void:
 	var castle := Castle.new()
@@ -2034,23 +2073,27 @@ func _spawn_bush_cluster(textures: Array, center: Vector3, count: int) -> void:
 			continue
 
 		var tex: Texture2D = textures[randi() % textures.size()]
-		var bmi := MeshInstance3D.new()
-		var bq  := QuadMesh.new()
-		# Крупные пышные кусты. ВАЖНО: Bushe*.png — шит из 8 кадров,
-		# пропорции берём у ОДНОГО кадра (кадр выбирает шейдер) — иначе
-		# куст рисовался плоской полосой из 8 кустов («заборчик»)
+		# ── КУСТ БОЛЬШЕ НЕ УЗЕЛ, А ЭКЗЕМПЛЯР В ОБЩЕМ MultiMesh ──────────────
+		# Раньше здесь строился MeshInstance3D со СВОИМ QuadMesh и СВОИМ
+		# ShaderMaterial — материал был свой потому, что в нём сидели личные
+		# фаза и темп колыхания. Личный материал означает отдельный вызов
+		# отрисовки на каждый куст. Разброс теперь едет instance-цветом
+		# (см. VegetationRenderer), вид не изменился, а весь ряд кустов одной
+		# текстуры рисуется одним вызовом.
+		#
+		# ВАЖНО: Bushe*.png — шит из 8 кадров, пропорции берутся у ОДНОГО
+		# кадра (кадр выбирает шейдер) — иначе куст рисовался плоской полосой
+		# из 8 кустов («заборчик»). Это делает сам рендерер через frame_aspect
 		var sc  := randf_range(2.2, 3.6)
 		var b_fa: float = _BBUtil.frame_aspect(tex)
-		bq.size = Vector2(sc, sc / b_fa)
-		# Цилиндрический билборд: каждый куст поворачивается к позиции камеры
-		# вокруг своей собственной оси (не «стенкой» вместе с соседями)
-		# КОЛЫХАНИЕ НА ВЕТРУ: у Bushe*.png в шите те же 8 кадров качания.
-		# Фаза и темп у каждого куста свои (см. BillboardUtil.make_wind_material),
-		# поэтому заросли шевелятся вразнобой, а не одной волной
-		bq.material = _BBUtil.make_wind_material(tex)
-		bmi.mesh    = bq
-		bmi.position = Vector3(center.x + pt.x, bq.size.y * 0.5, center.z + pt.y)
-		_world.add_child(bmi)
+		# ОСНОВАНИЕ БЕРЁТСЯ НА y = 0, А НЕ НА РЕЛЬЕФЕ — ровно так же, как было
+		# у прежнего узла (position.y = size.y * 0.5 от начала мира). Куст на
+		# бугре из-за этого чуть тонет, в ложбине чуть висит; это давняя мелочь
+		# самой посадки, и правкой отрисовки её менять нельзя — вид обязан
+		# остаться прежним до кадра
+		GameManager.veg.plant(tex,
+			Vector3(center.x + pt.x, 0.0, center.z + pt.y),
+			sc / maxf(b_fa, 0.01), _world)
 
 ## ОБЛАКА ОТКЛЮЧЕНЫ ВМЕСТЕ С ПЕРЕХОДОМ НА ОРТОГРАФИЮ.
 ## В перспективе они висели высоко и уменьшались с расстоянием, читаясь как

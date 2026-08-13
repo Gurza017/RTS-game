@@ -57,22 +57,70 @@ var _arrow_aspect: float = 43.0 / 12.0
 var _area: Area3D = null
 var _spent: bool  = false          # уже попала/воткнулась — больше не летит
 
+## ── СТРЕЛЫ ПЕРЕИСПОЛЬЗУЮТСЯ, А НЕ СОЗДАЮТСЯ ЗАНОВО ──────────────────────────
+## Каждый выстрел стоил: узел Arrow + узел ArrowSprite + свой QuadMesh + свой
+## ShaderMaterial + объект SceneTreeTimer на срок жизни. Залп трёх тысяч
+## лучников — это тысячи таких комплектов в секунду, создаваемых и тут же
+## выбрасываемых; на масштабе задания это отдельная статья расхода кадра и
+## работы сборщика.
+##
+## Теперь отлетавшая стрела не освобождается, а ГАСНЕТ и уходит в общий пул
+## (GameManager.spawn_arrow / recycle_arrow). Узлы, меш и материал у неё уже
+## построены — повторный выстрел только переписывает числа полёта.
+##
+## СПЯЩАЯ СТРЕЛА ОСТАЁТСЯ В ДЕРЕВЕ, а не висит снятым узлом: снятый был бы
+## orphan-узлом (стенд qa_arrow как раз печатает их число как утечку) и пережил
+## бы смену сцены, ни за кем не числясь. В дереве её уберёт выгрузка сцены, как
+## и любой другой узел.
+##
+## Срок жизни считается ПОЛЕМ, а не SceneTreeTimer'ом. Таймер тут был не только
+## лишним объектом на выстрел — он и не пережил бы переиспользования: связь
+## timeout → queue_free от прошлой жизни убила бы стрелу посреди нового полёта
+var _life: float = 0.0             # секунд с момента выстрела
+var _pooled: bool = false          # погашена и лежит в пуле
+
 const _ARROW_PATHS := [
 	"res://assets/factions/humans/units/archer/Arrow-Sheet.png",
 	"res://assets/sprites/units/Arrow.png",
 ]
 
 func _ready() -> void:
-	_arc_height = _dist * _arc_factor
 	_build_visual()
 	_build_hitbox()
+	launch()
+
+## ВЗВЕСТИ СТРЕЛУ НА ВЫСТРЕЛ. Зовётся и при рождении (из _ready), и при каждом
+## изъятии из пула. Числа полёта к этому моменту уже проставлены снаружи
+## (_start_pos/_end_pos/_dist/_speed/_arc_factor/damage/shooter/faction) — здесь
+## обнуляется только СОСТОЯНИЕ: прогресс, срок жизни, признаки погашения.
+##
+## Всё, что строится один раз на всю жизнь узла (меш, материал, спрайт), сюда
+## не входит — в этом весь смысл пула
+func launch() -> void:
+	_arc_height = _dist * _arc_factor
+	_progress   = 0.0
+	_life       = 0.0
+	_spent      = false
+	_pooled     = false
+	visible     = true
+	set_process(true)
 	# Ось выставляем СРАЗУ: первый кадр полёта уже с правильным наклоном
 	_apply_axis(_velocity_dir(0.0))
-	# Срок жизни отсчитывается ОТ ВЫСТРЕЛА и покрывает все состояния стрелы.
-	# Узел освобождается вместе со всеми потрохами (Area3D, спрайт наконечника),
-	# так что «зависших» стрел на карте не остаётся в принципе.
-	# Если стрела погибнет раньше (попадание), Godot снимет эту связь сам
-	get_tree().create_timer(MAX_LIFETIME).timeout.connect(queue_free)
+
+## ПОГАСИТЬ СТРЕЛУ И ВЕРНУТЬ ЕЁ В ПУЛ. Идемпотентно: попадание и истёкший срок
+## могут прийти в одном кадре
+func _despawn() -> void:
+	if _pooled:
+		return
+	_spent  = true
+	_pooled = true
+	visible = false
+	set_process(false)
+	set_physics_process(false)
+	# Ссылку на стрелка держать нельзя: пока стрела лежит в пуле, он может
+	# погибнуть, а пул пережил бы его и держал освобождённый объект
+	shooter = null
+	GameManager.recycle_arrow(self)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ПОПАДАНИЕ СЧИТАЕТСЯ ГЕОМЕТРИЕЙ, А НЕ ФИЗИКОЙ
@@ -126,12 +174,9 @@ func _strike(u: Unit) -> void:
 	# is_queued_for_deletion — тот, что жив этот кадр, но уже помечен на удаление
 	# (queue_free вызван, но объект ещё не снят с дерева)
 	if not is_instance_valid(u) or u.is_queued_for_deletion():
-		_spent = true
-		queue_free()
+		_despawn()
 		return
 	_spent = true
-	set_process(false)
-	set_physics_process(false)
 	_disable_physics()
 	# Стрелок мог погибнуть, пока стрела летела: передавать освобождённый
 	# объект в take_damage нельзя — движок ругается на «previously freed»
@@ -143,7 +188,7 @@ func _strike(u: Unit) -> void:
 	# стрелка: залп с 20 м должен приходить оттуда, куда он прилетел
 	AudioManager.play_3d("bow_impact", global_position)
 	u.take_damage(damage, valid_shooter)
-	queue_free()
+	_despawn()
 
 var _visual: MeshInstance3D = null
 var _mat: ShaderMaterial = null
@@ -220,10 +265,17 @@ func _apply_axis(dir: Vector3) -> void:
 		_mat.set_shader_parameter("axis", dir)
 
 func _process(delta: float) -> void:
+	# СРОК ЖИЗНИ — ПОЛЕМ, А НЕ ТАЙМЕРОМ (см. шапку у _life). Считается и у
+	# ЛЕТЯЩЕЙ, и у ВОТКНУВШЕЙСЯ: воткнувшаяся раньше снимала себя с _process
+	# целиком и полагалась на SceneTreeTimer, а его больше нет
+	_life += delta
+	if _life >= MAX_LIFETIME:
+		_despawn()
+		return
 	if _spent:
 		return
 	if _dist < 0.001:
-		queue_free()
+		_despawn()
 		return
 
 	_progress = minf(_progress + _speed * delta / _dist, 1.0)
@@ -250,8 +302,9 @@ func _process(delta: float) -> void:
 # в землю НАКОНЕЧНИКОМ вперёд и торчит там до конца MAX_LIFETIME, выступая
 # над грунтом на STUCK_EXPOSED своей длины.
 func _stick_into_ground() -> void:
+	# _process НЕ выключаем: на нём теперь висит отсчёт срока жизни, и без него
+	# воткнувшаяся стрела торчала бы в грунте вечно (см. _process)
 	_spent = true
-	set_process(false)
 	set_physics_process(false)
 	_disable_physics()
 	# ВТЫКАНИЕ В ЗЕМЛЮ — сухой удар мимо цели. Тише попадания в тело (см.

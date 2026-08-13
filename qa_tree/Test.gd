@@ -120,15 +120,29 @@ func _test_shake_and_sound() -> void:
 	# Дрожь реально смещает визуал и сама затухает
 	var t := _tree_at(Vector3(-170, 0, -170))
 	await frames(3)
+	# ── ГДЕ ЖИВЁТ СМЕЩЕНИЕ ОТ УДАРА ─────────────────────────────────────────
+	# У дерева СО СПРАЙТОМ собственного узла картинки больше нет: оно рисуется
+	# местом в общем MultiMesh растительности (см. VegetationRenderer), и
+	# дрожание пишется туда, а не в _visual_root.position — тот остаётся нулём
+	# навсегда. Проверка «сдвиг > 0» по старому владельцу числа теперь всегда
+	# честно отвечает 0.0000; спрашиваем нынешнего владельца.
+	# Тот же случай, что уже был с qa_fix #1 (spr.position.y → _sprite_base_y)
 	var vis: Node3D = t.get("_visual_root")
-	verdict("B4 у дерева есть визуальный корень", vis != null)
-	if vis == null:
+	var slot = t.get("_veg_slot")
+	verdict("B4 у дерева есть визуальный корень", vis != null or slot != null)
+	if vis == null and slot == null:
 		t.queue_free(); return
+	var base := Vector2.ZERO
+	if slot != null:
+		base = Vector2(slot.pos.x, slot.pos.z)
 	t.shake()
 	var moved := 0.0
 	for _i in range(12):
 		await get_tree().process_frame
-		moved = maxf(moved, Vector2(vis.position.x, vis.position.z).length())
+		if slot != null:
+			moved = maxf(moved, Vector2(slot.pos.x, slot.pos.z).distance_to(base))
+		else:
+			moved = maxf(moved, Vector2(vis.position.x, vis.position.z).length())
 	print("  максимальный сдвиг при ударе: %.4f м" % moved)
 	verdict("B5 удар реально смещает дерево", moved > 0.01,
 		"сдвиг %.4f м" % moved)

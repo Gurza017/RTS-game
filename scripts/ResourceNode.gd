@@ -18,6 +18,17 @@ var size_scale: float = 1.0
 
 var mesh_instance: MeshInstance3D
 var _visual_root: Node3D
+## ── ДЕРЕВО РИСУЕТСЯ БЕЗ СОБСТВЕННОГО УЗЛА ───────────────────────────────────
+## Место в общем MultiMesh растительности (см. VegetationRenderer). Только у
+## деревьев со спрайтом: процедурное дерево, золото, камень и еда по-прежнему
+## строят узлы — их немного, а у руды поверх лежат обрезка, блеск и подсветка
+var _veg_slot = null
+var _veg_tex: Texture2D = null
+## Мировая точка, на которую посажено дерево. Дрожание рубки считается от неё
+var _veg_base: Vector3 = Vector3.ZERO
+## Высота квада дерева в метрах. Была локальной переменной tree_h в _build_tree;
+## вынесена, потому что теперь ею же задаётся масштаб экземпляра
+const TREE_HEIGHT := 5.0
 var _max_remaining: float
 var _stump_node: MeshInstance3D = null
 var _shake_power: float = 0.0
@@ -74,6 +85,10 @@ func _drop_trunk() -> void:
 
 func _exit_tree() -> void:
 	_drop_trunk()
+	# Место в общей отрисовке надо вернуть явно: картинка дерева живёт не под
+	# его узлом, и вместе с ним не исчезнет (тот же случай, что у бойца в
+	# Unit._exit_tree)
+	_drop_veg()
 
 var _trunk_registered: bool = false
 var _trunk_pos: Vector3 = Vector3.ZERO
@@ -297,31 +312,56 @@ func _build_tree() -> void:
 	if ResourceLoader.exists(sprite_path):
 		var tex := load(sprite_path) as Texture2D
 		if tex:
-			mesh_instance = MeshInstance3D.new()
-			var quad := QuadMesh.new()
-			# ВАЖНО: Tree*.png — горизонтальные спрайт-шиты (6-8 кадров анимации).
-			# Размер квада — по пропорциям ОДНОГО кадра; кадр выбирает шейдер.
-			# (Раньше квад строился по всему шиту: ширина 30-40 м — «забор из
-			# деревьев», который при повороте камеры крутился как пропеллер.)
-			var tree_h := 5.0
-			var tree_w := tree_h * _BBUtil.frame_aspect(tex)
-			quad.size = Vector2(tree_w, tree_h)
-			# Цилиндрический билборд: дерево поворачивается к позиции камеры
-			# вокруг СВОЕГО ствола (FIXED_Y выравнивал весь лес параллельно
-			# экрану — ряды деревьев крутились «единым пропеллером»)
-			# КОЛЫХАНИЕ НА ВЕТРУ. В Tree*.png лежит готовая анимация качания
-			# (6-8 кадров) — ради неё лента и нарисована. Раньше её держали
-			# выключенной (fps = 0), потому что при ОДИНАКОВОЙ скорости у всех
-			# лес шевелился единым куском и читался как «ползущие деревья».
-			# make_wind_material раздаёт каждому дереву свою фазу и свою
-			# длительность цикла, поэтому роща качается вразнобой, как живая
-			quad.material = _BBUtil.make_wind_material(tex)
-			mesh_instance.mesh = quad
-			mesh_instance.position.y = 2.5
-			_visual_root.add_child(mesh_instance)
+			# ── ДЕРЕВО РИСУЕТСЯ ОБЩИМ MultiMesh, А НЕ СВОИМ УЗЛОМ ────────────
+			# Здесь строился MeshInstance3D со СВОИМ QuadMesh и СВОИМ
+			# ShaderMaterial. Материал был личным не от хорошей жизни: в нём
+			# сидели фаза и длительность колыхания, а без разброса лес машет
+			# единым куском («ползущие деревья»). Личный материал = отдельный
+			# вызов отрисовки на каждое дерево, и на двух тысячах стволов это
+			# 1762 вызова и потолок в 75 кадров в секунду на ПУСТОЙ карте
+			# (замер qa_veg). Разброс переехал в instance-цвет
+			# (см. VegetationRenderer), картинка осталась прежней.
+			#
+			# ВАЖНО: Tree*.png — горизонтальные спрайт-шиты (6-8 кадров
+			# анимации). Пропорции берутся у ОДНОГО кадра; кадр выбирает
+			# шейдер. (Квад по всему шиту давал ширину 30-40 м — «забор из
+			# деревьев», крутившийся при повороте камеры как пропеллер.)
+			# Цилиндрический билборд — тоже в шейдере: дерево доворачивается к
+			# камере вокруг СВОЕГО ствола, а не всем лесом параллельно экрану.
+			#
+			# ПОСАДКА ОТЛОЖЕНА ПО ТОЙ ЖЕ ПРИЧИНЕ, ЧТО И РЕГИСТРАЦИЯ СТВОЛА
+			# (см. _register_trunk): позицию узлу задают уже ПОСЛЕ add_child, а
+			# в _ready она ещё нулевая. Узел-владелец картинки исчез, значит
+			# мировая точка обязана попасть в буфер верной с первого раза —
+			# «сама подтянется» тут больше некому
+			_veg_tex = tex
+			call_deferred("_plant_tree_now")
 			return
 
 	_build_tree_procedural()
+
+## Отложенная посадка дерева в общую отрисовку (см. _build_tree)
+func _plant_tree_now() -> void:
+	if _veg_tex == null or _veg_slot != null or not is_inside_tree():
+		return
+	if _stump_node != null:
+		return          # успели срубить до посадки
+	var root: Node3D = null
+	if GameManager.main != null and is_instance_valid(GameManager.main):
+		root = GameManager.main.world_root()
+	if root == null:
+		root = get_parent() as Node3D
+	if root == null:
+		return
+	_veg_base = global_position
+	_veg_slot = GameManager.veg.plant(_veg_tex, _veg_base, TREE_HEIGHT, root)
+
+## Снять дерево с общей отрисовки (срубили, выгрузили карту). Идемпотентно
+func _drop_veg() -> void:
+	if _veg_slot == null:
+		return
+	GameManager.veg.remove(_veg_slot)
+	_veg_slot = null
 
 func _build_tree_procedural() -> void:
 	var trunk := MeshInstance3D.new()
@@ -365,6 +405,9 @@ func _show_stump() -> void:
 	if _visual_root:
 		_visual_root.position = Vector3.ZERO
 		_visual_root.visible  = false
+	# Крону дерева убираем из общей отрисовки — прятать там нечего, слот просто
+	# освобождается и достаётся следующему растению
+	_drop_veg()
 
 	var stump_path := "res://assets/environment/terrain/Stump %d.png" % tree_variant
 	if ResourceLoader.exists(stump_path):
@@ -475,7 +518,44 @@ const STONE_VARIANTS := 4    # Rock1..4
 ## никакого гало шире самородка в текущих файлах уже нет (см. подробный
 ## разбор в _maybe_load_sprite — эта заметка описывала более раннюю версию
 ## арта). Включаем обратно
-const GOLD_SHIMMER := true
+## ── АДДИТИВНАЯ АУРА ЗОЛОТА ВЫКЛЮЧЕНА (заказ владельца) ─────────────────────
+## Поверх самородка вторым квадом рисовался *_Highlight.png на аддитивном
+## шейдере. На траве это читалось как «размытое жёлтое пятно ПОД ресурсом» —
+## аддитивное смешивание высветляет и те пиксели, где блик едва заметен, а
+## соседние куски кучи накладывали свои пятна друг на друга.
+##
+## ЧЕСТНОЕ СЛЕДСТВИЕ, О КОТОРОМ НАДО ЗНАТЬ: анимации блеска у золота теперь нет
+## ВООБЩЕ. В арте она существует только в отдельной ленте Gold Stone N_Highlight.png
+## (768×128, 6 кадров); сам Gold Stone N.png — одиночный кадр 128×128, никакой
+## «нативной анимации внутри спрайта» у него нет. Вернуть переливы, не возвращая
+## подложку, можно только одним способом — нарисовать базовый спрайт лентой
+## кадров, и тогда он поедет обычным покадровым путём, как деревья и кусты
+const GOLD_SHIMMER := false
+
+## Мировой размер ПОЛНОГО кадра исходника. Ключ к «нерастянутым» спрайтам:
+## плотность текселей на метр постоянна, а величина куска берётся из того,
+## сколько он занимает в кадре, и из класса (см. Main.PIECE_CLASSES).
+## Золото нарисовано вдвое подробнее камня (128×128 против 64×64), поэтому
+## числа разные — на экране кадры при этом одного порядка
+##
+## ЧИСЛА ПОДОБРАНЫ ПО КАРТИНКЕ и остаются единственной ручкой размера кусков:
+## поднять их — вся руда станет крупнее, не теряя резкости, потому что растёт
+## мировой размер, а не коэффициент растяжения рисунка. Куски одного класса у
+## РАЗНЫХ вариантов получаются разной величины — это не дефект, а прямое
+## следствие того, что варианты по-разному заполняют свой кадр (у Gold Stone 1
+## рисунок занимает ~23% высоты, у Gold Stone 6 — ~45%), и как раз оно даёт
+## «самородки разного размера» из задания
+const FRAME_METRES_STONE := 3.8
+const FRAME_METRES_GOLD  := 4.4
+
+## Целевая высота куска класса 1.0 (см. Main.PIECE_CLASSES: big 1.6, mid 1.05,
+## small 0.62 — то есть примерно 2.0 / 1.3 / 0.8 м). Это и есть «ручка размера»
+const PIECE_TARGET_H := 1.28
+## Насколько разрешено отходить от родной высоты рисунка ради целевой.
+## ZOOM_MAX держим умеренным: именно многократное увеличение и превращало
+## пиксельный камень в мыло
+const ZOOM_MIN := 0.55
+const ZOOM_MAX := 1.75
 
 func _maybe_load_sprite() -> void:
 	var path := ""
@@ -543,11 +623,37 @@ func _maybe_load_sprite() -> void:
 			used_rect = used
 			crop_w = float(used.size.x)
 			crop_h = float(used.size.y)
-	var lump_h: float = 2.5 * size_scale
-	var lump_a: float = crop_w / crop_h if crop_h > 0.0 else 1.0
-	if lump_a <= 0.01:
-		lump_a = 1.0
-	quad.size = Vector2(lump_h * lump_a, lump_h)
+	# ── РАЗМЕР БЕРЁТСЯ ИЗ ПИКСЕЛЕЙ ИСХОДНИКА, А НЕ РАСТЯГИВАЕТСЯ ДО ЧИСЛА ────
+	# Здесь стояло `lump_h = 2.5 * size_scale`, то есть квад имел ФИКСИРОВАННУЮ
+	# мировую высоту независимо от того, сколько пикселей нарисовано. Rock*.png
+	# — это 64×64, и его вырезанная часть (обычно 40-50 px) растягивалась на
+	# 2.5-4 м: увеличение в разы, и вместе с линейной фильтрацией (её убрали в
+	# cyl_billboard.gdshader) это и давало «сильно растянутый камень, пиксели
+	# плывут и мылятся».
+	#
+	# Теперь у КАДРА исходника есть постоянный мировой размер (FRAME_METRES), а
+	# вырезанный кусок занимает свою долю от него. Плотность текселей на метр
+	# одинакова у всех вариантов и всех куч; разные по величине самородки
+	# получаются оттого, что они РАЗНЫЕ В АРТЕ и стоят в разных классах, а не
+	# оттого, что один и тот же рисунок надули сильнее другого
+	var frame_m: float = FRAME_METRES_GOLD if resource_type == Constants.RESOURCE_GOLD \
+		else FRAME_METRES_STONE
+	var frame_px: float = maxf(float(tex.get_height()), 1.0)
+	# «Родная» высота: рисунок в масштабе один к одному с плотностью текселей
+	# кадра. Растяжения нет ровно при ней
+	var natural_h: float = crop_h * frame_m / frame_px
+	# ── РАЗБРОС РАЗМЕРОВ ОГРАНИЧЕН ──────────────────────────────────────────
+	# Чистая пропорция «сколько нарисовано — столько и метров» дала разлёт в
+	# десять раз: варианты заполняют свой кадр от ~6% до ~45%, и рядом с
+	# нормальным самородком ложились точки в пиксель. Поэтому у класса есть
+	# ЦЕЛЕВАЯ высота, но дотягиваться до неё разрешено лишь в пределах
+	# ZOOM_MIN..ZOOM_MAX от родной: размер получается читаемым и предсказуемым,
+	# а пересэмплирование остаётся мягким — при нежёстком увеличении
+	# nearest-фильтр не рвёт рисунок так, как рвал прежний апскейл в разы
+	var target_h: float = PIECE_TARGET_H * size_scale
+	var h: float = clampf(target_h, natural_h * ZOOM_MIN, natural_h * ZOOM_MAX)
+	var aspect: float = crop_w / crop_h if crop_h > 0.0 else 1.0
+	quad.size = Vector2(h * aspect, h)
 	quad.material = _BBUtil.make_material(draw_tex)
 	# Квад теперь И ЕСТЬ рисунок (без полей) — читает slot_radius(), чтобы
 	# рабочий вставал за краем НАРИСОВАННОГО куска, а не за краем прозрачного
@@ -694,22 +800,35 @@ static func _crop_to_content(tex: Texture2D) -> Texture2D:
 	return out
 
 func shake() -> void:
-	if _stump_node != null or _visual_root == null:
+	if _stump_node != null:
+		return
+	# У дерева со спрайтом собственного узла картинки больше нет — трясётся его
+	# место в общей отрисовке (_veg_slot). У остальных ресурсов трясётся, как и
+	# раньше, _visual_root
+	if _visual_root == null and _veg_slot == null:
 		return
 	_shake_power = 1.0
 	set_process(true)
 
 func _process(delta: float) -> void:
-	if _visual_root == null or _shake_power <= 0.0:
+	if (_visual_root == null and _veg_slot == null) or _shake_power <= 0.0:
 		set_process(false)
 		return
 	_shake_power = maxf(0.0, _shake_power - delta * SHAKE_DECAY)
 	_shake_time += delta * 34.0
 	var amp := SHAKE_AMPLITUDE * _shake_power
-	_visual_root.position.x = sin(_shake_time) * amp
-	_visual_root.position.z = cos(_shake_time * 0.7) * amp * 0.5
-	if _shake_power <= 0.0:
+	var ox: float = sin(_shake_time) * amp
+	var oz: float = cos(_shake_time * 0.7) * amp * 0.5
+	var done: bool = _shake_power <= 0.0
+	if done:
 		# Возврат ТОЧНО в исходную точку — ствол не «уползает» от рубки
-		_visual_root.position.x = 0.0
-		_visual_root.position.z = 0.0
+		ox = 0.0
+		oz = 0.0
+	if _veg_slot != null:
+		GameManager.veg.move(_veg_slot,
+			Vector3(_veg_base.x + ox, _veg_base.y, _veg_base.z + oz))
+	elif _visual_root != null:
+		_visual_root.position.x = ox
+		_visual_root.position.z = oz
+	if done:
 		set_process(false)

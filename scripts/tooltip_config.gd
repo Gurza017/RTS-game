@@ -107,7 +107,7 @@ static var PARAMS: Dictionary = {
 static var TOOLTIPS: Dictionary = {
 	"spearman": {
 		"display_name": "Копейщик",
-		"icon": "res://assets/ui/icons_units_human/Lancer_human.png",
+		"icon": "res://assets/factions/humans/icons/units/Lancer.png",
 		"description": "Основа строя. Держит линию плечом к плечу — копья опускаются сами, когда враг подходит вплотную.",
 		"visible_stats": [
 			{"key": "hp"}, {"key": "attack"}, {"key": "armor"},
@@ -117,7 +117,7 @@ static var TOOLTIPS: Dictionary = {
 	},
 	"warrior": {
 		"display_name": "Мечник",
-		"icon": "res://assets/ui/icons_units_human/Warrior_human.png",
+		"icon": "res://assets/factions/humans/icons/units/Warrior.png",
 		"description": "Тяжёлая пехота. Сильнее всех в прямой рубке и продавливает чужой строй при столкновении.",
 		"visible_stats": [
 			{"key": "hp"}, {"key": "attack"}, {"key": "armor"},
@@ -127,7 +127,7 @@ static var TOOLTIPS: Dictionary = {
 	},
 	"archer": {
 		"display_name": "Лучник",
-		"icon": "res://assets/ui/icons_units_human/Archer_human.png",
+		"icon": "res://assets/factions/humans/icons/units/Archer.png",
 		"description": "Стрелок. Бьёт далеко и ходит быстро, но в ближнем бою гибнет мгновенно.",
 		"visible_stats": [
 			{"key": "hp"}, {"key": "attack"}, {"key": "armor"},
@@ -138,7 +138,10 @@ static var TOOLTIPS: Dictionary = {
 	},
 	"monk": {
 		"display_name": "Монах",
-		"icon": "",                      # ЗАГЛУШКА: своей иконки у монаха нет
+		# Готового портрета у монаха нет — берём первый кадр его боевого листа,
+		# ровно тот же путь и тот же приём, что и у кнопки найма в Замке
+		# (HUD.UNIT_ICONS + FRAME_SHEET_ICONS обрезают кадр по силуэту)
+		"icon": "res://assets/factions/humans/units/Blue Units/Monk/Idle.png",
 		"description": "Вспомогательный юнит. В бою слаб — держите его за строем.",
 		# Брони у монаха нет по конфигу — строки в списке тоже нет
 		"visible_stats": [
@@ -149,7 +152,7 @@ static var TOOLTIPS: Dictionary = {
 	},
 	"worker": {
 		"display_name": "Рабочий",
-		"icon": "res://assets/ui/icons_units_human/Pawn_human.png",
+		"icon": "res://assets/factions/humans/icons/units/Avatars_25.png",
 		"description": "Добывает ресурсы и строит здания. Безоружен — держите его подальше от боя.",
 		# Ни "attack", ни "armor": этих параметров у рабочего нет по смыслу
 		"visible_stats": [

@@ -154,8 +154,15 @@ func _test_fallback() -> void:
 	verdict("D4 у HUD есть единая точка загрузки иконок",
 		hud != null and hud.has_method("_icon_texture"))
 	if hud != null:
-		verdict("D5 HUD на битом имени возвращает null, а не падает",
-			hud._icon_texture("icon_definitely_not_here.png") == null)
+		# ТЕПЕРЬ HUD ОТДАЁТ ЗАГЛУШКУ, А НЕ null (заказ владельца: лог не должен
+		# засоряться, а кнопка не должна пропадать вместе с иконкой). Проверяем
+		# то, ради чего проверка и заводилась, — что вызов не роняет игру и
+		# что-то отдаёт; отдельно требуем, чтобы это была ИМЕННО заглушка,
+		# одна и та же на все ненайденные пути, а не случайная картинка
+		var miss1 = hud._icon_texture("icon_definitely_not_here.png")
+		var miss2 = hud._icon_texture("icon_also_missing_here.png")
+		verdict("D5 HUD на битом имени отдаёт заглушку, а не падает",
+			miss1 != null and miss1 == miss2)
 		verdict("D6 HUD разворачивает короткое имя из папки кузницы",
 			hud._icon_texture("icon_sword.png") != null)
 

@@ -140,9 +140,9 @@ func _is_front_attack(attacker: Node3D) -> bool:
 		return true          # бьют вплотную сверху — сторону не определить
 	return _facing.normalized().dot(to_atk.normalized()) > GUARD_FRONT_COS
 
-func tick_visual(delta: float, frame: int = -1) -> void:
+func tick_visual(delta: float, frame: int = -1, anim_every: int = ANIM_EVERY) -> void:
 	_update_guard()
-	super.tick_visual(delta, frame)
+	super.tick_visual(delta, frame, anim_every)
 
 ## Пересчёт признака «щит поднят». Три повода закрыться:
 ##   1) в юнита летит стрела или его только что ударили (_threatened);

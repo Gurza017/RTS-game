@@ -293,7 +293,15 @@ func _test_formation_preview() -> void:
 	src.close()
 	var has_line: bool  = "draw_line(" in text
 	var has_arrow: bool = "_draw_direction_arrow" in text
-	var has_tri: bool   = "_draw_unit_tri" in text
+	# ТРЕУГОЛЬНИКИ ИЩЕМ ПО ЛЮБОМУ ИЗ ДВУХ СПОСОБОВ ОТРИСОВКИ. Раньше на каждое
+	# место рисовался свой полигон вспомогательной функцией _draw_unit_tri; на
+	# большом выделении это давало две примитивы канваса на бойца и просадку до
+	# 29 к/с при растягивании линии. Теперь весь строй уходит одним
+	# canvas_item_add_triangle_array, и отдельной функции не осталось.
+	# Требование стенда при этом не изменилось — «полосы нет, треугольники
+	# есть», — изменился только признак, по которому их видно в исходнике
+	var has_tri: bool   = ("_draw_unit_tri" in text) \
+		or ("canvas_item_add_triangle_array" in text)
 	print("  draw_line (жёлтая полоса): %s" % str(has_line))
 	print("  крупная стрелка-ромб: %s" % str(has_arrow))
 	print("  треугольники слотов: %s" % str(has_tri))

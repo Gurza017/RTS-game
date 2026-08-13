@@ -8,7 +8,15 @@
 shader_type spatial;
 render_mode unshaded, cull_disabled;
 
-uniform sampler2D albedo_tex : source_color, filter_linear_mipmap;
+// ФИЛЬТРАЦИЯ — ПО ТЕКСЕЛЯМ, А НЕ СГЛАЖЕННАЯ. Здесь стояло filter_linear_mipmap,
+// и это было прямой причиной жалобы «пиксели плывут и мылятся»: весь арт
+// проекта — пиксельный, а линейная фильтрация размазывает его тем сильнее, чем
+// крупнее спрайт на экране. Бойцы всё это время рисовались через
+// filter_nearest (см. mm_unit_sprite.gdshader) и выглядели резко — камни и
+// жилы через этот шейдер выглядели мыльными рядом с ними.
+// Мипмапы ОСТАВЛЕНЫ (nearest_mipmap, а не голый nearest): без них дальний лес
+// на отдалённой камере начинает мерцать на движении
+uniform sampler2D albedo_tex : source_color, filter_nearest_mipmap;
 uniform vec4 modulate : source_color = vec4(1.0, 1.0, 1.0, 1.0);
 uniform float alpha_scissor : hint_range(0.0, 1.0) = 0.5;
 // Спрайт-шит: текстуры деревьев/кустов — ГОРИЗОНТАЛЬНЫЕ ленты кадров

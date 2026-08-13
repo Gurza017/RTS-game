@@ -445,11 +445,18 @@ func _test_star_and_choice() -> void:
 	# свойство одного узла, поэтому родителем стал мир, а положение обновляет
 	# GameManager._update_squad_stars(). Проверяем то, что теперь и есть правда:
 	# узел не ребёнок бойца и стоит над средней точкой отряда
+	# ЗВЕЗДА ТЕПЕРЬ ДОГОНЯЕТ ЦЕНТР, А НЕ ПРЫГАЕТ В НЕГО (заказ владельца:
+	# «должна плавно перемещаться, а не дёргаться»). Значит совпадение
+	# проверяется ПОСЛЕ того, как отряд стоит и сглаживание сошлось, а допуск
+	# берётся сантиметровый, а не нулевой: GameManager.STAR_FOLLOW подтягивает
+	# звезду экспоненциально и точного равенства не даёт никогда
+	for _i in range(40):
+		await get_tree().process_frame
 	var want_c: Vector3 = GameManager.squad_centroid(squad)
 	var got_c: Vector3 = (star as Node3D).global_position if star != null else Vector3.ZERO
 	verdict("4 звезда стоит по центру масс отряда, а не на бойце",
 		star != null and not (star.get_parent() is Unit)
-		and Vector2(got_c.x - want_c.x, got_c.z - want_c.z).length() <= 0.05,
+		and Vector2(got_c.x - want_c.x, got_c.z - want_c.z).length() <= 0.10,
 		"центр=(%.2f, %.2f) звезда=(%.2f, %.2f)" % [
 			want_c.x, want_c.z, got_c.x, got_c.z])
 	verdict("4 на 1 уровне ровно 1 звезда в ряду", _star_rays(star) == 1,

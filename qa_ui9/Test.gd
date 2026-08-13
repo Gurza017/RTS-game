@@ -111,9 +111,13 @@ func _test_gold() -> void:
 	# спрайтом), а настоящей причиной грязного пятна была яркость: blend_add
 	# СКЛАДЫВАЕТ блики соседних кусков, а кучи стоят внахлёст. Лечится не
 	# выключением, а низким gain — его и сторожим ниже
-	verdict("5 аддитивный перелив золота включён", _RN.GOLD_SHIMMER)
+	# ── ПЕРЕЛИВ СНОВА ВЫКЛЮЧЕН, И ПРОВЕРКА СНОВА ИНВЕРТИРОВАНА ──────────────
+	# Владелец отменил аддитивную ауру (2026-08-12): на траве она читалась как
+	# «размытое жёлтое пятно под ресурсом», а на кучах внахлёст её яркости
+	# складывались. Сторожим теперь ОТСУТСТВИЕ подложки: ни у одного куска — ни
+	# золота, ни камня — не должно быть узла GoldShimmer
+	verdict("5 аддитивная аура золота выключена", not _RN.GOLD_SHIMMER)
 
-	# У каждой золотой жилы обязан быть узел блика, у камня — нет
 	var shimmer := 0
 	var gold_n := 0
 	var stone_shimmer := 0
@@ -134,27 +138,9 @@ func _test_gold() -> void:
 				stone_shimmer += 1
 			if rn.resource_type == Constants.RESOURCE_STONE:
 				stone_pts.append(rn.global_position)
-	verdict("5 блик есть у золота и только у золота",
-		gold_n > 0 and shimmer == gold_n and stone_shimmer == 0,
-		"золота %d, с бликом %d, чужих бликов %d" % [gold_n, shimmer, stone_shimmer])
-
-	# ЯРКОСТЬ — ЭТО И ЕСТЬ ЛЕКАРСТВО ОТ «ГРЯЗНОГО ПЯТНА». Сторожим не число, а
-	# свойство: перекрытие трёх кусков не должно уходить за единицу
-	var gain := 0.0
-	for n in get_tree().get_nodes_in_group("resource_nodes"):
-		var rn := n as ResourceNode
-		if rn == null or rn.resource_type != Constants.RESOURCE_GOLD:
-			continue
-		var sh := rn.find_child("GoldShimmer", true, false) as MeshInstance3D
-		if sh == null or sh.mesh == null:
-			continue
-		var m := (sh.mesh as QuadMesh).material as ShaderMaterial
-		if m != null:
-			gain = float(m.get_shader_parameter("gain"))
-			break
-	verdict("5 яркость блика не прогорает при наложении кусков",
-		gain > 0.0 and gain * 3.0 <= 1.0,
-		"gain=%.2f, тройное наложение даёт %.2f" % [gain, gain * 3.0])
+	verdict("5 подложек блика не осталось ни на одном куске",
+		gold_n > 0 and shimmer == 0 and stone_shimmer == 0,
+		"золота %d, с подложкой %d, чужих подложек %d" % [gold_n, shimmer, stone_shimmer])
 
 	# ПЛОТНОСТЬ МЕРЯЕМ НА КОНТРОЛЬНЫХ КУЧАХ, а не на случайной карте: на карте
 	# соседние жилы стоят близко, любая наивная кластеризация их сливает, и

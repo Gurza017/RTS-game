@@ -30,6 +30,16 @@ var _last_group_press_time: float = 0.0
 # ── ПКМ-формация ─────────────────────────────────────────────────────────────
 var _rmb_down:         bool    = false
 var _rmb_screen_start: Vector2 = Vector2.ZERO
+
+## ── СВЁРТКА СОБЫТИЙ МЫШИ ДЛЯ ПРЕДПРОСМОТРА СТРОЯ ───────────────────────────
+## Событий движения приходит больше, чем кадров; считать построение на каждое —
+## чистая переплата. Копим последнюю точку и обрабатываем её раз в кадр
+var _fp_pending: bool    = false
+var _fp_mouse:   Vector2 = Vector2.ZERO
+var _fp_last:    Vector2 = Vector2(-1e9, -1e9)
+## Сдвиг курсора, меньше которого пересчитывать нечего: треугольники сместятся
+## меньше чем на пиксель, а стоит это полного перестроения раскладки
+const FP_MIN_MOVE_SQ := 4.0
 var _rmb_world_start:  Vector3 = Vector3.ZERO
 
 # ── Двойной ПКМ = БЕГ ────────────────────────────────────────────────────────
@@ -154,6 +164,11 @@ func _unhandled_input(event: InputEvent) -> void:
 			else:
 				if _fp:
 					_fp.hide_all()
+				# Отложенный пересчёт снимаем вместе с предпросмотром: иначе
+				# движение мыши, пришедшее перед самым отпусканием, показало бы
+				# треугольники уже ПОСЛЕ отданного приказа (см. _process)
+				_fp_pending = false
+				_fp_last = Vector2(-1e9, -1e9)
 				# Жест ПКМ, начатый на панели, закончился — снимаем пометку.
 				# Именно здесь, а не в _input: между нажатием и отпусканием
 				# может прийти сколько угодно движений мыши
@@ -185,7 +200,19 @@ func _unhandled_input(event: InputEvent) -> void:
 				_update_drag_rect(drag_start, event.position)
 		if _rmb_down and not selected_units.is_empty():
 			if _rmb_screen_start.distance_to(event.position) > DRAG_THRESHOLD:
-				_update_formation_preview(event.position)
+				# ── ПРЕДПРОСМОТР ПЕРЕСЧИТЫВАЕТСЯ НЕ ЧАЩЕ КАДРА ─────────────
+				# Здесь стоял прямой вызов _update_formation_preview. События
+				# движения мыши приходят С ЧАСТОТОЙ ОПРОСА МЫШИ, а не кадра —
+				# это 5-10 событий на кадр на обычной мыши и вдвое больше на
+				# игровой. Каждый пересчёт — луч в физику, слот на КАЖДОГО
+				# выделенного бойца, unproject_position на каждого и две
+				# примитивы отрисовки на каждого. На большом выделении это
+				# тысячи вызовов в кадр, отсюда и падение с 60 до 29 к/с.
+				# Теперь запоминаем последнюю точку, а считаем один раз за
+				# кадр (см. _process): промежуточные положения курсора всё
+				# равно никто не увидел бы — кадр между ними не рисовался
+				_fp_pending = true
+				_fp_mouse = event.position
 
 # ─── Горячие группы ──────────────────────────────────────────────────────────
 
@@ -292,10 +319,53 @@ func _split_into_blocks(movable: Array) -> Array:
 		blocks.append(by_squad[sid])
 	return blocks
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ТОПОЛОГИЧЕСКИЙ ПОРЯДОК: КТО ГДЕ СТОЯЛ, ТОТ ТАМ И ВСТАНЕТ
+#
+# Слоты раскладываются строго по индексу (см. _compute_line_slots: сначала вся
+# передняя шеренга слева направо, потом следующая), а бойцы приходили в этот
+# список в порядке РЕЕСТРА ОТРЯДА. Связи с тем, кто где реально стоит, не было
+# никакой: боец из последней шеренги мог получить слот в первой и шёл туда
+# СКВОЗЬ весь свой отряд, а передний уходил назад. Отряд выворачивался
+# наизнанку на каждом растягивании строя.
+#
+# Здесь состав пересортировывается ровно в порядке слотов: сперва по ГЛУБИНЕ
+# (кто ближе к фронту — тот раньше), потом внутри каждой шеренги по её ширине
+# слева направо. Пути перестают пересекаться: строй просто сдвигается.
+#
+# Сортировка двухуровневая, а не по одному ключу: единый ключ вида
+# «глубина × K + ширина» требует знать масштаб обеих осей и разваливается на
+# косом строе, а разбиение на шеренги по per_row — ровно та же нарезка,
+# которой пользуется сама раскладка.
+# ─────────────────────────────────────────────────────────────────────────────
+func _topo_order(block: Array, line_dir: Vector3, facing_dir: Vector3,
+		per_row: int) -> Array:
+	var ordered: Array = block.duplicate()
+	# По глубине: стоящий ближе к фронту (больше проекция на facing) — раньше
+	ordered.sort_custom(func(a, b):
+		return (a as Node3D).global_position.dot(facing_dir) \
+			> (b as Node3D).global_position.dot(facing_dir))
+	# Внутри каждой шеренги — слева направо вдоль линии
+	var n: int = ordered.size()
+	var step: int = maxi(per_row, 1)
+	var i := 0
+	while i < n:
+		var last: int = mini(i + step, n)
+		var rank_slice: Array = ordered.slice(i, last)
+		rank_slice.sort_custom(func(a, b):
+			return (a as Node3D).global_position.dot(line_dir) \
+				< (b as Node3D).global_position.dot(line_dir))
+		for k in range(rank_slice.size()):
+			ordered[i + k] = rank_slice[k]
+		i = last
+	return ordered
+
 ## Слоты для всего выделения: линия делится на секции по отрядам.
-## Возвращает {"slots": Array[Vector3], "rows": Array[int]} — в порядке movable
+## Возвращает {"slots": …, "rows": …, "flat": …} — все три в ОДНОМ порядке.
+## `flat` обязателен к использованию вместо исходного movable: состав внутри
+## каждого блока пересортирован по фактическому положению (см. _topo_order)
 func _block_formation_slots(line_start: Vector3, line_end: Vector3, movable: Array) -> Dictionary:
-	var out := {"slots": [], "rows": []}
+	var out := {"slots": [], "rows": [], "flat": []}
 	var blocks := _split_into_blocks(movable)
 	var line_vec := line_end - line_start
 	var total_len := line_vec.length()
@@ -313,6 +383,8 @@ func _block_formation_slots(line_start: Vector3, line_end: Vector3, movable: Arr
 	var usable: float = total_len - gaps
 	var gap_each: float = gaps / maxf(float(blocks.size() - 1), 1.0)
 
+	# Фронт строя — перпендикуляр к линии, та же формула, что в _compute_line_slots
+	var facing := Vector3(dir.z, 0.0, -dir.x)
 	var cursor := 0.0
 	for b in blocks:
 		var block: Array = b
@@ -321,9 +393,12 @@ func _block_formation_slots(line_start: Vector3, line_end: Vector3, movable: Arr
 		var b_end   := line_start + dir * (cursor + share)
 		var slots := _compute_line_slots(b_start, b_end, block.size())
 		var per_row := maxi(1, int(floor(share / UNIT_SPACING)))
-		for i in range(block.size()):
+		# Состав выстраивается в том же порядке, в каком лежат слоты
+		var ordered: Array = _topo_order(block, dir, facing, per_row)
+		for i in range(ordered.size()):
 			out["slots"].append(slots[i] if i < slots.size() else b_start)
 			out["rows"].append(i / per_row)
+			out["flat"].append(ordered[i])
 		cursor += share + gap_each
 	return out
 
@@ -368,10 +443,13 @@ func _layered_formation_slots(line_start: Vector3, line_end: Vector3, movable: A
 		var max_row := 0
 		for r in b_rows:
 			max_row = maxi(max_row, int(r))
-		for i in range(b.size()):
+		# Порядок бойцов — из плана, а не исходный: внутри каждого блока состав
+		# пересортирован по фактическому положению (см. _topo_order)
+		var b_flat: Array = plan["flat"]
+		for i in range(b_flat.size()):
 			out["slots"].append((b_slots[i] as Vector3) + back_dir * depth_cursor)
 			out["rows"].append(b_rows[i])
-			out["flat"].append(b[i])
+			out["flat"].append(b_flat[i])
 		# Следующий эшелон встаёт позади уже занятой этим эшелоном глубины
 		depth_cursor += float(max_row + 1) * ROW_DEPTH + RANK_GAP
 	return out
@@ -382,6 +460,17 @@ func _movable_count() -> int:
 		if is_instance_valid(u) and u.has_method("command_move"):
 			c += 1
 	return c
+
+## Свёрнутые события мыши обрабатываются здесь — ровно один пересчёт за кадр
+## отрисовки, и только если курсор реально сместился
+func _process(_delta: float) -> void:
+	if not _fp_pending:
+		return
+	_fp_pending = false
+	if _fp_mouse.distance_squared_to(_fp_last) < FP_MIN_MOVE_SQ:
+		return
+	_fp_last = _fp_mouse
+	_update_formation_preview(_fp_mouse)
 
 func _update_formation_preview(mouse_screen: Vector2) -> void:
 	if _fp == null:
@@ -466,9 +555,12 @@ func _execute_line_formation(line_start: Vector3, line_end: Vector3) -> void:
 		rows  = lplan["rows"]
 	else:
 		# СЕКЦИИ: каждый отряд получает свой участок линии и не перемешивается
-		# с соседями (см. _block_formation_slots)
-		flat = _blocks_flat(movable)
+		# с соседями (см. _block_formation_slots).
+		# ПОРЯДОК БОЙЦОВ БЕРЁТСЯ ИЗ ПЛАНА, а не из _blocks_flat: внутри блока
+		# состав пересортирован по фактическому положению, и старый «порядок
+		# реестра» рассыпал бы соответствие слотов бойцам
 		var plan := _block_formation_slots(line_start, line_end, movable)
+		flat  = plan["flat"]
 		slots = plan["slots"]
 		rows  = plan["rows"]
 	if slots.size() < flat.size():
@@ -1106,6 +1198,11 @@ func _issue_formation_move(center: Vector3, run: bool = false) -> void:
 ## по ней должно быть видно, где кончается один блок и начинается другой
 const GROUP_CELL_GAP := 3.0
 
+## Насколько отряды считаются стоящими НА ОДНОЙ ГЛУБИНЕ при раздаче ячеек.
+## Больше обычного разброса центров масс у выровненной группы и заметно меньше
+## расстояния между настоящими эшелонами
+const GROUP_DEPTH_EPS := 6.0
+
 ## Сколько блоков в ряду сетки. 3 для трёх-четырёх отрядов — это прямое
 ## требование задания («центральный в точку клика, остальные слева, справа и
 ## сзади»), а не общая формула: при ceil(√4) = 2 четыре отряда встали бы
@@ -1172,6 +1269,55 @@ func _issue_group_grid_move(movable: Array, center: Vector3, run: bool) -> bool:
 
 	var n: int = squads.size()
 	var cols: int = mini(_group_grid_cols(n), n)
+
+	# ── ЯЧЕЙКИ РАЗДАЮТСЯ ПО ФАКТИЧЕСКОМУ ПОЛОЖЕНИЮ ОТРЯДОВ ──────────────────
+	# Порядок в `squads` — это порядок появления отрядов в выделении, то есть по
+	# сути порядок реестра. Раздавать ячейки по нему нельзя: отряд, стоящий на
+	# левом фланге, легко получал ячейку справа и шёл туда НАСКВОЗЬ через соседей.
+	# Десять отрядов при этом пересекались все со всеми, перемешивались и, пока
+	# расталкивание разбирало кашу, разбегались в стороны — ровно жалоба «бегут в
+	# одну точку и встают хаотично».
+	#
+	# Сортируем ровно в том порядке, в каком раскладываются ячейки: сперва по
+	# глубине вдоль курса (передние ряды сетки — передним отрядам), затем внутри
+	# каждого ряда слева направо. Это та же топология, что у шеренг внутри отряда
+	# (см. _topo_order), только единица здесь — отряд, а точка — его центр масс.
+	# Пути перестают пересекаться: группа сдвигается параллельно
+	var cents: Array = []
+	for s in squads:
+		var c := Vector3.ZERO
+		for u in (s as Array):
+			c += (u as Node3D).global_position
+		c /= float(maxi((s as Array).size(), 1))
+		cents.append(c)
+	var order: Array = []
+	for i0 in range(n):
+		order.append(i0)
+	# Сортировка по глубине с ДОПУСКОМ и добором по ширине. Без допуска отряды,
+	# стоящие в одну шеренгу (а это самый обычный случай — они и так выровнены),
+	# имеют почти равную глубину, сравнение решает микрометровая разница, и
+	# порядок выходит случайным: соседние по фронту отряды попадали в разные ряды
+	# сетки вперемешку. С допуском такая группа честно упорядочивается слева
+	# направо, и ряды сетки набираются подряд идущими соседями
+	order.sort_custom(func(a, b):
+		var da: float = (cents[a] as Vector3).dot(course)
+		var db: float = (cents[b] as Vector3).dot(course)
+		if absf(da - db) > GROUP_DEPTH_EPS:
+			return da > db
+		return (cents[a] as Vector3).dot(across) < (cents[b] as Vector3).dot(across))
+	var oi := 0
+	while oi < n:
+		var last: int = mini(oi + cols, n)
+		var row_slice: Array = order.slice(oi, last)
+		row_slice.sort_custom(func(a, b):
+			return (cents[a] as Vector3).dot(across) < (cents[b] as Vector3).dot(across))
+		for k in range(row_slice.size()):
+			order[oi + k] = row_slice[k]
+		oi = last
+	var sorted_squads: Array = []
+	for i1 in order:
+		sorted_squads.append(squads[int(i1)])
+	squads = sorted_squads
 
 	for i in range(n):
 		var row: int = i / cols

@@ -4183,6 +4183,57 @@ func _add_audio_sliders(parent: Control) -> void:
 			AudioManager.save_settings())
 	parent.add_child(_spacer(10))
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ИНЖЕНЕРНЫЙ ПЕРЕКЛЮЧАТЕЛЬ: ВЕРТИКАЛЬНАЯ СИНХРОНИЗАЦИЯ
+#
+# Зачем в меню. Пока V-Sync включён, частота кадров упирается в развёртку
+# монитора (у владельца 75 Гц), и ЛЮБОЙ замер производительности показывает
+# ровно 75 — вне зависимости от того, стало быстрее или медленнее. Ровно на
+# этом однажды обманулся и стенд qa_veg: он отдавал 75 к/с и до, и после
+# четырёхкратного падения числа вызовов отрисовки.
+#
+# Настройка НЕ сохраняется на диск намеренно: это отладочный тумблер на сессию,
+# а не игровая опция. Игрок, случайно его нажавший, получит прежнее поведение
+# после перезапуска.
+# ─────────────────────────────────────────────────────────────────────────────
+func _vsync_on() -> bool:
+	return DisplayServer.window_get_vsync_mode() != DisplayServer.VSYNC_DISABLED
+
+func _set_vsync(on: bool) -> void:
+	DisplayServer.window_set_vsync_mode(
+		DisplayServer.VSYNC_ENABLED if on else DisplayServer.VSYNC_DISABLED)
+	# Снятой синхронизации мало: при max_fps > 0 движок всё равно ограничит темп
+	Engine.max_fps = 0
+
+func _add_vsync_toggle(parent: Control) -> void:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 8)
+	parent.add_child(row)
+	var cap := Label.new()
+	cap.text = "V-Sync"
+	cap.custom_minimum_size = Vector2(78, 0)
+	cap.add_theme_font_size_override("font_size", 13)
+	cap.add_theme_color_override("font_color", Color(0.78, 0.80, 0.86))
+	row.add_child(cap)
+	var btn := Button.new()
+	btn.custom_minimum_size = Vector2(190, 24)
+	btn.process_mode = Node.PROCESS_MODE_ALWAYS
+	btn.focus_mode = Control.FOCUS_NONE
+	btn.text = "включена (кадры ограничены монитором)" if _vsync_on() \
+		else "выключена (предел снят)"
+	row.add_child(btn)
+	btn.pressed.connect(func():
+		_set_vsync(not _vsync_on())
+		btn.text = "включена (кадры ограничены монитором)" if _vsync_on() \
+			else "выключена (предел снят)")
+	var hint := Label.new()
+	hint.text = "для честных замеров производительности"
+	hint.add_theme_font_size_override("font_size", 11)
+	hint.add_theme_color_override("font_color", Color(0.60, 0.64, 0.72))
+	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	parent.add_child(hint)
+	parent.add_child(_spacer(10))
+
 func _show_pause_menu() -> void:
 	_clear_overlay()
 	get_tree().paused = true
@@ -4193,6 +4244,7 @@ func _show_pause_menu() -> void:
 	lbl.add_theme_color_override("font_color", Color(0.95, 0.90, 0.70))
 	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER; vbox.add_child(lbl)
 	_add_audio_sliders(vbox)
+	_add_vsync_toggle(vbox)
 	vbox.add_child(_make_btn("  Продолжить  ", Color(0.10, 0.28, 0.10), func():
 		get_tree().paused = false; _clear_overlay()))
 	vbox.add_child(_make_btn("  Выйти в меню  ", Color(0.25, 0.10, 0.08), func():
@@ -4489,14 +4541,48 @@ func get_drag_rect() -> ColorRect:
 # возвращал false, ветка пропускалась, и кнопка просто оставалась без картинки —
 # отличить «иконка не задумана» от «путь сломан» было нечем.
 # ─────────────────────────────────────────────────────────────────────────────
+## О каких путях уже пожаловались (см. _icon_texture)
+static var _icon_warned: Dictionary = {}
+## Заглушка вместо ненайденной иконки. Строится один раз и рисуется процедурно,
+## чтобы не зависеть от ещё одного файла, которого тоже может не оказаться:
+## тусклая рамка с диагональю — сразу видно, что картинки нет, но кнопка на
+## месте и панель не разъезжается
+static var _placeholder_tex: Texture2D = null
+
+static func _placeholder_icon() -> Texture2D:
+	if _placeholder_tex != null:
+		return _placeholder_tex
+	const SIDE := 32
+	var img := Image.create(SIDE, SIDE, false, Image.FORMAT_RGBA8)
+	img.fill(Color(0.0, 0.0, 0.0, 0.0))
+	var edge := Color(0.62, 0.60, 0.54, 0.85)
+	var fill := Color(0.24, 0.23, 0.21, 0.55)
+	for y in range(SIDE):
+		for x in range(SIDE):
+			var on_edge: bool = x == 0 or y == 0 or x == SIDE - 1 or y == SIDE - 1
+			var on_diag: bool = absi(x - y) <= 1
+			if on_edge or on_diag:
+				img.set_pixel(x, y, edge)
+			else:
+				img.set_pixel(x, y, fill)
+	_placeholder_tex = ImageTexture.create_from_image(img)
+	return _placeholder_tex
+
 func _icon_texture(icon_name: String) -> Texture2D:
 	if icon_name.is_empty():
 		return null                      # иконка не задумана — это не ошибка
 	var path: String = _UCfg.smith_icon_path(icon_name)
 	if not ResourceLoader.exists(path):
-		push_warning("HUD: иконка не найдена: %s (в конфиге указано «%s»)"
-			% [path, icon_name])
-		return null
+		# ЖАЛУЕМСЯ ОДИН РАЗ НА ПУТЬ, А НЕ НА КАЖДЫЙ ВЫЗОВ. Иконки запрашиваются
+		# при каждой пересборке панели, то есть на каждом выделении, — из-за
+		# этого одна недостающая картинка давала бесконечный поток одинаковых
+		# строк в консоли. Диагностику при этом терять нельзя: молча рисовать
+		# пустоту — это как раз то, ради чего предупреждение и заводилось
+		if not _icon_warned.has(path):
+			_icon_warned[path] = true
+			push_warning("HUD: иконка не найдена: %s (в конфиге указано «%s»)"
+				% [path, icon_name])
+		return _placeholder_icon()
 	if FRAME_SHEET_ICONS.has(path):
 		return _trimmed_icon_frame(path, int(FRAME_SHEET_ICONS[path]))
 	var tex := ResourceLoader.load(path) as Texture2D
@@ -4507,7 +4593,18 @@ func _icon_texture(icon_name: String) -> Texture2D:
 ## Первый кадр квадратной спрайт-полосы (frame_side×frame_side), обрезанный
 ## по непрозрачному силуэту — для UNIT_ICONS, у которых нет готового портрета
 ## и приходится брать кадр из боевого спрайт-листа (см. FRAME_SHEET_ICONS)
+## Разобранные листовые иконки: путь -> готовый AtlasTexture.
+## БЕЗ КЭША каждый вызов заново читал Image, при нужде распаковывал его,
+## вырезал кадр и искал непрозрачную область — и всё это на КАЖДУЮ пересборку
+## панели, то есть на каждое выделение. Побочно это ещё и плодило разные
+## объекты текстуры на одну и ту же картинку (стенд qa_icons/Card поймал это
+## как «карточка и кнопка дают РАЗНЫЕ картинки» у монаха)
+static var _frame_icon_cache: Dictionary = {}
+
 func _trimmed_icon_frame(path: String, frame_side: int) -> Texture2D:
+	var hit: Variant = _frame_icon_cache.get(path)
+	if hit != null:
+		return hit
 	var tex := load(path) as Texture2D
 	if tex == null:
 		return null
@@ -4527,6 +4624,7 @@ func _trimmed_icon_frame(path: String, frame_side: int) -> Texture2D:
 	atlas.atlas  = tex
 	atlas.region = Rect2(used)
 	atlas.filter_clip = true
+	_frame_icon_cache[path] = atlas
 	return atlas
 
 ## size: 0 — обычная кнопка приказа (BTN_SIZE). Замок передаёт увеличенный
@@ -4878,9 +4976,20 @@ func _unit_card(unit_id: String, faction: int, cost: Dictionary, squad: int,
 	var title: String = String(tip["display_name"])
 	if title == unit_id:
 		title = String(UNIT_TITLES.get(unit_id, unit_id))
+	# ── ОТКАТ НА РАБОЧУЮ ИКОНКУ КНОПОК, А НЕ ТОЛЬКО НА ПУСТОЕ ЗНАЧЕНИЕ ──────
+	# Здесь стояло только `if icon.is_empty()`. Из-за этого карточка молча
+	# показывала заглушку, когда путь в конфиге БЫЛ, но вёл в никуда: тултипы
+	# ссылались на res://assets/ui/icons_units_human/*.png, которых в проекте
+	# нет, тогда как кнопки Замка и отрядов брали иконки из UNIT_ICONS и
+	# рисовались правильно. Пути в конфиге исправлены, но проверка нужна и
+	# сама по себе: два списка путей на одни и те же картинки обязаны
+	# расходиться рано или поздно, и расходиться они должны молча в пользу
+	# рабочего, а не в пользу серой палки
 	var icon: String = String(tip["icon"])
-	if icon.is_empty():
-		icon = String(UNIT_ICONS.get(unit_id, ""))
+	if icon.is_empty() or not ResourceLoader.exists(icon):
+		var fallback: String = String(UNIT_ICONS.get(unit_id, ""))
+		if not fallback.is_empty():
+			icon = fallback
 	return {
 		"title": title,
 		"icon":  icon,
