@@ -1,5 +1,7 @@
 extends Node
 
+const _OptCfgG = preload("res://scripts/perf_config.gd")
+
 ## ═══════════════════════════════════════════════════════════════════════════
 ## МАСШТАБ: 3000 И 5000 БОЙЦОВ НА МАРШЕ — ТИХИЙ ЗАМЕР
 ## ═══════════════════════════════════════════════════════════════════════════
@@ -244,6 +246,9 @@ func _run() -> void:
 		DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
 	Engine.max_fps = 0
 
+	# ДЕРЕВНЯ ГОБЛИНОВ ВЫКЛЮЧЕНА: стенд меряет ровно ту армию, которую
+	# заявляет, и не растягивает габарит сетки на свой угол карты
+	_OptCfgG.goblin_village = false
 	main = load("res://scenes/Main.tscn").instantiate()
 	get_tree().root.add_child(main)
 	await frames(5)

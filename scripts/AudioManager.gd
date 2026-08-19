@@ -31,8 +31,60 @@ extends Node
 const DIR_MUSIC := "res://assets/environment/Main Sounds/"
 const DIR_SFX   := "res://assets/factions/humans/Sounds Human/"
 
-const MUSIC_BACKGROUND := DIR_MUSIC + "Main sound background.ogg"
-const AMBIENCE_FOREST  := DIR_MUSIC + "Forest Day.ogg"
+const MUSIC_BACKGROUND   := DIR_MUSIC + "Main sound background.ogg"
+const MUSIC_BACKGROUND_2 := DIR_MUSIC + "Main sound background 2.ogg"
+const AMBIENCE_FOREST    := DIR_MUSIC + "Forest Day.ogg"
+
+## ═══════════════════════════════════════════════════════════════════════════
+## ПЛЕЙЛИСТ ФОНОВОЙ МУЗЫКИ
+## ═══════════════════════════════════════════════════════════════════════════
+## Порядок в партии: 10 минут тишины (только лес) -> трек 1 целиком -> 10 минут
+## тишины -> трек 2 целиком -> 10 минут тишины -> трек 1 ... по кругу.
+##
+## ПОЧЕМУ ЭТО НЕ ЗАЦИКЛЕННЫЙ ПОТОК И НЕ КРОССФЕЙД МЕЖДУ ДВУМЯ ПЛЕЕРАМИ.
+## Треки НЕ ПЕРЕКРЫВАЮТСЯ: между ними стоит десятиминутная пауза, то есть
+## наложения, ради которого нужен второй плеер, здесь не бывает по условию.
+## Плавность нужна только на КРАЯХ трека — вход из тишины и выход в тишину, —
+## и её даёт один плеер с огибающей громкости.
+##
+## Список, а не пара переменных: третий трек добавляется одной строкой.
+const MUSIC_PLAYLIST := [MUSIC_BACKGROUND, MUSIC_BACKGROUND_2]
+
+## ═══════════════════════════════════════════════════════════════════════════
+## ЗВУКИ ИНТЕРФЕЙСА
+## ═══════════════════════════════════════════════════════════════════════════
+## Каталог и имена файлов записаны РОВНО так, как они лежат на диске: PCK
+## регистрозависим на всех ОС, включая Windows, и «Sound UI menu» вместо
+## «Sound ui menu» уже один раз стоило этому проекту отсутствующих курсоров
+## в сборке.
+const DIR_UI := DIR_MUSIC + "Sound ui menu/"
+
+## Событие интерфейса → файл. Одна запись — один файл: у интерфейса
+## рандомизация не нужна, звук кнопки обязан быть узнаваемым и одинаковым
+const UI_BANK := {
+	"order_unit":  "select unit.ogg",          # заказан любой юнит в любом здании
+	"smith_pick":  "select_icon_in_smith.ogg", # клик по исследованию в кузнице
+	"pick_building": "click1.ogg",             # выделено здание
+	"pick_squad":  "click3.ogg",               # выделен отряд/юниты
+}
+
+## Пауза между повторами одного события и громкость. Пауза нужна: заказ
+## десяти рабочих одной кнопкой — это десять вызовов в один кадр, и без окна
+## они сложились бы в кашу вместо щелчка
+const UI_LIMITS := {
+	"order_unit":    {"gap": 0.06, "db": -6.0},
+	"smith_pick":    {"gap": 0.06, "db": -6.0},
+	"pick_building": {"gap": 0.05, "db": -7.0},
+	"pick_squad":    {"gap": 0.05, "db": -7.0},
+}
+
+## ── ПОЧЕМУ У ИНТЕРФЕЙСА СВОИ ГОЛОСА, А НЕ ОБЩИЙ ПУЛ ─────────────────────────
+## Пул боевых звуков — это AudioStreamPlayer3D: у него есть точка в мире,
+## затухание по расстоянию, панорама и — с прошлого прохода — запрет звучать
+## из тумана. Щелчок по кнопке не имеет ни точки, ни расстояния, ни отношения
+## к туману, и любой из этих механизмов ему только помешает. Плюс интерфейс
+## обязан щёлкать НА ПАУЗЕ (меню настроек), а весь 3D-пул на паузе глушится.
+const UI_VOICES := 4
 
 ## Категории эффектов: id → список файлов. Из списка каждый раз берётся
 ## СЛУЧАЙНЫЙ файл — это и есть рандомизация (AudioStreamRandomizer здесь не
@@ -81,12 +133,18 @@ const SFX_BANK := {
 ## по плотности (work_density), и лишние голоса им ни к чему — иначе стук
 ## сорока топоров перекроет сражение.
 const SFX_LIMITS := {
-	# Рубка: голосов и «окна» прибавлено под возросший темп взмаха
-	# (Worker.CHOP_SWING_RATE +30%) — иначе лишние удары просто съедались
-	# ограничителем и на слух ничего бы не изменилось
-	"chop":         {"voices": 6, "gap": 0.07, "db": -3.0},
-	"mine_gold":    {"voices": 3, "gap": 0.12, "db": -4.0},
-	"mine_stone":   {"voices": 3, "gap": 0.12, "db": -4.0},
+	# ── РУБКА: САМАЯ ПЛОТНАЯ ИЗ РАБОЧИХ КАТЕГОРИЙ ───────────────────────────
+	# Темп взмаха поднят до одного удара в секунду (Worker.CHOP_SWING_RATE),
+	# и потолок поднят следом: восемь голосов при окне 0.045 с пропускают до 22
+	# ударов в секунду, то есть бригада из десяти человек звучит КАЖДЫМ ударом,
+	# а не через один. Расширенный питч здесь не украшение: файлов рубки всего
+	# четыре, и на возросшей частоте узкий разброс (±6%) начинал слышаться как
+	# закольцованный сэмпл — «тук-тук-тук» одним и тем же топором
+	"chop":         {"voices": 8, "gap": 0.045, "db": -3.0, "pitch": [0.88, 1.12]},
+	# Кирка осталась реже топора намеренно: удар по камню тяжелее взмаха топором,
+	# и та же частота читалась бы как отбойный молоток
+	"mine_gold":    {"voices": 4, "gap": 0.10, "db": -4.0},
+	"mine_stone":   {"voices": 4, "gap": 0.10, "db": -4.0},
 	# Свист стрел и залпы — самая частая ткань боя, голосов им нужно больше всех
 	"bow_attack":   {"voices": 6, "gap": 0.03,  "db": -7.0},
 	"bow_impact":   {"voices": 6, "gap": 0.035, "db": -4.0},
@@ -157,7 +215,10 @@ const SFX_CULL_DISTANCE := SFX_MAX_DISTANCE
 ## Раз во столько секунд поверх леса тихо поднимается основная тема
 const MUSIC_INTERVAL := 600.0     # 10 минут
 ## Сколько секунд длится плавное появление и затухание темы
-const MUSIC_FADE := 6.0
+## Длительность нарастания и затухания трека, сек. Заказ владельца — «около
+## двух секунд» (было 6.0). Это ОДНО число на оба края огибающей: разные
+## времена входа и выхода на слух читаются как ошибка, а не как замысел
+const MUSIC_FADE := 2.0
 ## Насколько тише эмбиента играет подмешанная тема
 const MUSIC_UNDER_DB := -14.0
 ## Громкость темы в меню
@@ -174,6 +235,10 @@ var _streams: Dictionary = {}          # путь → AudioStream (кэш заг
 var _music: AudioStreamPlayer = null   # тема (меню и подмешивание)
 var _ambience: AudioStreamPlayer = null# лес
 var _music_timer: float = 0.0
+## Какой трек плейлиста играет следующим. Живёт в автозагрузке и НЕ сбрасывается
+## ни сменой сцены, ни перезагрузкой карты — обнуляется только новой партией
+## (start_game_audio), иначе каждый рестарт начинал бы плейлист с первого трека
+var _music_track: int = 0
 var _fade: float = 0.0                 # 0..1 текущая громкость подмешанной темы
 var _fade_dir: float = 0.0             # +1 нарастание, -1 затухание, 0 покой
 var _in_game: bool = false
@@ -198,10 +263,18 @@ func _ready() -> void:
 	_preload_sfx()
 	_music = AudioStreamPlayer.new()
 	_music.bus = "Music"
+	# ТРЕК МОЖЕТ КОНЧИТЬСЯ САМ, не дождавшись затухания: длину потока движок
+	# знает не для всех форматов, и проверка «до конца осталось меньше MUSIC_FADE»
+	# тогда не срабатывает ни разу. Без этого обработчика следующий трек
+	# начинался бы В ТОТ ЖЕ МИГ — пауза в десять минут пропадала бы
+	_music.finished.connect(_on_music_finished)
 	add_child(_music)
 	_ambience = AudioStreamPlayer.new()
 	_ambience.bus = "Music"
 	add_child(_ambience)
+	_build_ui_pool()
+	_preload_ui()
+	_preload_music()
 
 # ── ШИНЫ И ГРОМКОСТЬ ─────────────────────────────────────────────────────────
 
@@ -335,6 +408,64 @@ func _preload_sfx() -> void:
 		for f in SFX_BANK[cat]:
 			_stream(DIR_SFX + String(f))
 
+## ── ГОЛОСА ИНТЕРФЕЙСА ──────────────────────────────────────────────────────
+var _ui_pool: Array = []          # AudioStreamPlayer (без позиции в мире)
+var _ui_next: int = 0
+var _ui_last: Dictionary = {}     # событие → время последнего запуска, сек
+
+func _build_ui_pool() -> void:
+	for _i in range(UI_VOICES):
+		var p := AudioStreamPlayer.new()
+		p.bus = "SFX"
+		# Интерфейс звучит и на паузе: пауза глушит 3D-пул, музыку и лес
+		# (см. set_paused), а щелчки меню настроек глушить нельзя
+		p.process_mode = Node.PROCESS_MODE_ALWAYS
+		add_child(p)
+		_ui_pool.append(p)
+
+func _preload_music() -> void:
+	for path in MUSIC_PLAYLIST:
+		_stream(String(path))
+	_stream(AMBIENCE_FOREST)
+
+func _preload_ui() -> void:
+	for k in UI_BANK:
+		_stream(DIR_UI + String(UI_BANK[k]))
+
+## ЗВУК ИНТЕРФЕЙСА. Ни тумана, ни расстояния, ни слушателя — только окно
+## повтора. Возвращает true, если звук реально пошёл
+## СЧЁТЧИКИ ДЛЯ СТЕНДОВ. Отмечаются ДО проверки `enabled`: в headless
+## звукового драйвера нет вовсе, и без этого проверить ПОДКЛЮЧЕНИЕ события к
+## интерфейсу было бы нечем — стенд не отличил бы «не позвали» от «позвали, но
+## устройство молчит»
+var ui_last: String = ""
+var ui_calls: int = 0
+
+func play_ui(event: String) -> bool:
+	ui_last = event
+	ui_calls += 1
+	if not enabled or _ui_pool.is_empty():
+		return false
+	var fname: String = String(UI_BANK.get(event, ""))
+	if fname == "":
+		return false
+	var lim: Dictionary = UI_LIMITS.get(event, {})
+	var now: float = float(Time.get_ticks_msec()) * 0.001
+	if now - float(_ui_last.get(event, -999.0)) < float(lim.get("gap", 0.05)):
+		return false
+	var s: AudioStream = _stream(DIR_UI + fname)
+	if s == null:
+		return false
+	_ui_last[event] = now
+	# Голоса выдаются по кругу: щелчок короткий, и перебивать сам себя ему
+	# не страшно — важно лишь, чтобы два разных события не резали друг друга
+	var v: AudioStreamPlayer = _ui_pool[_ui_next]
+	_ui_next = (_ui_next + 1) % _ui_pool.size()
+	v.stream = s
+	v.volume_db = float(lim.get("db", -6.0))
+	v.play()
+	return true
+
 func _stream(path: String) -> AudioStream:
 	if _streams.has(path):
 		return _streams[path]
@@ -372,12 +503,35 @@ func work_density() -> float:
 	return maxf(lerpf(1.0, 0.5, minf(t, 1.0)) - maxf(t - 1.0, 0.0) * 0.15,
 		WORK_DENSITY_FLOOR)
 
+## Слышно ли из этой точки. Отдельной функцией, потому что вопрос задаётся из
+## горячего места и должен отвечать дёшево: пока тумана нет (меню, стенды,
+## первый кадр) — обычная проверка на null и выход
+func _audible_at(at: Vector3) -> bool:
+	var fog = GameManager.fog
+	if fog == null or not is_instance_valid(fog):
+		return true
+	return fog.is_lit(at.x, at.z)
+
 func play_3d(cat: String, at: Vector3) -> bool:
 	sfx_calls += 1
 	if not enabled:
 		return false
 	var files: Array = SFX_BANK.get(cat, [])
 	if files.is_empty():
+		return false
+	# ── ЗВУК ИЗ ТУМАНА НЕ ЗВУЧИТ ────────────────────────────────────────────
+	# Это защита от читерства, а не косметика: по стуку топоров и лязгу боя из
+	# черноты игрок безошибочно находит чужую базу и чужую армию, ни разу туда
+	# не заглянув, — то есть слухом обходит ровно ту механику, ради которой
+	# туман и сделан. Проверка стоит ПЕРВОЙ из содержательных, до прореживания,
+	# выбора файла и голоса: звук, который не будет слышен, не должен занимать
+	# ни голоса в пуле, ни окна ограничителя категории.
+	#
+	# Порог — is_lit, а не is_seen: разведанная, но покинутая земля показывает
+	# ПАМЯТЬ о рельефе, а не происходящее. Слышать оттуда «сейчас там рубят
+	# лес» — это то же самое разоблачение, только на такт позже.
+	# Выключенный туман (стенды, отладка) отвечает «видно везде» сам
+	if not _audible_at(at):
 		return false
 	# ПРОРЕЖИВАНИЕ ПО ПЛОТНОСТИ — до ограничителя голосов: смысл не в том,
 	# чтобы занять меньше голосов, а в том, чтобы сорок топоров не били в ухо
@@ -460,7 +614,10 @@ func start_game_audio() -> void:
 	if not enabled:
 		return
 	_in_game = true
+	# ПЕРВОЕ ПРОИГРЫВАНИЕ — НА 10-Й МИНУТЕ, а не на старте: партия начинается
+	# под лес, музыка вступает позже (MUSIC_INTERVAL)
 	_music_timer = MUSIC_INTERVAL
+	_music_track = 0
 	_fade = 0.0
 	_fade_dir = 0.0
 	_music.stop()
@@ -510,6 +667,16 @@ func set_paused(on: bool) -> void:
 
 func is_paused() -> bool:
 	return _audio_paused
+
+## Снять зацикливание. Нужен потому, что ресурс потока ОБЩИЙ (см. _stream):
+## меню зацикливает ту же тему, которую партия обязана доиграть до конца
+func _unloop(s: AudioStream) -> void:
+	if s is AudioStreamOggVorbis:
+		(s as AudioStreamOggVorbis).loop = false
+	elif s is AudioStreamMP3:
+		(s as AudioStreamMP3).loop = false
+	elif s is AudioStreamWAV:
+		(s as AudioStreamWAV).loop_mode = AudioStreamWAV.LOOP_DISABLED
 
 ## Зациклить поток независимо от формата (ogg/mp3/wav — у всех свой флаг)
 func _loop(s: AudioStream) -> void:
@@ -575,11 +742,36 @@ func _process(delta: float) -> void:
 		if left <= MUSIC_FADE:
 			_fade_dir = -1.0
 
+## Очередной трек плейлиста. Пропускает отсутствующие файлы, чтобы один
+## недостающий не останавливал музыку на всю партию
+func _next_music_stream() -> AudioStream:
+	var n: int = MUSIC_PLAYLIST.size()
+	for _i in range(n):
+		var path: String = String(MUSIC_PLAYLIST[_music_track % n])
+		_music_track = (_music_track + 1) % n
+		var st: AudioStream = _stream(path)
+		if st != null:
+			return st
+	return null
+
+## Трек доиграл сам — уходим в паузу до следующего по расписанию
+func _on_music_finished() -> void:
+	if not _in_game:
+		return
+	_fade = 0.0
+	_fade_dir = 0.0
+	_music_timer = MUSIC_INTERVAL
+
 func _start_music_swell() -> void:
-	var s: AudioStream = _stream(MUSIC_BACKGROUND)
+	var s: AudioStream = _next_music_stream()
 	if s == null:
 		_music_timer = MUSIC_INTERVAL
 		return
+	# ТРЕК ПАРТИИ НЕ ЗАЦИКЛЕН. Ресурс потока ОБЩИЙ с меню (_stream кэширует его
+	# по пути), а меню играет ту же тему по кругу и ставит ей флаг зацикливания.
+	# Без снятия флага трек в партии не кончился бы никогда, и пауза между
+	# треками, ради которой всё это и сделано, не наступила бы ни разу
+	_unloop(s)
 	_music.stream = s
 	_fade = 0.0
 	_fade_dir = 1.0

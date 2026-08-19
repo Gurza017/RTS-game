@@ -10,6 +10,9 @@ const _CSite    := preload("res://scripts/ConstructionSite.gd")
 # ИИ вынесен в отдельный файл: логика в EnemyAI.gd, ЧИСЛА — в ai_start_army_limit.gd
 const _EnemyAI  := preload("res://scripts/EnemyAI.gd")
 const _AICfg    := preload("res://scripts/ai_start_army_limit.gd")
+## Куча руды как единый объект. Через preload, а не по class_name: кэш
+## глобальных классов в этом проекте уже ломал сборку (см. память проекта)
+const _MineCluster := preload("res://scripts/MineCluster.gd")
 
 const VICTORY_CHECK_INTERVAL := 3.0
 
@@ -72,6 +75,15 @@ const LAKE_MARGIN := 0.6
 var hud: HUD
 var selection_manager: SelectionManager
 var enemy_ai: Node             = null     # см. scripts/EnemyAI.gd
+## ── ТРЕТЬЯ СТОРОНА: ОРДА ГОБЛИНОВ ──────────────────────────────────────────
+## Отдельный узел, а не второй EnemyAI: у гоблинов нет ни рабочих, ни кузницы,
+## ни союзников, зато есть расписание (спячка до 30:00 и волны). Общего с
+## красным ИИ у них только базовые механики бойца — а они живут в Unit
+var goblin_ai: Node            = null     # см. scripts/goblin/GoblinAI.gd
+const _GoblinAI  := preload("res://scripts/goblin/GoblinAI.gd")
+const _GoblinHut := preload("res://scripts/goblin/GoblinHut.gd")
+const _GobCfg    := preload("res://scripts/goblin/goblin_config.gd")
+const _Opt       := preload("res://scripts/perf_config.gd")
 var _victory_timer     := 0.0
 var _phase: int        = Phase.MAIN_MENU
 var _ghost: MeshInstance3D    = null
@@ -83,6 +95,10 @@ var _camera: RTSCamera        = null
 # ничего не зная про базы. Теперь зоны резервируются ДО генерации, и все
 # спавнеры их обходят.
 const BASE_CLEAR_RADIUS := 11.0
+## Радиус расчищенной площадки под деревню гоблинов. Больше базового: внутри
+## десять хижин сеткой (см. goblin_config.hut_offsets), а вокруг них кольцо
+## стартовых отрядов
+const GOBLIN_VILLAGE_CLEAR := 34.0
 # ── СТАРТОВЫЕ УГЛЫ: ИГРОК И ИИ ПО ДИАГОНАЛИ ──────────────────────────────────
 # Игрок — НИЖНИЙ ЛЕВЫЙ угол (−X, −Z), ИИ — ВЕРХНИЙ ПРАВЫЙ (+X, +Z).
 # Якоря отсчитываются ОТ УГЛОВ ПОЛЯ, а не литералами: изменится форма карты —
@@ -144,7 +160,51 @@ func _ready() -> void:
 	enemy_ai = _EnemyAI.new()
 	enemy_ai.name = "EnemyAI"
 	add_child(enemy_ai)
+	goblin_ai = _GoblinAI.new()
+	goblin_ai.name = "GoblinAI"
+	add_child(goblin_ai)
+	_setup_pause_modes()
 	start_game()
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ТАКТИЧЕСКАЯ ПАУЗА: СТОИТ МИР, А НЕ ИГРА
+# ═════════════════════════════════════════════════════════════════════════════
+# ЧТО БЫЛО. get_tree().paused = true останавливал ВСЁ, кроме HUD: панель
+# рисовалась, но выделить отряд, отдать приказ, довести призрак постройки или
+# подвинуть камеру было нельзя. То есть пауза годилась только на «отойти от
+# компьютера», а не на то, ради чего тактическая пауза существует, — спокойно
+# осмотреться и раздать приказы.
+#
+# ЧТО СТАЛО. Пауза перестала быть свойством ВСЕЙ сцены и стала свойством МИРА.
+#
+# ── ПОЧЕМУ ИМЕННО ТАК, А НЕ «ВСЕМУ UI ПОСТАВИТЬ ALWAYS» ─────────────────────
+# process_mode НАСЛЕДУЕТСЯ ВНИЗ. Поставить ALWAYS на Main (а он нужен: в нём
+# живут призрак постройки и наведение курсора) — значит поставить его и всем
+# потомкам, включая _world со всей армией: игра не встала бы вовсе. Поэтому
+# ветки перечислены явно и по отдельности:
+#   • Main, камера, SelectionManager, HUD — ВСЕГДА: это интерфейс и ввод;
+#   • _world (юниты, здания, ресурсы), enemy_ai, туман — ПАУЗУЕМЫЕ: это мир.
+# GameManager в списке нет намеренно: он автозагрузка, лежит вне Main и на
+# паузе останавливается сам — вместе с ним встают тик армии и вся отрисовка.
+#
+# ПРИКАЗЫ, ОТДАННЫЕ НА ПАУЗЕ, НЕ ТЕРЯЮТСЯ И НЕ ВЫПОЛНЯЮТСЯ РАНЬШЕ ВРЕМЕНИ:
+# command_move и прочие только пишут поля бойцу, а шаг делает его тик — который
+# стоит. На снятии паузы отряд трогается с уже готовым приказом.
+func _setup_pause_modes() -> void:
+	process_mode = Node.PROCESS_MODE_ALWAYS
+	if _camera != null and is_instance_valid(_camera):
+		_camera.process_mode = Node.PROCESS_MODE_ALWAYS
+	if selection_manager != null and is_instance_valid(selection_manager):
+		selection_manager.process_mode = Node.PROCESS_MODE_ALWAYS
+	# hud уже ALWAYS у себя в _ready — повторять не нужно, но и не вредно
+	if _world != null and is_instance_valid(_world):
+		_world.process_mode = Node.PROCESS_MODE_PAUSABLE
+	if enemy_ai != null and is_instance_valid(enemy_ai):
+		enemy_ai.process_mode = Node.PROCESS_MODE_PAUSABLE
+	if goblin_ai != null and is_instance_valid(goblin_ai):
+		goblin_ai.process_mode = Node.PROCESS_MODE_PAUSABLE
+	if GameManager.fog != null and is_instance_valid(GameManager.fog):
+		(GameManager.fog as Node).process_mode = Node.PROCESS_MODE_PAUSABLE
 
 func start_game() -> void:
 	# Реестр стволов переживает узлы (он не в дереве сцены), поэтому при новом
@@ -154,6 +214,11 @@ func start_game() -> void:
 	# Пул стрел тоже переживает сцену (GameManager — автозагрузка), а лежащие в
 	# нём узлы принадлежали прошлой карте
 	GameManager.clear_arrow_pool()
+	# Реестр куч живёт в Main, но переживает предыдущий бой ровно так же, как
+	# реестр стволов: узлы прошлой карты уже мертвы, а их номера остались бы
+	# годными, и рабочий искал бы соседний кусок в куче, которой нет
+	res_clusters.clear()
+	_cluster_seq = 0
 	_setup_reserved_zones()
 	ResourceManager.reset_resources()
 	GameManager.reset_squads()
@@ -188,6 +253,7 @@ func start_game() -> void:
 		enter_castle_placement(true)
 	if enemy_ai != null:
 		enemy_ai.setup(self)
+	_spawn_goblin_village()
 
 ## ТОЧКА СБОРА ИИ «В ПОЛЕ» — середина карты.
 ## Спрашивается из EnemyAI: тот не знает ни про озеро, ни про класс Main
@@ -247,6 +313,13 @@ func _setup_reserved_zones() -> void:
 	_reserved.clear()
 	_reserve(PLAYER_BASE_ANCHOR, BASE_CLEAR_RADIUS)
 	_reserve(ENEMY_BASE_ANCHOR,  BASE_CLEAR_RADIUS)
+	# ДЕРЕВНЯ ГОБЛИНОВ — ТОЖЕ БАЗА, и лесу в ней делать нечего: без резерва
+	# хижины вырастали прямо в чаще, деревня терялась среди крон, а орда, выходя
+	# из неё, первым делом обтекала десяток стволов на собственной околице.
+	# Точка детерминирована (goblin_village_center), поэтому её можно занять
+	# здесь же, до посадки леса. Радиус — вся застройка плюс кольцо отрядов
+	if _Opt.goblin_village:
+		_reserve(goblin_village_center(), GOBLIN_VILLAGE_CLEAR)
 	# Пятачки под СВОИ кучи руды резервируются ЗДЕСЬ, а не после их спавна.
 	# Порядок вызовов: _ready() → _setup_terrain() сажает лес подковы, и только
 	# потом start_game() ставит кучи. Резерв, выставленный вместе с кучей,
@@ -282,6 +355,11 @@ func _clear_area_of_resources(center: Vector3, radius: float) -> void:
 
 func on_selection_changed(units: Array) -> void:
 	hud.show_selection(units)
+
+## Открылась карточка разведки чужого отряда (или закрылась — пустым списком)
+func on_recon_changed(units: Array) -> void:
+	if hud != null and is_instance_valid(hud):
+		hud.show_recon(units)
 
 # Единственная точка добавления контента карты: всё — под World (identity transform)
 func world_add(node: Node) -> void:
@@ -700,7 +778,9 @@ func _try_place_castle(screen_pos: Vector2) -> void:
 	if selection_manager:
 		selection_manager._clear_selection()
 		selection_manager._select(site)
-		GameManager.on_selection_changed(selection_manager.selected_units)
+		# ТИХО: игрок не кликал по площадке, её выбрала игра. Звук выделения
+		# здесь читался как «щелчок из ниоткуда» при закладке крепости
+		GameManager.on_selection_changed(selection_manager.selected_units, true)
 
 	_spawn_starting_workers(world_pos, site)
 
@@ -713,7 +793,8 @@ func _on_castle_built(made) -> void:
 	if selection_manager:
 		selection_manager._clear_selection()
 		selection_manager._select(made)
-		GameManager.on_selection_changed(selection_manager.selected_units)
+		# ТИХО по той же причине: замок достроился сам, клика не было
+		GameManager.on_selection_changed(selection_manager.selected_units, true)
 	_send_starting_workers_to_resources(made.global_position)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -807,19 +888,16 @@ func _update_hover_cursor(delta: float) -> void:
 	# Дерево является целью лишь для рабочего (см. SelectionManager.selection_has_worker):
 	# у отряда солдат ПКМ по лесу проходит сквозь него на землю, и обещать рукой
 	# «здесь можно рубить» там нельзя — курсор врал бы про то, что произойдёт
-	if not selection_manager.selection_has_worker():
-		if _cursor_on_res:
-			_cursor_on_res = false
-			var arrow := _UIAssets.cursor(1)
-			if arrow != null:
-				Input.set_custom_mouse_cursor(arrow, Input.CURSOR_ARROW,
-					_UIAssets.cursor_hotspot(1))
-		return
-	var mask: int = Constants.LAYER_UNITS | Constants.LAYER_BUILDINGS \
-		| Constants.LAYER_RESOURCES | Constants.LAYER_GROUND
-	var hit: Dictionary = selection_manager._pick_at(
-		get_viewport().get_mouse_position(), mask)
-	var on_res: bool = hit["target"] is ResourceNode
+	# ЕДИНСТВЕННЫЙ ИСТОЧНИК ОТВЕТА — тот же, которым воспользуется правая кнопка
+	# (см. SelectionManager.resource_under_cursor). Здесь стоял отдельный _pick_at
+	# со СВОЕЙ маской, в которой LAYER_RESOURCES был всегда: курсор обещал сбор
+	# и тогда, когда клик его не отдал бы. Заодно тот разбор ничего не знал про
+	# рабочих и про интерфейс
+	var mouse := get_viewport().get_mouse_position()
+	var hovered: ResourceNode = selection_manager.resource_under_cursor(mouse)
+	_update_hover_highlight(hovered)
+	_update_enemy_hover(mouse, hovered != null)
+	var on_res: bool = hovered != null
 	if on_res == _cursor_on_res:
 		return
 	_cursor_on_res = on_res
@@ -831,13 +909,178 @@ func _update_hover_cursor(delta: float) -> void:
 		Input.set_custom_mouse_cursor(tex, Input.CURSOR_ARROW,
 			_UIAssets.cursor_hotspot(idx))
 
+# ═════════════════════════════════════════════════════════════════════════════
+# ЗЕЛЁНАЯ ПОДСВЕТКА ЦЕЛИ СБОРА
+# ═════════════════════════════════════════════════════════════════════════════
+# Под комлем дерева — КОЛЬЦО, под кучей руды — ОВАЛ НА ВСЮ КУЧУ. Разная форма
+# здесь не украшение, а честный ответ на разный приказ: дерево рубят поштучно
+# (кликнул в этот ствол — рубишь этот ствол), а руду разрабатывают кучей
+# (кликнул в самородок — бригада сядет на всё месторождение и будет брать
+# соседние куски сама, см. Worker._auto_find_resource). Подсветка обязана
+# показывать НАСТОЯЩУЮ область действия приказа, иначе она врёт.
+#
+# УЗЕЛ ОДИН НА ВСЮ ИГРУ. Под курсором всегда ровно одна цель, поэтому заводить
+# по декали на жилу (сотни узлов на карте) незачем — хватает единственного
+# квада, который переезжает и меняет размер. Ноль стоимости, когда ничего не
+# подсвечено: узел просто невидим.
+# ═════════════════════════════════════════════════════════════════════════════
+# КРАСНЫЕ КОЛЬЦА ПРИЦЕЛА НА ЧУЖОМ ОТРЯДЕ
+# ═════════════════════════════════════════════════════════════════════════════
+# Ровно та же обратная связь, что жёлтые кольца под своими: наведясь на чужой
+# строй, игрок видит, КОГО именно накроет приказ — весь отряд, а не того
+# человечка, в которого он попал курсором.
+#
+# Условие «есть кому атаковать» обязательно: артель рабочих, наведённая на
+# копейщиков, не должна обещать бой, которого не будет (у рабочего
+# attack_damage = 0, и приказ атаки для него — самоубийство, см.
+# SelectionManager._selection_can_attack).
+#
+# Опрос тот же самый, что у подсветки жил (CURSOR_POLL, 12 раз в секунду), а не
+# отдельный: оба ответа нужны в один и тот же момент и оба стоят одного луча
+func _update_enemy_hover(mouse: Vector2, on_resource: bool) -> void:
+	if GameManager.sel_decals == null:
+		return
+	# Курсор уже занят жилой — прицел не рисуем: два разных обещания под одним
+	# курсором противоречили бы друг другу
+	if on_resource or selection_manager == null:
+		GameManager.sel_decals.clear_hover()
+		return
+	if not selection_manager._selection_can_attack():
+		GameManager.sel_decals.clear_hover()
+		return
+	var foes: Array = selection_manager.enemy_squad_under_cursor(mouse)
+	if foes.is_empty():
+		GameManager.sel_decals.clear_hover()
+		return
+	GameManager.sel_decals.set_hover_units(foes, world_root())
+
+const _RES_HL_SHADER := preload("res://shaders/res_highlight.gdshader")
+
+## СВЕТЛЫЙ, ПОЧТИ БЕЛЫЙ (заказ владельца, разворот вчерашнего тёмно-зелёного).
+##
+## Тёмно-зелёная линия решала ровно одну задачу — не спорить с травой — и
+## решала её слишком хорошо: на самой траве она читалась, а на камне, золоте и в
+## тени леса пропадала. Обводка обязана работать на ВСЕХ трёх подложках сразу, а
+## единственный тон, который контрастен и с зелёным, и с серым, и с жёлтым, —
+## светлый. Полупрозрачность (alpha_max в шейдере) держит её от превращения в
+## жирную белую черту.
+##
+## С подмесом на СТВОЛЕ (veg_multimesh.highlight_tint) он намеренно не совпадает:
+## подмес подкрашивает рисунок и остаётся зелёным, обводка размечает землю
+const HOVER_RES_COLOR := Color(0.90, 0.94, 0.92)
+## ТОЛЩИНА ЛИНИИ В МЕТРАХ — одна на кольцо у комля и на овал кучи (шейдер меряет
+## расстояние до границы в метрах, см. res_highlight.gdshader). Пять сантиметров
+## это один-два пикселя на рабочем отдалении камеры, то есть «максимально тонко»
+## из заказа; тоньше шейдер всё равно не нарисует — он не даёт линии стать уже
+## пикселя, иначе она рассыпалась бы на приближении
+const HOVER_RING_W := 0.05
+## РАДИУС КОЛЬЦА У КОМЛЯ, метры. Ровно вдвое меньше прежнего (было
+## slot_radius() + 0.35 = 0.35 + 0.30 + 0.35 = 1.0 м). Прежнее кольцо шло по
+## РАЗМЕТКЕ РАБОЧИХ МЕСТ, то есть по кругу, на котором стоят лесорубы, — оно и
+## выглядело смещённым относительно ствола, потому что описывало не дерево, а
+## бригаду вокруг него. Теперь оно описывает сам комель и потому центрируется на
+## нём по построению
+const HOVER_TREE_RADIUS := 0.50
+## Подъём над грунтом. Достаточно, чтобы не мерцать с рельефом (три синусоиды
+## амплитудой 0.85 м, но с длиной волны ~13 м — на двух метрах квада это
+## сантиметры), и мало, чтобы кольцо не «висело» над травой
+const HOVER_LIFT := 0.09
+
+var _hl_node: MeshInstance3D = null
+var _hl_mat: ShaderMaterial = null
+## Дерево, которому сейчас подмешан зелёный. Держим ссылку, чтобы погасить его
+## при уходе курсора — иначе подсветка осталась бы на нём навсегда
+var _hl_tree: ResourceNode = null
+
+func _ensure_highlight_node() -> void:
+	if _hl_node != null and is_instance_valid(_hl_node):
+		return
+	var quad := QuadMesh.new()
+	# Квад ЕДИНИЧНЫЙ: настоящий размер задаётся масштабом узла, поэтому меш
+	# один и тот же и для кольца в 0.9 м, и для овала в шесть метров
+	quad.size = Vector2(1.0, 1.0)
+	_hl_mat = ShaderMaterial.new()
+	_hl_mat.shader = _RES_HL_SHADER
+	_hl_mat.set_shader_parameter("tint", HOVER_RES_COLOR)
+	quad.material = _hl_mat
+	_hl_node = MeshInstance3D.new()
+	_hl_node.name = "ResourceHoverHighlight"
+	_hl_node.mesh = quad
+	# Квад стоит вертикально (плоскость XY) — кладём его на землю
+	_hl_node.rotation.x = -PI * 0.5
+	_hl_node.visible = false
+	_hl_node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	var root: Node3D = _world if _world != null else self
+	root.add_child(_hl_node)
+
+## Показать подсветку под наведённой жилой. null — погасить
+func _update_hover_highlight(rn: ResourceNode) -> void:
+	# Зелёный подмес на самом стволе снимаем с ПРЕЖНЕГО дерева всегда, даже если
+	# новое — тоже дерево: иначе за курсором тянулся бы светящийся след
+	if _hl_tree != null and is_instance_valid(_hl_tree) and _hl_tree != rn:
+		_hl_tree.set_hover_highlight(false)
+		_hl_tree = null
+	if rn == null or not is_instance_valid(rn):
+		if _hl_node != null and is_instance_valid(_hl_node):
+			_hl_node.visible = false
+		return
+	_ensure_highlight_node()
+	var center: Vector3
+	var half: Vector2
+	## Подъём НАД грунтом сверх обычного HOVER_LIFT (у дерева — до комля)
+	var lift: float = 0.0
+	if rn.resource_type == Constants.RESOURCE_WOOD:
+		# ДЕРЕВО: кольцо ровно вокруг КОМЛЯ. Узел ресурса и есть точка ствола на
+		# земле (см. _plant_tree_now: дерево сажается в свой global_position), так
+		# что центр обводки — это ровно основание ствола, а не круг бригады
+		center = rn.global_position
+		# ПОДЪЁМ К НАРИСОВАННОМУ КОМЛЮ. У Tree*.png под стволом есть прозрачные
+		# поля, поэтому кольцо, честно положенное на грунт, оказывалось на траве
+		# ПОД деревом. Величину поля меряет сама жила по своей текстуре
+		# (ResourceNode.hover_ring_lift) — числом здесь её задавать нельзя,
+		# у разных лент она разная
+		lift = rn.hover_ring_lift()
+		half = Vector2(HOVER_TREE_RADIUS, HOVER_TREE_RADIUS)
+		rn.set_hover_highlight(true)
+		_hl_tree = rn
+	else:
+		# РУДА: овал на всю кучу. Габариты — из реестра (Main.res_clusters), то
+		# есть по РЕАЛЬНО ПОСТАВЛЕННЫМ кускам. Куча без номера (её быть не
+		# должно, но подстраховаться дешевле, чем ловить исчезнувшую подсветку)
+		# подсвечивается по себе самой
+		var info: Dictionary = res_clusters.get(rn.cluster_id, {})
+		if info.is_empty():
+			center = rn.global_position
+			var rr: float = rn.slot_radius()
+			half = Vector2(rr, rr)
+		else:
+			center = info["center"]
+			var h: Vector2 = info["half"]
+			half = h + Vector2(CLUSTER_RIM, CLUSTER_RIM)
+	# Полуоси уходят в шейдер В МЕТРАХ: только зная их, он может держать линию
+	# одинаково тонкой по обеим осям вытянутого овала
+	_hl_mat.set_shader_parameter("half_size", half)
+	_hl_mat.set_shader_parameter("ring_width", HOVER_RING_W)
+	_hl_node.global_position = Vector3(center.x,
+		get_terrain_height(center.x, center.z) + HOVER_LIFT + lift, center.z)
+	# Масштаб по локальным осям квада: после поворота на -90° локальный X — это
+	# мировой X, а локальный Y — мировой Z
+	_hl_node.scale = Vector3(half.x * 2.0, half.y * 2.0, 1.0)
+	_hl_node.visible = true
+
 func _process(delta: float) -> void:
+	# ── ТАКТИЧЕСКАЯ ПАУЗА: ИНТЕРФЕЙС ЖИВЁТ, МИР СТОИТ ───────────────────────
+	# Main работает и на паузе (см. _setup_pause_modes), поэтому всё, что здесь
+	# СИМУЛЯЦИЯ, а не интерфейс, надо остановить руками. Призрак постройки и
+	# наведение курсора — интерфейс и продолжают работать; проверка победы,
+	# качание уточки и прочее «идёт время» — нет
+	var frozen: bool = get_tree().paused
 	_update_hover_cursor(delta)
-	if _duck_node and is_instance_valid(_duck_node):
+	if not frozen and _duck_node and is_instance_valid(_duck_node):
 		_duck_node.position.y = 0.45 + sin(Time.get_ticks_msec() * 0.001 * PI) * 0.08
 	if _phase == Phase.PLACING_CASTLE or _phase == Phase.PLACING_BUILDING:
 		_update_ghost(delta)
-	if _phase == Phase.PLAYING:
+	if not frozen and _phase == Phase.PLAYING:
 		# ИИ тикает сам (EnemyAI._process по THINK_INTERVAL из конфига);
 		# «волн усиления из воздуха» больше нет — армия только через найм
 		_victory_timer += delta
@@ -978,6 +1221,96 @@ func find_nearest_resource(from_pos: Vector3, res_type: int) -> ResourceNode:
 			best_dist = d; nearest = n
 	return nearest
 
+# ═════════════════════════════════════════════════════════════════════════════
+# ПОИСК СЛЕДУЮЩЕЙ ЖИЛЫ «ПОБЛИЗОСТИ», А НЕ «ГДЕ УГОДНО»
+# ═════════════════════════════════════════════════════════════════════════════
+# Это второй вход в тот же перебор, что и find_nearest_resource, но с потолком
+# по расстоянию и (для руды) с привязкой к своей куче. Разделение намеренное:
+# find_nearest_resource остаётся «ищи по всей карте» и им пользуется ИИ, когда
+# у него действительно кончилось всё рядом; рабочий игрока ходит только этим.
+#
+# Почему потолок, а не «ближайший вообще». Выработав кучу, рабочий обязан
+# ОСТАТЬСЯ на месте и попасть в счётчик простаивающих — это заказ владельца и
+# ровно то, чего не бывает при поиске по всей карте: там всегда что-то найдётся,
+# и бригада молча уходит за горизонт вместо того, чтобы попросить приказа.
+
+## Радиус, в котором ищется следующее ДЕРЕВО. У леса нет номера кучи (деревья
+## сажаются россыпью, а не композицией), поэтому «соседний ствол» — это просто
+## ствол в пределах одной делянки. 26 м — примерно два радиуса лесного массива
+## (_spawn_tree_cluster сажает кучи радиусом ~5.5 м, они стоят вплотную)
+const WOOD_NEXT_RADIUS := 26.0
+
+## Запас поверх радиуса кучи при поиске следующего куска руды. Куча выработана —
+## значит выработана целиком, но пока в ней хоть что-то есть, рабочий обязан
+## брать именно её, даже если стоит с краю
+const CLUSTER_NEXT_PAD := 4.0
+
+## Следующая жила ДЛЯ ЭТОГО ЖЕ РАБОЧЕГО: своя куча (руда) или ближайший ствол в
+## пределах делянки (лес). null — работа рядом кончилась.
+## `cluster_id` — номер кучи, на которой рабочий трудился; 0 — не знаем
+## radius_scale — расширение радиуса поиска (рабочий не смог дойти до ближней
+## жилы и ищет замену чуть шире, см. Worker.WIDE_SEARCH_SCALE).
+## skip — эту жилу не предлагать: до неё как раз и не дошли
+func find_next_resource_nearby(from_pos: Vector3, res_type: int,
+		cluster_id: int = 0, radius_scale: float = 1.0,
+		skip: ResourceNode = null) -> ResourceNode:
+	# ── РУДА: СНАЧАЛА СВОЯ КУЧА ─────────────────────────────────────────────
+	if cluster_id > 0 and res_clusters.has(cluster_id):
+		var info: Dictionary = res_clusters[cluster_id]
+		var lim: float = float(info.get("radius", 0.0)) + CLUSTER_NEXT_PAD
+		var in_cluster := _nearest_gatherable(from_pos, res_type,
+			lim * radius_scale, cluster_id, skip)
+		if in_cluster != null:
+			return in_cluster
+		# Своя куча выработана. Дальше решает вызывающий (Worker): рабочему
+		# игрока положено встать, рабочему ИИ — уйти на следующую кучу
+		return null
+	# ── ЛЕС: БЛИЖАЙШИЙ ЖИВОЙ СТВОЛ В ПРЕДЕЛАХ ДЕЛЯНКИ ───────────────────────
+	return _nearest_gatherable(from_pos, res_type,
+		WOOD_NEXT_RADIUS * radius_scale, 0, skip)
+
+## Ближайший добываемый узел нужного типа в радиусе. cluster_id > 0 — ещё и
+## строго из этой кучи; skip — узел, который не предлагать
+func _nearest_gatherable(from_pos: Vector3, res_type: int, max_dist: float,
+		cluster_id: int, skip: ResourceNode = null) -> ResourceNode:
+	var nearest: ResourceNode = null
+	var best_d2 := max_dist * max_dist
+	for n in get_tree().get_nodes_in_group("resource_nodes"):
+		var rn := n as ResourceNode
+		if rn == null or not is_instance_valid(rn):
+			continue
+		if rn.resource_type != res_type or rn.remaining <= 0.0:
+			continue
+		if skip != null and rn == skip:
+			continue
+		if cluster_id > 0 and rn.cluster_id != cluster_id:
+			continue
+		var d2: float = from_pos.distance_squared_to(rn.global_position)
+		if d2 < best_d2:
+			best_d2 = d2
+			nearest = rn
+	return nearest
+
+## СЛЕДУЮЩАЯ КУЧА ЦЕЛИКОМ — для рабочих ИИ, которым «застревать» запрещено.
+## Возвращает ближайший кусок ЧУЖОЙ (не выработанной) кучи того же типа
+func find_next_cluster_resource(from_pos: Vector3, res_type: int,
+		exclude_cluster: int = 0) -> ResourceNode:
+	var best: ResourceNode = null
+	var best_d2 := INF
+	for n in get_tree().get_nodes_in_group("resource_nodes"):
+		var rn := n as ResourceNode
+		if rn == null or not is_instance_valid(rn):
+			continue
+		if rn.resource_type != res_type or rn.remaining <= 0.0:
+			continue
+		if exclude_cluster > 0 and rn.cluster_id == exclude_cluster:
+			continue
+		var d2: float = from_pos.distance_squared_to(rn.global_position)
+		if d2 < best_d2:
+			best_d2 = d2
+			best = rn
+	return best
+
 # ─────────────────────────────────────────────────────────────────────────────
 # SPAWNING
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1072,37 +1405,78 @@ const CLUSTER_PRESETS := [
 # остаётся опрятной при любом розыгрыше.
 #
 # Координаты в метрах относительно центра кучи: [x, z, класс].
+#
+# ═════════════════════════════════════════════════════════════════════════════
+# КУСКОВ В КУЧЕ РОВНО ВДВОЕ БОЛЬШЕ (заказ владельца: «золото выглядит скудно,
+# добавить ровно в два раза, чтобы это был целый кластер»)
+# ═════════════════════════════════════════════════════════════════════════════
+# Все три шаблона выросли с 8 кусков до 16, и — что важнее — СОСТАВ ПО КЛАССАМ
+# удвоен ровно: было 2 крупных + 3 средних + 3 мелких в каждом, стало 4 + 6 + 6
+# (у «Гряды» 4 + 7 + 5).
+#
+# ЗАПАС КУЧИ ОТ ЧИСЛА КУСКОВ БОЛЬШЕ НЕ ЗАВИСИТ. Раньше зависел: запас куска
+# задавался классом, и «вдвое больше кусков» автоматически означало вдвое больше
+# ресурса. Теперь у кучи ОДИН общий пул из конфига (см. MineCluster и
+# unit_stats_config.DEFAULT_CLUSTER_GOLD), а раскладка отвечает только за то,
+# как месторождение выглядит и насколько крупным читается. Это и есть развязка,
+# ради которой всё делалось: вид правится здесь, баланс — там.
+#
+# Размах композиции при этом вырос гораздо слабее, чем вдвое (примерно 5.2×2.1 м
+# → 5.7×2.6 м): куски добавлены НЕ вширь, а вторым и третьим рядом по глубине.
+# Расползись куча вдвое по обеим осям — она перестала бы быть кучей и накрыла бы
+# полполяны, а кольца слотов соседних кусков (ResourceNode.slot_radius) и так
+# смыкаются, то есть бригаде есть где встать.
+#
+# ПРАВИЛО РАССТОЯНИЙ ТО ЖЕ, ЧТО И БЫЛО, и оно проверено попарно: центр соседа
+# не должен попадать внутрь силуэта куска. Практически это ≥1.05 м между
+# крупными, ≥0.95 м крупный-средний, ≥0.85 м между средними и ≥0.7 м до мелкого.
+# Куски соприкасаются и перекрываются краями (так куча и читается как навал), но
+# ни один не садится другому в середину
 const CLUSTER_LAYOUTS := [
-	# «Гряда» — вытянутая жила, как на эталонном скриншоте
+	# «Гряда» — вытянутая жила, как на эталонном скриншоте. Ядро идёт цепью по
+	# оси, сверху и снизу легли ещё два ряда
 	[
-		[-1.75,  0.30, "small"], [-0.90, -0.10, "mid"],  [ 0.05,  0.15, "big"],
-		[ 1.15, -0.10, "big"],   [ 2.10,  0.35, "mid"],  [ 0.60,  0.95, "mid"],
-		[-0.30,  0.95, "small"], [ 2.70, -0.25, "small"],
+		[-2.78,  0.18, "mid"],   [-1.75, -0.15, "big"],  [-0.65,  0.15, "big"],
+		[ 0.50, -0.15, "big"],   [ 1.60,  0.20, "big"],  [ 2.60, -0.15, "mid"],
+		[-1.95,  1.15, "mid"],   [-0.85,  1.25, "mid"],  [ 0.30,  1.15, "mid"],
+		[ 1.30,  1.20, "small"], [ 2.15,  1.05, "small"],
+		[-1.20, -1.25, "mid"],   [ 0.00, -1.30, "mid"],  [ 1.10, -1.20, "small"],
+		[-2.20, -1.15, "small"], [ 2.95,  0.65, "small"],
 	],
-	# «Гнездо» — компактное ядро с осыпью
+	# «Гнездо» — компактное ядро с осыпью. Четыре крупных куска стоят кустом,
+	# средние обходят их кольцом, мелочь осыпалась по краю
 	[
-		[ 0.00,  0.00, "big"],   [ 1.20,  0.30, "big"],  [ 0.60, -0.95, "mid"],
-		[-1.00,  0.40, "mid"],   [ 1.95, -0.50, "small"],[-0.55, -0.85, "small"],
-		[ 1.65,  1.10, "mid"],   [-1.75, -0.35, "small"],
+		[ 0.00,  0.00, "big"],   [ 1.15,  0.25, "big"],  [ 0.55, -1.00, "big"],
+		[-1.10,  0.35, "big"],   [ 1.85, -0.65, "mid"],  [-0.60, -1.20, "mid"],
+		[ 1.70,  1.20, "mid"],   [-1.80, -0.55, "mid"],  [ 0.35,  1.15, "mid"],
+		[-0.90,  1.35, "mid"],   [ 2.55,  0.35, "small"],[-2.25,  0.75, "small"],
+		[ 1.45, -1.75, "small"], [-1.55, -1.55, "small"],[ 0.60,  2.05, "small"],
+		[-2.30, -1.35, "small"],
 	],
-	# «Россыпь» — редкая цепочка вдоль склона
+	# «Россыпь» — редкая цепочка вдоль склона, теперь с боковыми выносами
 	[
-		[-2.15, -0.20, "mid"],   [-1.10,  0.35, "big"],  [ 0.10, -0.25, "big"],
-		[ 1.25,  0.40, "mid"],   [ 2.25, -0.15, "mid"],  [-0.50,  1.05, "small"],
-		[ 1.75,  1.05, "small"], [ 3.05,  0.40, "small"],
+		[-3.05, -0.15, "mid"],   [-2.00,  0.30, "big"],  [-0.85, -0.10, "big"],
+		[ 0.30,  0.25, "big"],   [ 1.45, -0.10, "big"],  [ 2.50,  0.30, "mid"],
+		[ 3.45, -0.20, "mid"],   [-1.45,  1.30, "mid"],  [ 0.90,  1.25, "mid"],
+		[-0.30, -1.25, "mid"],   [-2.45, -1.15, "small"],[ 1.95, -1.20, "small"],
+		[-0.35,  1.35, "small"], [ 2.05,  1.20, "small"],[ 0.75, -1.30, "small"],
+		[ 3.20,  1.05, "small"],
 	],
 ]
 
-# Размер и запас по классу куска. Разброс масштаба добавляется сверху,
-# поэтому двух одинаковых камней в куче не бывает
-# ЗАПАС ×3 к прежнему: жилы золота и каменоломни выдыхались слишком быстро,
-# рабочие успевали срыть базовую кучу за пару минут. Значения ниже — уже
-# итоговые (было 420 / 250 / 130). Множитель применяется только к КУЧАМ
-# (золото и камень) — деревья считают свой запас отдельно, в _spawn_tree_cluster
+# ── КЛАСС КУСКА — ЭТО ТЕПЕРЬ ТОЛЬКО РАЗМЕР ───────────────────────────────────
+# Раньше здесь же лежал ЗАПАС куска (amount), и суммарный запас кучи получался
+# как сумма по её составу: «добавить золота» означало править РАСКЛАДКУ, то есть
+# внешний вид, и наоборот — правка вида молча меняла баланс. Запас переехал в
+# конфиг единой цифрой на кучу (unit_stats_config.DEFAULT_CLUSTER_GOLD/_STONE,
+# см. MineCluster), и поле amount отсюда убрано, а не оставлено выключенным:
+# неиспользуемое число в балансной таблице рано или поздно кто-нибудь правит,
+# ожидая эффекта. Заодно убраны jitter и spread — их перестала читать раскладка,
+# когда та стала шаблонной (см. CLUSTER_LAYOUTS)
 const PIECE_CLASSES := {
-	"big":   {"scale": 1.60, "amount": 1260.0, "jitter": 0.22, "spread": 0.9},
-	"mid":   {"scale": 1.05, "amount":  750.0, "jitter": 0.20, "spread": 1.7},
-	"small": {"scale": 0.62, "amount":  390.0, "jitter": 0.26, "spread": 2.6},
+	"big":   {"scale": 1.60},
+	"mid":   {"scale": 1.05},
+	"small": {"scale": 0.62},
 }
 
 # Минимальный просвет между центрами кусков: намеренно МЕНЬШЕ их радиусов,
@@ -1131,6 +1505,25 @@ const PIECE_MIN_GAP := 0.42
 ## композиция чуть плотнее
 const LAYOUT_SPAN_STONE := 1.0
 const LAYOUT_SPAN_GOLD  := 0.82
+
+# ═════════════════════════════════════════════════════════════════════════════
+# РЕЕСТР КУЧ (КЛАСТЕРОВ)
+# ═════════════════════════════════════════════════════════════════════════════
+# Куча всегда была только композицией на экране: куски рождались одним вызовом
+# и тут же становились друг другу чужими. Из-за этого «выработал жилу — возьми
+# соседнюю» было НЕВЫПОЛНИМО в принципе: единственный поиск, который существовал
+# (find_nearest_resource), идёт по всей группе resource_nodes и честно отдаёт
+# ближайший кусок ХОТЬ НА ДРУГОМ КОНЦЕ КАРТЫ. Рабочий уходил за горизонт не по
+# ошибке — ему просто нечем было отличить «свою» кучу от чужой.
+#
+# id → {"type": int, "center": Vector3, "radius": float}. Заполняет
+# _spawn_resource_cluster, читают Worker (авто-цикл) и подсветка наведения
+var res_clusters: Dictionary = {}
+var _cluster_seq: int = 0
+
+## Запас радиуса овала подсветки поверх габарита по ЦЕНТРАМ кусков: крайний
+## самородок нарисован шире своей точки, и овал по голым центрам обрезал бы его
+const CLUSTER_RIM := 1.6
 
 # ── РЕСУРСЫ БАЗЫ ─────────────────────────────────────────────────────────────
 # Золото и камень стоят РЯДОМ с замком, но на расчищенном кольце: достаточно
@@ -1274,6 +1667,16 @@ func _spawn_resource_cluster(center: Vector3, res_type: int, ignore_reserved: bo
 	var span: float = LAYOUT_SPAN_GOLD if res_type == Constants.RESOURCE_GOLD \
 		else LAYOUT_SPAN_STONE
 
+	# ── КУЧА ПОЛУЧАЕТ НОМЕР И ПОПАДАЕТ В РЕЕСТР ─────────────────────────────
+	# Ровно здесь, а не в ResourceNode: только эта функция вообще знает, что
+	# полтора десятка узлов — одна куча. Дальше по номеру живут и авто-цикл
+	# рабочего (выработал кусок — берёт соседний В СВОЕЙ куче), и зелёный овал
+	# подсветки (он рисуется под кучей целиком, а не под одним самородком)
+	_cluster_seq += 1
+	var cid: int = _cluster_seq
+	var placed_pts: Array = []
+	var placed_nodes: Array = []
+
 	for entry in layout:
 		var e: Array = entry
 		var lx: float = float(e[0]) * mirror * span
@@ -1300,10 +1703,184 @@ func _spawn_resource_cluster(center: Vector3, res_type: int, ignore_reserved: bo
 		# этого хватает, чтобы двух одинаковых рядом не стояло
 		var sc: float = pc.get("scale", 1.0)
 		node.size_scale  = sc
-		node.remaining   = float(pc.get("amount", 200.0))
+		# ЗАПАС КУСКУ БОЛЬШЕ НЕ ВЫДАЁТСЯ. Он общий на всю кучу и приходит из
+		# конфига (_UStats.cluster_stock ниже); здесь только затравка, чтобы
+		# узел до сборки кучи не считался выработанным. Дальше его remaining
+		# держит MineCluster — как зеркало общего остатка
+		node.remaining   = 1.0
 		node.res_variant = 0     # 0 = вариант спрайта выберется случайно
+		node.cluster_id  = cid
 		_world.add_child(node)
 		node.global_position = Vector3(px, get_terrain_height(px, pz), pz)
+		placed_pts.append(Vector2(px, pz))
+		placed_nodes.append(node)
+
+	# Габариты кучи считаются по РЕАЛЬНО ПОСТАВЛЕННЫМ кускам, а не по шаблону:
+	# часть его точек отбраковывается водой и пятачком базы, и куча у берега
+	# честно оказывается меньше и смещённой. Овал подсветки обязан лечь на то,
+	# что стоит на карте, а не на то, что задумывалось
+	if placed_pts.is_empty():
+		_cluster_seq -= 1          # куча не состоялась — номер не расходуем
+		return
+	var cmin := Vector2(INF, INF)
+	var cmax := Vector2(-INF, -INF)
+	for p in placed_pts:
+		var pv: Vector2 = p
+		cmin.x = minf(cmin.x, pv.x); cmin.y = minf(cmin.y, pv.y)
+		cmax.x = maxf(cmax.x, pv.x); cmax.y = maxf(cmax.y, pv.y)
+	var mid_pt: Vector2 = (cmin + cmax) * 0.5
+	var half: Vector2 = (cmax - cmin) * 0.5
+	var mid3 := Vector3(mid_pt.x, get_terrain_height(mid_pt.x, mid_pt.y), mid_pt.y)
+
+	# ── КУЧА СОБИРАЕТСЯ В ЕДИНЫЙ ОБЪЕКТ ─────────────────────────────────────
+	# Ровно здесь, и только здесь: это единственное место, которое знает, что
+	# полтора десятка узлов — одна жила. Ёмкость приходит из конфига одной
+	# цифрой, а не складывается из запасов кусков (см. unit_stats_config.
+	# DEFAULT_CLUSTER_GOLD): раньше «добавить золота» означало править РАСКЛАДКУ,
+	# то есть внешний вид, и наоборот
+	var kind: String = "gold" if res_type == Constants.RESOURCE_GOLD else "stone"
+	var mine = _MineCluster.new()
+	mine.setup(cid, res_type, mid3, half, CLUSTER_RIM,
+		_UCfg.cluster_stock(kind), placed_nodes)
+	for n in placed_nodes:
+		(n as ResourceNode)._mine = mine
+
+	res_clusters[cid] = {
+		"type": res_type,
+		"center": mid3,
+		# Радиус — по большей полуоси плюс силуэт крайнего куска: подсветка и
+		# поиск «в своей куче» обязаны накрывать нарисованное, а не только центры
+		"radius": maxf(half.x, half.y) + CLUSTER_RIM,
+		# Полуоси по отдельности: подсветка рисует ОВАЛ по форме кучи, а не круг
+		# по её наибольшему габариту. Куча вытянутая («Гряда», «Россыпь»), и круг
+		# по длинной оси захватил бы половину поляны рядом с ней
+		"half": half,
+		# Сам объект кучи. Реестр остаётся словарём (его геометрию читают
+		# подсветка и поиск «в своей куче»), а логика добычи живёт здесь
+		"mine": mine,
+	}
+
+## ═════════════════════════════════════════════════════════════════════════════
+## ДЕРЕВНЯ ГОБЛИНОВ — ПРАВЫЙ ВЕРХНИЙ УГОЛ
+## ═════════════════════════════════════════════════════════════════════════════
+## Десять хижин и десять стартовых отрядов. Пять отрядов выходят уже с
+## серебряной звездой и с четырьмя РОЗДАННЫМИ наградами — вновь нанятые звёзд
+## не получают вовсе (заказ владельца).
+##
+## Отряды спавнятся СРАЗУ и СРАЗУ ЗАСЫПАЮТ: до тридцатой минуты они не тикают
+## ни физикой, ни картинкой (см. GoblinAI._set_dormant). Ставить их позже
+## нельзя — тысяча бойцов, рождённая одним кадром на тридцатой минуте, дала бы
+## фриз ровно в тот момент, когда начинается бой.
+func goblin_village_center() -> Vector3:
+	var a: Vector2 = _GobCfg.VILLAGE_ANCHOR
+	var x: float = GEN_HALF_X * a.x
+	var z: float = GEN_HALF_Z * a.y
+	return Vector3(x, get_terrain_height(x, z), z)
+
+func _spawn_goblin_village() -> void:
+	# Массовые стенды деревню выключают — см. perf_config.goblin_village
+	if not _Opt.goblin_village:
+		return
+	var center := goblin_village_center()
+	# ── ХИЖИНЫ: ПЛОТНЫЙ КЛАСТЕР ─────────────────────────────────────────────
+	# Раскладка — сетка в шахматку с шагом HUT_STEP (goblin_config.hut_offsets),
+	# детерминированная: деревня обязана выглядеть одинаково в двух прогонах.
+	#
+	# ЗДЕСЬ БЫЛО КОЛЬЦО РАДИУСА 26 М, и оно давало ровно то, на что жаловался
+	# владелец: десять домиков, разнесённых на полсотни метров, читались как
+	# случайно разбросанные постройки, а не как деревня. Вдобавок проверка
+	# зазора отсеивала часть точек кольца, и хижин выходило меньше десяти.
+	var spots: Array = []
+	for off in _GobCfg.hut_offsets():
+		var o: Vector2 = off
+		var px: float = center.x + o.x
+		var pz: float = center.z + o.y
+		# Зазор всё равно проверяем: сетка выдерживает его по построению, но
+		# раскладку правят руками, и наложение хижин читалось бы как одно
+		# здание с двойным запасом здоровья
+		var ok := true
+		for prev in spots:
+			if (prev as Vector2).distance_to(Vector2(px, pz)) < _GobCfg.HUT_MIN_GAP:
+				ok = false
+				break
+		if ok:
+			spots.append(Vector2(px, pz))
+	for sp in spots:
+		var v: Vector2 = sp
+		var hut = _GoblinHut.new()
+		hut.faction = Constants.FACTION_GOBLIN
+		_world.add_child(hut)
+		hut.global_position = Vector3(v.x, get_terrain_height(v.x, v.y), v.y)
+
+	# ── СТАРТОВАЯ ОРДА ──────────────────────────────────────────────────────
+	var vet_level: int = _GobCfg.veteran_level_for_tier(_UCfg, _GobCfg.VETERAN_TIER)
+	for i in range(_GobCfg.ARMY_COMPOSITION.size()):
+		var uid: String = String(_GobCfg.ARMY_COMPOSITION[i])
+		var sid: int = GameManager.new_squad(Constants.FACTION_GOBLIN, uid)
+		var n: int = int(_GobCfg.SQUAD_SIZE.get(uid, 20))
+		# Отряды стоят КОЛЬЦОМ ВОКРУГ деревни, за околицей: внутри стоят хижины,
+		# и толпа в сто человек влезла бы прямо в них
+		var ang2: float = TAU * float(i) / float(_GobCfg.ARMY_COMPOSITION.size())
+		var ring_r: float = _GobCfg.VILLAGE_RADIUS + _GobCfg.horde_radius(n) + 2.0
+		var base := Vector2(center.x + cos(ang2) * ring_r,
+			center.z + sin(ang2) * ring_r)
+		var scene: PackedScene = Building.PRELOAD_SCENES.get(uid)
+		if scene == null:
+			continue
+		for k in range(n):
+			var u: Unit = scene.instantiate()
+			u.faction = Constants.FACTION_GOBLIN
+			_world.add_child(u)
+			# ── ТОЛПА, А НЕ ПРЯМОУГОЛЬНИК ───────────────────────────────────
+			# Гоблины не держат шеренгу: места раздаются по диску (спираль
+			# золотого угла + детерминированный сдвиг), см.
+			# goblin_config.horde_offset. Прежняя раскладка по колонкам давала
+			# ту самую «фалангу людской пехоты», которой у орды быть не должно
+			var ho: Vector2 = _GobCfg.horde_offset(k, n, sid)
+			var ux: float = base.x + ho.x
+			var uz: float = base.y + ho.y
+			u.global_position = Vector3(ux, get_terrain_height(ux, uz), uz)
+			u.sync_row()
+			GameManager.add_to_squad(sid, u)
+		# ── СЕРЕБРО ПЕРВЫМ ПЯТИ ─────────────────────────────────────────────
+		# Уровень ставится напрямую, а не «накапливается убийствами»: отряд
+		# обязан ВЫЙТИ ветераном. Награды раздаются тем же путём, каким их
+		# берёт игрок (apply_veteran_choice), поэтому бонусы доходят до бойцов
+		# ровно так же — без второй реализации раздачи
+		if i < _GobCfg.VETERAN_START_SQUADS:
+			_grant_goblin_veterancy(sid, vet_level)
+	if goblin_ai != null:
+		goblin_ai.setup(self, center)
+
+## Выдать отряду уровень и РАЗДАТЬ за него награды. Выбор идёт по списку
+## предпочтений из конфига; чего на этом уровне не предлагают — пропускается
+func _grant_goblin_veterancy(sid: int, level: int) -> void:
+	GameManager.squads[sid]["level"] = level
+	GameManager.squads[sid]["pending"] = _GobCfg.VETERAN_AUTO_PICKS
+	var utype: String = GameManager.squad_type(sid)
+	for _step in range(_GobCfg.VETERAN_AUTO_PICKS):
+		# Награды берутся ровно тем же путём, что и в панели игрока: список
+		# зависит от УРОВНЯ, на котором отряд сейчас выбирает
+		var lvl: int = GameManager.squad_choosing_level(sid)
+		if lvl <= 0:
+			break
+		var choices: Array = _UCfg.veteran_choices(utype, lvl)
+		if choices.is_empty():
+			break
+		var pick := 0
+		for want in _GobCfg.VETERAN_PREFERENCE:
+			var found := -1
+			for ci in range(choices.size()):
+				var c: Dictionary = choices[ci]
+				if float(c.get(String(want), 0.0)) != 0.0:
+					found = ci
+					break
+			if found >= 0:
+				pick = found
+				break
+		if not GameManager.apply_veteran_choice(sid, pick):
+			break
+	GameManager.refresh_star(sid)
 
 func _spawn_enemy_base() -> void:
 	var castle := Castle.new()

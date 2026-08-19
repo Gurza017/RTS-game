@@ -8,8 +8,8 @@ signal resources_changed(faction)
 var resources: Dictionary = {}
 
 func _ready() -> void:
-	_init_faction(Constants.FACTION_PLAYER)
-	_init_faction(Constants.FACTION_ENEMY)
+	for f in range(Constants.FACTION_COUNT):
+		_init_faction(f)
 
 func _init_faction(f: int) -> void:
 	resources[f] = {
@@ -26,8 +26,8 @@ func reset_resources() -> void:
 	# СТАРТ сохранён специально: когда у ИИ было на 50 дерева и 50 золота больше,
 	# он закладывал постройку раньше игрока, и это читалось как «ресурсы падают
 	# с неба». Раздельные блоки нужны, чтобы фору МОЖНО было дать осознанно
-	resources[Constants.FACTION_PLAYER] = _UCfg.starting_resources(Constants.FACTION_PLAYER)
-	resources[Constants.FACTION_ENEMY]  = _UCfg.starting_resources(Constants.FACTION_ENEMY)
+	for f in range(Constants.FACTION_COUNT):
+		resources[f] = _UCfg.starting_resources(f)
 	gathered.clear()          # новая партия — новый счёт добытого
 	resources_changed.emit(Constants.FACTION_PLAYER)
 

@@ -2,6 +2,12 @@ extends Unit
 class_name Worker
 
 const _SSParser := preload("res://scripts/SpriteSheetParser.gd")
+## Только ради константы F_WORKING: сами массивы живут полем GameManager.army
+const _Army := preload("res://scripts/army/ArmySoA.gd")
+
+## Последнее записанное в строку значение F_WORKING. Держим у себя, чтобы не
+## трогать массив признаков каждый тик — он общий на всю армию
+var _soa_working: bool = false
 
 @export var gather_time: float   = 2.0
 @export var gather_amount: float = 10.0
@@ -16,6 +22,13 @@ var gather_target: ResourceNode = null
 # Тип ресурса, на который рабочего послали. Переживает исчезновение самого
 # узла (дерево срубили в пень и оно освободилось) — по нему ищем следующее
 var _gather_res_type: int  = -1
+## Номер КУЧИ, на которой рабочий сейчас трудится (ResourceNode.cluster_id).
+## 0 — куча неизвестна или её нет вовсе (лес сажается россыпью, а не кучей).
+## Переживает исчезновение узла ровно по той же причине, что и _gather_res_type:
+## кусок руды при выработке освобождается насовсем, и спросить его номер потом
+## уже не у кого — а именно в этот момент он и нужен, чтобы взять СОСЕДНИЙ кусок
+## В ТОЙ ЖЕ КУЧЕ, а не первый попавшийся на карте (см. _auto_find_resource)
+var _gather_cluster: int   = 0
 var _gather_timer: float   = 0.0
 var _axe: Node3D           = null
 var _pickaxe: Node3D       = null
@@ -157,23 +170,77 @@ func _create_pickaxe() -> void:
 	_pickaxe.visible  = false
 	add_child(_pickaxe)
 
+# ═════════════════════════════════════════════════════════════════════════════
+# АВТО-ЦИКЛ: ВЫРАБОТАЛ — ВЗЯЛ СЛЕДУЮЩЕЕ. РАЗНЫЙ У ИГРОКА И У ИИ
+# ═════════════════════════════════════════════════════════════════════════════
+# ЧТО БЫЛО. Здесь стоял единственный вызов GameManager.find_nearest_resource,
+# то есть «ближайший кусок этого типа НА ВСЕЙ КАРТЕ». Формально авто-цикл был, и
+# срубленное дерево действительно сменялось следующим — но границы у поиска не
+# было никакой. Выработав кучу у базы, бригада молча уходила за полкарты к
+# первой попавшейся жиле: мимо озера, мимо вражеских патрулей, без единого
+# приказа игрока и без единого признака в интерфейсе. Простаивающих рабочих при
+# этом не появлялось НИКОГДА — счётчик Idle Workers на выработке кучи не
+# срабатывал в принципе, потому что рабочий всегда что-то себе находил.
+#
+# ЧТО СТАЛО — две разные политики, как и заказано:
+#   • ИГРОК: следующий кусок берётся только В СВОЕЙ КУЧЕ (руда) или в пределах
+#     делянки (лес). Кончилось рядом — рабочий встаёт и попадает в счётчик
+#     простаивающих. Куда вести бригаду дальше, решает игрок, а не эвристика.
+#   • ИИ: то же самое, но при пустой куче он не встаёт, а уходит на СЛЕДУЮЩУЮ
+#     кучу (find_next_cluster_resource). ИИ некому раздать приказ вручную, и
+#     застрявшая на выработанной жиле бригада — это просто мёртвая экономика.
+#
+# Куча опознаётся по номеру (ResourceNode.cluster_id, реестр в Main.res_clusters)
 func _auto_find_resource(res_type: int) -> void:
 	if res_type < 0:
 		state = State.IDLE
 		return
-	var new_target: ResourceNode = GameManager.find_nearest_resource(global_position, res_type)
-	if new_target:
+	# Недоступная жила исключается ровно на этот поиск (см. _blocked_target)
+	var skip: ResourceNode = _blocked_target
+	_blocked_target = null
+	# 1. Рядом: свой кластер для руды, соседний ствол для леса
+	var new_target: ResourceNode = GameManager.find_next_resource_nearby(
+		global_position, res_type, _gather_cluster, 1.0, skip)
+	# 1б. Не вышло — ищем ЧУТЬ ШИРЕ. Это случай «следующий ствол перекрыт»:
+	# рядом стволы есть, но до них не дойти, и стоять столбом посреди делянки
+	# рабочий не должен
+	if new_target == null and skip != null:
+		new_target = GameManager.find_next_resource_nearby(
+			global_position, res_type, _gather_cluster, WIDE_SEARCH_SCALE, skip)
+	# 2. Рабочий ИИ не имеет права застревать — идёт на следующую кучу
+	if new_target == null and faction != Constants.FACTION_PLAYER:
+		new_target = GameManager.find_next_cluster_resource(
+			global_position, res_type, _gather_cluster)
+	if new_target != null:
 		command_gather(new_target)
-	else:
-		# Ресурса этого типа на карте не осталось — только тогда встаём
-		_gather_res_type = -1
-		state = State.IDLE
+		return
+	# ── МОЯ КУЧА ЕЩЁ НЕ ПУСТА — ЗНАЧИТ ДЕЛО НЕ В НЕЙ, А В ДОРОГЕ ─────────────
+	# Заказ владельца: «если точка заблокирована, делать повторную попытку, а не
+	# сбрасывать рабочий статус». Поиск выше ограничен радиусом вокруг рабочего;
+	# рабочего могло вытолкнуть за этот радиус (соседи, обход кучи), и тогда он
+	# вставал бездельником при живой жиле в двух шагах. Спрашиваем саму кучу:
+	# пока в ней есть запас, у неё есть и якорь — цель, которая переживёт всю
+	# выработку (см. MineCluster.anchor)
+	if _gather_cluster > 0:
+		var anchor: ResourceNode = GameManager.cluster_anchor(_gather_cluster)
+		if anchor != null and is_instance_valid(anchor) and anchor.is_gatherable():
+			command_gather(anchor)
+			return
+	# ── РЯДОМ ВСЁ ВЫРАБОТАНО: ВСТАЁМ И ЖДЁМ ПРИКАЗА ─────────────────────────
+	# Слот на бывшей жиле обязателен к возврату, иначе он остался бы забронирован
+	# за рабочим, который уже ничего не добывает (см. _free_slot)
+	_free_slot()
+	gather_target    = null
+	_gather_res_type = -1
+	_gather_cluster  = 0
+	state            = State.IDLE
 
 func command_move(target_pos: Vector3, slow_march: bool = false, face_dir: Vector3 = Vector3.ZERO,
 		keep_retreat: bool = false, player_order: bool = false, run: bool = false) -> void:
 	_free_slot()
 	gather_target    = null
 	_gather_res_type = -1     # прямой приказ игрока отменяет работу
+	_gather_cluster  = 0
 	_leave_construction()
 	super.command_move(target_pos, slow_march, face_dir, keep_retreat, player_order, run)
 
@@ -200,6 +267,7 @@ func command_build(site: Node3D) -> void:
 	_free_slot()
 	gather_target    = null
 	_gather_res_type = -1
+	_gather_cluster  = 0
 	_leave_construction()
 	build_target = site
 	move_target  = site.work_position(global_position)
@@ -207,13 +275,30 @@ func command_build(site: Node3D) -> void:
 	_wake_process()
 
 func command_gather(node: ResourceNode) -> void:
+	if node == null or not is_instance_valid(node):
+		return
+	# ЦЕЛЬ ДОБЫЧИ У РУДЫ — ВСЯ КУЧА, А НЕ ТОТ КАМУШЕК, ПО КОТОРОМУ КЛИКНУЛИ.
+	# gather_anchor() отдаёт кусок, который переживёт всю выработку (см.
+	# MineCluster.anchor). Без этого цель пропадала бы на каждом косметически
+	# исчезнувшем камушке, и рабочий уходил бы в поиск следующей на ровном месте
+	node = node.gather_anchor()
 	_leave_construction()
 	set_attack_target(null)
 	# Слот на прежней жиле отдаём: иначе он остался бы забронирован навсегда
 	if gather_target != null and is_instance_valid(gather_target) and gather_target != node:
 		gather_target.release_slot(self)
+	# Счёт попыток дойти обнуляется ТОЛЬКО при СМЕНЕ цели. Повтор подхода зовёт
+	# эту же функцию с той же жилой (см. tick_physics), и безусловный сброс
+	# означал бы, что порог APPROACH_GIVE_UP не достигается никогда, — то есть
+	# вечный повтор остался бы на месте
+	if gather_target != node:
+		_approach_fails = 0
 	gather_target    = node
 	_gather_res_type = node.resource_type
+	# Номер кучи запоминается ЗДЕСЬ, а не спрашивается у цели потом: к моменту,
+	# когда рабочий доработает кусок, узла уже не будет (руда освобождается
+	# насовсем, см. ResourceNode.extract), и спросить будет не у кого
+	_gather_cluster  = node.cluster_id
 	# ИДЁМ НА КОЛЬЦО, А НЕ В ЦЕНТР ЖИЛЫ. Приказ в global_position камня означал
 	# «влезь внутрь спрайта и дрожи там вместе со всеми» — см. ResourceNode.claim_slot
 	move_target      = node.claim_slot(self)
@@ -372,7 +457,8 @@ func _update_sprite_anim() -> void:
 
 ## Переопределяет Unit.tick_physics (см. шапку там же — централизованный тик
 ## через GameManager, метод больше не движковая нотификация)
-func tick_physics(delta: float) -> void:
+func tick_physics(delta: float, prof: bool = false, bm: bool = true,
+		bonus_ver: int = -1) -> void:
 	# С грузом рабочий идёт медленнее (walk_speed_loaded из конфига)
 	move_speed = walk_speed_loaded if state == State.RETURNING else walk_speed_empty
 	var wt := _work_res_type()
@@ -403,6 +489,18 @@ func tick_physics(delta: float) -> void:
 	# Рабочий в этих состояниях двигается сам (подход к слоту, доводка
 	# SETTLE_SPEED, ход к точке сдачи), поэтому писать надо КАЖДЫЙ тик, а не по
 	# порогу
+	# ── «Я РАБОТАЮ» — РАЗРЕШЕНИЕ СТОЯТЬ ТЕСНЕЕ ──────────────────────────────
+	# Заказ владельца: у одного дерева или у кучи руды бригада должна слипаться,
+	# накладываясь примерно на треть спрайта. Признак читает пакетный разбор
+	# наложений (ArmySoA.batch_separation, F_WORKING), он же его и единственный
+	# читатель. Пишется признак ЗДЕСЬ, в одном месте на все состояния, — иначе
+	# его пришлось бы снимать в каждом приказе, и один забытый путь оставил бы
+	# бойца «работающим» навсегда
+	var working: bool = state == State.GATHERING or state == State.BUILDING
+	if working != _soa_working and _soa >= 0:
+		_soa_working = working
+		GameManager.army.set_flag(_soa, _Army.F_WORKING, working)
+
 	if state == State.BUILDING:
 		_sync_soa_row()
 		_process_build(delta)
@@ -445,7 +543,7 @@ func tick_physics(delta: float) -> void:
 			_gather_timer = _cycle_time()
 			_wake_process()
 			return
-		super.tick_physics(delta)
+		super.tick_physics(delta, prof, bm, bonus_ver)
 		if state == State.IDLE and gather_target != null and is_instance_valid(gather_target):
 			if _in_work_reach():
 				state         = State.GATHERING
@@ -457,11 +555,34 @@ func tick_physics(delta: float) -> void:
 				# бездельников не попадал, потому что цель у него формально есть.
 				# Ровно это и выглядит как «встал в куче камней и не работает».
 				# Подходим заново, но не чаще раза в секунду, чтобы не сыпать
-				# приказами каждый кадр
+				# приказами каждый кадр.
+				#
+				# ── НО НЕ БЕСКОНЕЧНО, И ЭТО ВТОРАЯ ПОЛОВИНА ЛЕЧЕНИЯ ─────────────
+				# Повтор был ВЕЧНЫМ. Если до жилы не дойти в принципе — ствол за
+				# другими стволами, место занято, дорога перекрыта — рабочий раз в
+				# секунду получал приказ, делал шаг, упирался, возвращался в IDLE и
+				# получал его снова. Это и есть «битый Idle с тиком»: работы нет,
+				# в счётчик простаивающих он не попадает (цель-то назначена), и
+				# дёргается так до конца партии.
+				#
+				# Теперь попытки считаются. Исчерпал — жила признаётся недоступной,
+				# ИСКЛЮЧАЕТСЯ из поиска и ищется замена в РАСШИРЕННОМ радиусе
+				# (заказ владельца: «ищет доступное дерево в чуть большем радиусе»).
+				# Не нашлось и там — рабочий честно встаёт бездельником, попадает в
+				# счётчик и ждёт приказа, а не топчется
 				_approach_retry -= delta
 				if _approach_retry <= 0.0:
 					_approach_retry = 1.0
-					command_gather(gather_target)
+					_approach_fails += 1
+					if _approach_fails >= APPROACH_GIVE_UP:
+						var t: int = _gather_res_type
+						_blocked_target = gather_target
+						_free_slot()
+						gather_target = null
+						_approach_fails = 0
+						_auto_find_resource(t)
+					else:
+						command_gather(gather_target)
 
 # ── СКОРОСТЬ ДОБЫЧИ ПО ТИПУ РЕСУРСА ──────────────────────────────────────────
 ## РУБКА ЛЕСА БЫСТРЕЕ НА 15%. Дерево — самый ходовой ресурс: он уходит и на
@@ -471,11 +592,30 @@ func tick_physics(delta: float) -> void:
 ## Пень при этом остаётся на карте, как и раньше (см. ResourceNode._show_stump)
 const WOOD_SPEEDUP := 0.85
 
-## Длительность одного цикла добычи с учётом типа ресурса
+## НИЖЕ ЭТОГО ЦИКЛ НЕ ОПУСКАЕТСЯ НИКАКИМИ УЛУЧШЕНИЯМИ. Цикл — это ещё и время
+## между взмахами инструмента: на десятых долях секунды рабочий перестаёт рубить
+## и начинает дрожать, а сама добыча превращается в струю ресурса. Потолок
+## прокачки лучше упереть здесь, в одном месте, чем ловить его балансом цен
+const MIN_CYCLE_TIME := 1.10
+
+## Длительность одного цикла добычи с учётом типа ресурса и веток кузницы.
+##
+## bonus_gather — СЕКУНДЫ ДОЛОЙ (см. unit_stats_config.BONUS_KEYS): в конфиге он
+## записан положительным, как и все прочие бонусы, а вычитается здесь. Множитель
+## леса применяется ДО вычитания — иначе одна и та же ветка давала бы на дереве
+## меньше секунд, чем на камне, хотя в описании узла написано одно число
 func _cycle_time() -> float:
+	var t: float = gather_time
 	if _work_res_type() == Constants.RESOURCE_WOOD:
-		return gather_time * WOOD_SPEEDUP
-	return gather_time
+		t *= WOOD_SPEEDUP
+	t -= GameManager.unit_bonus(faction, stat_id, "bonus_gather") + vet_gather
+	return maxf(t, MIN_CYCLE_TIME)
+
+## Сколько ресурса рабочий уносит за одну ходку. База из конфига плюс ветка
+## вместимости в кузнице (bonus_carry)
+func carry_capacity() -> float:
+	return maxf(1.0, gather_amount
+		+ GameManager.unit_bonus(faction, stat_id, "bonus_carry"))
 
 ## Насколько близко к своей точке на кольце нужно подойти, чтобы считать, что
 ## рабочий на месте. Заметно шире базовых 30 см: в бригаде соседи всё время
@@ -503,34 +643,82 @@ func _at_gather_slot() -> bool:
 ## Дотягивается ли инструмент до назначенной жилы прямо сейчас.
 ## Порог берётся У САМОЙ ЖИЛЫ (ResourceNode.work_reach) и потому согласован
 ## с разметкой кольца слотов: крупный самородок раздвигает и кольцо, и руку
+## Вопрос задаётся САМОЙ ЦЕЛИ (ResourceNode.in_work_reach): у одиночного ресурса
+## это по-прежнему расстояние до центра, у кучи руды — попадание в её зону.
+## У кучи «центра» в осмысленном виде нет: она вытянута, и мерить до середины
+## значило бы объявить рабочего на дальнем торце не дотянувшимся
 func _in_work_reach() -> bool:
 	if gather_target == null or not is_instance_valid(gather_target):
 		return false
-	if gather_target.remaining <= 0.0:
-		return false
-	var tpos := gather_target.global_position
-	var dx: float = global_position.x - tpos.x
-	var dz: float = global_position.z - tpos.z
-	var reach: float = gather_target.work_reach()
-	return dx * dx + dz * dz < reach * reach
+	return gather_target.in_work_reach(global_position)
 
 ## Обратный отсчёт до повторной попытки подойти к жиле
 var _approach_retry: float = 0.0
 
+## Сколько раз подряд рабочий пробует дойти до назначенной жилы, прежде чем
+## признать её недоступной. Попытка идёт раз в секунду (см. _approach_retry),
+## то есть четыре попытки — это четыре секунды: заметно дольше любой толчеи у
+## камня и заметно короче «до конца партии»
+const APPROACH_GIVE_UP := 4
+var _approach_fails: int = 0
+
+## Жила, до которой дойти не удалось. Исключается из ближайшего поиска замены —
+## иначе поиск «ближайшего» немедленно вернул бы её же, и цикл пошёл бы заново.
+## Ссылка живёт ровно один поиск и тут же гасится
+var _blocked_target: ResourceNode = null
+
+## Во сколько раз шире ищется замена, когда ближняя жила оказалась недоступна.
+## Именно «чуть шире», а не «по всей карте»: бригада не должна молча уходить за
+## полкарты — это ровно та болезнь, от которой авто-цикл и лечили (см. шапку
+## _auto_find_resource)
+const WIDE_SEARCH_SCALE := 2.5
+
 ## ТЕМП ВЗМАХА. Один полный оборот синуса = один удар: по нему заводятся И
 ## дрожь дерева, И звук топора, поэтому они синхронны по построению.
 ##
-## Было 3.5 (≈0.56 удара в секунду). Поднято на 30% до 4.55 (≈0.72): рубка
-## слышна и видна заметно чаще, при этом взмах остаётся взмахом, а не
-## превращается в дрожание инструмента.
+## Было 3.5 (≈0.56 удара в секунду), затем 4.55 (≈0.72). Сейчас 6.30 — это
+## РОВНО ОДИН УДАР В СЕКУНДУ (TAU / 6.30 ≈ 1.0 с на полный взмах) и ещё +38% к
+## плотности стука: заказ владельца — «звуков топора очень жиденько, хочу
+## слышать больше».
 ##
-## На СКОРОСТЬ ДОБЫЧИ это не влияет вовсе — она считается таймером цикла
-## (_cycle_time), а не числом взмахов. Меняется только «плотность» отдачи
-const CHOP_SWING_RATE := 4.55
+## ПОЧЕМУ ПОДНИМАЕТСЯ ИМЕННО ТЕМП, А НЕ ЛИМИТЫ ЗВУКА. Ограничитель категории
+## (AudioManager.SFX_LIMITS.chop) при пятерых рабочих не срабатывал вовсе:
+## пятеро на 0.72 Гц дают ~3.6 удара в секунду, а окно gap = 0.07 пропускает
+## четырнадцать. То есть звуков было мало не потому, что их резали, а потому,
+## что их СТОЛЬКО И БЫЛО — рубили редко. Лимиты подняты следом (см. там же), но
+## они лишь снимают потолок для большой бригады, а слышимую плотность у малой
+## задаёт вот это число.
+##
+## ВЫШЕ ПОДНИМАТЬ НЕЛЬЗЯ: секунда на замах — это ещё замах, а на 8+ инструмент
+## начинает дрожать вместо того, чтобы рубить.
+##
+## На СКОРОСТЬ ДОБЫЧИ это по-прежнему не влияет ВООБЩЕ — она считается таймером
+## цикла (_cycle_time), а не числом взмахов. Владелец просил темп добычи не
+## трогать, и он не тронут: меняется только «плотность» отдачи, то есть сколько
+## раз за один и тот же цикл дёрнется дерево и звякнет топор
+const CHOP_SWING_RATE := 6.30
+
+## ТЕМП УДАРА КИРКОЙ — ОТДЕЛЬНЫЙ, И ОН НЕ МЕНЯЛСЯ (прежние 4.55).
+## Раньше это была одна константа на весь инструмент, и ускорение топора
+## автоматически ускорило бы и кирку — а заказ был именно про лес («больше
+## звуков рубящего леса»). По делу они и не должны совпадать: удар киркой по
+## камню тяжелее взмаха топором, и на секундном темпе рудник начинает звучать
+## отбойным молотком. Молоток строителя идёт по этой же, спокойной ставке
+const MINE_SWING_RATE := 4.55
+
+## Темп замаха для того инструмента, который сейчас в руках
+func _swing_rate() -> float:
+	# Стройка проверяется ПЕРВОЙ: у строителя gather_target пуст, и
+	# _work_res_type() отдал бы тип ГРУЗА (по умолчанию — дерево), то есть
+	# молоток невольно поехал бы по ставке топора
+	if state == State.BUILDING:
+		return MINE_SWING_RATE
+	return CHOP_SWING_RATE if _work_res_type() == Constants.RESOURCE_WOOD \
+		else MINE_SWING_RATE
 
 func _animate_chop(delta: float) -> void:
 	var prev := _chop_time
-	_chop_time += delta * CHOP_SWING_RATE
+	_chop_time += delta * _swing_rate()
 	var swing := -30.0 + sin(_chop_time) * 40.0
 	if _axe and _axe.visible:
 		_axe.rotation_degrees.x = swing
@@ -582,10 +770,19 @@ func _process_gather(delta: float) -> void:
 		var bd := back.length()
 		if bd > SLOT_SETTLE:
 			_move_blocked(back / bd * (SETTLE_SPEED * delta))
+	# ── ВНУТРЬ НАВАЛА РАБОЧИЙ НЕ ЗАХОДИТ ────────────────────────────────────
+	# Приказ внутрь не выдаётся никогда: цель добычи у кучи — точка на ВНЕШНЕМ
+	# периметре (MineCluster.claim_slot). Но затолкать рабочего внутрь могут и
+	# чужие силы — расталкивание соседями, обход ствола, подошедшая бригада.
+	# Тогда он тихо выдавливается наружу тем же незаметным шагом, что и доводка
+	# до слота. Именно этот случай и выглядел как «залез в текстуру и дёргается»
+	var push := gather_target.outward_push(global_position)
+	if push != Vector3.ZERO:
+		_move_blocked(push * (SETTLE_SPEED * 2.0 * delta))
 	_gather_timer -= delta
 	if _gather_timer <= 0.0:
 		if carrying_amount == 0.0:
-			var taken       := gather_target.extract(gather_amount)
+			var taken       := gather_target.extract(carry_capacity())
 			carrying_amount  = taken
 			carrying_type    = gather_target.resource_type
 		var drop_off := GameManager.get_nearest_dropoff(faction, global_position)

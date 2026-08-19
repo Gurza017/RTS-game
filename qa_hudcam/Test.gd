@@ -480,9 +480,22 @@ func _test_idle_widget() -> void:
 		again.size() == idle_all.size(),
 		"во второй раз выделено %d из %d" % [again.size(), idle_all.size()])
 
-	# Занятого рабочего плашка перестаёт считать
+	# ── ЗАНЯТОГО РАБОЧЕГО ПЛАШКА ПЕРЕСТАЁТ СЧИТАТЬ ──────────────────────────
+	# «Занятость» задаётся НАСТОЯЩИМ ПРИКАЗОМ, а не присвоением state.
+	# Раньше здесь стояло `ws[0].state = GATHERING` без цели — состояние, какого
+	# игра не производит: на первом же тике Worker._process_gather видит пустую
+	# цель, не находит работы рядом и честно возвращает бойца в IDLE, после чего
+	# он снова попадает в счётчик. Проверка ловила не плашку, а собственную
+	# подделку состояния
 	var before_n: int = hud._idle_workers().size()
-	ws[0].state = Unit.State.GATHERING
+	var busy_tree: ResourceNode = null
+	for n2 in get_tree().get_nodes_in_group("resource_nodes"):
+		var rn2 := n2 as ResourceNode
+		if rn2 != null and rn2.is_gatherable():
+			busy_tree = rn2
+			break
+	if busy_tree != null:
+		ws[0].command_gather(busy_tree)
 	await frames(1)
 	hud._idle_timer = 0.0
 	hud._idle_last = -1

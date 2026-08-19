@@ -106,23 +106,32 @@ func _test_gate_spawn() -> void:
 	verdict("A3 квадрат для 9 = 3 колонны",
 		Building.square_cols(9) == 3, "получили %d" % Building.square_cols(9))
 
-	# Барак в стороне от центра: ворота обязаны смотреть НА ЦЕНТР карты,
-	# а не в прибитый мировой +X
+	# ── ВОРОТА СМОТРЯТ ТУДА, КУДА НАРИСОВАН ФАСАД ───────────────────────────
+	# Проверка требовала «ворота на середину карты» — и ровно это правило было
+	# причиной жалобы «бойцы выходят сбоку от барака»: картинка здания прибита
+	# фасадом к мировому +Z и от положения на карте не зависит вовсе, так что
+	# ворота уезжали от нарисованных дверей тем сильнее, чем дальше барак от
+	# центра. Сверяемся с фасадом (Building.facade_dir) — с тем же, с чем
+	# сверяется игрок глазами
 	var b := Barracks.new()
 	b.faction = Constants.FACTION_PLAYER
 	main.world_add(b)
 	b.global_position = Vector3(-40, 0, -40)
 	await frames(3)
 	var gate: Vector3 = b._gate_position()
-	var to_centre := (Vector3.ZERO - b.global_position)
-	to_centre.y = 0.0
-	to_centre = to_centre.normalized()
+	var facade: Vector3 = b.facade_dir()
 	var gate_dir := gate - b.global_position
 	gate_dir.y = 0.0
-	var align: float = gate_dir.normalized().dot(to_centre)
+	var align: float = gate_dir.normalized().dot(facade)
 	print("  барак на %s, ворота на %s" % [str(b.global_position), str(gate)])
-	verdict("A4 ворота смотрят на середину карты", align > 0.99,
+	verdict("A4 ворота смотрят туда же, куда нарисован фасад", align > 0.99,
 		"совпадение направлений %.3f" % align)
+	# И это НАСТОЯЩИЙ УЗЕЛ, а не вычисленная точка: спавн читает его мировую
+	# позицию, поэтому подвинутый маркер обязан двигать и выход
+	var mk: Node3D = b.get_node_or_null(Building.SPAWN_POINT_NAME) as Node3D
+	verdict("A4б точка выхода — узел SpawnPoint под зданием",
+		mk != null and mk.global_position.distance_to(gate) < 0.01,
+		"узел=%s" % ("есть" if mk != null else "нет"))
 	var wall: float = maxf(b.build_size.x, b.build_size.z) * 0.5
 	var reach: float = gate_dir.length()
 	verdict("A5 точка выхода у стены фасада, а не в поле",
@@ -514,9 +523,14 @@ func _test_reform() -> void:
 # ═════════════════════════════════════════════════════════════════════════════
 func _test_phalanx_pace() -> void:
 	print("\n═════ F. ТЕМП АТАКИ ИЗ СТОЙКИ ЗАЩИТЫ ═════")
-	verdict("F1 замедление ровно −25%",
-		absf(Unit.PHALANX_ATTACK_FACTOR - 0.75) < 0.001,
-		"PHALANX_ATTACK_FACTOR=%.3f" % Unit.PHALANX_ATTACK_FACTOR)
+	# ЧИСЛО БЕРЁТСЯ ИЗ КОНФИГА, А НЕ ИЗ СТЕНДА. Множитель скорости стойки — это
+	# баланс, и владелец его уже разворачивал (−25% → −35%). Проверяем СВОЙСТВО:
+	# оборона медленнее атаки, и ровно на столько, сколько написано в таблице
+	var _Cfg := preload("res://scripts/unit_stats_config.gd")
+	var want: float = _Cfg.stance_stat("defense", "move_speed_mult", 1.0)
+	verdict("F1 у обороны есть штраф скорости и он из конфига",
+		want < 1.0 and want > 0.0,
+		"STANCES.defense.move_speed_mult=%.3f" % want)
 
 	var u: Unit = load("res://scenes/units/Spearman.tscn").instantiate()
 	u.faction = Constants.FACTION_PLAYER
@@ -530,9 +544,23 @@ func _test_phalanx_pace() -> void:
 	u.set_stance("defense")
 	var phalanx: float = u._effective_speed()
 	print("  ход обычный %.3f, фалангой %.3f" % [plain, phalanx])
-	verdict("F2 фаланга идёт на четверть медленнее",
-		absf(phalanx / maxf(plain, 0.001) - 0.75) < 0.01,
-		"отношение %.4f" % (phalanx / maxf(plain, 0.001)))
+	verdict("F2 фаланга идёт медленнее ровно на множитель стойки",
+		absf(phalanx / maxf(plain, 0.001) - want) < 0.01,
+		"отношение %.4f при множителе %.3f" % [phalanx / maxf(plain, 0.001), want])
+	# ── БЕГ НЕ ОТМЕНЯЕТ ШТРАФ СТОЙКИ ────────────────────────────────────────
+	# Был баг: `not sprinting and ...` — боец со щитом на бегу разгонялся до 1.4
+	# базовой, то есть БЫСТРЕЕ обычной ходьбы
+	u._set_sprinting(true)
+	var run_def: float = u._effective_speed()
+	u.set_stance("attack")
+	var run_atk: float = u._effective_speed()
+	u._set_sprinting(false)
+	verdict("F3 бегущий в обороне не быстрее обычного шага",
+		run_def <= plain + 0.001,
+		"бег в обороне %.3f против обычного шага %.3f" % [run_def, plain])
+	verdict("F4 штраф стойки действует и на бегу",
+		absf(run_def / maxf(run_atk, 0.001) - want) < 0.01,
+		"отношение на бегу %.4f" % (run_def / maxf(run_atk, 0.001)))
 	u.state = Unit.State.IDLE
 	var standing: float = u._effective_speed()
 	verdict("F3 стоящую фалангу замедление не трогает",

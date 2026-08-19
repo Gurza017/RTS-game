@@ -18,6 +18,7 @@ extends Node
 
 const _AICfg := preload("res://scripts/ai_start_army_limit.gd")
 const _UCfg  := preload("res://scripts/unit_stats_config.gd")
+const _FCfg  := preload("res://scripts/forge_config.gd")
 
 ## Роли отряда
 const ROLE_GUARD   := "guard"     # стоит у замка в обороне
@@ -25,6 +26,15 @@ const ROLE_FIELD   := "field"     # отправлен драться к озе�
 const ROLE_ASSAULT := "assault"   # идёт на базу игрока
 const ROLE_LINE    := "line"      # держит рубеж обороны (DEFENSIVE_MODE)
 const ROLE_PATROL  := "patrol"    # ходит по своей территории (DEFENSIVE_MODE)
+## ── ТАКТИЧЕСКИЕ РОЛИ, ПЕРЕБИВАЮЩИЕ ОПЕРАТИВНЫЕ ──────────────────────────────
+## Роли выше отвечают на вопрос «где этому отряду быть по плану кампании».
+## Три роли ниже отвечают на «что делать прямо сейчас» и назначаются ПОВЕРХ
+## плана каждый такт (см. _tactical_overrides): обстановка меняется быстрее,
+## чем план, и отряд, который вот-вот вырежут, не должен упрямо идти в свою
+## точку на рубеже
+const ROLE_FLANK   := "flank"     # мечники обходят строй и идут в тыл, к стрелкам
+const ROLE_KITE    := "kite"      # лучники отходят за спину своей пехоты
+const ROLE_RETREAT := "retreat"   # отряд выбит и уходит на восстановление в замок
 
 # Строй отряда при выдаче приказа
 const SQUAD_COLS    := 6
@@ -46,6 +56,26 @@ var _peace_over:   bool  = false
 var _wave_index:   int   = 0
 var _tactic: Dictionary  = {}
 var _lake_taken: bool    = false
+## Волна уже вышла (собралась на точке сбора и получила приказ на атаку)
+var _wave_out: bool      = false
+
+## Собралась ли волна на точке сбора. Считается по центрам отрядов, а не по
+## каждому бойцу: отряд приходит целиком, и его центр — честный ответ
+func _mustered(field: Array, rally: Vector3) -> bool:
+	if field.is_empty():
+		return false
+	var r2: float = _AICfg.MUSTER_RADIUS * _AICfg.MUSTER_RADIUS
+	var at := 0
+	for s in field:
+		var c := _squad_centroid((s as Dictionary)["members"])
+		if c == Vector3.ZERO:
+			continue
+		var dx: float = c.x - rally.x
+		var dz: float = c.z - rally.z
+		if dx * dx + dz * dz <= r2:
+			at += 1
+	return float(at) >= float(field.size()) * _AICfg.MUSTER_FRACTION
+
 ## Была ли у ИИ настоящая армия. Нужно для аварийного барака: на старте армия
 ## тоже равна нулю, и без этого флага ПЕРВЫЙ барак доставался бы бесплатно
 var _had_army: bool      = false
@@ -64,6 +94,8 @@ func reset() -> void:
 	_wave_index  = 0
 	_tactic      = _AICfg.tactic_for_wave(0)
 	_lake_taken  = false
+	_wave_out    = false
+	_home_pos    = Vector3.ZERO
 	_had_army    = false
 	_patrol_phase = 0
 	_patrol_timer = 0.0
@@ -84,6 +116,8 @@ func _process(delta: float) -> void:
 	if _patrol_timer >= _AICfg.PATROL_DWELL:
 		_patrol_timer = 0.0
 		_patrol_phase += 1
+	# Недоразданные приказы прошлого такта — по порции за кадр (см. _drain_orders)
+	_drain_orders()
 	_think_timer += delta
 	if _think_timer < _AICfg.THINK_INTERVAL:
 		return
@@ -95,6 +129,9 @@ func _process(delta: float) -> void:
 # ─────────────────────────────────────────────────────────────────────────────
 func tick() -> void:
 	last_action = ""
+	# Снимок зданий игрока на весь такт: дальше его читает _nearest_player_target
+	# вместо копирования группы на каждый запрос
+	_refresh_target_cache()
 	var castle: Castle = _find_castle()
 	_regroup()                    # разложить новых бойцов по отрядам
 	if army_size() >= _AICfg.ARMY_LOST_THRESHOLD:
@@ -102,7 +139,13 @@ func tick() -> void:
 	_auto_veteran()               # звёздочки отрядов раздаются сами
 	_economy(castle)              # рабочие: добыча и найм
 	if castle == null:
+		# ── ЗАМОК ПАЛ ────────────────────────────────────────────────────────
+		# Раньше такт просто заканчивался здесь: ИИ переставал отдавать приказы
+		# ВООБЩЕ. Отряды замирали там, где их застало падение крепости, а те,
+		# кого уже отправили в гарнизон, шли к воротам, которых больше нет.
+		_no_castle()
 		return
+	_home_pos = castle.global_position
 	_construction(castle)         # барак, кузница, улучшения
 	if not _peace_over:
 		_hold_everyone_home(castle)
@@ -167,7 +210,13 @@ func _regroup() -> void:
 		var sq: Dictionary = s
 		var alive: Array = []
 		for m in sq["members"]:
-			if is_instance_valid(m) and not m.is_dead():
+			# ГАРНИЗОННЫЕ ВЫБЫВАЮТ ИЗ СОСТАВА НАРАВНЕ С УБИТЫМИ. Отряд, ушедший
+			# в замок на восстановление, физически ещё жив, но с карты снят
+			# (Castle.absorb_unit гасит его и выводит из отрисовки) — оставь его
+			# в составе, и ИИ вечно числил бы роль «отход», раздавал бы посты
+			# невидимкам и не набирал бы замену. Вернувшихся из замка подберёт
+			# шаг 3 этой же функции, как обычное пополнение
+			if is_instance_valid(m) and not m.is_dead() and not (m as Unit).garrisoned:
 				alive.append(m)
 		if alive.is_empty():
 			continue
@@ -187,7 +236,7 @@ func _regroup() -> void:
 		if not is_instance_valid(n):
 			continue
 		var u := n as Unit
-		if u == null or u is Worker or u.is_dead():
+		if u == null or u is Worker or u.is_dead() or u.garrisoned:
 			continue
 		if assigned.has(u.get_instance_id()):
 			continue
@@ -208,7 +257,26 @@ func _regroup() -> void:
 			squads.append({
 				"type": uid, "members": [u], "role": ROLE_GUARD,
 				"target": u.global_position, "issued": false,
+				# Сторона обхода закрепляется за отрядом ОДИН РАЗ, при рождении.
+				# Считай её каждый такт — два отряда мечников менялись бы краями
+				# и топтались бы на месте вместо обхода (см. _try_flank)
+				"flank_side": squad_count(uid) % 2,
+				"flank_close": false,
+				"peak": 0,
 			})
+
+	# 4) ПИК ЧИСЛЕННОСТИ — ЗНАМЕНАТЕЛЬ БОЕСПОСОБНОСТИ (см. _squad_strength).
+	# Считается ПОСЛЕ добора новобранцев, а не в первом проходе: отряд, собранный
+	# только что, в первом проходе ещё не существовал, и его пик остался бы
+	# единицей до следующего такта. Практическая цена такой задержки — не
+	# косметика: возьми отряд потери в это самое окно, и пик записался бы уже
+	# УМЕНЬШЕННЫМ, то есть разгромленный отряд навсегда считался бы целым и
+	# никогда не ушёл бы на восстановление. Стенд поймал это как «боеспособность
+	# 60.00» у только что собранных шестидесяти копейщиков.
+	# Пик только растёт: отряд обязан помнить, каким он был
+	for s in squads:
+		var sq2: Dictionary = s
+		sq2["peak"] = maxi(int(sq2.get("peak", 0)), (sq2["members"] as Array).size())
 
 ## Сколько отрядов данного типа существует
 func squad_count(unit_id: String) -> int:
@@ -232,6 +300,45 @@ func army_ready() -> bool:
 		if squad_count(uid) < _AICfg.squad_limit(uid):
 			return false
 	return not squads.is_empty()
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ЗАМОК ПАЛ: ОТСТРАИВАЕМСЯ И ДЕРЁМСЯ НА РУИНАХ
+# ═════════════════════════════════════════════════════════════════════════════
+# Два требования владельца, и оба про один момент — потерю крепости:
+#   • рабочие пытаются заложить НОВУЮ неподалёку, если есть на что;
+#   • защитники держатся у руин и дерутся до последнего, а не разбредаются.
+#
+# Второе делается НЕ новым кодом, а тем, который уже есть: _command_last_stand
+# строит последний рубеж вокруг точки — стена копий фронтом, лучники за спиной,
+# рыцари по флангам. Единственное, чего ему не хватало, — замка как якоря;
+# теперь якорем служит запомненное место базы (_home_pos).
+#
+# Отход при этом запрещён в принципе: уходить некуда, а режим отхода глушит и
+# авто-агро, и ответный удар — отряд просто шёл бы умирать молча (см.
+# _try_retreat).
+
+## Место своей базы. Пишется каждый такт, пока замок жив, и переживает его
+var _home_pos: Vector3 = Vector3.ZERO
+
+func _no_castle() -> void:
+	last_action += "|ЗАМОК ПОТЕРЯН"
+	var anchor: Vector3 = _home_pos if _home_pos != Vector3.ZERO else _rally_point()
+	# ── 1. НОВАЯ КРЕПОСТЬ, ЕСЛИ ЕСТЬ НА ЧТО ────────────────────────────────
+	# Одна стройка за раз — общее правило ИИ. Площадка берётся чуть в стороне от
+	# руин: на самих руинах стоит коллайдер обломков
+	if not _site_in_progress():
+		var cost: Dictionary = _UCfg.building_cost("castle")
+		if ResourceManager.can_afford(Constants.FACTION_ENEMY, cost):
+			var spot: Vector3 = GameManager.land_target(
+				anchor + Vector3(CASTLE_REBUILD_OFFSET, 0.0, CASTLE_REBUILD_OFFSET))
+			if _start_site("castle", spot):
+				last_action += "|закладывается новая крепость"
+	# ── 2. ПОСЛЕДНИЙ РУБЕЖ У РУИН ──────────────────────────────────────────
+	last_stand = true
+	_command_last_stand_at(anchor)
+
+## Насколько в сторону от руин закладывается новая крепость, м
+const CASTLE_REBUILD_OFFSET := 9.0
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ЭКОНОМИКА
@@ -379,6 +486,108 @@ func _construction(castle: Castle) -> void:
 				last_action += "|исследование %s" % uid
 				return
 
+	_research_forge(smithy)
+	_buy_squad_abilities()
+
+# ═════════════════════════════════════════════════════════════════════════════
+# СПОСОБНОСТИ-РЕЖИМЫ: ДОКУПИТЬ И ВКЛЮЧИТЬ
+# ═════════════════════════════════════════════════════════════════════════════
+# Двухступенчатая схема (исследование фракции + покупка отрядом) у игрока
+# замыкается кликом по панели. У ИИ панели нет, и без этого прохода он честно
+# исследовал бы «Залповый огонь» и не применил его ни разу.
+#
+# Включаем СРАЗУ после покупки: выбор «залпом или вразнобой» — это тактика на
+# уровне, до которого ИИ не поднимался ни в одной другой механике, а залп по
+# плотному строю выгоден почти всегда. Если понадобится разбор «когда выгодно» —
+# это будет отдельное решение с отдельным замером, а не догадка здесь
+func _buy_squad_abilities() -> void:
+	if not _AICfg.AI_BUY_SQUAD_ABILITIES:
+		return
+	for sq in GameManager.squads_of_faction(Constants.FACTION_ENEMY):
+		var d: Dictionary = sq
+		var sid: int = int(d.get("id", 0))
+		var uid: String = String(d.get("type", ""))
+		if sid <= 0 or uid.is_empty():
+			continue
+		var node: Dictionary = _FCfg.toggle_ability_of(uid)
+		if node.is_empty():
+			continue
+		var nid: String = String(node.get("id", ""))
+		if not GameManager.is_researched(Constants.FACTION_ENEMY, nid):
+			continue
+		if not GameManager.squad_has_ability(sid, nid):
+			# Резерв: прокачанный режим у трёх отрядов хуже, чем пополнение
+			var gold: float = ResourceManager.get_amount(
+				Constants.FACTION_ENEMY, Constants.RESOURCE_GOLD)
+			var cost: float = _FCfg.squad_unlock_cost(node)
+			if gold - cost <= _AICfg.AI_ABILITY_GOLD_RESERVE:
+				continue
+			if not GameManager.squad_buy_ability(sid, nid):
+				continue
+			last_action += "|куплен режим %s отряду %d" % [nid, sid]
+		if not GameManager.squad_ability_on(sid, nid):
+			GameManager.squad_set_ability(sid, nid, true)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ДРЕВО КУЗНИЦЫ: ИИ ТОЖЕ УЧИТСЯ
+# ═════════════════════════════════════════════════════════════════════════════
+# Здесь была дыра, а не недоработка баланса. Цикл выше перебирает ПЛОСКИЕ слоты
+# (_UCfg.UPGRADE_SLOTS) — наследство от старой кузницы, там всего несколько
+# позиций, причём первая из них навсегда закрыта заглушкой "requires" (см.
+# CLAUDE.md, «Never index UPGRADE_SLOTS[0]»). Вся настоящая наука переехала в
+# древо (forge_config: 4 рода войск × 20 узлов), и ИИ не покупал из неё НИЧЕГО.
+# На длинной партии это означало прокачанного игрока против ИИ с базовыми
+# характеристиками — и списывалось на «ИИ слабый», хотя механика просто не была
+# ему подключена.
+#
+# Узел древа И ЕСТЬ слот улучшения: _UCfg.get_upgrade_slot() падает в
+# forge_config.get_node(), поэтому ни Smithy.research, ни GameManager.can_research
+# менять не пришлось — доступность, цена, очередь и накопление бонусов работают
+# ровно так же, как у игрока.
+func _research_forge(smithy: Smithy) -> void:
+	if not _AICfg.AI_RESEARCH_FORGE or smithy == null:
+		return
+	# Резерв на найм: прокачанная армия из трёх человек проигрывает
+	# необученной из тридцати
+	if ResourceManager.get_amount(Constants.FACTION_ENEMY, Constants.RESOURCE_GOLD) \
+			<= _AICfg.AI_RESEARCH_GOLD_RESERVE:
+		return
+	var best_id := ""
+	var best_score := 0.0
+	# Только те рода войск, которые ИИ реально нанимает: качать ветку монаха,
+	# которого нет в SQUAD_LIMIT, — это выкинутое золото. Плюс экономические
+	# ветки из AI_FORGE_EXTRA_BRANCHES: рабочий в combat_types() не значится, но
+	# он есть у ИИ всегда и с первой минуты
+	var branches: Array = _AICfg.combat_types().duplicate()
+	branches.append_array(_AICfg.AI_FORGE_EXTRA_BRANCHES)
+	for t in branches:
+		var uid: String = String(t)
+		for n in _FCfg.tree(uid):
+			var node: Dictionary = n
+			var nid: String = String(node.get("id", ""))
+			if nid.is_empty():
+				continue
+			# can_research сам проверит и предпосылки, и «весь ряд» у колонки D,
+			# и то, что узел не куплен и не в очереди
+			if not GameManager.can_research(Constants.FACTION_ENEMY, nid):
+				continue
+			var score := 0.0
+			for key in _AICfg.AI_FORGE_WEIGHTS:
+				score += float(node.get(String(key), 0.0)) * float(_AICfg.AI_FORGE_WEIGHTS[key])
+			if score <= 0.0:
+				continue
+			# Дешёвое при равной пользе предпочтительнее: делим на цену золота,
+			# чтобы ИИ шёл по древу снизу вверх, а не упирался в дорогой узел
+			var gold: float = maxf(float(node.get("cost_gold", 0.0)), 1.0)
+			score /= gold
+			if score > best_score:
+				best_score = score
+				best_id    = nid
+	if best_id.is_empty():
+		return
+	if smithy.research(best_id):
+		last_action += "|исследование древа %s" % best_id
+
 # ─────────────────────────────────────────────────────────────────────────────
 # НАЙМ ВОЙСК ДО ЛИМИТОВ
 # ─────────────────────────────────────────────────────────────────────────────
@@ -438,9 +647,7 @@ func _most_needed(types: Array, bld: Building) -> String:
 
 ## Мирная фаза: всё стоит дома и никого не трогает
 func _hold_everyone_home(castle: Castle) -> void:
-	for i in range(squads.size()):
-		_set_role(squads[i] as Dictionary, ROLE_GUARD,
-			_guard_post(castle, i, squads.size()))
+	_assign_home_posts(castle, squads)
 	_apply_orders()
 
 func _command_squads(castle: Castle) -> void:
@@ -468,10 +675,24 @@ func _command_squads(castle: Castle) -> void:
 		else:
 			field.append(sq)
 
+	# ── СБОР ПЕРЕД АТАКОЙ ───────────────────────────────────────────────────
+	# Лимит набран — это ещё не волна: отряды в этот момент могут быть
+	# размазаны от барака до озера. Пока на точке сбора не собралась
+	# MUSTER_FRACTION волны, все идут К НЕЙ, а не на базу игрока.
+	# Защёлка _wave_out нужна, чтобы уже вышедшая волна не разворачивалась
+	# обратно, когда доля просядет из-за потерь
+	if _AICfg.AI_MUSTER_BEFORE_ATTACK and not _wave_out:
+		if (ready or _lake_taken) and _mustered(field, rally):
+			_wave_out = true
+			last_action += "|волна собрана, общий выход"
+	if field.is_empty():
+		_wave_out = false          # волны нет — сбор начинается заново
+	var attacking: bool = (ready or _lake_taken) 		and (_wave_out or not _AICfg.AI_MUSTER_BEFORE_ATTACK)
+
 	# Куда идут излишки/волна
 	var target_pos := rally
 	var role := ROLE_FIELD
-	if ready or _lake_taken:
+	if attacking:
 		var base := _player_base_pos()
 		if base != Vector3.ZERO:
 			target_pos = base
@@ -484,16 +705,28 @@ func _command_squads(castle: Castle) -> void:
 
 	# Посты раздаются, когда итоговое число домашних отрядов уже известно:
 	# иначе индекс заворачивался по кругу и два отряда получали одну точку
-	for i in range(home.size()):
-		_set_role(home[i] as Dictionary, ROLE_GUARD,
-			_guard_post(castle, i, home.size()))
+	_assign_home_posts(castle, home)
 
 	if field.is_empty():
 		_apply_orders()
 		return
 
+	# ── ФРОНТОМ К АРМИИ ИГРОКА, А НЕ К ЕГО ЗДАНИЮ ───────────────────────────
+	# Курс задаёт ориентацию ВСЕГО боевого порядка: по нему считаются и глубина
+	# эшелонов, и разнос флангов, и направление взгляда каждого отряда. Пока он
+	# брался от замка к замку, стена копий могла встретить армию боком — лучники
+	# оказывались не за спинами своих, а сбоку. Точка прицеливания ищется от
+	# ЦЕНТРА МАСС ВОЛНЫ и по уже собранной за этот кадр сетке, то есть стоит
+	# один скан на такт, а не обход групп
+	var wave_c := _field_centroid(field)
+	if attacking and _AICfg.AI_FACE_PLAYER_ARMY and wave_c != Vector3.ZERO:
+		var seen = GameManager.army.nearest_of_side(wave_c.x, wave_c.z,
+			Constants.FACTION_PLAYER, _AICfg.ARMY_AIM_RADIUS)
+		if seen != null:
+			target_pos = (seen as Node3D).global_position
+			last_action += "|строй фронтом к армии игрока"
 	# Курс волны и раскладка по тактике
-	var course := target_pos - castle.global_position
+	var course := target_pos - (wave_c if wave_c != Vector3.ZERO else castle.global_position)
 	course.y = 0.0
 	if course.length() < 0.01:
 		course = Vector3.FORWARD
@@ -538,6 +771,15 @@ func _command_squads(castle: Castle) -> void:
 # ═════════════════════════════════════════════════════════════════════════════
 
 ## Точка рубежа обороны — на доле пути от своего замка к базе игрока
+## Курс «на противника» от произвольной точки. Замка может не быть вовсе
+func _course_from(home: Vector3) -> Vector3:
+	var base := _player_base_pos()
+	var c := base - home
+	c.y = 0.0
+	if c.length() < 0.01:
+		return Vector3.FORWARD
+	return c.normalized()
+
 func _defense_center(castle: Castle) -> Vector3:
 	if castle == null:
 		return _rally_point()
@@ -615,9 +857,13 @@ func _should_last_stand(castle: Castle) -> bool:
 
 ## Построение у замка: копейщики стеной, лучники за ними, рыцари по флангам
 func _command_last_stand(castle: Castle) -> void:
-	var course := _defense_course(castle)
+	_command_last_stand_at(castle.global_position)
+
+## Тот же последний рубеж, но вокруг ПРОИЗВОЛЬНОЙ точки: замка может уже не
+## быть (см. _no_castle), а рубеж всё равно нужен
+func _command_last_stand_at(home: Vector3) -> void:
+	var course := _course_from(home)
 	var right := Vector3(-course.z, 0.0, course.x)
-	var home := castle.global_position
 
 	# Раскладка по родам войск: у каждого своя линия и свой порядковый номер
 	var idx: Dictionary = {}
@@ -676,8 +922,7 @@ func _command_squads_defensive(castle: Castle) -> void:
 		else:
 			rest.append(sq)
 
-	for i in range(home.size()):
-		_set_role(home[i] as Dictionary, ROLE_GUARD, _guard_post(castle, i, home.size()))
+	_assign_home_posts(castle, home)
 
 	# ЗАСЛОН ВАЖНЕЕ ПАТРУЛЕЙ: в патруль уходит не больше половины излишков.
 	# Без этой доли при четырёх свободных отрядах трое уходили гулять и рубеж
@@ -751,6 +996,72 @@ func _intruder_near(center: Vector3) -> bool:
 ## отряды, и индекс поста заворачивался по кругу — два отряда получали одну и
 ## ту же точку и лезли друг на друга.
 ## guard_count <= 0 — запасной путь: делим по числу из конфига.
+# ═════════════════════════════════════════════════════════════════════════════
+# ЗАСЛОН У БАЗЫ: ГАРНИЗОН СТОИТ СТРОЕМ, А НЕ КОЛЬЦОМ
+# ═════════════════════════════════════════════════════════════════════════════
+# _guard_post раздавал точки по ОКРУЖНОСТИ вокруг замка, одинаково всем родам
+# войск. Половина гарнизона при этом стояла в тылу, спиной к противнику, а
+# лучники с равной вероятностью оказывались перед копейщиками — то есть первыми
+# под удар шли те, кому в ближнем бою нечем ответить.
+#
+# Теперь домашний гарнизон строится ЛИЦОМ к базе игрока:
+#
+#            ← фронт (на противника)
+#     [мечники]                        [мечники]     ← фланги, манёвр
+#         ██████ копейщики, ЗАЩИТА ██████            ← щиты и фаланга
+#                ▒▒▒ лучники ▒▒▒                     ← за спинами пехоты
+#                    [ЗАМОК]
+#
+# Это та же раскладка, что у последнего рубежа (_command_last_stand), и это
+# намеренно: построение у своих стен не должно зависеть от того, каким путём ИИ
+# в него пришёл — плановым гарнизоном или отходом под давлением.
+#
+# Номер отряда здесь ПО СВОЕМУ РОДУ ВОЙСК, а не сквозной: сквозной разносил бы
+# три копейщика и одного лучника по одной шкале, и лучник вставал бы на край
+# копейной шеренги
+func _assign_home_posts(castle: Castle, home: Array) -> void:
+	if castle == null:
+		return
+	if not _AICfg.AI_BASE_SCREEN:
+		for i in range(home.size()):
+			_set_role(home[i] as Dictionary, ROLE_GUARD,
+				_guard_post(castle, i, home.size()))
+		return
+	var total: Dictionary = {}
+	for s in home:
+		var uid: String = String((s as Dictionary)["type"])
+		total[uid] = int(total.get(uid, 0)) + 1
+	var idx: Dictionary = {}
+	for s in home:
+		var sq: Dictionary = s
+		var uid2: String = String(sq["type"])
+		var i2: int = int(idx.get(uid2, 0))
+		idx[uid2] = i2 + 1
+		_set_role(sq, ROLE_GUARD,
+			_screen_post(castle, uid2, i2, int(total.get(uid2, 1))))
+
+## Точка заслона для отряда рода `uid`, номер `idx` из `count` отрядов этого рода
+func _screen_post(castle: Castle, uid: String, idx: int, count: int) -> Vector3:
+	var course := _defense_course(castle)
+	var right := Vector3(-course.z, 0.0, course.x)
+	var home := castle.global_position
+	var n: int = maxi(count, 1)
+	var centered: float = float(idx) - float(n - 1) * 0.5
+	var spot: Vector3
+	match uid:
+		"archer":
+			spot = home + course * _AICfg.SCREEN_BOW_DIST \
+				+ right * (centered * (_AICfg.SCREEN_WIDTH / float(n + 1)))
+		"warrior":
+			var side: float = -1.0 if idx % 2 == 0 else 1.0
+			spot = home + course * _AICfg.SCREEN_FLANK_DIST \
+				+ right * (side * _AICfg.SCREEN_FLANK_SIDE + centered * 2.0)
+		_:
+			# Копейщики и всё прочее ближнего боя — стена перед зданиями
+			spot = home + course * _AICfg.SCREEN_SPEAR_DIST \
+				+ right * (centered * (_AICfg.SCREEN_WIDTH / float(n)))
+	return GameManager.land_target(spot)
+
 func _guard_post(castle: Castle, idx: int, guard_count: int = 0) -> Vector3:
 	if castle == null:
 		return Vector3.ZERO
@@ -779,13 +1090,348 @@ func _may_counter_attack(sq: Dictionary) -> bool:
 		return true
 	return String(sq["type"]) == "warrior"
 
+# ═════════════════════════════════════════════════════════════════════════════
+# ТАКТИЧЕСКИЙ СЛОЙ: ЧТО ДЕЛАТЬ ПРЯМО СЕЙЧАС
+# ═════════════════════════════════════════════════════════════════════════════
+# Считается РАЗ В ТАКТ (THINK_INTERVAL = 2 с) и РАЗ НА ОТРЯД — не на бойца.
+# Армия ИИ это десяток отрядов; те же решения, посчитанные поимённо, стоили бы
+# в двадцать раз дороже и не изменили бы ни одного из них: отступает, обходит и
+# прячется отряд целиком, а не отдельный человек.
+#
+# Вызывается из _apply_orders, а не из каждой ветки команд, НАМЕРЕННО:
+# _apply_orders — единственное место, где приказы вообще уходят к бойцам, и
+# тактика, привязанная к нему, не может быть забыта в новой ветке планирования.
+#
+# ПОРЯДОК ПРОВЕРОК = ПОРЯДОК ПРИОРИТЕТОВ. Выбитый отряд уходит, что бы ему ни
+# планировали; уцелевшие лучники прячутся; мечники идут в обход. Каждый отряд
+# получает не больше одной тактической роли за такт
+func _tactical_overrides(castle: Castle) -> void:
+	if not _peace_over:
+		return
+	for s in squads:
+		var sq: Dictionary = s
+		if (sq["members"] as Array).is_empty():
+			continue
+		if _try_retreat(sq, castle):
+			continue
+		match String(sq["type"]):
+			"archer":
+				_try_kite(sq)
+			"warrior":
+				_try_flank(sq)
+
+## Боеспособность отряда: живое здоровье против здоровья того же отряда В ЕГО
+## ЛУЧШЕМ СОСТАВЕ (sq["peak"] — наибольшая численность, которой он достигал).
+##
+## ЗДЕСЬ БЫЛА ЛОВУШКА, И ОНА СТОИЛА БЫ ИИ ВСЕЙ АРМИИ. Сначала знаменателем
+## стояла ШТАТНАЯ численность (_UCfg.squad_size) — «доля от полного отряда».
+## Звучит правильно, но отряды ИИ собираются пополнением: барак выпускает
+## бойцов шеренгами, и _regroup заводит отряд с ОДНОГО человека, доливая
+## остальных следующими тактами. По штатной мерке такой отряд боеспособен на
+## 5%, то есть свежее пополнение, едва выйдя из ворот, разворачивалось и
+## уходило обратно в замок — навсегда, потому что там оно снова становилось
+## пополнением. Стенд поймал это на ровном месте: у шести мечников роль вышла
+## «отход» вместо «обход».
+##
+## Отсчёт от собственного пика лишён этого порока и вдобавок точнее отвечает
+## заказу («при КРИТИЧЕСКОМ УРОНЕ»): целый отряд любого размера боеспособен на
+## единицу, а падает эта величина ровно от потерь и ран — от того, что и
+## называется уроном
+func _squad_strength(sq: Dictionary) -> float:
+	var members: Array = sq["members"]
+	if members.is_empty():
+		return 0.0
+	var sample: Unit = null
+	var hp := 0.0
+	for m in members:
+		var u := m as Unit
+		if u == null or not is_instance_valid(u) or u.is_dead():
+			continue
+		if sample == null:
+			sample = u
+		hp += u.current_health
+	if sample == null:
+		return 0.0
+	var peak: int = maxi(int(sq.get("peak", members.size())), 1)
+	var full_hp: float = float(peak) * maxf(sample.max_health, 1.0)
+	return hp / full_hp
+
+## ── ОТСТУПЛЕНИЕ В КРЕПОСТЬ ──────────────────────────────────────────────────
+## Выбитый отряд, оставленный в поле, доедают бесплатно. Отправленный в замок —
+## лечится и пополняется до штатной численности и возвращается в строй.
+##
+## Отправка идёт ШТАТНЫМ механизмом гарнизона (Castle.request_garrison), а не
+## своим приказом «идти к замку»: тот сам снимает разметку строя, переводит
+## бойцов в режим отхода (без перехвата, без авто-агро, сквозь чужие строи) и
+## впускает их внутрь. Своя реализация повторила бы всё это хуже.
+##
+## Номер отряда берётся У БОЙЦОВ, а не у записи ИИ: гарнизон оперирует отрядами
+## GameManager, а запись ИИ — своя группировка, и в неё после потерь могут
+## попасть остатки нескольких разных отрядов найма
+## Есть ли у записи ИИ хоть один боец, до которого прямо сейчас достают оружием.
+## Номера отрядов берутся У БОЙЦОВ, а не у записи ИИ: одна запись ИИ может
+## содержать остатки нескольких отрядов найма (см. _try_retreat ниже)
+func _in_melee(sq: Dictionary) -> bool:
+	var seen: Dictionary = {}
+	for m in sq["members"]:
+		if not is_instance_valid(m):
+			continue
+		var u := m as Unit
+		if u == null or u.is_dead():
+			continue
+		var sid: int = u.squad_id
+		if sid <= 0 or seen.has(sid):
+			continue
+		seen[sid] = true
+		if GameManager.squad_engaged(sid) > 0:
+			return true
+	return false
+
+func _try_retreat(sq: Dictionary, castle: Castle) -> bool:
+	if not _AICfg.AI_SQUAD_RETREAT or castle == null:
+		return false
+	# Уже отступает: приказ отдан замком, переиздавать нечего. Роль спадёт сама,
+	# когда бойцы уйдут внутрь (_regroup выкидывает их из состава)
+	if String(sq["role"]) == ROLE_RETREAT:
+		return true
+	if _squad_strength(sq) > _AICfg.RETREAT_STRENGTH:
+		return false
+	# ── ЗАВЯЗАЛСЯ В РУКОПАШНОЙ — ДЕРЁТСЯ ДО КОНЦА ───────────────────────────
+	# Отряд, развернувшийся спиной посреди схватки, не отступает, а гибнет: он
+	# идёт к воротам сквозь тех, кто до него достаёт, не отвечает (режим отхода
+	# глушит и авто-агро, и ответный удар) и получает весь урон бесплатно. Это и
+	# есть «трусость ИИ» из отчёта — механика отхода сама по себе верна, неверен
+	# был момент её применения.
+	#
+	# Правило: отходить можно ДО контакта и ПОСЛЕ него, но не ИЗ него. Пока
+	# оружие достаёт хотя бы до одного бойца отряда, решение об отходе просто не
+	# принимается, и отряд дерётся обычным порядком. Уцелевшие уйдут в замок
+	# следующим тактом, когда контакт разорвётся; полноценная система морали и
+	# паники — отдельная работа, здесь её нет намеренно.
+	#
+	# «Контакт» берётся из бухгалтерии боя (GameManager.squad_engaged): она уже
+	# считает это раз в 0.4 с на отряд, своего обхода бойцов не добавляется
+	if _AICfg.AI_NO_RETREAT_IN_MELEE and _in_melee(sq):
+		return false
+	# Отступают ОТ КОГО-ТО. Уводить отряд с поста из-за старых ран, когда вокруг
+	# тихо, значит оголить рубеж без всякой причины
+	var anchor := _squad_centroid(sq["members"])
+	if _nearest_player_target(anchor, _AICfg.RETREAT_THREAT_RADIUS) == null:
+		return false
+	var sent := false
+	var seen: Dictionary = {}
+	for m in sq["members"]:
+		var u := m as Unit
+		if u == null or not is_instance_valid(u):
+			continue
+		var sid: int = u.squad_id
+		if sid <= 0 or seen.has(sid):
+			continue
+		seen[sid] = true
+		if castle.request_garrison(sid):
+			sent = true
+	if not sent:
+		return false          # гарнизон полон — деремся там, где стоим
+	_set_role(sq, ROLE_RETREAT, castle.global_position)
+	sq["issued"] = true       # приказ уже отдан замком, свой поверх не нужен
+	last_action += "|отход отряда %s в замок" % String(sq["type"])
+	return true
+
+## ── КАЙТ ЛУЧНИКОВ ───────────────────────────────────────────────────────────
+## Лучник в ближнем бою бесполезен и умирает первым. Подошла пехота — отряд
+## отходит ЗА СПИНУ ближайшей своей пехоты и стреляет оттуда.
+## Если прикрывать некем, отходит просто от угрозы: даже голое отступление
+## лучше, чем стоять и получать по зубам оружием, которым не ответишь
+func _try_kite(sq: Dictionary) -> bool:
+	if not _AICfg.AI_ARCHER_KITE:
+		return false
+	var anchor := _squad_centroid(sq["members"])
+	var foe := _nearest_player_melee(anchor, _AICfg.KITE_TRIGGER_DIST)
+	if foe == null:
+		return false
+	var fpos: Vector3 = foe.global_position
+	var cover := _nearest_own_melee_centroid(anchor)
+	var spot: Vector3
+	if cover != Vector3.INF:
+		# «За спиной» считается ОТ УГРОЗЫ, а не от лучников: прикрытие имеет
+		# смысл только тогда, когда пехота оказывается МЕЖДУ ними
+		var away := cover - fpos
+		away.y = 0.0
+		if away.length() < 0.01:
+			away = anchor - fpos
+			away.y = 0.0
+		if away.length() < 0.01:
+			away = Vector3.FORWARD
+		spot = cover + away.normalized() * _AICfg.KITE_BACK_DIST
+	else:
+		var back := anchor - fpos
+		back.y = 0.0
+		if back.length() < 0.01:
+			back = Vector3.FORWARD
+		spot = anchor + back.normalized() * _AICfg.KITE_BACK_DIST
+	_set_role(sq, ROLE_KITE, GameManager.land_target(spot))
+	return true
+
+## ── ФЛАНГОВЫЙ ОБХОД МЕЧНИКОВ ────────────────────────────────────────────────
+## Мечник, пущенный в лоб на строй копейщиков, — это размен, который ИИ всегда
+## проигрывает: у копья и досягаемость больше, и фаланга держит строй. Его дело
+## — обойти стену по дуге и добраться до стрелков, у которых в ближнем бою нет
+## ничего.
+##
+## Обход двухшаговый: пока далеко, отряд идёт в точку СБОКУ от стрелков (мимо
+## лобового строя), и только вблизи переходит в атаку. Первый шаг отдаётся
+## БЕГОМ (см. _apply_orders): бегущий отряд не перехватывается чужой линией и
+## не втягивается в авто-бой — то есть действительно обходит, а не застревает в
+## первой же стычке. Плата за это честная: на бегу мечники уязвимы
+func _try_flank(sq: Dictionary) -> bool:
+	if not _AICfg.AI_WARRIOR_FLANK:
+		return false
+	var anchor := _squad_centroid(sq["members"])
+	# Стрелки ищутся рядом с ЦЕЛЬЮ ВОЛНЫ, а не рядом с самим отрядом: обход
+	# затевается заранее, когда до чужого строя ещё далеко
+	var prey := _nearest_player_ranged(sq["target"] as Vector3, _AICfg.FLANK_REACH)
+	if prey == null:
+		return false
+	var ppos: Vector3 = prey.global_position
+	var course := ppos - anchor
+	course.y = 0.0
+	var dist := course.length()
+	if dist < 0.01:
+		return false
+	course = course.normalized()
+	var right := Vector3(-course.z, 0.0, course.x)
+	# Сторона обхода закреплена за отрядом навсегда (по номеру первого бойца):
+	# иначе два отряда мечников каждый такт менялись бы краями и топтались
+	var side: float = 1.0 if (int(sq.get("flank_side", 0)) == 0) else -1.0
+	if dist > _AICfg.FLANK_TRIGGER_DIST:
+		sq["flank_close"] = false
+		var wp := ppos + right * (side * _AICfg.FLANK_ARC_RADIUS) - course * 4.0
+		_set_role(sq, ROLE_FLANK, GameManager.land_target(wp))
+	else:
+		sq["flank_close"] = true
+		_set_role(sq, ROLE_FLANK, ppos)
+	return true
+
+## Ближайший боец игрока БЛИЖНЕГО боя (порог дальности — из конфига, чтобы
+## новый род войск подхватился сам)
+func _nearest_player_melee(from: Vector3, radius: float) -> Node3D:
+	return _nearest_player_unit(from, radius, false)
+
+## Ближайший СТРЕЛОК игрока
+func _nearest_player_ranged(from: Vector3, radius: float) -> Node3D:
+	return _nearest_player_unit(from, radius, true)
+
+## Обход группы здесь ОСТАВЛЕН СОЗНАТЕЛЬНО: нужен ближайший боец С ЗАДАННЫМ
+## РОДОМ (стрелок или рукопашник), а сетка про род ничего не знает — она
+## различает только стороны. Зато и зовут это редко: один раз на отряд в роли
+## обхода, а не на бойца (см. _apply_orders). Радиус проверяется ПЕРВЫМ, до
+## чтения свойств узла, — это отсекает подавляющее большинство кандидатов
+func _nearest_player_unit(from: Vector3, radius: float, ranged: bool) -> Node3D:
+	var best: Node3D = null
+	var best_d := radius
+	var fx: float = from.x
+	var fz: float = from.z
+	var rr: float = radius * radius
+	for n in main.get_tree().get_nodes_in_group("player_units"):
+		if not is_instance_valid(n):
+			continue
+		var p: Vector3 = (n as Node3D).global_position
+		var dx: float = fx - p.x
+		var dz: float = fz - p.z
+		var d2: float = dx * dx + dz * dz
+		if d2 >= rr:
+			continue
+		var u := n as Unit
+		if u == null or u.is_dead() or u is Worker:
+			continue
+		var is_ranged: bool = u.attack_range >= _AICfg.RANGED_ATTACK_RANGE
+		if is_ranged != ranged:
+			continue
+		var d: float = sqrt(d2)
+		if d < best_d:
+			best_d = d
+			best = u
+	return best
+
+## Середина ближайшего СВОЕГО отряда ближнего боя — за его спину и прячутся
+## лучники. Vector3.INF — прикрывать некем
+func _nearest_own_melee_centroid(from: Vector3) -> Vector3:
+	var best := Vector3.INF
+	var best_d := INF
+	for s in squads:
+		var sq: Dictionary = s
+		var uid: String = String(sq["type"])
+		if uid == "archer":
+			continue
+		var members: Array = sq["members"]
+		if members.is_empty():
+			continue
+		var c := _squad_centroid(members)
+		var d: float = from.distance_to(c)
+		if d < best_d:
+			best_d = d
+			best = c
+	return best
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ВЫДАЧА ПРИКАЗОВ РАЗМАЗАНА ПО КАДРАМ
+#
+# Такт размышления идёт раз в THINK_INTERVAL (2 с), и ВСЯ его работа падала в
+# ОДИН кадр: решение по отряду плюс обход всех его бойцов с command_move/
+# command_attack на каждого. На шести сотнях бойцов ИИ это заметный горб раз в
+# две секунды — тот самый «синхронный пульс», который видно как рывок всей
+# армии разом.
+#
+# Решение (дешёвая часть) по-прежнему принимается сразу и на все отряды —
+# обстановка обязана быть согласованной, иначе половина отрядов планировала бы
+# по одной картине мира, половина по другой. А вот РАЗДАЧА (дорогая часть)
+# складывается в очередь и разбирается по ORDER_BUDGET_MEMBERS бойцов за кадр.
+# При шести сотнях бойцов это три-четыре кадра, то есть 50-70 мс — на фоне
+# двухсекундного такта задержка неощутима, а горб исчезает.
+#
+# Тот же приём, что и с фазами коридоров отрядов (GameManager._sweep_corridors):
+# кадр держит работа В ОДНОМ КАДРЕ, а не за секунду.
+# ─────────────────────────────────────────────────────────────────────────────
+
+## План выдачи: по записи на отряд, каждая — уже принятое решение
+var _order_queue: Array = []
+var _order_at: int = 0
+
+const ORDER_BUDGET_MEMBERS := 200
+
+## Разобрать очередь приказов. Зовётся КАЖДЫЙ кадр из _process
+func _drain_orders() -> void:
+	if _order_at >= _order_queue.size():
+		return
+	var left: int = ORDER_BUDGET_MEMBERS
+	while _order_at < _order_queue.size() and left > 0:
+		var plan: Dictionary = _order_queue[_order_at]
+		_order_at += 1
+		left -= _issue_plan(plan)
+	if _order_at >= _order_queue.size():
+		_order_queue.clear()
+		_order_at = 0
+
 func _apply_orders() -> void:
+	_tactical_overrides(_find_castle())
+	# Недоразобранный план прошлого такта выбрасывается целиком: обстановка
+	# пересчитана, и выдавать поверх неё вчерашние приказы было бы хуже, чем
+	# не выдать вовсе
+	_order_queue.clear()
+	_order_at = 0
 	for s in squads:
 		var sq: Dictionary = s
 		var members: Array = sq["members"]
 		if members.is_empty():
 			continue
 		var role: String = String(sq["role"])
+		# ── ОТСТУПАЮЩИЙ ОТРЯД НИКАКИХ ПРИКАЗОВ ОТ ИИ НЕ ПОЛУЧАЕТ ────────────
+		# Его ведёт замок (Castle.request_garrison): бойцы уже в режиме отхода и
+		# идут к воротам. Любой приказ отсюда снял бы этот режим — command_move
+		# без keep_retreat гасит retreating (см. Unit) — и отряд посреди дороги
+		# снова полез бы драться, ради чего его и уводили
+		if role == ROLE_RETREAT:
+			continue
 		# Стойка: гарнизон и заслон держат строй, патруль/поле/штурм — в атаке.
 		# Заслону приказ «атаковать» НЕ выдаётся сознательно: прямой приказ
 		# переводит бойца в стойку АТАКА (см. Unit.command_attack), и рубеж
@@ -811,10 +1457,45 @@ func _apply_orders() -> void:
 			threat = _nearest_player_target(anchor, _AICfg.DEFENSE_ENGAGE_RADIUS)
 		if threat != null:
 			holds = false
+		var uid: String = String(sq["type"])
 		var stance: String = _UCfg.STANCE_DEFENSE if holds else _UCfg.STANCE_ATTACK
+		# ── ФАЛАНГА НА МАРШЕ ────────────────────────────────────────────────
+		# Копья опускает СТОЙКА ЗАЩИТА (Spearman._spear_leveled: holds =
+		# _stance_holds_ground() or _charging()), а марширующий отряд получал
+		# стойку АТАКА и шёл щетиной вверх — копья опускались только в момент
+		# приказа атаки, то есть уже в контакте. Пока противника нет рядом,
+		# копейщики держат ЗАЩИТУ и идут блоком с опущенными копьями; при
+		# контакте стойка возвращается к АТАКЕ, и отряд бьёт как обычно.
+		# «Контакт» ищется один раз на отряд, не на бойца
+		var contact: bool = threat != null
+		if _AICfg.AI_SPEAR_PHALANX_ON_MARCH and uid == "spearman" and not holds:
+			if not contact:
+				contact = _nearest_player_target(_squad_centroid(members),
+					_AICfg.CONTACT_RADIUS) != null
+			if not contact:
+				stance = _UCfg.STANCE_DEFENSE
+		# Обходящие мечники бегут, а на бегу фаланги и стойки нет вовсе —
+		# им стойка АТАКА нужна, чтобы по прибытии сразу вступить в бой
+		if role == ROLE_FLANK:
+			stance = _UCfg.STANCE_ATTACK
 		var need_issue: bool = not bool(sq["issued"])
 		if not need_issue:
-			# Приказ уже отдан: подтолкнуть только тех, кто встал без дела
+			# Приказ уже отдан: подтолкнуть только тех, кто встал без дела.
+			#
+			# ── НО НЕ ПОСРЕДИ СХВАТКИ ────────────────────────────────────────
+			# Это второй источник «разворота спиной», и он тоньше первого.
+			# В свалке отряд, который многочисленнее своего противника, наполовину
+			# состоит из бойцов БЕЗ ЦЕЛИ: до врага дотягивается только передняя
+			# шеренга, остальные честно стоят в State.IDLE. Условие «бездельников
+			# больше половины» на такой картине срабатывает всегда, и отряд
+			# получал command_move поверх идущего боя — а command_move у бойца с
+			# живой целью эту цель СНИМАЕТ (см. Unit._disengaging). То есть
+			# подталкивание тыла разворачивало и передний ряд тоже.
+			#
+			# Пока отряд в контакте, никаких подталкиваний: тыл подтянется сам
+			# смыканием рядов, а передний ряд не бросит начатое
+			if _in_melee(sq):
+				continue
 			var idle := 0
 			for m in members:
 				if (m as Unit).state == Unit.State.IDLE:
@@ -824,48 +1505,154 @@ func _apply_orders() -> void:
 		sq["issued"] = true
 		var center: Vector3 = sq["target"]
 		var course := _order_course(members, center)
-		for i in range(members.size()):
-			var u := members[i] as Unit
-			if not is_instance_valid(u) or u.is_dead():
-				continue
-			if u.stance != stance:
-				u.set_stance(stance)
-			var col: int = i % SQUAD_COLS
-			var row: int = i / SQUAD_COLS
-			var off_x: float = (float(col) - float(SQUAD_COLS - 1) * 0.5) * SQUAD_SPACING
-			var off_z: float = float(row) * SQUAD_SPACING
-			u.formation_row = row
-			if threat != null:
-				# ПРОТИВНИК В ЗОНЕ — ДЕРЁМСЯ ВСЕЙ СЕКЦИЕЙ. Цель берётся своя для
-				# каждого бойца (см. Unit.command_attack: приказ разворачивается
-				# по вражескому отряду), поэтому секция не сваливается на одного
-				var own := _nearest_player_target(u.global_position,
-					_AICfg.DEFENSE_ENGAGE_RADIUS * 1.5)
-				u.command_attack(own if own != null else threat, true, true)
-			elif holds:
-				# Вокруг тихо: гарнизон и заслон встают на пост и держат его
-				u.command_move(center + Vector3(off_x, 0.0, off_z), false, course)
-			elif role == ROLE_PATROL:
-				# Патруль обходит свою дугу; в бой втягивается авто-агро
-				u.command_move(center + Vector3(off_x, 0.0, off_z), true, course)
-			else:
-				var foe := _nearest_player_target(u.global_position, 24.0)
-				if foe != null:
-					u.command_attack(foe, true, true)
-				else:
-					u.command_move(center + Vector3(off_x, 0.0, off_z), false, course)
+		# ── РОВНЫЕ ШЕРЕНГИ: КОЛОНКИ ВЫВОДЯТСЯ ИЗ ЧИСЛА ШЕРЕНГ ───────────────
+		# Здесь была жёсткая шестёрка колонок на всех. Отряд копейщиков в 20
+		# человек ложился в неё как 6+6+6+2 — три полных ряда и огрызок, то есть
+		# ни «ровных шеренг», ни предсказуемой глубины фаланги. Теперь у
+		# копейщиков задано ЧИСЛО ШЕРЕНГ (PHALANX_RANKS), а колонки считаются от
+		# него: 20 человек на 4 шеренги — ровно 5×4, при любых потерях ряды
+		# остаются одинаковой длины. Остальным родам шестёрка и подходит
+		var cols: int = SQUAD_COLS
+		if uid == "spearman" and _AICfg.PHALANX_RANKS > 0:
+			cols = maxi(1, int(ceil(float(members.size()) / float(_AICfg.PHALANX_RANKS))))
+		var flank_close: bool = bool(sq.get("flank_close", false))
+		# ── ЦЕЛЬ ИЩЕТСЯ РАЗ НА ОТРЯД, А НЕ НА БОЙЦА ─────────────────────────
+		# Здесь стояли три вызова _nearest_player_target/_ranged ВНУТРИ цикла по
+		# бойцам. Это было плохо дважды.
+		#
+		# По ЦЕНЕ: каждый вызов обходил обе группы игрока целиком (см. шапку
+		# _nearest_player_target), и весь такт размышления укладывался в один
+		# кадр — отсюда «пульс раз в две секунды» и просадка до 6 FPS в момент
+		# первой стычки, когда отрядов становится много.
+		#
+		# По СМЫСЛУ: своя цель каждому бойцу — это ровно тот механизм, который
+		# уже однажды разваливал отряд игрока (см. в CLAUDE.md разбор
+		# SelectionManager: «каждому выделенному своя ближайшая цель» и есть
+		# главный источник расползания). Один приказ на отряд разворачивается по
+		# составу противника сам — этим занимается GameManager.squad_pick_member
+		# внутри command_attack, и делает он это равномерно, а не «кто ближе».
+		var anchor: Vector3 = _squad_centroid(members)
+		var squad_prey: Node3D = null
+		if role == ROLE_FLANK and flank_close:
+			squad_prey = _nearest_player_ranged(anchor, _AICfg.FLANK_TRIGGER_DIST * 1.5)
+			if squad_prey == null:
+				squad_prey = _nearest_player_target(anchor, _AICfg.CONTACT_RADIUS)
+		elif threat != null:
+			squad_prey = _nearest_player_target(anchor,
+				_AICfg.DEFENSE_ENGAGE_RADIUS * 1.5)
+			if squad_prey == null:
+				squad_prey = threat
+		elif not holds and role != ROLE_KITE and role != ROLE_PATROL:
+			squad_prey = _nearest_player_target(anchor, 24.0)
+		# Решение принято — раздача уходит в очередь (см. _drain_orders)
+		_order_queue.append({
+			"members": members, "role": role, "stance": stance,
+			"center": center, "course": course, "cols": cols,
+			"prey": squad_prey, "threat": threat, "holds": holds,
+			"flank_close": flank_close,
+		})
+	# Первую порцию выдаём сразу, в этом же кадре: отряды, попавшие в начало
+	# очереди, не должны ждать следующего кадра без причины
+	_drain_orders()
 
-## Середина секции — от неё и считается «есть ли враг в зоне»
-func _squad_centroid(members: Array) -> Vector3:
+## Разослать один готовый план бойцам. Возвращает, скольким выдано (бюджет
+## считается в бойцах, а не в отрядах: отряды бывают и по одному человеку, и по
+## полсотни)
+func _issue_plan(plan: Dictionary) -> int:
+	var members: Array = plan["members"]
+	var role: String = plan["role"]
+	var stance: String = plan["stance"]
+	var center: Vector3 = plan["center"]
+	var course: Vector3 = plan["course"]
+	var cols: int = plan["cols"]
+	var prey = plan["prey"]
+	var threat = plan["threat"]
+	var holds: bool = plan["holds"]
+	var flank_close: bool = plan["flank_close"]
+	# Цель могли убить, пока план ждал своей очереди
+	if prey != null and not is_instance_valid(prey):
+		prey = null
+	if threat != null and not is_instance_valid(threat):
+		threat = null
+	var done := 0
+	for i in range(members.size()):
+		# ПРОВЕРКА ДО ПРИВЕДЕНИЯ ТИПА, А НЕ ПОСЛЕ. `x as Unit` на освобождённом
+		# объекте не возвращает null — он БРОСАЕТ «Trying to cast a freed
+		# object», то есть страховка ниже физически не могла сработать. Здесь
+		# это не теория: план ждёт своей очереди несколько кадров (см.
+		# _drain_orders), и бойца за это время вполне могут добить — рядом
+		# стоящая проверка prey/threat поставлена ровно по этой причине
+		if not is_instance_valid(members[i]):
+			continue
+		var u := members[i] as Unit
+		if u == null or u.is_dead():
+			continue
+		done += 1
+		if u.stance != stance:
+			u.set_stance(stance)
+		var col: int = i % cols
+		var row: int = i / cols
+		var off_x: float = (float(col) - float(cols - 1) * 0.5) * SQUAD_SPACING
+		var off_z: float = float(row) * SQUAD_SPACING
+		u.formation_row = row
+		if role == ROLE_FLANK:
+			# ОБХОД. Пока далеко — БЕГОМ мимо чужого строя: бегущий отряд не
+			# перехватывается вражеской линией и не втягивается в авто-бой
+			# (см. Unit.sprinting), то есть действительно обходит, а не
+			# застревает в первой стычке. Флаг спадает сам по прибытии
+			if flank_close:
+				u.command_attack(prey, true, true)
+			else:
+				u.command_move(center + Vector3(off_x, 0.0, off_z), false,
+					course, false, false, true)
+		elif role == ROLE_KITE:
+			# ОТХОД ЗА СПИНУ СВОИХ. Не режим отхода (retreating): лучники
+			# обязаны продолжать стрелять, а тот режим глушит авто-агро
+			u.command_move(center + Vector3(off_x, 0.0, off_z), false, course)
+		elif threat != null:
+			# ПРОТИВНИК В ЗОНЕ — ДЕРЁМСЯ ВСЕЙ СЕКЦИЕЙ, ОДНОЙ ЦЕЛЬЮ НА ОТРЯД
+			u.command_attack(prey if prey != null else threat, true, true)
+		elif holds:
+			# Вокруг тихо: гарнизон и заслон встают на пост и держат его
+			u.command_move(center + Vector3(off_x, 0.0, off_z), false, course)
+		elif role == ROLE_PATROL:
+			# Патруль обходит свою дугу; в бой втягивается авто-агро
+			u.command_move(center + Vector3(off_x, 0.0, off_z), true, course)
+		elif prey != null:
+			u.command_attack(prey, true, true)
+		else:
+			u.command_move(center + Vector3(off_x, 0.0, off_z), false, course)
+	return maxi(done, 1)
+
+## Центр масс всей полевой волны — от него считается курс боевого порядка
+func _field_centroid(field: Array) -> Vector3:
 	var c := Vector3.ZERO
 	var n := 0
+	for s in field:
+		for m in (s as Dictionary)["members"]:
+			if not is_instance_valid(m):
+				continue
+			var u := m as Unit
+			if u == null or u.is_dead():
+				continue
+			c += u.global_position
+			n += 1
+	return c / float(n) if n > 0 else Vector3.ZERO
+
+## Середина секции — от неё и считается «есть ли враг в зоне»
+## ЦЕНТР ОТРЯДА — МЕДИАНА (тот же разбор, что в GameManager._centroid_of):
+## у растянутого или расколотого надвое отряда среднее садится в пустое поле
+## между группами, и туда же уезжает вся тактика ИИ — отход, кайт, обход
+func _squad_centroid(members: Array) -> Vector3:
+	var live: Array = []
 	for m in members:
 		var u := m as Unit
 		if u == null or not is_instance_valid(u) or u.is_dead():
 			continue
-		c += u.global_position
-		n += 1
-	return c / float(n) if n > 0 else Vector3.ZERO
+		live.append(u)
+	if live.is_empty():
+		return Vector3.ZERO
+	return GameManager._centroid_of(live)
 
 func _order_course(members: Array, center: Vector3) -> Vector3:
 	var centroid := Vector3.ZERO
@@ -929,19 +1716,64 @@ func _player_combat_near(pos: Vector3) -> int:
 			n += 1
 	return n
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ПОИСК ЦЕЛИ: СЕТКА ДЛЯ БОЙЦОВ, СНИМОК ЗА ТАКТ ДЛЯ ЗДАНИЙ
+#
+# Здесь стоял двойной обход групп `player_units` + `player_buildings`. Обе беды
+# этого обхода видны только на большой армии:
+#   • get_nodes_in_group КОПИРУЕТ внутренний массив на каждое обращение — при
+#     1900 бойцах игрока это 1900 ссылок в новый Array;
+#   • расстояние мерилось до КАЖДОГО, включая тех, кто на другом конце карты,
+#     хотя радиус запроса — 24-40 м.
+# А звали это из ПОШТУЧНОГО цикла по бойцам ИИ (см. _apply_orders), то есть один
+# такт размышления при 600 бойцах ИИ стоил ~1.1 млн проверок расстояния и 1200
+# копий массива — и всё это в ОДНОМ кадре. Это и был «пульс раз в две секунды».
+#
+# Бойцы теперь берутся из плоской сетки армии (ArmySoA.nearest_of_side): она уже
+# собрана в этом кадре, и обходятся только непустые ячейки нужного радиуса.
+# Здания в сетке не лежат — их мало, и их список снимается РАЗ ЗА ТАКТ
+# (_refresh_target_cache), а не на каждый запрос.
+# ─────────────────────────────────────────────────────────────────────────────
+
+## Снимок зданий игрока на текущий такт: [Node3D, x, z] тройками в плоском виде
+var _pb_nodes: Array = []
+var _pb_x := PackedFloat32Array()
+var _pb_z := PackedFloat32Array()
+
+func _refresh_target_cache() -> void:
+	_pb_nodes.clear()
+	_pb_x.clear()
+	_pb_z.clear()
+	if main == null:
+		return
+	for b in main.get_tree().get_nodes_in_group("player_buildings"):
+		if not is_instance_valid(b):
+			continue
+		if b.has_method("is_dead") and b.is_dead():
+			continue
+		var p: Vector3 = (b as Node3D).global_position
+		_pb_nodes.append(b)
+		_pb_x.append(p.x)
+		_pb_z.append(p.z)
+
 func _nearest_player_target(from: Vector3, radius: float) -> Node3D:
 	var best: Node3D = null
-	var best_d := radius
-	for grp in ["player_units", "player_buildings"]:
-		for n in main.get_tree().get_nodes_in_group(String(grp)):
-			if not is_instance_valid(n):
-				continue
-			if n.has_method("is_dead") and n.is_dead():
-				continue
-			var d: float = from.distance_to((n as Node3D).global_position)
-			if d < best_d:
+	var best_d: float = radius
+	var u = GameManager.army.nearest_of_side(from.x, from.z,
+		Constants.FACTION_PLAYER, radius)
+	if u != null:
+		best = u as Node3D
+		best_d = from.distance_to(best.global_position)
+	# Здания — коротким проходом по снимку такта. Их единицы, сетка тут не нужна
+	for i in range(_pb_nodes.size()):
+		var dx: float = from.x - _pb_x[i]
+		var dz: float = from.z - _pb_z[i]
+		var d: float = sqrt(dx * dx + dz * dz)
+		if d < best_d:
+			var b = _pb_nodes[i]
+			if is_instance_valid(b):
 				best_d = d
-				best = n as Node3D
+				best = b as Node3D
 	return best
 
 # ─────────────────────────────────────────────────────────────────────────────

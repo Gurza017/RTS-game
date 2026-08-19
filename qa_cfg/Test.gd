@@ -147,9 +147,15 @@ func _run() -> void:
 			for k in need_n:
 				if not d.has(k):
 					miss_n.append("%s.%s" % [String(d.get("id", "?")), k])
+	# Ожидаемое число узлов ВЫВОДИТСЯ ИЗ КОНФИГА, а не написано числом: стояло
+	# жёсткое 80 (4 вкладки × 20 ячеек), и добавление пятой вкладки — рабочего —
+	# уронило проверку, которая на деле следит совсем за другим (полнотой полей
+	# во «вью»). Конфиг — источник правды, размер сетки берём у него
+	var need_cells: int = _Forge.UNIT_TABS.size() * _Forge.ROWS * _Forge.COLS.size()
 	verdict("C1 у каждого узла древа есть все запрошенные поля",
-		miss_n.is_empty() and checked == 80,
-		"проверено узлов %d, не хватает: %s" % [checked, str(miss_n.slice(0, 5))])
+		miss_n.is_empty() and checked == need_cells,
+		"проверено узлов %d (ждали %d), не хватает: %s" % [
+			checked, need_cells, str(miss_n.slice(0, 5))])
 
 	# Данные во «вью» — те же самые, что в рабочей таблице (одна копия)
 	var v1: Dictionary = _Forge.node_view("warrior_1a")

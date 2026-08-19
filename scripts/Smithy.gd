@@ -29,7 +29,7 @@ func _ready() -> void:
 	max_health   = _UCfg.building_stat("smithy", "max_hp", 250.0)
 	build_size   = _UCfg.building_size("smithy", Vector3(4.0, 3.0, 4.0))
 	display_name = String(_UCfg.building_cfg("smithy").get("name", "Кузница"))
-	spawn_offset = Vector3(0.0, 0.0, 5.0)
+	# Точку выхода держит узел SpawnPoint (см. Building), офсет считается по нему
 	super._ready()
 
 func _build_visual() -> void:
@@ -74,12 +74,21 @@ func research(upgrade_id: String) -> bool:
 	if t <= 0.0:
 		# research_time = 0 в конфиге — прежнее мгновенное поведение
 		GameManager.finish_research(faction, upgrade_id)
+		_click_sfx()
 		return true
 	if research_id.is_empty():
 		_begin(upgrade_id, t)
 	else:
 		research_queue.append({"id": upgrade_id, "time": t})
+	_click_sfx()
 	return true
+
+## ЩЕЛЧОК ПО ИССЛЕДОВАНИЮ. Звучит на ПРИНЯТЫЙ заказ, а не на нажатие кнопки:
+## отказ (не хватило ресурсов, узел заперт, очередь полна) обязан отличаться от
+## успеха хотя бы тишиной. Чужая кузница молчит — интерфейс наш
+func _click_sfx() -> void:
+	if faction == Constants.FACTION_PLAYER:
+		AudioManager.play_ui("smith_pick")
 
 ## ОТМЕНИТЬ заказ — текущий или стоящий в очереди. Ресурсы возвращаются
 ## полностью (GameManager.cancel_research). Отменённое текущее исследование

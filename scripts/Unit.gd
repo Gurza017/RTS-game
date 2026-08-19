@@ -246,21 +246,46 @@ func _check_local_xform() -> void:
 		return
 	var p := get_parent() as Node3D
 	_local_xform = p != null and p.global_transform.is_equal_approx(Transform3D.IDENTITY)
+	# Тот же ответ — признаком в строке: пакетные проходы пишут координату сами
+	# и читать поле объекта на каждого сдвинутого не должны
+	if _soa >= 0:
+		GameManager.army.set_flag(_soa, 1 << 13, _local_xform)
 
 ## Лёгкая запись строки из текущего положения узла — для подклассов, которые
 ## переопределяют tick_physics и в своих ветках не доходят до super()
 ## (см. Worker: добыча, стройка, возврат груза). Без проверки трансформа: она
 ## разовая и делается при рождении
 func _sync_soa_row() -> void:
+	# СМЕНА СОСТОЯНИЯ ТРЕБУЕТ НЕМЕДЛЕННОГО ПЕРЕСЧЁТА ПОЗЫ. У рабочего это
+	# единственная дорога записи строки в состояниях добычи/стройки/возврата
+	# (базовый tick_physics туда не доходит), и без этой строки он менял
+	# анимацию только на общем такте — топор в руках по дороге к замку
+	if state != _sent_st:
+		_sent_st = state
+		_wake_process()
 	if _soa >= 0:
 		GameManager.army.write_pose(_soa, global_position, velocity, state)
 
 ## Переписать строку ядра армии по текущему положению узла. Нужен тем, кто
 ## двигает бойца В ОБХОД тика — выпуск из гарнизона, отладочный перенос
+## Ниже какого изменения поза считается прежней и в строку не пишется.
+## Полмиллиметра: сетка соседей имеет ячейку в метр, а порог разведения — 29 см
+const POSE_EPS := 0.0005
+var _sent_x: float = INF
+var _sent_z: float = INF
+var _sent_vx: float = INF
+var _sent_vz: float = INF
+var _sent_st: int = -1
+## Следующую запись позы сделать безусловно. Взводится там, где строка могла
+## разойтись с узлом помимо обычного тика: рождение, телепорт, выход из
+## гарнизона (там же гасится и возвращается признак «координата настоящая»)
+var _pose_force: bool = true
+
 func sync_row() -> void:
 	if _soa < 0:
 		return
 	_check_local_xform()
+	_pose_force = true
 	GameManager.army.write_pose(_soa, global_position, velocity, state)
 
 ## Записать в строку боевые характеристики и здоровье. Зовётся там, где они
@@ -379,6 +404,11 @@ var _post_valid: bool = false
 ## невидим, без физики, вне пространственной сетки и вне групп фракции —
 ## поэтому его не видят ни враги, ни поиск целей. См. Castle.absorb_unit()
 var garrisoned: bool = false
+## СПЯЩИЙ ПО РАСПИСАНИЮ (деревня гоблинов до подъёма). Отдельное поле, а не
+## «не тикает физикой»: тик выключают и гарнизон, и стенды, и путать эти
+## случаи нельзя — по этому признаку считается число ходящих бойцов, из
+## которого выводится количество шардов (GameManager.active_units)
+var dormant: bool = false
 
 # ── ОТСТУПЛЕНИЕ В ЗАМОК ──────────────────────────────────────────────────────
 # Отдельный режим, а не «просто приказ идти к замку». Отходящий отряд обязан
@@ -522,6 +552,7 @@ func begin_retreat() -> void:
 	set_attack_target(null)
 	_attack_is_forced = false
 	_charge_order     = false
+	_hold_goal_set    = false     # и точка приказа стены (см. _phalanx_march)
 	# Отход — это отмена приказа атаки, а не пауза в нём: замок цели снимается,
 	# иначе отряд, отправленный лечиться в замок, по дороге снова полез бы драться
 	_atk_pending = false
@@ -554,6 +585,11 @@ var vet_attack:  float = 0.0
 var vet_armor:   float = 0.0
 var vet_defense: float = 0.0
 var vet_speed:   float = 0.0
+## Кучность стрельбы и темп добычи от наград за ветеранство. У них, в отличие
+## от урона и брони, нет собственного поля в характеристиках — прибавлять
+## некуда, поэтому они живут здесь (см. GameManager._apply_bonus_to_unit)
+var vet_spread:  float = 0.0
+var vet_gather:  float = 0.0
 # true — марш строем шагом: скорость вдвое ниже, строй держится плотно
 var march_slow: bool = false
 # ── НАПРАВЛЕНИЕ ВЗГЛЯДА ПОСЛЕ ПРИБЫТИЯ ───────────────────────────────────────
@@ -573,6 +609,18 @@ var _sprite_node: MeshInstance3D = null
 ## давно рисуется общим MultiMesh (см. HpBarRenderer). Всегда null
 var _hp_bar_root: Node3D          = null
 var _hp_bar_fill: MeshInstance3D  = null
+## Полоску погасил ТУМАН (а не тумблер Alt и не смерть). По этому признаку она
+## возвращается сама, когда боец снова попадает в зону видимости
+var _hp_fog_hidden: bool = false
+
+## ── ЗАДЕРЖКА ГАШЕНИЯ В ТУМАНЕ ───────────────────────────────────────────────
+## Сколько секунд чужой боец остаётся нарисованным после того, как перестал
+## просматриваться. Три пересчёта маски (FogOfWar.UPDATE_INTERVAL = 0.15):
+## меньше — дребезг на кромке возвращается, больше — начинает читаться как
+## «вижу сквозь туман»
+const FOG_HIDE_GRACE := 0.45
+## Момент, когда бойца в последний раз было видно, по часам движка
+var _fog_lit_ms: int = 0
 # Текущее состояние зеркала спрайта (см. _update_sprite_flip): хранится
 # отдельно, чтобы гистерезис пережил кадры, когда flip не пересчитывается
 var _flip_h_state: bool = false
@@ -585,6 +633,16 @@ var _active_sprite: Node3D = null
 # с направленными листами правят её под каждый лист: у разных поз копейщика
 # фигурка нарисована на разной высоте внутри кадра (см. Spearman)
 var _sprite_base_y: float = SPRITE_BASE_Y
+## Высота центра ЭТАЛОННОЙ ленты (той, на которую подкласс посадил узел) и её
+## нижний прозрачный отступ в пикселях. По ним выравниваются все прочие позы
+var _look_base_y: float = SPRITE_BASE_Y
+var _look_base_bottom: int = 0
+## Доля 0..1 — с какого места ленты боец начинает зацикленную анимацию.
+## Заполняется в _ready() от номера узла: «случайность», одинаковая от запуска
+## к запуску, — стенд обязан получать те же кадры
+var _anim_offset: float = 0.0
+## Потолок поправки привязки, метры
+const BASE_Y_FIX_MAX := 0.45
 # До этого момента (мс) _update_sprite_anim не трогает анимацию — атака доигрывает
 var _anim_lock_until_ms: int = 0
 
@@ -635,8 +693,19 @@ func _apply_config_stats(unit_id: String) -> void:
 func _ready() -> void:
 	current_health = max_health + GameManager.get_upgrade(faction, "health")
 	max_health     = current_health
+	# ── ДАЛЬНОСТЬ ИЗ КУЗНИЦЫ ВПИСЫВАЕТСЯ В ПОЛЕ, А НЕ ЧИТАЕТСЯ ВЖИВУЮ ────────
+	# attack_range читается в горячих ветках десятки раз за тик (перехват,
+	# подтягивание, скан целей, обзор в тумане), и межобъектный вызов в каждой
+	# из них стоил бы дороже самого бонуса. Поэтому здесь тот же приём, что у
+	# запаса HP: прибавка вписывается в поле при рождении, а уже стоящим на
+	# карте её раздаёт GameManager._apply_range_bonus_now в момент исследования
+	if stat_id != "":
+		attack_range += GameManager.unit_bonus(faction, stat_id, "bonus_range")
 
 	_sep_phase      = get_instance_id() & 7
+	# Сдвиг фазы анимации: 251 — простое, соседние по спавну бойцы получают
+	# заметно разные доли, а не соседние сотые
+	_anim_offset    = float(get_instance_id() % 251) / 251.0
 	# Разводим первый опрос агро по времени: иначе весь отряд, вышедший из
 	# барака одним заказом, сканирует округу в один и тот же кадр
 	_aggro_timer    = float(_sep_phase) * 0.12
@@ -668,10 +737,9 @@ func _ready() -> void:
 	_soa_push_stats()
 	GameManager.register_unit(self)
 	add_to_group("all_units")
-	if faction == Constants.FACTION_PLAYER:
-		add_to_group("player_units")
-	else:
-		add_to_group("enemy_units")
+	# Группа по номеру фракции, а не развилкой «свой/чужой»: гоблины не имеют
+	# права попасть в enemy_units, иначе красный ИИ запишет их в свою армию
+	add_to_group(Constants.unit_group(faction))
 	# НАСЛЕДОВАНИЕ РЕЖИМА ПОЛОСОК. Если игрок держит тумблер Alt поднятым, свежее
 	# подкрепление должно выйти из ворот уже с полоской, а не ждать первой раны
 	if GameManager.hp_bars_forced:
@@ -841,8 +909,14 @@ func _resume_attack() -> bool:
 	if not _atk_pending:
 		return false
 	_atk_pending = false
-	var tgt: Node3D = _atk_pending_target
-	if not is_instance_valid(tgt) or tgt.is_dead():
+	# ПРОВЕРКА НА СЫРОЙ ССЫЛКЕ. Присваивание освобождённого объекта в
+	# ТИПИЗИРОВАННУЮ переменную бросает исключение само по себе — страховка
+	# строкой ниже до выполнения не доходила. А поле держится через весь бой,
+	# и цель за это время гибнет регулярно
+	var tgt: Node3D = null
+	if is_instance_valid(_atk_pending_target):
+		tgt = _atk_pending_target
+	if tgt == null or tgt.is_dead():
 		tgt = GameManager.squad_pick_member(_atk_pending_squad, global_position, null)
 	if tgt == null:
 		# Исходная жертва и весь её отряд выбиты — приказ выполнен, замок больше
@@ -867,6 +941,7 @@ func command_move(target_pos: Vector3, slow_march: bool = false, face_dir: Vecto
 	# и без сброса боец успел бы полметра пройти не туда (см. _sweep_battle_lines)
 	_rear_line = false
 	_line_valid = false
+	_melee_grip = false          # новый приказ на движение снимает сцепку
 	# Любой новый приказ движения отменяет отход — кроме самого приказа «в замок»,
 	# который отдаётся с keep_retreat = true (см. Castle.request_garrison)
 	if retreating and not keep_retreat:
@@ -877,6 +952,11 @@ func command_move(target_pos: Vector3, slow_march: bool = false, face_dir: Vecto
 	_charge_order = false        # просто идём — копья вверх
 	# Новый приказ снимает признак «стою»: боец снова в пути
 	_settled = false
+	# И запрет погони тоже: игрок переставил отряд — новый подход разрешён
+	_engaged_once = false
+	# Точка, куда шла стена по приказу атаки, тоже отменена: приказ «идти туда»
+	# перебивает приказ «идти на них» (см. _phalanx_march)
+	_hold_goal_set = false
 	# НОВЫЙ ПРИКАЗ ДВИЖЕНИЯ ОТМЕНЯЕТ НЕЗАКОНЧЕННЫЙ ПРИКАЗ АТАКИ — симметрично
 	# тому, как command_attack(forced=true) отменяет _march_pending
 	_atk_pending = false
@@ -925,10 +1005,13 @@ func command_move(target_pos: Vector3, slow_march: bool = false, face_dir: Vecto
 
 func set_stance(new_stance: String) -> void:
 	stance = new_stance
-	# В обороне юнит немедленно бросает преследование: приказ «атаковать» ещё
-	# действует, но с места он больше не сходит
+	# ПЕРЕКЛЮЧЕНИЕ В ОБОРОНУ = «СТОЙ ГДЕ СТОИШЬ». Незаконченный приказ атаки
+	# гаснет вместе с точкой, куда шла стена: игрок нажал щит — значит хочет,
+	# чтобы отряд встал здесь, а не дошёл сначала туда, куда его послали минуту
+	# назад. Новый клик по врагу заведёт новую точку (см. _phalanx_march)
 	if _stance_holds_ground():
 		_attack_is_forced = false
+		_hold_goal_set = false
 	_wake_process()
 
 ## ЗАПОМНЕННЫЙ ОТВЕТ ПО ТЕКУЩЕЙ СТОЙКЕ. Сам разбор — обращение в таблицу стоек
@@ -948,7 +1031,12 @@ func _stance_holds_ground() -> bool:
 # Кулдаун удара с учётом стойки: в обороне бьют на 25% чаще
 func _effective_cooldown() -> float:
 	var mult: float = _UStats.stance_stat(stance, "attack_speed_mult", 1.0)
-	return attack_cooldown / maxf(mult, 0.01)
+	# СКОРОСТЬ АТАКИ ИЗ КУЗНИЦЫ. Ключ хранится положительным (см. MODIFIERS) и
+	# вычитается здесь; пол — MIN_COOLDOWN, иначе достаточно длинная ветка
+	# исследований обнулила бы перезарядку. Чтение вживую здесь ничего не стоит:
+	# ветка выполняется один раз на удар, а не на кадр
+	var cut: float = GameManager.unit_bonus(faction, stat_id, "bonus_cooldown")
+	return maxf(attack_cooldown / maxf(mult, 0.01) - cut, _UStats.MIN_COOLDOWN)
 
 # forced = true  — прямой приказ (ПКМ игрока / ИИ): юнит преследует цель.
 # forced = false — оборонительная атака (авто-агро, ответ на урон): юнит
@@ -1007,8 +1095,14 @@ func command_attack(target: Node3D, forced: bool = true, charge: bool = false,
 		# Замок переживает перехват заслона: возобновлённый приказ (_resume_attack)
 		# обязан быть таким же приказом игрока, каким был исходный
 		_atk_pending_lock   = lock or target_lock
-		if _stance_holds_ground():
-			set_stance(_UStats.STANCE_ATTACK)
+		# ── СТОЙКА «ЗАЩИТА» СИЛЬНЕЕ ПРИКАЗА (заказ владельца, авг. 2026) ─────
+		# Здесь стояло set_stance(STANCE_ATTACK): прямой приказ молча выводил
+		# отряд из обороны, и «железобетон» существовал ровно до первого клика
+		# по врагу — после него фаланга бежала за целью, как обычная пехота.
+		# Требование теперь прямое: «при включённом щите преследование ПОЛНОСТЬЮ
+		# отключается». Отряд в обороне исполняет приказ тем, что достаёт
+		# копьём, и с места не сходит; хочешь навала — переключи стойку
+		# кнопкой, она для того и есть (активная подсвечена жёлтой рамкой).
 	# ЗАМОК ВЗВОДИТСЯ ТОЛЬКО ЯВНЫМ lock И НИКОГДА НЕ ГАСНЕТ ЗДЕСЬ. Ровно как
 	# _charge_order выше: перехват заслона зовёт command_attack(blocker, false) —
 	# если бы этот вызов сбрасывал замок, приоритет №2 отменял бы приоритет №1,
@@ -1023,6 +1117,17 @@ func command_attack(target: Node3D, forced: bool = true, charge: bool = false,
 		var tu := target as Unit
 		if tu != null and tu.squad_id != 0:
 			target = GameManager.squad_pick_member(tu.squad_id, global_position, target)
+	# ── ФАЛАНГА ЗАПОМИНАЕТ ТОЧКУ, А НЕ ЦЕЛЬ (см. _phalanx_march) ──────────────
+	# Только по ПРЯМОМУ приказу и только в обороне: авто-агро и ответ на удар
+	# строй с места не сдвигают, это и есть «в покое — намертво»
+	if forced and _stance_holds_ground() and target != null:
+		_hold_goal = target.global_position
+		_hold_goal_set = true
+	# НОВАЯ ЦЕЛЬ — НОВЫЙ ПОДХОД. Запрет погони (см. pursues_target) снимается
+	# только сменой противника: пока это тот же самый, отбежавший враг,
+	# стрелок за ним не идёт, сколько бы раз авто-агро его ни подсунуло
+	if target != attack_target:
+		_engaged_once = false
 	set_attack_target(target)
 	_attack_is_forced = forced
 	state             = State.ATTACKING
@@ -1069,9 +1174,27 @@ func _should_pull_up(dist: float) -> bool:
 func target_in_range() -> bool:
 	if attack_target == null or not is_instance_valid(attack_target):
 		return false
-	var d := attack_target.global_position - global_position
+	# ── ТОЧКИ ПО ДЕШЁВОМУ ПУТИ (см. _local_xform) ───────────────────────────
+	# Это ГОРЯЧАЯ функция: её зовёт выбор позы копейщика на каждом обновлении
+	# ракурса, то есть сотни раз в кадр. Стояли два чтения global_position — а
+	# это не поле, а свойство: после записи трансформа оно пересобирает мировую
+	# матрицу по цепочке родителей. Пересобирать есть что — пакетный шаг только
+	# что записал координаты обоим
+	# ── ТОЧКИ ПО ДЕШЁВОМУ ПУТИ, ВСТРОЕННО (см. _local_xform) ────────────────
+	# Это ГОРЯЧАЯ функция: её зовёт выбор позы копейщика на каждом обновлении
+	# ракурса, то есть сотни раз в кадр. Стояли два чтения global_position — а
+	# это не поле, а свойство: после записи трансформа оно пересобирает мировую
+	# матрицу по цепочке родителей, и пересобирать есть что — пакетный шаг
+	# только что записал координаты обоим.
+	# ВСТРОЕНО, А НЕ ВЫНЕСЕНО В ХЕЛПЕР: вызов функции здесь стоил бы столько же,
+	# сколько экономит (проверено — вынесенный вариант дал нулевую разницу)
+	var tu := attack_target as Unit
+	var tp: Vector3 = tu.position if (tu != null and tu._local_xform) 		else attack_target.global_position
+	var mp: Vector3 = position if _local_xform else global_position
+	var d := tp - mp
 	d.y = 0.0
 	return d.length() <= attack_range
+
 
 # Все присвоения attack_target — только через этот сеттер: подписка на died
 # позволяет не вызывать target.is_dead() каждый физ. кадр в _process_attack().
@@ -1086,17 +1209,31 @@ func set_attack_target(target: Node3D) -> void:
 		var prev := attack_target as Unit
 		if prev != null:
 			prev.attackers = maxi(0, prev.attackers - 1)
+			# Зеркало в колонку: выбор цели (best_enemy) считает штраф за
+			# занятость ВНУТРИ солвера, и чтение поля объекта оттуда стоило бы
+			# обращения через Variant на каждого кандидата скана
+			GameManager.army.set_attackers(prev._soa, prev.attackers)
 	attack_target = target
+	# Строка цели — в колонку: по ней пакетный бой считает дистанцию, не
+	# заглядывая в объект. Пишется ПО СОБЫТИЮ, смена цели редка
+	if _soa >= 0:
+		var trow := -1
+		var tu2 := target as Unit
+		if tu2 != null:
+			trow = tu2._soa
+		GameManager.army.set_target(_soa, trow)
 	if target != null:
 		target.died.connect(_on_attack_target_died)
 		var nu := target as Unit
 		if nu != null:
 			nu.attackers += 1
+			GameManager.army.set_attackers(nu._soa, nu.attackers)
 
 func _on_attack_target_died(who: Node) -> void:
 	var u := who as Unit
 	if u != null:
 		u.attackers = maxi(0, u.attackers - 1)
+		GameManager.army.set_attackers(u._soa, u.attackers)
 	attack_target = null
 	# ── ВОЗВРАТ ИЗ ТЫЛА ПО СОБЫТИЮ, А НЕ ПО СРОКУ ────────────────────────────
 	# Аренда признака и так истечёт на ближайшей разметке отряда, но здесь
@@ -1172,9 +1309,62 @@ static func _sheet_table(sf: SpriteFrames) -> Dictionary:
 			var fw: float = maxf(at.region.size.x, 1.0)
 			total = maxi(1, int(round(at.atlas.get_size().x / fw)))
 		table[StringName(a)] = [tex, total, sf.get_animation_speed(a),
-			sf.get_animation_loop(a)]
+			sf.get_animation_loop(a), _anim_bottom_px(first)]
 	_sheet_tables[key] = table
 	return table
+
+## ── ПРИВЯЗКА ЛЕНТЫ К ЗЕМЛЕ ──────────────────────────────────────────────────
+## Сколько ПРОЗРАЧНЫХ строк пикселей внизу первого кадра. Разные ленты одного
+## набора нарисованы с разным запасом снизу (щит мечника, замах, переноска
+## бревна у рабочего), и спрайт, посаженный на одну и ту же высоту центра,
+## встаёт то выше, то ниже земли. Жёлтое кольцо выделения при этом лежит ровно
+## на земле — отсюда и жалоба «кружочки сползают при смене стоек».
+##
+## Ровно тот же приём, что копейщик давно применяет к своим направленным листам
+## (Spearman._bottom_margin); здесь он поднят в базу, чтобы работал у всех.
+## Считается ОДИН РАЗ на ресурс SpriteFrames (таблица кэшируется статически).
+static func _anim_bottom_px(first: Texture2D) -> int:
+	if first == null:
+		return 0
+	var img: Image = null
+	var x0 := 0
+	var y0 := 0
+	var w := 0
+	var h := 0
+	var at := first as AtlasTexture
+	if at != null and at.atlas != null:
+		img = at.atlas.get_image()
+		x0 = int(at.region.position.x)
+		y0 = int(at.region.position.y)
+		w  = int(at.region.size.x)
+		h  = int(at.region.size.y)
+	else:
+		img = first.get_image()
+		if img != null:
+			w = img.get_width()
+			h = img.get_height()
+	if img == null or w <= 0 or h <= 0:
+		return 0
+	if img.is_compressed():
+		img.decompress()
+	var iw: int = img.get_width()
+	var ih: int = img.get_height()
+	var margin := 0
+	var y: int = mini(y0 + h, ih) - 1
+	while y >= y0:
+		var opaque := false
+		var x: int = x0
+		var xend: int = mini(x0 + w, iw)
+		while x < xend:
+			if img.get_pixel(x, y).a > 0.02:
+				opaque = true
+				break
+			x += 2
+		if opaque:
+			break
+		margin += 1
+		y -= 1
+	return margin
 
 ## Снять вид с узла ОДИН раз и дальше вести его числами.
 ## Вызывается лениво из _process: подкласс ставит _active_sprite внутри своего
@@ -1189,10 +1379,15 @@ func _look_bind() -> void:
 		if asp.sprite_frames == null:
 			return
 		_look_px = asp.pixel_size
-		_sprite_base_y = asp.position.y
+		_look_base_y = asp.position.y
+		_sprite_base_y = _look_base_y
 		# Разобранный набор кладём В ПОЛЕ: дальше смена анимации не обращается
 		# к узлу вообще, даже за списком доступных лент
 		_look_table = _sheet_table(asp.sprite_frames)
+		# ЭТАЛОН ПРИВЯЗКИ — лента, на которую посажен узел в _ready() подкласса
+		# (как правило "idle"). Все прочие позы выравниваются по ней
+		var ref_row: Variant = _look_table.get(asp.animation)
+		_look_base_bottom = int((ref_row as Array)[4]) if ref_row != null else 0
 		_set_anim(asp.animation)
 		return
 	var s3 := spr as Sprite3D
@@ -1227,7 +1422,21 @@ func _set_anim(want: StringName) -> bool:
 	_look_fps    = row[2]
 	_look_loop   = row[3]
 	_look_frame  = 0
-	_anim_phase  = 0.0
+	# ── ФАЗА АНИМАЦИИ У КАЖДОГО СВОЯ ───────────────────────────────────────
+	# Сотня бойцов, вставших в строй одним заказом, начинала ленту с нулевого
+	# кадра в один и тот же миг и дальше дышала СИНХРОННО — отряд читается как
+	# один многократно скопированный спрайт, а не как толпа. Сдвиг берётся от
+	# номера узла (одинаков в двух прогонах стенда) и применяется ТОЛЬКО к
+	# зацикленным лентам: удар обязан начинаться с замаха, то есть с кадра ноль
+	_anim_phase = (_anim_offset * float(_look_frames)) if _look_loop else 0.0
+	# ── НОГИ ОСТАЮТСЯ НА ЗЕМЛЕ ПРИ ЛЮБОЙ ПОЗЕ (см. _anim_bottom_px) ─────────
+	# Низ рисунка новой ленты приводится туда же, где он у эталонной. Зажим
+	# нужен на случай ленты с диким запасом снизу: лучше не выровнять, чем
+	# отправить бойца под землю
+	var shift: float = float(_look_base_bottom - int(row[4])) * _look_px
+	_sprite_base_y = _look_base_y + clampf(shift, -BASE_Y_FIX_MAX, BASE_Y_FIX_MAX)
+	if not _mm_only and _active_sprite != null:
+		(_active_sprite as Node3D).position.y = _sprite_base_y
 	# Узел ведём синхронно ТОЛЬКО пока он на экране (запасной режим отрисовки)
 	if not _mm_only:
 		var asp := _active_sprite as AnimatedSprite3D
@@ -1308,11 +1517,22 @@ func _hide_in_fog() -> void:
 		_far_slot = null
 	if _active_sprite != null and is_instance_valid(_active_sprite):
 		_active_sprite.visible = false
+	# ── ВСЁ, ЧТО ВИСИТ НАД ГОЛОВОЙ, ГАСНЕТ ВМЕСТЕ С БОЙЦОМ ──────────────────
+	# Полоска здоровья живёт НЕ под узлом бойца, а слотом в общем слое
+	# (HpBarRenderer) — ровно как его картинка. Скрытие спрайта её не трогало, и
+	# раненый чужой боец под пеленой оставлял в черноте висящую красную
+	# чёрточку. Та же утечка, что со звёздами ветеранства
+	# (GameManager._update_squad_stars): любая метка над отрядом обязана
+	# подчиняться той же проверке видимости, что и он сам.
+	# Обратно полоску вернёт tick_visual, когда боец снова окажется на свету
+	GameManager.hp_bars.unregister(self)
+	_hp_fog_hidden = true
 	# Признак «меня видно» обязан быть снят: по нему подклассы решают, считать
 	# ли позу, и оставленный true заставлял бы их работать на невидимого
 	_seen = false
 
-func _sync_far_render(seen: bool, look_changed: bool, gp := Vector3.INF) -> void:
+func _sync_far_render(seen: bool, look_changed: bool, gp := Vector3.INF,
+		mm_all: bool = true) -> void:
 	if gp.x == INF:
 		gp = global_position
 	# ── ВСЯ АРМИЯ В ОБЩЕЙ ОТРИСОВКЕ (см. perf_config.mm_render_all) ──────────
@@ -1320,14 +1540,21 @@ func _sync_far_render(seen: bool, look_changed: bool, gp := Vector3.INF) -> void
 	# при возврате в кадр. Разница только в ЧАСТОТЕ обновления: того, кого
 	# видно, надо двигать каждый кадр (иначе шаг рвётся), дальнего — раз в
 	# ANIM_EVERY кадров, как и раньше
-	if _Opt.mm_render_all:
+	if mm_all:
 		if not _far_registered:
 			if _active_sprite != null and is_instance_valid(_active_sprite):
 				_active_sprite.visible = false
 			_mm_only = true
 			_look_detach_node()
 			_far_slot = GameManager.register_far(self, _flip_h_state)
-			_far_registered = true
+			# ── ПРИЗНАК СЛЕДУЕТ ЗА РЕЗУЛЬТАТОМ, А НЕ ЗА НАМЕРЕНИЕМ ───────────
+			# Здесь стояло безусловное `true`. Но register() имеет право вернуть
+			# null (спрайт ещё не собран — sheet_frame() пуст), и тогда боец
+			# числился зарегистрированным, НЕ ИМЕЯ слота: ни одна ветка ниже его
+			# больше не рисовала и заново не регистрировала. На экране боец
+			# просто пропадал — а в свалке, где внешность меняется постоянно,
+			# это и читается как мерцание армии
+			_far_registered = _far_slot != null
 			return
 		# ── ДВА РАЗНЫХ ПУТИ, А НЕ ОДИН ──────────────────────────────────────
 		# ПОЛНЫЙ (refresh) разбирает спрайт: лента, номер кадра, зеркало. Он и
@@ -1340,7 +1567,18 @@ func _sync_far_render(seen: bool, look_changed: bool, gp := Vector3.INF) -> void
 		# позиции — и ничего больше. Неподвижного он отсекает сам
 		var p := Vector3(gp.x, gp.y + _bob, gp.z)
 		if look_changed or _far_slot == null:
-			_far_slot = GameManager.far_units.refresh(self, p, _flip_h_state)
+			# Слот передаётся ЯВНО: у нас он и так под рукой, а искать его по
+			# словарю с объектом-ключом на каждом обновлении незачем
+			_far_slot = GameManager.far_units.refresh(self, p, _flip_h_state, _far_slot)
+			# ── ПОТЕРЯННЫЙ СЛОТ ВОССТАНАВЛИВАЕТСЯ, А НЕ ЗАБЫВАЕТСЯ ──────────
+			# refresh() при смене ленты СНИМАЕТ слот и берёт новый; если взять
+			# новый не удалось (мир не найден, спрайт ещё не собран), она честно
+			# возвращает null. Признак регистрации при этом оставался взведённым,
+			# и боец выпадал из отрисовки НАВСЕГДА: ветка выше регистрирует
+			# только `если не зарегистрирован`. Сбрасывая признак, мы превращаем
+			# это в пропуск одного кадра с самовосстановлением на следующем
+			if _far_slot == null:
+				_far_registered = false
 		elif seen:
 			_far_slot.move_to(p)
 		return
@@ -1379,7 +1617,25 @@ func _sync_far_render(seen: bool, look_changed: bool, gp := Vector3.INF) -> void
 ## GameManager._process (см. perf_config.anim_every_for). Передаётся аргументом,
 ## а не читается из статики: чтение чужого скрипта в цикле по армии — это
 ## лишний поиск на бойца в каждом кадре, а число одно на всех
-func tick_visual(delta: float, frame: int = -1, anim_every: int = ANIM_EVERY) -> void:
+## ── ВСЁ ОБЩЕЕ НА АРМИЮ ПРИХОДИТ АРГУМЕНТАМИ, А НЕ ЧИТАЕТСЯ ОТСЮДА ──────────
+## В прологе этой функции стояло СЕМЬ обращений к чужим объектам на каждого
+## бойца в каждом кадре отрисовки: три поля точки обзора у автозагрузки
+## (_view_x/_view_z/_view_r2) и четыре статических поля настроек (sprite_lod,
+## profile_physics, visual_smoothing, mm_render_all). Все семь одинаковы для
+## ВСЕЙ армии и меняются не чаще раза в кадр.
+##
+## Замер (qa_fx, 3000, фаза контакта) показал, что пролог до первой ветки стоит
+## ~1.4 мкс на вызов при ~900 вызовах в кадр — то есть больше миллисекунды
+## уходило на повторное чтение одних и тех же восьми чисел. Это ровно та цена,
+## которую проект уже оплатил трижды («валюта проекта — межобъектный вызов»);
+## здесь она просто пряталась в визуальном тике, где профиля до сих пор не было.
+##
+## Теперь их читает GameManager ОДИН раз на кадр и раздаёт аргументами — тем же
+## приёмом, каким туда уже переехали frame и anim_every.
+func tick_visual(delta: float, frame: int = -1, anim_every: int = ANIM_EVERY,
+		view_x: float = 0.0, view_z: float = 0.0, view_r2: float = INF,
+		lerp_k: float = 1.0, mm_all: bool = true, prof: bool = false,
+		fog_on: bool = true) -> void:
 	# Ответ «видно ли меня» кладём в поле: подклассы с направленными спрайтами
 	# (Spearman) спрашивали GameManager.near_view ЕЩЁ РАЗ, каждый своим вызовом.
 	# Замер: одна такая пара вызовов на бойца в кадре стоила ~5 кадров в секунду
@@ -1403,13 +1659,31 @@ func tick_visual(delta: float, frame: int = -1, anim_every: int = ANIM_EVERY) ->
 	# наложения, то есть число тут ровно то же самое.
 	# Признак F_POS_VALID снят у тех, кого нет на поле (гарнизон) и у ещё ни
 	# разу не тикавших — для них честнее спросить узел
-	var A = GameManager.army
-	var si: int = _soa
-	var gp: Vector3
-	if si >= 0 and (A.flags[si] & 1) != 0:
-		gp = Vector3(A.px[si], A.py[si], A.pz[si])
-	else:
-		gp = global_position
+	# ── РАЗБИВКА ВИЗУАЛЬНОГО ПРОХОДА ────────────────────────────────────────
+	# Его цена (7-9 мс на 3000 бойцах) до сих пор была ОДНИМ числом без единого
+	# внутреннего замера, и оптимизировать его можно было только вслепую.
+	# Ветки те же по смыслу, что у физического профиля, и включаются тем же
+	# флагом; при выключенном это одна проверка bool
+	var _vprof: bool = prof
+	var _vt: int
+	if _vprof: _vt = Time.get_ticks_usec()
+	# ── ТОЧКА БЕРЁТСЯ У УЗЛА, И ЭТО САМЫЙ ДЕШЁВЫЙ ИЗ ТРЁХ ВАРИАНТОВ ─────────
+	# История этой строки стоит того, чтобы её знать, — здесь перепробованы все
+	# три способа и все три замерены:
+	#   1) global_position — свойство, а не поле: после записи трансформа мировая
+	#      матрица помечена грязной, и первое чтение оплачивает её пересборку по
+	#      цепочке родителей. На каждого бойца в каждом кадре отрисовки;
+	#   2) четыре чтения КОЛОНОК (flags, px, py, pz) — так было, пока колонки
+	#      жили в GDScript: 0.80 мкс на бойца;
+	#   3) один вызов солвера pos_or() — казался очевидным улучшением и оказался
+	#      ХУЖЕ: 2.30 мкс, потому что каждый переход границы GDScript↔C# стоит
+	#      дороже, чем всё, что он экономит.
+	# Правильный ответ — не спрашивать никого: локальная position это ПОЛЕ
+	# трансформа без пересборки матрицы, а под неподвижным World она равна
+	# мировой (см. _local_xform, предпосылка проверяется). Узел и колонка всегда
+	# синхронны: их ведут пакетный шаг, разбор наложения и _move_blocked
+	var gp: Vector3 = position if _local_xform else global_position
+	if _vprof: _Opt.prof_add("vis_row", Time.get_ticks_usec() - _vt)
 	# ── ТУМАН ВОЙНЫ ГАСИТ ЧУЖИХ ЦЕЛИКОМ ─────────────────────────────────────
 	# Не «рисовать потусклее», а не рисовать вовсе: боец снимается с общей
 	# отрисовки, и его слот освобождается. Это и требование по игре (в тумане
@@ -1418,33 +1692,91 @@ func tick_visual(delta: float, frame: int = -1, anim_every: int = ANIM_EVERY) ->
 	# Спрашиваем ТОЛЬКО за чужих: свои сами и есть источники обзора, они
 	# всегда освещены, и вызов наружу за каждого своего бойца был бы платой
 	# за заведомо известный ответ
-	if faction != Constants.FACTION_PLAYER and state != State.DEAD:
+	if _vprof: _vt = Time.get_ticks_usec()
+	# ── ПРИЗНАК «ТУМАН ВКЛЮЧЁН» ПРИХОДИТ АРГУМЕНТОМ ────────────────────────
+	# Вопрос «а есть ли туман вообще» одинаков для всей армии, а задавался он
+	# ДВУМЯ обращениями к чужим объектам (GameManager.fog_lit_at → FogOfWar)
+	# на каждого ЧУЖОГО бойца в каждом кадре. При выключенном тумане — а он
+	# выключен во всех перф-стендах и во всех стендах, меряющих звук и тряску, —
+	# это была чистая переплата за заведомо известный ответ
+	if fog_on and faction != Constants.FACTION_PLAYER and state != State.DEAD:
 		if not GameManager.fog_lit_at(gp.x, gp.z):
-			_hide_in_fog()
-			return
-	var seen := true
-	if _Opt.sprite_lod:
-		var vdx: float = gp.x - GameManager._view_x
-		var vdz: float = gp.z - GameManager._view_z
-		seen = vdx * vdx + vdz * vdz <= GameManager._view_r2
+			# ── ГАСНЕТ НЕ МГНОВЕННО, А ЧЕРЕЗ ЗАДЕРЖКУ ───────────────────────
+			# Маска тумана пересчитывается раз в FogOfWar.UPDATE_INTERVAL
+			# (0.15 с), а бойцы на кромке видимости всё время переступают туда
+			# и обратно: без задержки они гаснут и загораются семь раз в
+			# секунду. В крупном бою таких на кромке сотни — это и есть
+			# «армия мерцает». Задержка в три пересчёта маски убирает дребезг и
+			# не превращается в подсказку: полсекунды — это «последнее, что ты
+			# видел», а не разведка
+			# ── ЗАДЕРЖКА СЧИТАЕТСЯ ПО ЧАСАМ, А НЕ ПО ТИКАМ ──────────────────
+			# Первая версия вычитала delta и была неверной: боец без дела
+			# засыпает (set_process(false)), а будит его редкий обход
+			# GameManager._wake_returned_far_units — раз в четверть секунды и
+			# ровно на ОДИН кадр. Полсекунды задержки набирались бы двадцать семь
+			# таких пробуждений, то есть почти семь секунд (стенд qa_fog D2 это и
+			# показал). Часы от частоты тика не зависят
+			if Time.get_ticks_msec() - _fog_lit_ms > int(FOG_HIDE_GRACE * 1000.0):
+				_hide_in_fog()
+				return
+		else:
+			_fog_lit_ms = Time.get_ticks_msec()
+		# Вышел обратно на свет — вернуть полоску, которую погасил туман.
+		# Признак, а не безусловный вызов: _update_hp_bar лезет наружу, а этот
+		# путь проходят все чужие бойцы каждый кадр
+		if _hp_fog_hidden:
+			_hp_fog_hidden = false
+			_update_hp_bar()
+	if _vprof: _Opt.prof_add("vis_fog", Time.get_ticks_usec() - _vt)
+	# Радиус приходит уже готовым: выключенный LOD — это просто бесконечность
+	# (см. GameManager._process), поэтому здесь нет ни ветки, ни чтения настройки
+	var vdx: float = gp.x - view_x
+	var vdz: float = gp.z - view_z
+	var seen: bool = vdx * vdx + vdz * vdz <= view_r2
 	_seen = seen
+	if _vprof: _vt = Time.get_ticks_usec()
 	_update_walk_anim(delta, seen)
+	if _vprof: _Opt.prof_add("vis_walk", Time.get_ticks_usec() - _vt)
 	# Признак «внешность могла смениться» считается ОДИН раз и передаётся
 	# дальше: по нему же общая отрисовка решает, разбирать ли спрайт заново
 	# (см. _sync_far_render). _flip_dirty сбрасывает _update_sprite_flip, а
 	# _pose_dirty — строка ниже, поэтому запоминаем до вызовов
-	var look_changed: bool = _pose_dirty or _flip_dirty \
-		or (frame + _sep_phase) % anim_every == 0
+	var look_changed: bool = _pose_dirty or _flip_dirty 		or (frame + _sep_phase) % anim_every == 0
 	if seen and look_changed:
+		if _vprof: _vt = Time.get_ticks_usec()
 		_pose_dirty = false
 		_update_sprite_anim()
 		_update_sprite_flip()
+		if _vprof: _Opt.prof_add("vis_pose", Time.get_ticks_usec() - _vt)
 	# Кадр листаем САМИ и ЧИСЛОМ — узел спрайта в общей отрисовке невидим,
 	# а его собственная анимация выключена (см. _look_detach_node)
 	if seen and _look_frames > 1:
 		_advance_look_frame(delta)
 	if state != State.DEAD:
-		_sync_far_render(seen, look_changed, _smoothed(gp))
+		if _vprof: _vt = Time.get_ticks_usec()
+		# ── САМЫЙ ЧАСТЫЙ СЛУЧАЙ СОБРАН ЗДЕСЬ, БЕЗ ДВУХ ВЫЗОВОВ ──────────────
+		# Обычный кадр обычного бойца — это «внешность та же, надо лишь
+		# подвинуть слот». Он проходил через ДВА вызова GDScript подряд
+		# (_smoothed и _sync_far_render), а по замеру сам перенос позиции стоит
+		# 1.22 мкс, из которых заметная часть — это и есть цена вызовов.
+		# Здесь та же арифметика развёрнута на месте; всё остальное
+		# (регистрация, смена ленты, запасной режим отрисовки) уходит в
+		# _sync_far_render, как и раньше
+		if mm_all and _far_registered and _far_slot != null 				and seen and not look_changed:
+			var sx: float = gp.x
+			var sz: float = gp.z
+			if lerp_k < 1.0 and _draw_init:
+				var ddx: float = gp.x - _draw_pos.x
+				var ddz: float = gp.z - _draw_pos.z
+				if ddx * ddx + ddz * ddz <= VIS_SNAP_SQ:
+					sx = _draw_pos.x + ddx * lerp_k
+					sz = _draw_pos.z + ddz * lerp_k
+			_draw_pos = Vector3(sx, gp.y, sz)
+			_draw_init = true
+			_far_slot.move_to(Vector3(sx, gp.y + _bob, sz))
+		else:
+			_sync_far_render(seen, look_changed, _smoothed(gp, lerp_k), mm_all)
+		if _vprof: _Opt.prof_add("vis_far", Time.get_ticks_usec() - _vt)
 	# Сон: стоящему юниту с затухшей анимацией _process не нужен вовсе.
 	# Пробуждение — _wake_process() в командах/уроне.
 	if state == State.IDLE and _anim_time == 0.0 and _process_can_sleep():
@@ -1473,8 +1805,13 @@ const VIS_SNAP_SQ := 4.0
 var _draw_pos: Vector3 = Vector3.ZERO
 var _draw_init: bool = false
 
-func _smoothed(gp: Vector3) -> Vector3:
-	if not _Opt.visual_smoothing:
+## `k` — доля сближения за кадр; её считает GameManager один раз на всю армию.
+## Единица означает «сглаживания нет», поэтому отдельного чтения настройки
+## visual_smoothing здесь больше не нужно
+func _smoothed(gp: Vector3, k: float = -1.0) -> Vector3:
+	if k < 0.0:
+		k = GameManager.vis_lerp_k if _Opt.visual_smoothing else 1.0
+	if k >= 1.0:
 		return gp
 	if not _draw_init:
 		_draw_pos = gp
@@ -1485,12 +1822,46 @@ func _smoothed(gp: Vector3) -> Vector3:
 	if dx * dx + dz * dz > VIS_SNAP_SQ:
 		_draw_pos = gp
 		return gp
-	var k: float = GameManager.vis_lerp_k
 	_draw_pos = Vector3(
 		_draw_pos.x + dx * k,
 		gp.y,                      # высота идёт как есть: рельеф не дёргается
 		_draw_pos.z + dz * k)
 	return _draw_pos
+
+## ── ДОВЕДЕНИЕ КАРТИНКИ, КАЖДЫЙ КАДР ────────────────────────────────────────
+## Сглаживание жило внутри tick_visual, а тот ШАРДИРОВАН — то есть догон
+## случался ровно тогда же, когда и сам шаг, и между шагами не происходило
+## ничего. При трёх шардах спрайт двигался двадцать раз в секунду прыжками
+## тройной длины и рисовался в этих же двадцати кадрах из шестидесяти: именно
+## это и видно как «армия дёргается спрайтами». Считать это сглаживанием было
+## нельзя — оно только добавляло постоянное отставание.
+##
+## Метод нарочно КРОШЕЧНЫЙ: чтение строки ядра армии, одно вычитание с
+## умножением и запись трёх float в общий буфер. Ни ракурса, ни анимации, ни
+## LOD, ни тумана здесь нет — всё это по-прежнему считается раз в несколько
+## кадров в tick_visual. Зовётся только при шардировании (при одном шарде
+## tick_visual и так идёт каждый кадр) — см. GameManager._process
+func tick_draw() -> void:
+	if not _mm_only or _far_slot == null or not _seen or state == State.DEAD:
+		return
+	var gp: Vector3 = position if _local_xform else global_position
+	var p := _smoothed(gp, GameManager.vis_lerp_k)
+	_far_slot.move_to(Vector3(p.x, p.y + _bob, p.z))
+
+## ТОЧКА, В КОТОРОЙ БОЕЦ НАРИСОВАН, а не в которой он логически стоит.
+##
+## Всё, что лежит на земле ПОД бойцом — кольцо выделения, тень, красное кольцо
+## прицела, полоска здоровья — обязано браться отсюда, а не из global_position.
+## Иначе получается ровно то, на что пришла жалоба: метки уезжают от ног.
+## Причина не в метках — они как раз честно стоят в логической точке. Уезжает
+## САМ СПРАЙТ: картинка сглаживается между физическими шагами (_smoothed), а на
+## трёх шардах боец шагает раз в три кадра, и догон отстаёт от логики на
+## РАССТОЯНИЕ ШАГА. Замер qa_ring: на одном шарде отставание 5-7 см и глазу
+## незаметно, на трёх — 0.28 м по X и 0.28 по Z, то есть почти полметра по
+## диагонали марша. Логическая точка при этом остаётся честной: попадания,
+## клики и блокировка строем считаются по ней.
+func draw_position() -> Vector3:
+	return _draw_pos if _draw_init else global_position
 
 # Подклассы с направленными спрайтами добавляют свои условия (см. Spearman)
 func _process_can_sleep() -> bool:
@@ -1559,10 +1930,31 @@ func _play_attack_anim(anim: String, dur_ms: int = 500) -> void:
 	_anim_lock_until_ms = Time.get_ticks_msec() + dur_ms
 	_set_anim(anim)
 
-## Единственная внешняя точка пробуждения (см. GameManager._wake_returned_far_units).
-## Спящий дальний юнит сам не заметит возврат в near_view — будит его снаружи
+## Единственная внешняя точка пробуждения (см. GameManager._wake_returned_far_units
+## и ArmyCore.BatchSeparation).
+##
+## ── ПОЗУ ЗДЕСЬ НЕ ПАЧКАЕМ, И ЭТО ГЛАВНОЕ ОТЛИЧИЕ ОТ _wake_process ──────────
+## Смыслов у пробуждения два, и раньше они были склеены в один:
+##   • «я сдвинулся или вернулся в кадр» — нужно снова крутить визуальный тик,
+##     чтобы перерисовалась ПОЗИЦИЯ;
+##   • «моя внешность изменилась» — нужно пересчитать позу и ракурс.
+## Отсюда будят только по первому поводу: расталкивание толкает сотни бойцов за
+## кадр, и каждый такой толчок помечал позу грязной, хотя вид не менялся.
+##
+## Замер счётчиками (не зависит от загрузки машины): за 90 кадров в фазе
+## контакта было 34 788 ПОЛНЫХ обновлений слота отрисовки и НОЛЬ быстрых, то
+## есть дорогой путь шёл всегда; 23 301 из них взводились именно этим признаком
+## против 16 568 по штатному такту анимации.
+##
+## Поза от этого не застаивается: она пересчитывается по такту (anim_every), то
+## есть не позже пяти тиков бойца, а настоящие смены внешности (приказ, стойка,
+## начало удара, пробуждение из сна) метят её явно — см. _wake_process ниже
 func wake_for_lod() -> void:
-	_wake_process()
+	if _proc_sleeping:
+		# Из СНА выходим с пересчётом позы: пока боец спал, поза могла устареть
+		_pose_dirty = true
+		_proc_sleeping = false
+		set_process(true)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # УБРАТЬ БОЙЦА С ПОЛЯ, НЕ УБИВАЯ ЕГО (гарнизон замка)
@@ -1676,23 +2068,37 @@ var _prof_on: bool = false
 # и т.п.) — сам движковый флаг никуда не делся, GameManager проверяет его
 # через `is_physics_processing()` перед вызовом. Меняется только КТО и КАК
 # зовёт метод, а не семантика тумблера.
-func tick_physics(delta: float) -> void:
+func tick_physics(delta: float, prof: bool = false, bm: bool = true,
+		bonus_ver: int = -1) -> void:
 	# РАЗБИВКА ПО ВЕТКАМ — только когда _Opt.profile_physics включён (qa_perf).
 	# При выключенном флаге это одна проверка bool на вызов, без единого
 	# обращения к Time.get_ticks_usec()
-	var _prof: bool = _Opt.profile_physics
+	# Флаг профиля — общий на всю армию и приходит аргументом: статическое поле
+	# чужого скрипта, прочитанное на каждого бойца в каждом тике, стоит дороже
+	# самой проверки (та же оговорка, что и у аргументов tick_visual)
+	var _prof: bool = prof
 	_prof_on = _prof
+	# ── ОБЩИЕ НА АРМИЮ ВЕЛИЧИНЫ СНИМАЮТСЯ ОДИН РАЗ ЗА ТИК ──────────────────
+	# Оба читались из ГОРЯЧИХ мест по нескольку раз на бойца: выключатель
+	# пакетного шага — в _commit_step, версия бонусов — в кэше базовой скорости.
+	# Оба одинаковы для всей армии и меняются реже кадра, а стоили обращения к
+	# чужому объекту на каждое чтение
+	_bm_on = bm
+	if bonus_ver >= 0:
+		_bonus_ver = bonus_ver
 	var _t0: int
 	# СЕТКУ ТРОГАЕМ, ТОЛЬКО ЕСЛИ СДВИНУЛИСЬ. Ячейка 1 м, поэтому смещение на
 	# сантиметры ячейку сменить не может, а вызов update() всё равно считал
 	# ключ и лез в два словаря. На тысяче бойцов, половина которых стоит в
 	# строю или бьётся на месте, это тысяча лишних словарных операций в кадр
 	if _prof: _t0 = Time.get_ticks_usec()
-	# ТОЧКА ЧИТАЕТСЯ ОДИН РАЗ. global_position у Node3D — не поле, а свойство:
-	# каждое чтение проверяет актуальность мировой матрицы и при нужде
-	# пересобирает её. Здесь оно читалось трижды подряд, хотя между чтениями
-	# ничего не менялось
-	var gp := global_position
+	# ТОЧКА ЧИТАЕТСЯ ОДИН РАЗ И ПО ДЕШЁВОМУ ПУТИ. global_position у Node3D —
+	# не поле, а свойство: каждое чтение проверяет актуальность мировой матрицы
+	# и при нужде пересобирает её ПО ЦЕПОЧКЕ РОДИТЕЛЕЙ. А пересобирать её есть
+	# что: пакетный шаг только что записал координату. Локальная position —
+	# обычное поле трансформа, и под неподвижным World она равна мировой
+	# (см. _local_xform, предпосылка проверяется, а не принимается на веру)
+	var gp: Vector3 = position if _local_xform else global_position
 	var gdx: float = gp.x - _grid_pos.x
 	var gdz: float = gp.z - _grid_pos.z
 	# ── СТРОКА ПИШЕТСЯ КАЖДЫЙ ТИК, И ЭТО ДЕШЕВЛЕ ПРЕЖНЕГО ──────────────────
@@ -1711,7 +2117,64 @@ func tick_physics(delta: float) -> void:
 	# Редкие величины (здоровье, характеристики, отряд) по-прежнему пишутся по
 	# событию из тех мест, где они и меняются.
 	_grid_pos = gp
-	GameManager.army.write_pose(_soa, gp, velocity, state)
+	# ── ПОЗА ПУБЛИКУЕТСЯ, ТОЛЬКО ЕСЛИ ОНА ИЗМЕНИЛАСЬ ───────────────────────
+	# Прежний комментарий (он выше и оставлен как история) утверждал обратное:
+	# «условие здесь дороже безусловной записи трёх чисел», и на чистом GDScript
+	# это было ВЕРНО — запись стоила доли микросекунды. С переездом колонок в
+	# C#-солвер цена изменилась на порядок: каждый вызов через границу языков
+	# стоит ~2.4 мкс, и ветка grid_update стала второй по величине статьёй тика
+	# (2.1 мс кадра на трёх тысячах).
+	#
+	# А писать почти всегда нечего. В плотном бою сотни бойцов стоят в
+	# ATTACKING с нулевой скоростью: их точка, скорость и состояние не меняются
+	# тиками подряд. Шесть сравнений своих же полей стоят около 0.1 мкс —
+	# против 2.4 мкс перехода границы.
+	#
+	# Позицию при этом ведёт САМ СОЛВЕР (пакетный шаг и разбор наложения пишут
+	# колонку напрямую), так что пропуск записи ничего не теряет: сравнение
+	# ловит ровно те случаи, когда бойца сдвинуло что-то ДРУГОЕ — поштучный
+	# _move_blocked, выход из гарнизона, телепорт стенда
+	if _pose_force or state != _sent_st 			or absf(gp.x - _sent_x) > POSE_EPS or absf(gp.z - _sent_z) > POSE_EPS 			or absf(velocity.x - _sent_vx) > POSE_EPS 			or absf(velocity.z - _sent_vz) > POSE_EPS:
+		_pose_force = false
+		# ── СМЕНА СОСТОЯНИЯ = СМЕНА ВНЕШНОСТИ, И ОНА СРОЧНАЯ ────────────────
+		# Позы пересчитываются раз в ANIM_EVERY кадров визуального такта, а тот
+		# ещё и шардирован: на большой армии между сменой состояния и сменой
+		# картинки проходило до дюжины кадров. У бойца это незаметно (walk/idle
+		# похожи), а у рабочего заметно в упор: он уже идёт от дерева к замку, а
+		# нарисован всё ещё машущим топором, и бревно на спине появляется
+		# позже. Признак состояния — единственное, что тут сравнивается, и оно
+		# уже сравнивается строкой ниже: стоимость проверки нулевая
+		if state != _sent_st:
+			_wake_process()
+		_sent_x = gp.x
+		_sent_z = gp.z
+		_sent_vx = velocity.x
+		_sent_vz = velocity.z
+		_sent_st = state
+		# ПОЗА КЛАДЁТСЯ В ОЧЕРЕДЬ АВТОЗАГРУЗКИ, А НЕ УХОДИТ ЗА ГРАНИЦУ ЯЗЫКОВ:
+		# весь список отдаётся солверу одним вызовом после обхода армии
+		# (см. GameManager.queue_pose)
+		# ── ВОРОТА ПАКЕТНОГО БОЯ ЕДУТ ВМЕСТЕ С ПОЗОЙ ───────────────────────
+		# «Простой бой» — это отсутствие всего особенного: замка приказа игрока,
+		# стойки, держащей место, бега, отхода, выхода из боя и одиночества вне
+		# отряда (подтягивание рядов — механика ОТРЯДА, см. _should_pull_up).
+		# Все эти условия боец и так проверяет в своём автомате; собрать из них
+		# слово и положить в тот же массив, что и позу, стоит нескольких
+		# сравнений и НИ ОДНОГО перехода границы
+		# ── ВОРОТА СЧИТАЮТСЯ, ТОЛЬКО ЕСЛИ ИХ КТО-ТО ЧИТАЕТ ──────────────────
+		# Их единственный потребитель — пакетный проход боя, а он выключен по
+		# замеру (см. perf_config.batch_combat). Пока он выключен, это шесть
+		# сравнений и ВЫЗОВ _effective_speed() на каждого бойца в каждом тике
+		# ради двух чисел, которые никто не прочтёт
+		var gate := 0
+		var eff := 0.0
+		if _Opt.batch_combat:
+			if not target_lock and not _stance_holds_ground() and not sprinting 					and not retreating and not _disengaging and squad_id != 0 					and not _hold_goal_set:
+				gate |= 1 << 14                 # F_ATK_SIMPLE
+			if retreating: gate |= 1 << 1
+			if sprinting:  gate |= 1 << 2
+			eff = _effective_speed()
+		GameManager.queue_pose(_soa, gp, velocity, state, gate, eff)
 	if _prof: _Opt.prof_add("grid_update", Time.get_ticks_usec() - _t0)
 	# Фактический ряд пересчитывается ТОЛЬКО у фаланги: вне обороны эта
 	# механика не работает и лишнего скана сетки не делает
@@ -1748,7 +2211,16 @@ func tick_physics(delta: float) -> void:
 			_process_move(delta)
 			if _prof: _Opt.prof_add("process_move", Time.get_ticks_usec() - _t0)
 		State.ATTACKING:
-			_process_attack(delta)
+			# ── ПАКЕТ МОГ ЗАКРЫТЬ ЭТОТ КАДР ЗА МЕНЯ ─────────────────────────
+			# BatchCombat уже посчитал шаг подтягивания по колонкам и отметил
+			# кадром только тех, кому нужен полный автомат (замер: пятая часть
+			# состава в фазе контакта). Направление берётся из колонки — оно
+			# нужно спрайту, а посчитано уже там
+			if _Opt.batch_combat and _soa >= 0 					and _soa < GameManager.atk_need.size() 					and GameManager.atk_need[_soa] == 0:
+				var A2 = GameManager.army
+				_facing = Vector3(A2.facing_x(_soa), 0.0, A2.facing_z(_soa))
+			else:
+				_process_attack(delta)
 			if _prof: _Opt.prof_add("process_attack", Time.get_ticks_usec() - _t0)
 		State.IDLE:
 			velocity = Vector3.ZERO
@@ -1850,8 +2322,9 @@ func _resolve_overlap() -> void:
 	global_position = Vector3(nx, GameManager.get_terrain_height(nx, nz), nz)
 	# Стоящий боец спит по картинке (set_process(false)) и своего нового места
 	# сам не перерисует — общая отрисовка узнала бы о сдвиге только со следующим
-	# приказом. Будим: сдвиги редки и заканчиваются сами
-	_wake_process()
+	# приказом. Будим, но БЕЗ пометки позы: сдвинулась точка, а не внешность
+	# (см. wake_for_lod)
+	wake_for_lod()
 
 func _exit_tree() -> void:
 	GameManager.unit_grid.remove(self)
@@ -1868,9 +2341,19 @@ func _exit_tree() -> void:
 	# метками выделения строкой ниже)
 	GameManager.hp_bars.unregister(self)
 	# Метки выделения теперь не дети юнита и сами с ним не исчезнут: слот надо
-	# вернуть явно, иначе кольцо останется висеть над пустым местом
-	if _selected:
-		GameManager.sel_decals.unregister(self)
+	# вернуть явно, иначе кольцо останется висеть над пустым местом.
+	# Снимаем БЕЗУСЛОВНО, а не `if _selected`: снятие идемпотентно, а флаг —
+	# всего лишь второе описание того же факта, и разойтись эти два описания
+	# уже могут (гарнизон, перевыделение в кадре гибели). Цена ошибки —
+	# висящий слот и ссылка на освобождённый объект в словаре рендерера
+	GameManager.sel_decals.unregister(self)
+	# ПРИЦЕЛЬНАЯ ПОДСВЕТКА — ТРЕТИЙ СЛОЙ, И ЕГО ЗДЕСЬ НЕ ЧИСТИЛИ ВОВСЕ.
+	# Набор красных колец задаётся опросом курсора раз в CURSOR_POLL, а вырезают
+	# подсвеченный отряд куда быстрее: между двумя опросами в _hover_slot
+	# накапливались освобождённые объекты, и покадровый обход колец падал на них
+	# с «Trying to assign invalid previously freed instance» (отчётный стек
+	# SelectionDecalRenderer.gd:280)
+	GameManager.sel_decals.drop_hover(self)
 	# Выбывшего бойца сразу вычёркиваем из отряда: пустой отряд расформируется
 	# сам, и в реестре не копятся ссылки на удалённые узлы
 	GameManager.remove_from_squad(self)
@@ -1906,9 +2389,9 @@ const SPRINT_SPEED_FACTOR := 1.4
 ## GameManager.squad_note_arrival). +15%: хвост подтягивается заметно быстрее,
 ## но не срывается в спринт и не проскакивает свой слот
 const CATCH_UP_FACTOR := 1.15
-## Насколько медленнее фаланга идёт в атаку с опущенными копьями.
-## −25% от базовой: наступление щетиной пик — размеренное, зато отряд всю
-## дорогу сохраняет строй и оборонительные бонусы стойки
+## ИСТОРИЧЕСКОЕ ЧИСЛО, ОСТАВЛЕНО ТОЛЬКО ДЛЯ СТЕНДОВ. Живой множитель скорости
+## стойки теперь лежит в балансной таблице: unit_stats_config.STANCES
+## [stance]["move_speed_mult"] (у обороны 0.65 — заказ владельца, −35%)
 const PHALANX_ATTACK_FACTOR := 0.75
 
 # Эффективная скорость с учётом бонусов кузницы (сапоги/броня) и марша строем
@@ -1927,8 +2410,13 @@ var _spd_version: int = -1
 var _spd_vet: float   = -1.0
 var _spd_own: float   = -1.0
 
+## Снимок общих величин тика (см. tick_physics): чтение полей автозагрузки шло
+## на каждый расчёт скорости и на каждый шаг каждого идущего бойца
+var _bm_on: bool = true
+var _bonus_ver: int = -1
+
 func _base_speed() -> float:
-	var ver: int = GameManager.bonus_version
+	var ver: int = _bonus_ver if _bonus_ver >= 0 else GameManager.bonus_version
 	if _spd_version == ver and _spd_vet == vet_speed and _spd_own == move_speed:
 		return _spd_cache
 	_spd_cache = maxf(0.5, move_speed
@@ -1959,15 +2447,52 @@ func _effective_speed() -> float:
 	# по прибытии (см. sprinting / _arrive_at_target)
 	if sprinting and state == State.MOVING:
 		s *= SPRINT_SPEED_FACTOR
-	# АТАКА ИЗ СТОЙКИ ЗАЩИТЫ. Отряд не бросает фалангу и не переходит на бег:
-	# идёт медленнее, но с опущенными копьями и со всеми бонусами стойки.
-	# На бегу стойка не действует — бегущий строй уже распущен
-	if not sprinting and _stance_holds_ground() and state != State.IDLE:
-		s *= PHALANX_ATTACK_FACTOR
+	# ── ШТРАФ СТОЙКИ. ПРИМЕНЯЕТСЯ ВСЕГДА, В ТОМ ЧИСЛЕ НА БЕГУ ───────────────
+	# Множитель берётся из конфига (STANCES.move_speed_mult), а не из константы:
+	# это балансное число, и место ему в балансной таблице.
+	#
+	# Было `not sprinting and ...` — то есть бегущий боец штраф стойки не платил
+	# вовсе и разгонялся до 1.4 базовой. Со щитом наизготовку это давало
+	# скорость ВЫШЕ обычной ходьбы: строй с опущенными копьями обгонял налегке
+	# идущую пехоту, а лучники, считающие упреждение по скорости цели, стреляли
+	# мимо. Теперь стойка режет скорость до всех прочих множителей: 1.4 × 0.65 =
+	# 0.91, то есть бегущая фаланга всё равно медленнее обычного шага.
+	if state != State.IDLE:
+		var stance_mult: float = _UStats.stance_stat(stance, "move_speed_mult", 1.0)
+		if stance_mult != 1.0:
+			s *= stance_mult
 	# ПОДТЯГИВАНИЕ ХВОСТА: первые ряды уже на местах — отстающим прибавка
 	if _catch_up and state == State.MOVING:
 		s *= CATCH_UP_FACTOR
 	return s
+
+
+## ── ЗАЯВИТЬ ШАГ, А НЕ ПРОВОДИТЬ ЕГО ─────────────────────────────────────────
+## Единая точка для всех горячих путей движения: марш, подход к цели и ход
+## стены. Боец кладёт желаемое смещение в строку, а геометрию (вода, ствол,
+## чужой строй, край карты, рельеф, запись координаты) делает один пакетный
+## проход по колонкам после обхода армии.
+##
+## Запасной путь обязателен: строки может не быть (боец вне ядра армии — так
+## бывает в стендах и до первого тика), и тогда шаг проводится по-старому.
+func _commit_step(step: Vector3) -> void:
+	if _soa >= 0 and _bm_on:
+		# Слово признаков складывается ЛИТЕРАЛЬНЫМИ СДВИГАМИ, а не через
+		# ArmySoA.F_*: обращение к константе чужого скрипта в горячем месте
+		# стоит дороже самой арифметики. Сходимость номеров сторожит qa_army A1
+		var sfl := 0
+		if retreating:          sfl |= 1 << 1     # F_RETREATING
+		if sprinting:           sfl |= 1 << 2     # F_SPRINTING
+		if _clear_trunk:        sfl |= 1 << 7     # F_CLEAR_TRUNK
+		if _clear_enemy:        sfl |= 1 << 8     # F_CLEAR_ENEMY
+		if _trunk_ignore > 0.0: sfl |= 1 << 12    # F_TRUNK_IGNORE
+		# ЗАЯВКА КЛАДЁТСЯ В ОЧЕРЕДЬ АВТОЗАГРУЗКИ, А НЕ УХОДИТ ЗА ГРАНИЦУ ЯЗЫКОВ.
+		# Прямой вызов солвера — это переход границы на КАЖДОГО шагающего
+		# (~2.2 мкс); очередь стоит одну запись в массив, а весь список уходит
+		# в солвер одним вызовом за кадр (см. GameManager.queue_step)
+		GameManager.queue_step(_soa, step.x, step.z, sfl)
+	else:
+		_move_blocked(step)
 
 # Шаг с УЧЁТОМ ЧУЖОГО СТРОЯ: сквозь вражескую шеренгу пройти нельзя.
 # Физические маски намеренно остаются нулевыми (см. README — включённые
@@ -2065,9 +2590,23 @@ func _move_blocked(step: Vector3) -> void:
 	#
 	# И ЗДЕСЬ ОТРЯД ОТВЕТИЛ ЗА ВСЕХ: чужих в габаритах отряда нет — значит, нет
 	# их и у каждого его бойца (см. GameManager._recalc_corridor)
+	# ── БЕГУЩИЙ БОЛЬШЕ НЕ ПРОХОДИТ СКВОЗЬ ТЕЛА (жалоба владельца) ───────────
+	# Здесь было `not sprinting` — то есть бегущий отряд игнорировал чужой строй
+	# целиком. Для игрока это читалось как «пробежать мимо, не ввязываясь», а вот
+	# у ИИ бегом обходят фланг мечники (EnemyAI ROLE_FLANK), и на экране они
+	# просто проходили СКВОЗЬ шеренгу копейщиков, как сквозь пустое место.
+	#
+	# Разделяем два разных смысла, которые раньше были склеены в один флаг:
+	#   • «не ввязываться в бой» — остаётся за бегом (авто-агро, перехват марша
+	#     и ответный удар по-прежнему выключены, см. пять ворот с `not sprinting`);
+	#   • «проходить сквозь людей» — снято. Бегущий упирается в строй и обтекает
+	#     его вдоль, как любой другой.
+	# Сквозной проход сохранён ТОЛЬКО за отходом (retreating): отряду, которого
+	# отзывают в замок, перекрытая дорога означала бы вечное трение боком о
+	# вражескую шеренгу — ровно ту помеху, ради которой исключение и заводилось
 	if _prof: _t = Time.get_ticks_usec()
 	var block: Vector3 = Vector3.ZERO
-	if not retreating and not sprinting and not _clear_enemy:
+	if not retreating and not _clear_enemy:
 		block = GameManager.unit_grid.enemy_block(self, np, BLOCK_RADIUS)
 	if _prof: _Opt.prof_add("mb_enemyblock", Time.get_ticks_usec() - _t)
 	if block.length_squared() > 1e-8:
@@ -2078,15 +2617,47 @@ func _move_blocked(step: Vector3) -> void:
 		_enemy_contact = true
 		# Скользим ВДОЛЬ вражеской шеренги: убираем составляющую «внутрь» строя
 		var n := block.normalized()
-		var into := step.dot(n)
-		if into > 0.0:
-			step -= n * into
-		if step.length_squared() < 1e-8:
-			return
-		np = cur + step
-		# Второй проход: если и боковой шаг упирается — стоим вплотную
-		if GameManager.unit_grid.enemy_block(self, np, BLOCK_RADIUS).length_squared() > 1e-8:
-			return
+		var full_len: float = step.length()
+		if sprinting:
+			# ── БЕГУЩИЙ ОБХОДИТ СТРОЙ, А НЕ УПИРАЕТСЯ В НЕГО ────────────────
+			# Шаг РАЗВОРАЧИВАЕТСЯ по касательной с СОХРАНЕНИЕМ ДЛИНЫ, а не просто
+			# теряет составляющую «внутрь». Разница решает: обрезка оставляет
+			# бойцу, идущему почти в лоб, считанные сантиметры вбок, и он ползёт
+			# вдоль шеренги со скоростью пары см/с — на стенде из четырёх бегущих
+			# мимо одного тела за семь секунд проходили двое. С разворотом он
+			# обходит на полной скорости и возвращается на курс, как только тело
+			# перестаёт быть между ним и целью.
+			#
+			# Сторона — та, куда шаг И ТАК тянет; строго лобовой случай (боковой
+			# составляющей почти нет) разводится по чётности id, чтобы двое
+			# бегущих рядом расходились, а не толкались в одну сторону
+			var tang := Vector3(-n.z, 0.0, n.x)
+			var lat: float = tang.dot(step)
+			var s: float
+			if absf(lat) < full_len * 0.15:
+				s = 1.0 if (get_instance_id() & 1) == 0 else -1.0
+			else:
+				s = 1.0 if lat > 0.0 else -1.0
+			step = tang * (s * full_len)
+			np = cur + step
+			# Второго прохода здесь нет НАМЕРЕННО: скольжение вдоль строя по
+			# построению оставляет бойца на прежнем расстоянии от тел, то есть
+			# enemy_block в новой точке снова ненулевой — и проверка отменяла бы
+			# обход целиком. Составляющей «внутрь» в шаге уже нет, тонуть нечем
+		else:
+			# Скользим ВДОЛЬ вражеской шеренги: убираем составляющую «внутрь»
+			var into := step.dot(n)
+			if into > 0.0:
+				step -= n * into
+			# Шаг обнулился целиком — идём строго в лоб. Для шагающего это
+			# правильный ответ «встань»: контакт со строем и означает «дерись»,
+			# _enemy_contact выше уже взведён, перехват сделает остальное
+			if step.length_squared() < 1e-8:
+				return
+			np = cur + step
+			# Второй проход: если и боковой шаг упирается — стоим вплотную
+			if GameManager.unit_grid.enemy_block(self, np, BLOCK_RADIUS).length_squared() > 1e-8:
+				return
 	# КРАЙ МИРА НЕПРОХОДИМ: за бортик карты не выходит никто.
 	# Зажим считаем ЗДЕСЬ, по готовым пределам (GameManager.map_lim_x/z), а не
 	# вызовом clamp_to_map: тот возвращает Vector2, то есть на каждый шаг
@@ -2193,6 +2764,24 @@ func _rear_step(delta: float) -> void:
 	velocity = _line_course * (step / maxf(delta, 1e-6))
 	_facing = _line_course
 	var np: Vector3 = global_position + _line_course * step
+	# ── ЧУЖОЕ ТЕЛО НЕПРОХОДИМО И ДЛЯ ТЫЛА ───────────────────────────────────
+	# ЭТО И БЫЛО «МЕЧНИКИ ПРОНИКАЮТ В ЦЕНТР ФАЛАНГИ СКВОЗЬ ПИКИ». Дешёвый шаг
+	# тыла считался как «иду вперёд по курсу колонны, пока не упрусь в СВОЕГО»
+	# (_rear_hold ограничивает глубину относительно своего же передового) — и не
+	# спрашивал про чужих ВООБЩЕ. Пока свалка редкая, это незаметно: тыл далеко
+	# от чужой шеренги. Но в плотном бою строи перемешаны, и боец, размеченный
+	# как тыловой своим отрядом, честно шёл сквозь чужие тела — то есть внутрь
+	# вражеской фаланги, мимо всех пик.
+	#
+	# Ответ отряда используется как бесплатный отсев: если коридор сказал «чужих
+	# рядом нет», скан не нужен вовсе. В самой свалке он сказать этого не может,
+	# и там скан идёт — ровно тот же, что делает обычный шаг. Экономия дешёвого
+	# шага от этого никуда не девается: он по-прежнему пропускает и воду, и
+	# стволы, и весь боевой автомат
+	if not _clear_enemy and not retreating:
+		if GameManager.unit_grid.enemy_block(self, np, BLOCK_RADIUS).length_squared() > 1e-8:
+			velocity = Vector3.ZERO
+			return
 	if GameManager.world_bounds_enabled:
 		var lx: float = GameManager.map_lim_x
 		var lz: float = GameManager.map_lim_z
@@ -2222,6 +2811,23 @@ var _th_y: float = 0.0
 ## Чуть больше дальности удара — чтобы боец встал ВПЛОТНУЮ к чужой шеренге,
 ## а не замирал ровно на грани и топтался
 const INTERCEPT_MARGIN := 0.8
+
+## ── СЦЕПКА В БЛИЖНЕМ БОЮ (лечит «челнок») ───────────────────────────────────
+## Взводится, когда цель взята ПО ФИЗИЧЕСКОМУ КОНТАКТУ: заслон, в который отряд
+## упёрся телом, или тот, кто только что ударил. Пока признак стоит, боец не
+## бросает такую цель на границе дальности оружия, а доступает к ней.
+##
+## ЧТО БЫЛО. Заслон выбирался в полосе attack_range + INTERCEPT_MARGIN, а
+## приказ на него шёл НЕПРИНУДИТЕЛЬНЫЙ (forced = false) — и уже на следующем
+## тике _process_attack видел «цель дальше дальности удара, приказа не было»,
+## обнулял её и уходил в IDLE. Дальше возобновлялся исходный приказ, боец делал
+## шаг, снова упирался в тот же заслон, снова его брал и снова бросал. Со
+## стороны это ровно «юнит циклично бегает назад-вперёд у строя противника»,
+## причём в рубку он так и не входит.
+##
+## Полоса сцепки — те же 0.8 м, что и полоса перехвата: это не погоня, это
+## «доступить до того, обо кого уже упёрся».
+var _melee_grip: bool = false
 
 ## Шаг упёрся во вражеский строй прямо сейчас (ставит _move_blocked).
 ## По этому признаку марш немедленно перебивается боем, не дожидаясь
@@ -2367,9 +2973,21 @@ func _process_move(delta: float) -> void:
 		if _prof: _t = Time.get_ticks_usec()
 		velocity = dir * _effective_speed()
 		if _prof: _Opt.prof_add("mv_speed", Time.get_ticks_usec() - _t)
+		# ── ШАГ НЕ ПРОВОДИТСЯ ЗДЕСЬ, А ЗАЯВЛЯЕТСЯ (см. ArmySoA.batch_move) ───
+		# Замер по фазам (qa_fx --prof, 3000 бойцов): на сближении process_move
+		# занимает 81 % тика при 23.4 мкс на вызов, и из них НАЗВАНЫ только
+		# десять — остальные тринадцать это цена самого вызова _move_blocked,
+		# чтения global_position (свойство, а не поле) и полутора десятков
+		# чтений полей объекта, повторяемых на каждого бойца каждый кадр.
+		# Решение («куда и с какой скоростью») остаётся здесь, геометрия шага
+		# уходит в один проход по столбцам после обхода армии.
+		#
+		# Запасной путь обязателен: строки может не быть (боец вне ядра армии —
+		# так бывает в стендах и до первого тика), и тогда шаг проводится
+		# по-старому, поштучно
 		# collision_mask = 0 — физических коллизий нет, интегрируем напрямую
 		# (дешевле move_and_slide), но сквозь чужой строй не пускаем
-		_move_blocked(velocity * delta)
+		_commit_step(velocity * delta)
 
 ## Пауза между повторными попытками найти замену погибшей цели (см. ниже).
 ## БЫЛО: полный скан сетки (до FORCED_RETARGET_RANGE/attack_range, у лучника
@@ -2387,6 +3005,13 @@ var _retarget_timer: float = 0.0
 func _process_attack(delta: float) -> void:
 	# is_dead()/is_instance_valid не нужны: цель обнуляется сигналом died (см. set_attack_target)
 	if attack_target == null:
+		_melee_grip = false      # сцепка живёт ровно один контакт (см. поле)
+		# ── СТЕНА ДОХОДИТ ДО ТОЧКИ ПРИКАЗА, ДАЖЕ ЕСЛИ ЦЕЛЬ УЖЕ ПАЛА ─────────
+		# Иначе строй, снёсший заслон на полдороге, вставал бы там, где кончилась
+		# рубка, — ровно та же болезнь, от которой в марше лечит _resume_march
+		if _attack_is_forced and _hold_goal_set and _stance_holds_ground():
+			if _phalanx_march(delta):
+				return
 		_retarget_timer -= delta
 		if _retarget_timer > 0.0:
 			return
@@ -2472,10 +3097,30 @@ func _process_attack(delta: float) -> void:
 			if squad_id > 0 and not GameManager.squad_in_combat(squad_id):
 				GameManager.call_deferred("squad_close_ranks", squad_id, true)
 		return
-	var dir  := attack_target.global_position - global_position
+	# ── ОБЕ ТОЧКИ ЧИТАЮТСЯ ПО ДЕШЁВОМУ ПУТИ ─────────────────────────────────
+	# Здесь было два обращения к global_position — своему и ЧУЖОМУ. Каждое из
+	# них не поле, а свойство: проверяет актуальность мировой матрицы и при
+	# нужде пересобирает её по цепочке родителей, а пересобирать есть что —
+	# пакетный шаг только что записал координаты обоим. Под неподвижным World
+	# локальная position равна мировой (см. _local_xform), и у цели-бойца её
+	# можно взять так же дёшево; зданию и прочим остаётся прежний путь
+	var tu := attack_target as Unit
+	var tp: Vector3
+	if tu != null and tu._local_xform:
+		tp = tu.position
+	else:
+		tp = attack_target.global_position
+	var mp: Vector3 = position if _local_xform else global_position
+	var dir  := tp - mp
 	dir.y    = 0
 	var dist := dir.length()
 	if dist > attack_range:
+		# ── СТЕНА ИДЁТ В ТОЧКУ ПРИКАЗА (см. _phalanx_march) ──────────────────
+		# Стоит ПЕРВЫМ в ветке подхода: в обороне никакой другой способ сближения
+		# не разрешён — ни подтягивание рядов, ни обход свалки, ни погоня
+		if _attack_is_forced and _hold_goal_set and _stance_holds_ground():
+			if _phalanx_march(delta):
+				return
 		# ПОДТЯГИВАНИЕ ЗАДНИХ РЯДОВ. Отряд стоит в несколько шеренг, и задние
 		# физически не достают до врага: у стрелков это половина отряда, которая
 		# просто стоит и смотрит. Такой боец делает шаги ВПЕРЁД, пока цель не
@@ -2490,16 +3135,47 @@ func _process_attack(delta: float) -> void:
 		# рядов — механика для отряда, стоящего НА ПОЗИЦИИ без приказа (задние
 		# шеренги подшагивают, чтобы достать); прямой приказ игрока — это марш,
 		# и он идёт нормальным ходом (ветка forced ниже)
-		if not target_lock and _should_pull_up(dist):
+		# ── В ОБОРОНЕ ПОДТЯГИВАНИЯ К ВРАГУ НЕТ ВОВСЕ ────────────────────────
+		# Подшагивание рядов ведёт бойца К ЦЕЛИ, и в стойке «Защита» это прямо
+		# противоречит её смыслу: строй обязан стоять забором, а не подползать
+		# за отходящим противником. Смыкание строя при этом никуда не делось —
+		# им занимается _phalanx_advance, который двигает бойца к ДЫРЕ В СВОЁМ
+		# СТРОЮ, а не к врагу
+		if not target_lock and not _stance_holds_ground() and _should_pull_up(dist):
 			dir /= dist
 			_facing  = dir
 			velocity = dir * (_effective_speed() * PULL_UP_SPEED)
-			_move_blocked(velocity * delta)
+			_commit_step(velocity * delta)
 			return
 		# Hold Position: без прямого приказа за целью НЕ гонимся — лучник
 		# стреляет с места, пехота стоит на посту; ушла из радиуса — отбой.
-		# Стойка ЗАЩИТА держит позицию всегда, даже по прямому приказу
-		if not _attack_is_forced or _stance_holds_ground():
+		# Стойка ЗАЩИТА держит позицию всегда, даже по прямому приказу.
+		#
+		# ── ТРЕТИЙ СЛУЧАЙ: СТРЕЛОК УЖЕ ОТСТРЕЛЯЛСЯ ──────────────────────────
+		# Дальнобойный боец подходит к указанной цели ТОЛЬКО на дистанцию
+		# выстрела и на этом останавливается навсегда: цель побежала дальше —
+		# он остаётся стоять и ищет новую в своём радиусе. Признак взводится в
+		# тот момент, когда цель впервые оказалась в зоне поражения (ветка
+		# ниже), и снимается только новым приказом. Без него лучники бежали за
+		# отступающим в замок противником через полкарты
+		# ── ЗДЕСЬ СТОЯЛ ЖЁСТКИЙ ЗАПРЕТ ДВИЖЕНИЯ ФАЛАНГИ, И ОН УДАЛЁН ───────────
+		# Было `... or _stance_holds_ground() or ...` — то есть боец в обороне
+		# бросал цель, едва она выходила за дальность оружия, ДАЖЕ ПО ПРЯМОМУ
+		# ПРИКАЗУ. Это и делало «щит» синонимом «стою столбом»: клик по врагу в
+		# двадцати метрах не сдвигал строй ни на шаг.
+		# Теперь оборона выражена там, где ей и место, — в pursues_target() (см.
+		# разбор там же): по приказу фаланга ИДЁТ, но за отступившим противником
+		# лично никто не бежит. Условие ниже осталось из двух честных частей:
+		# «приказа не было» и «уже подошёл, а гнаться не полагается»
+		# СЦЕПКА ПЕРЕБИВАЕТ «HOLD POSITION» В УЗКОЙ ПОЛОСЕ. В обороне не
+		# действует: «единый забор» не подшагивает даже на полметра
+		if _melee_grip and not _stance_holds_ground() 				and dist <= attack_range + INTERCEPT_MARGIN:
+			dir /= dist
+			_facing  = dir
+			velocity = dir * _effective_speed()
+			_commit_step(velocity * delta)
+			return
+		if not _attack_is_forced or (_engaged_once and not pursues_target()):
 			set_attack_target(null)
 			velocity = Vector3.ZERO
 			# ЗДЕСЬ ТОЖЕ ПРОДОЛЖАЕМ МАРШ. Это ветка «цель ушла из зоны удара,
@@ -2540,19 +3216,45 @@ func _process_attack(delta: float) -> void:
 				if blocker != null and blocker != attack_target:
 					velocity = Vector3.ZERO
 					command_attack(blocker, false)
+					_melee_grip = true      # см. разбор у поля: лечит «челнок»
 					return
 		dir /= dist
 		_facing  = dir
 		# Шаг может идти В ОБХОД (см. _flank_step), поэтому velocity считается
 		# по фактическому направлению движения, а не по направлению на цель —
-		# иначе вектор скорости и реальное перемещение расходятся
-		var step_dir := _flank_step(dir, dist)
+		# иначе вектор скорости и реальное перемещение расходятся.
+		#
+		# ── НО НЕ В ОБОРОНЕ ─────────────────────────────────────────────────
+		# _flank_step — это индивидуальное обтекание свалки сбоку: боец, упёршийся
+		# в спины своих, обходит их по дуге. Для фаланги это ровно то, чего быть
+		# не должно: «единый забор» держится тем, что никто не выходит из
+		# шеренги. Строй идёт в лоб, а дыры в нём закрывает смыкание рядов
+		# (_phalanx_advance), а не самовольный обход
+		var step_dir := dir if _stance_holds_ground() else _flank_step(dir, dist)
 		velocity = step_dir * _effective_speed()
-		_move_blocked(velocity * delta)
+		# ── ПОДХОД К ЦЕЛИ ИДЁТ ТЕМ ЖЕ ПАКЕТНЫМ ПУТЁМ, ЧТО И МАРШ ────────────
+		# Замер (qa_fx --prof, 3000, фаза «стоят»): process_attack — 68 % тика
+		# при 11.6 мкс на вызов, и 6.5 из них это mb_enemyblock + mb_trunk +
+		# mb_commit, то есть ровно тот поштучный шаг, который для марша уже
+		# вынесен в пакет. Держать две разные дороги для одного и того же
+		# перемещения незачем
+		_commit_step(velocity * delta)
 	else:
 		velocity = Vector3.ZERO
+		# ЦЕЛЬ В ЗОНЕ ПОРАЖЕНИЯ — приказ «дойти и стрелять» исполнен. Дальше
+		# дальнобойный боец с места не сходит (см. pursues_target выше)
+		_engaged_once = true
 		_attack_timer -= delta
-		if _attack_timer <= 0.0:
+		# ── ГОТОВ, НО ЖДЁТ КОМАНДЫ ──────────────────────────────────────────
+		# По умолчанию боец бьёт сразу, как перезарядился, и эта ветка ничего не
+		# стоит (одно сравнение с true). Переопределяет её только лучник в режиме
+		# залпа: отряд стреляет разом, а не по мере готовности каждого.
+		# Таймер при этом ЗАЖИМАЕТСЯ В НОЛЬ, а не уходит в минус: «готов» —
+		# состояние, и по нему отряд считает, сколько его бойцов уже ждут
+		# (GameManager._sweep_volleys)
+		if _attack_timer <= 0.0 and not _may_strike_now():
+			_attack_timer = 0.0
+		elif _attack_timer <= 0.0:
 			# Счётчик atk_strike — САМ УДАР без списания урона: кулдаун, расчёт
 			# силы, два звука, толчок шеренги, отметка на снаряде. Списание урона
 			# считается отдельно (atk_damage, на стороне цели), иначе одно число
@@ -2583,6 +3285,104 @@ func _process_attack(delta: float) -> void:
 				_apply_push(tgt as Unit, pdir)
 			_on_attack_fired(tgt, dmg)
 			if _prof_s: _Opt.prof_add("atk_strike", Time.get_ticks_usec() - _t_s)
+
+## ── ПОГОНЯ ЗА ЦЕЛЬЮ, ВЫШЕДШЕЙ ИЗ ЗОНЫ ПОРАЖЕНИЯ ─────────────────────────────
+## Ближний бой — да: без погони мечник вообще не может драться, его дистанция
+## удара меньше двух метров. Стрелки — НЕТ (переопределяет Archer): дальность у
+## них двадцать метров, и «догнать» для них означает бросить строй и убежать за
+## отступающим противником прямо под его стены. Это правило игрока, а не
+## оптимизация: «Лучники НИКОГДА не преследуют».
+## Приказ игрока при этом работает: боец ПОДХОДИТ на дистанцию выстрела —
+## запрет включается только после того, как цель первый раз оказалась в зоне
+## поражения (_engaged_once)
+##
+## ── СТОЙКА «ЗАЩИТА» — ВТОРОЙ СЛУЧАЙ ЗАПРЕТА ПОГОНИ, И ОН ЖЕ СНЯЛ СТАРЫЙ ЗАПРЕТ
+## ДВИЖЕНИЯ ЦЕЛИКОМ (заказ владельца, авг. 2026).
+##
+## Было так: в обороне _process_attack ОБНУЛЯЛ цель, едва та выходила за
+## дальность оружия, — даже по прямому приказу. То есть «щит» означал «стою
+## столбом»: фаланга, которой кликнули по врагу в двадцати метрах, не делала ни
+## шагу. Требование теперь другое и делится ровно надвое:
+##   • В ПОКОЕ (приказа нет) строй держится намертво — это по-прежнему так,
+##     потому что авто-агро в обороне берёт только то, до чего достаёт копьё
+##     (_check_auto_aggro), а ответный навал заблокирован (take_damage).
+##   • ПО ПРИКАЗУ (клик по врагу, клик за спину, растянутый ПКМ) фаланга ИДЁТ
+##     ВПЕРЁД единым забором с опущенными копьями и бьёт всё, до чего дотянется
+##     по дороге.
+## Разница между «идти по приказу» и «гнаться за убегающим» — это ровно
+## _engaged_once: боец доходит до назначенного противника, а когда тот
+## отступает — остаётся стоять и берёт следующего, кто окажется в досягаемости.
+## Индивидуальной погони не возникает по построению, и для этого не нужен ни
+## один новый флаг: механизм уже был написан для лучников.
+func pursues_target() -> bool:
+	return not _stance_holds_ground()
+
+## Цель хотя бы раз побывала в зоне поражения с момента последнего приказа
+var _engaged_once: bool = false
+
+## Номер прохода пакетного боя, на котором этот боец попал в список «нужен
+## полный автомат» (см. GameManager.atk_frame)
+var _atk_frame: int = -1
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ФАЛАНГА В ДВИЖЕНИИ: ИДЁМ В ТОЧКУ ПРИКАЗА, А НЕ ЗА ЦЕЛЬЮ
+# ═══════════════════════════════════════════════════════════════════════════
+# Требование владельца делит поведение обороны надвое, и вторая половина —
+# именно эта: «Фаланга медленно идёт вперёд единым забором, выставив копья, и
+# поражает всё на пути своего фронта. Никакого индивидуального преследования
+# уходящих врагов».
+#
+# Оба слова важны и противоречат друг другу, если целиться в ЖИВУЮ цель: строй,
+# идущий за отступающим противником, — это и есть преследование, только всем
+# отрядом сразу. Поэтому в обороне приказ атаки запоминает ТОЧКУ, где враг стоял
+# в момент приказа, и строй идёт туда. Что попадётся по дороге — будет побито
+# (контакт со строем ловится тем же способом, что и на марше); противник, успевший
+# убежать, просто перестаёт быть чьим-либо делом.
+#
+# В стойке АТАКА ничего этого нет: там преследование — штатное поведение пехоты.
+var _hold_goal: Vector3 = Vector3.ZERO
+var _hold_goal_set: bool = false
+
+## Шаг стены к точке приказа. Возвращает false, когда идти больше некуда
+func _phalanx_march(delta: float) -> bool:
+	if not _hold_goal_set:
+		return false
+	var cur := global_position
+	var gx: float = _hold_goal.x - cur.x
+	var gz: float = _hold_goal.z - cur.z
+	var gd: float = sqrt(gx * gx + gz * gz)
+	if gd <= ARRIVE_RADIUS:
+		# Пришли куда велели. Приказ исполнен: дальше боец живёт обычной
+		# обороной — бьёт то, до чего достаёт, и с места не сходит
+		_hold_goal_set = false
+		_attack_is_forced = false
+		_engaged_once = true
+		velocity = Vector3.ZERO
+		return false
+	# ── ЧТО ПОПАЛОСЬ ПОД КОПЬЁ ПО ДОРОГЕ ────────────────────────────────────
+	# Цель подменяется НАПРЯМУЮ, а не через command_attack: тот переписал бы
+	# _attack_is_forced значением своего аргумента и стёр бы сам приказ, ради
+	# которого строй и идёт. Здесь меняется только то, кого бьём сейчас
+	_aggro_timer -= delta
+	if _enemy_contact or _aggro_timer <= 0.0:
+		_enemy_contact = false
+		_aggro_timer = AGGRO_INTERVAL_HOT
+		var at_hand := _find_nearest_enemy_in_range(attack_range)
+		if at_hand != null and at_hand != attack_target:
+			set_attack_target(at_hand)
+			velocity = Vector3.ZERO
+			return true
+	var d := Vector3(gx / gd, 0.0, gz / gd)
+	_facing = d
+	velocity = d * _effective_speed()
+	_commit_step(velocity * delta)
+	return true
+
+## МОЖНО ЛИ БИТЬ ПРЯМО СЕЙЧАС, когда перезарядка уже вышла.
+## По умолчанию да — обычный боец ни у кого разрешения не спрашивает.
+## Переопределяет только лучник в режиме залпового огня (см. Archer)
+func _may_strike_now() -> bool:
+	return true
 
 # true — урон списывается сразу при ударе (ближний бой).
 # Стрелки переопределяют на false: у них урон несёт летящая стрела.
@@ -2683,6 +3483,15 @@ func _apply_push(target: Unit, dirn: Vector3) -> void:
 	var mine := global_position + dirn * (step * 0.5)
 	if GameManager.is_water(mine.x, mine.z):
 		return
+	# ── НО НЕ ВНУТРЬ ЧУЖОГО СТРОЯ ───────────────────────────────────────────
+	# Полшага вперёд — единственное перемещение во всей игре, которое шло мимо
+	# проверки чужих тел. По одному разу это два сантиметра, но толчок идёт раз
+	# в PUSH_EVERY ударов и не прекращается, пока шеренга побеждает: за минуту
+	# рубки мечник, продавливающий копейщика, наступал такими полушагами прямо
+	# в глубину фаланги. Это второй канал того же проникновения, что и у
+	# тылового шага выше, и закрывается он так же — телом чужого бойца
+	if GameManager.unit_grid.enemy_block(self, mine, BLOCK_RADIUS).length_squared() > 1e-8:
+		return
 	var mlim: Vector2 = GameManager.clamp_to_map(mine.x, mine.z)
 	mine.x = mlim.x
 	mine.z = mlim.y
@@ -2722,7 +3531,15 @@ func _check_auto_aggro() -> void:
 	# рядов считаются отдельно — в _update_live_rank()/_phalanx_advance()
 	if _stance_holds_ground():
 		var at_hand := _squad_cached_enemy(attack_range)
-		if at_hand:
+		# ── ТОЛЬКО ТО, ЧТО ПЕРЕД КОПЬЁМ ─────────────────────────────────────
+		# Заказ владельца: крайние копейщики фаланги не имеют права выламываться
+		# из строя ради противника, зашедшего сбоку или в тыл. Раньше проверка
+		# была одна — «дотянусь ли», — и фланговый боец разворачивался на
+		# соседа по свалке: _facing уезжал, вслед за ним уезжал курс подсчёта
+		# рядов (_phalanx_dir), и «единый забор» распадался с краёв.
+		# Теперь цель обязана быть В ЛОБОВОМ СЕКТОРЕ строя. Стоять при этом
+		# боец не перестаёт — стоять и есть его задача до приказа отряду.
+		if at_hand != null and _in_phalanx_front(at_hand):
 			command_attack(at_hand, false)
 		return
 	# АГРО-РАДИУС 10 м: простаивающий боец сам видит бой рядом и вступает в него.
@@ -2765,6 +3582,24 @@ func _check_auto_aggro() -> void:
 		if far and squad_id > 0:
 			GameManager.squad_mark_helped(squad_id)
 		command_attack(nearby, far)
+
+## Косинус границы лобового сектора фаланги. 0.34 ≈ ±70°: строй достаёт копьём
+## всё, что стоит перед ним и чуть в стороны, но не разворачивается назад
+const PHALANX_FRONT_COS := 0.34
+
+## Цель стоит перед фронтом строя? Курс берётся тот же, по которому считаются
+## ряды (_phalanx_dir), — иначе «перед» у подсчёта рядов и у выбора цели были бы
+## разными направлениями
+func _in_phalanx_front(target: Node3D) -> bool:
+	var f := _phalanx_dir()
+	if f.length_squared() < 1e-6:
+		return true                      # курса нет — брать что дотянется
+	var to := target.global_position - global_position
+	to.y = 0.0
+	var l: float = to.length()
+	if l < 0.01:
+		return true                      # вплотную, стороны не определить
+	return f.dot(to / l) >= PHALANX_FRONT_COS
 
 # ── ФАЛАНГА: ФАКТИЧЕСКИЙ РЯД И СМЫКАНИЕ ──────────────────────────────────────
 
@@ -2845,6 +3680,9 @@ func _update_live_rank() -> void:
 ## ADVANCE_MAX_DIST, то есть перед бойцом действительно выбили соседа и надо
 ## сомкнуть строй. Дальний противник оставляет фалангу стоять.
 const ADVANCE_MAX_DIST := 1.5   # м сверх дальности атаки
+## Подаётся ли фаланга вперёд на близкого врага сама, без приказа.
+## false — стойка «Защита» держит место намертво (см. _phalanx_advance)
+const PHALANX_ADVANCE_ON_ENEMY := false
 
 func _phalanx_advance(delta: float) -> void:
 	if _enemy_seen_dist == INF:
@@ -2905,8 +3743,20 @@ func _phalanx_advance(delta: float) -> void:
 			g.allies_ahead(self, dir, FILE_LOOK_AHEAD, FILE_HALF_WIDTH) > 0 \
 			and g.allies_ahead(self, dir, PHALANX_HOLE_GAP, FILE_HALF_WIDTH) == 0
 	var closing_gap: bool = _closing_gap
-	if not closing_gap and _enemy_seen_dist > attack_range + ADVANCE_MAX_DIST:
-		return                       # враг далеко — держим позицию, не наступаем
+	# ── ФАЛАНГА БОЛЬШЕ НЕ НАСТУПАЕТ САМА (заказ владельца, авг. 2026) ────────
+	# Передовой боец, перед которым нет никого, раньше подавался ВПЕРЁД к врагу,
+	# если тот был в пределах attack_range + ADVANCE_MAX_DIST. Требование теперь
+	# прямо противоположное: «копейщики стоят на месте как забор, враг отбежал —
+	# бойцы стоят». Шаг остаётся ровно один — в ДЫРУ СВОЕГО СТРОЯ (closing_gap),
+	# то есть смыкание рядов после гибели переднего, чего владелец просил
+	# отдельно и явно.
+	# Ветка сохранена под константой, а не вырезана: это правило боя, и его
+	# захотят вернуть одним словом, а не восстанавливать по истории
+	if not closing_gap:
+		if not PHALANX_ADVANCE_ON_ENEMY:
+			return
+		if _enemy_seen_dist > attack_range + ADVANCE_MAX_DIST:
+			return                   # враг далеко — держим позицию, не наступаем
 	var spd: float = _effective_speed() * PHALANX_FILL_SPEED
 	_settled = false             # тронулся закрывать брешь — не якорь
 	_facing  = dir
@@ -2991,13 +3841,16 @@ func _find_nearest_enemy_in_range(range_limit: float) -> Node3D:
 		best_dist = global_position.distance_to(best.global_position)
 	# Здания — их мало, обычный перебор группы (список кэширован на кадр:
 	# в свалке этот вызов идёт сотни раз за кадр, см. nodes_in_group_cached)
-	var b_grp := "player_buildings" if faction == Constants.FACTION_ENEMY else "enemy_buildings"
-	for node in GameManager.nodes_in_group_cached(b_grp):
-		if not is_instance_valid(node): continue
-		if node.has_method("is_dead") and node.is_dead(): continue
-		var d: float = global_position.distance_to((node as Node3D).global_position)
-		if d < best_dist:
-			best_dist = d; best = node
+	# ГРУППЫ ВСЕХ ЧУЖИХ СТОРОН, а не «противоположной». С двумя фракциями это
+	# было одно и то же; с гоблинами — нет: боец обязан видеть целью и красное
+	# здание, и гоблинскую хижину
+	for b_grp in Constants.enemy_building_groups(faction):
+		for node in GameManager.nodes_in_group_cached(String(b_grp)):
+			if not is_instance_valid(node): continue
+			if node.has_method("is_dead") and node.is_dead(): continue
+			var d: float = global_position.distance_to((node as Node3D).global_position)
+			if d < best_dist:
+				best_dist = d; best = node
 	if _prof: _Opt.prof_add("atk_find_enemy", Time.get_ticks_usec() - _t)
 	return best
 
@@ -3026,6 +3879,7 @@ func take_damage(amount: float, attacker: Node3D = null) -> void:
 	var total_defense: float = defense + armor \
 		+ GameManager.get_upgrade(faction, "defense") \
 		+ GameManager.unit_bonus(faction, stat_id, "bonus_armor") \
+		+ GameManager.unit_bonus(faction, stat_id, "bonus_defense") \
 		+ vet_armor + vet_defense \
 		+ _UStats.stance_stat(stance, "defense_bonus", 0.0)   # +5 в обороне
 	# ПОРОГ ПРОБИТИЯ. Раньше стояло maxf(0.0, ...) — если сумма защиты

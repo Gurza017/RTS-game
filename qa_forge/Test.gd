@@ -130,19 +130,32 @@ func _a_config() -> void:
 	verdict("A5 у каждого узла есть название и ненулевая цена", empty.is_empty(),
 		"пустых: %d %s" % [empty.size(), str(empty.slice(0, 5))])
 
-	# A6 — колонка D помечена как способность отряда и имеет цену за отряд
+	# A6 — способность отряда: колонка D И цена выкупа за отряд.
+	#
+	# СТЕНД БОЛЬШЕ НЕ СЧИТАЕТ, ЧТО ЛЮБАЯ ЯЧЕЙКА D — СПОСОБНОСТЬ. Раньше здесь
+	# бралась ВКЛАДКА №0 и от неё требовалось ровно ROWS способностей; после
+	# появления экономической ветки рабочего (её колонка D — обычные пассивные
+	# улучшения без выкупа отрядом, см. forge_config.tree) первой вкладкой стал
+	# рабочий, и проверка честно показала 0 из 5. Числа она при этом не
+	# проверяла — только структурное предположение, которого конфиг больше не
+	# держит. Проверяем СВОЙСТВА, а не позицию: способность обязана лежать в
+	# колонке D и иметь цену выкупа; вкладка, у которой выкуп объявлен, обязана
+	# иметь его во ВСЕХ пяти ячейках D — «полспособности в ряду» это баг
 	var d_bad: Array = []
+	var d_partial: Array = []
 	for u in _Forge.UNIT_TABS:
-		for n in _Forge.ability_nodes(String(u)):
+		var uid: String = String(u)
+		for n in _Forge.ability_nodes(uid):
 			var d: Dictionary = n
 			if String(d.get("col", "")) != _Forge.ABILITY_COL \
 					or _Forge.squad_unlock_cost(d) <= 0.0:
 				d_bad.append(String(d.get("id", "")))
-	var d_count: int = _Forge.ability_nodes(String(_Forge.UNIT_TABS[0])).size()
-	verdict("A6 колонка D — способности отряда с ценой за отряд",
-		d_bad.is_empty() and d_count == _Forge.ROWS,
-		"способностей на вкладку=%d (ожидали %d), брак: %s" % [
-			d_count, _Forge.ROWS, str(d_bad)])
+		var cnt: int = _Forge.ability_nodes(uid).size()
+		if cnt != 0 and cnt != _Forge.ROWS:
+			d_partial.append("%s=%d" % [uid, cnt])
+	verdict("A6 способность = колонка D + цена выкупа, и она либо во всём столбце, либо нигде",
+		d_bad.is_empty() and d_partial.is_empty(),
+		"брак: %s, неполные столбцы: %s" % [str(d_bad), str(d_partial)])
 
 	# A7 — бонусы копятся ТОЛЬКО своему роду войск
 	var cross: Array = []

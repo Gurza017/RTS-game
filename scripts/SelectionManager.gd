@@ -319,6 +319,41 @@ func _split_into_blocks(movable: Array) -> Array:
 		blocks.append(by_squad[sid])
 	return blocks
 
+## ── ОТРЯДЫ РАСКЛАДЫВАЮТСЯ ПО ФАКТИЧЕСКОМУ ПОЛОЖЕНИЮ, А НЕ ПО ПОРЯДКУ ВЫДЕЛЕНИЯ
+##
+## _split_into_blocks отдаёт отряды в порядке ПОЯВЛЕНИЯ в выделении, то есть по
+## сути в порядке реестра. Раздавать участки линии по нему нельзя: отряд,
+## стоящий на левом фланге, легко получал участок справа и шёл туда НАСКВОЗЬ
+## через соседей. На пяти отрядах это выглядит как перетасовка всей группы по
+## дороге — жалоба «отряды меняются местами и линия фронта переворачивается».
+##
+## Сортируем по проекции центра масс на направление линии: кто стоял левее,
+## тот левее и встанет. Векторы движения отрядов выходят параллельными, и пути
+## не пересекаются по построению.
+##
+## Тот же приём уже применён к сетке групп (_issue_group_grid_move); здесь он
+## был пропущен, а это ВТОРАЯ из двух веток, которыми игрок двигает группу
+func _blocks_along(movable: Array, dir: Vector3) -> Array:
+	var blocks := _split_into_blocks(movable)
+	if blocks.size() < 2:
+		return blocks
+	var keys: Array = []
+	for b in blocks:
+		var arr: Array = b
+		var c := Vector3.ZERO
+		for u in arr:
+			c += (u as Node3D).global_position
+		c /= float(maxi(arr.size(), 1))
+		keys.append(c.dot(dir))
+	var idx: Array = []
+	for i in range(blocks.size()):
+		idx.append(i)
+	idx.sort_custom(func(a, b): return float(keys[a]) < float(keys[b]))
+	var out: Array = []
+	for i in idx:
+		out.append(blocks[int(i)])
+	return out
+
 # ─────────────────────────────────────────────────────────────────────────────
 # ТОПОЛОГИЧЕСКИЙ ПОРЯДОК: КТО ГДЕ СТОЯЛ, ТОТ ТАМ И ВСТАНЕТ
 #
@@ -366,12 +401,17 @@ func _topo_order(block: Array, line_dir: Vector3, facing_dir: Vector3,
 ## каждого блока пересортирован по фактическому положению (см. _topo_order)
 func _block_formation_slots(line_start: Vector3, line_end: Vector3, movable: Array) -> Dictionary:
 	var out := {"slots": [], "rows": [], "flat": []}
-	var blocks := _split_into_blocks(movable)
 	var line_vec := line_end - line_start
 	var total_len := line_vec.length()
-	if total_len < 0.1 or blocks.is_empty():
+	if total_len < 0.1:
 		return out
 	var dir := line_vec / total_len
+	# Участки линии раздаются СЛЕВА НАПРАВО по фактическому положению отрядов,
+	# а не по порядку выделения (см. _blocks_along) — иначе отряды идут к своим
+	# местам крест-накрест
+	var blocks := _blocks_along(movable, dir)
+	if blocks.is_empty():
+		return out
 	var total_men := 0
 	for b in blocks:
 		total_men += (b as Array).size()
@@ -431,11 +471,40 @@ func _layered_formation_slots(line_start: Vector3, line_end: Vector3, movable: A
 	var facing_dir := Vector3(line_dir.z, 0.0, -line_dir.x)
 	var back_dir    := -facing_dir
 	var depth_cursor := 0.0
+	# ── ТЫЛОВЫЕ ЭШЕЛОНЫ ЦЕНТРИРУЮТСЯ ПО ФРОНТУ ПЕРВОГО ──────────────────────
+	# Здесь КАЖДЫЙ эшелон получал ЛИНИЮ ЦЕЛИКОМ. Для копейщиков это правильно —
+	# они и есть фронт, — а вот один отряд лучников, растянутый на ту же ширину,
+	# что и четыре отряда копейщиков, ложится в ОДНУ шеренгу длиной во весь строй.
+	# На экране это тонкая нитка позади блоков (видно на скриншоте предпросмотра),
+	# и она же — источник жалобы «лучники встают с краю»: боец такой шеренги
+	# оказывается где угодно, только не за спиной у своих.
+	#
+	# Ширина тылового эшелона теперь берётся по ЕГО численности относительно
+	# первого, а сам он центрируется на середине фронта. Двадцать лучников за
+	# восемьюдесятью копейщиками занимают четверть фронта ровно посередине и
+	# ложатся в столько же шеренг, сколько и копейщики, — то есть плотность
+	# строя у всех эшелонов одинаковая, а не «фронт блоками, тыл ниткой».
+	var front_men := 0
+	var mid_line := (line_start + line_end) * 0.5
+	var full_len: float = line_vec.length()
 	for bucket in _Formations.group_by_rank(movable):
 		var b: Array = bucket
 		if b.is_empty():
 			continue
-		var plan := _block_formation_slots(line_start, line_end, b)
+		if front_men == 0:
+			front_men = b.size()
+		var seg_start := line_start
+		var seg_end   := line_end
+		if b.size() < front_men and full_len > 0.001:
+			# Не уже, чем нужно на пару человек в шеренге: иначе крошечный
+			# эшелон вырождается в колонну по одному, а при совсем малой длине
+			# _block_formation_slots вернул бы пустой план и эшелон пропал бы
+			var want: float = full_len * float(b.size()) / float(front_men)
+			var half: float = maxf(want, UNIT_SPACING * 3.0) * 0.5
+			half = minf(half, full_len * 0.5)
+			seg_start = mid_line - line_dir * half
+			seg_end   = mid_line + line_dir * half
+		var plan := _block_formation_slots(seg_start, seg_end, b)
 		var b_slots: Array = plan["slots"]
 		var b_rows: Array  = plan["rows"]
 		if b_slots.size() < b.size():
@@ -640,19 +709,42 @@ func _pick_radius(node, unit_slack: float = 0.35) -> float:
 	if node is ResourceNode:
 		var rn := node as ResourceNode
 		if rn.resource_type == Constants.RESOURCE_WOOD:
-			return 1.35
+			# СТВОЛ, А НЕ КРОНА. Здесь стояло 1.35 — радиус прежнего коллайдера
+			# «на весь спрайт». Кликбокс дерева ужат до ствола (см.
+			# ResourceNode.TRUNK_PICK_RADIUS), и наземный круг обязан поехать
+			# следом: иначе луч не находил бы дерево, а счёт всё равно считался
+			# бы по кроне, и правило «что подсвечено, то и приказано» разъехалось
+			return ResourceNode.TRUNK_PICK_RADIUS
 		return 0.85 * rn.size_scale
 	return unit_slack    # боец
 
 ## Кого предпочесть при РАВНОМ счёте. Боец важнее жилы и здания: маски
 ## столкновений везде нулевые, поэтому бойцы свободно стоят на габарите
-## построек, и клик по бойцу внутри коробки замка обязан выбрать бойца
+## построек, и клик по бойцу внутри коробки замка обязан выбрать бойца.
+##
+## ── РУДА ВЫШЕ ДЕРЕВА, И ЭТО ПОЛОВИНА ЛЕЧЕНИЯ «КЛИКНУЛ ПО КАМНЮ — ПОШЁЛ РУБИТЬ
+## СОСЕДНИЙ КУСТ» ────────────────────────────────────────────────────────────
+## Раньше вся растительность и вся руда делили один ранг 1, и спор решался
+## размером: «по мелкой цели попасть труднее, она и важнее». Звучит логично, но
+## работает наоборот, потому что радиусы тут несравнимы. У дерева наземный круг
+## ФИКСИРОВАННЫЕ 1.35 м (коллайдер накрывает всю крону, чтобы ПКМ по любой ветке
+## отправлял рубить), а у куска руды — 0.85 × size_scale, то есть от 1.36 м у
+## крупного самородка до 0.53 м у мелкого осколка. Осколок формально «мельче» и
+## выигрывал спор — но лишь тогда, когда вообще до него доходило: чаще счёт у
+## дерева оказывался строго лучше, потому что его круг вчетверо больше по
+## площади и накрывал точку земли целиком.
+##
+## В лесу и на опушке — а руду генератор ставит именно там — куст или ствол
+## почти всегда стоит в паре метров от кучи. Поэтому: если под курсором есть и
+## руда, и дерево, выигрывает руда. Обратный случай безопасен — целясь в ствол
+## посреди леса, игрок просто не наводит курсор на самородок, и руда в
+## кандидатах не появляется вовсе
 func _pick_rank(node) -> int:
 	if node is Unit:
 		return 0
 	if node is ResourceNode:
-		return 1
-	return 2
+		return 1 if (node as ResourceNode).resource_type != Constants.RESOURCE_WOOD else 2
+	return 3
 
 ## Разбор клика: {"target": Node|null, "position": Vector3}
 ## position — точка на земле (или на ближайшем теле, если земли на луче нет)
@@ -735,16 +827,36 @@ func _pick_at(screen_pos: Vector2, mask: int) -> Dictionary:
 			var u := n as Unit
 			if u != null and not u.is_dead():
 				cands.append(u)
+	# ── ПОПРАВКА РАКУРСА ДЛЯ ЖИЛ: ВТОРАЯ ПОЛОВИНА ЛЕЧЕНИЯ ───────────────────
+	# Она же — корень жалобы «показал на камень, рабочий ушёл к соседнему кусту».
+	# Точка земли под курсором лежит НЕ под тем, на что смотрит игрок: наведясь
+	# на кусок руды, нарисованный на высоте ~0.6-1.0 м, при камере в 45° игрок
+	# получает точку земли примерно на столько же метров ЗА камнем. У бойцов эта
+	# поправка есть с самого начала (unit_slack выше), у жил её не было вовсе —
+	# то есть кусок руды систематически «проигрывал» самому себе, а выигрывал тот,
+	# кто стоял на метр дальше от камеры. В редколесье это почти всегда дерево.
+	#
+	# Поправка СДВИГАЕТ круг цели, а не раздувает его (как unit_slack). Это
+	# принципиально: раздутый круг сделал бы мелкий осколок «жирной» целью и он
+	# начал бы перехватывать клики соседей — ровно та болезнь, от которой лечим
+	var lean := Vector2.ZERO
+	if absf(dirn.y) > 1e-4:
+		lean = Vector2(dirn.x, dirn.z) / absf(dirn.y)
 	for node in cands:
 		var np: Vector3 = (node as Node3D).global_position
 		var radius: float = _pick_radius(node, unit_slack)
 		var rank: int = _pick_rank(node)
+		var anchor := Vector2(np.x, np.z)
+		if node is ResourceNode:
+			var bh: float = (node as ResourceNode).pick_body_h()
+			if bh > 0.0:
+				anchor += lean * bh
 		var score: float
 		if ground.x == INF:
 			# Луч смотрит горизонтально — сравниваем по расстоянию до основания
 			score = maxf(np.distance_to(first_pos if have_pos else from) - radius, 0.0)
 		else:
-			score = maxf(Vector2(np.x, np.z).distance_to(ground) - radius, 0.0)
+			score = maxf(anchor.distance_to(ground) - radius, 0.0)
 		var better := false
 		if score < best_score - PICK_TIE:
 			better = true
@@ -808,7 +920,21 @@ func _handle_single_click(screen_pos: Vector2, additive: bool) -> void:
 	var pick := _pick_at(screen_pos, Constants.LAYER_UNITS | Constants.LAYER_BUILDINGS)
 	if pick["target"] != null:
 		var target = pick["target"]
-		if (target is Unit or target is Building) and target.faction == Constants.FACTION_PLAYER:
+		# ── ЛКМ ПО ЧУЖОМУ ОТРЯДУ = РАЗВЕДКА, А НЕ ВЫДЕЛЕНИЕ ─────────────────
+		# Раньше эта ветка просто не срабатывала: условие требовало своей
+		# фракции, и клик по врагу молча снимал выделение. Теперь он открывает
+		# карточку — но чужой отряд по-прежнему НЕ попадает в selected_units
+		# (см. recon_units), поэтому приказать ему ничего нельзя
+		if target is Unit and (target as Unit).faction != Constants.FACTION_PLAYER:
+			if _visible_to_player(target as Unit) and not additive:
+				# ПОРЯДОК ВАЖЕН: сначала уведомляем о (пустом) своём выделении,
+				# и только потом открываем разведку. Наоборот — карточка гасла
+				# бы в тот же кадр, потому что show_selection сам сбрасывает
+				# разведку (свои и чужие в панели не смешиваются)
+				GameManager.on_selection_changed(selected_units)
+				_set_recon(target as Unit)
+				return
+		elif (target is Unit or target is Building) and target.faction == Constants.FACTION_PLAYER:
 			# Двойной клик по юниту → выделить всех однотипных юнитов на экране
 			var now := Time.get_ticks_msec() / 1000.0
 			var is_double: bool = target is Unit \
@@ -820,6 +946,9 @@ func _handle_single_click(screen_pos: Vector2, additive: bool) -> void:
 				_select_same_type_on_screen(target)
 			else:
 				_select(target)
+	# Досюда доходит только клик, который разведкой НЕ стал (на чужой ветке
+	# стоит return): значит открытую карточку пора закрыть
+	clear_recon()
 	GameManager.on_selection_changed(selected_units)
 
 # Двойной клик: выделить ВСЕ ОТРЯДЫ этого типа, видимые сейчас на экране
@@ -934,6 +1063,110 @@ func selected_squad_ids() -> Array:
 			ids.append(sid)
 	return ids
 
+# ═════════════════════════════════════════════════════════════════════════════
+# РАЗВЕДКА: ЧУЖОЙ ОТРЯД ПОД ЛУПОЙ
+# ═════════════════════════════════════════════════════════════════════════════
+# Разведанный отряд ЖИВЁТ В ОТДЕЛЬНОМ СПИСКЕ, а не в selected_units, и это не
+# вопрос чистоты. _handle_right_click перебирает именно selected_units и раздаёт
+# приказы всем, кто там лежит: вражеский боец в этом списке получил бы от игрока
+# приказ идти и атаковать. Отдельный список делает это невозможным по
+# построению, а не по внимательности.
+#
+# Кольца на разведанном отряде тоже не зажигаются: set_selected — это признак
+# «мой и мною управляется». Чужой строй подсвечивается красным по НАВЕДЕНИЮ
+# (см. enemy_squad_under_cursor), и это ровно тот же ответ, что даёт прицел
+var recon_units: Array = []
+
+## Виден ли этот боец игроку ПРЯМО СЕЙЧАС. Разведать можно только то, что
+## видно: без этой проверки игрок тыкал бы в чёрное поле и получал полную
+## карточку отряда, которого «не видит» — то есть находил бы армию противника
+## наощупь, мимо всей механики тумана.
+## Туман выключен (стенды, fog.enabled = false) — видно всё, как и раньше
+func _visible_to_player(u: Unit) -> bool:
+	if u == null or not is_instance_valid(u) or u.is_dead():
+		return false
+	var fog = GameManager.fog
+	if fog == null or not is_instance_valid(fog) or not fog.enabled:
+		return true
+	return fog.is_lit(u.global_position.x, u.global_position.z)
+
+## Чужой боец под курсором. `use_zone` — разрешить попадание «рядом со строем»
+## (тот же SQUAD_CLICK_REACH, что у приказа атаки): игрок целится в отряд, а не
+## в пиксель модели
+func enemy_unit_under_cursor(screen_pos: Vector2, use_zone: bool = true) -> Unit:
+	if camera == null or _over_ui(screen_pos):
+		return null
+	var pick := _pick_at(screen_pos, Constants.LAYER_UNITS | Constants.LAYER_BUILDINGS
+		| Constants.LAYER_GROUND)
+	var u := pick["target"] as Unit
+	if u != null and u.faction != Constants.FACTION_PLAYER and _visible_to_player(u):
+		return u
+	# Луч нашёл грунт или своего — но рядом может стоять чужой строй
+	if not use_zone:
+		return null
+	if u != null and u.faction != Constants.FACTION_PLAYER:
+		return null      # чужой есть, но он в тумане — «рядом» искать нечего
+	var pos: Vector3 = pick["position"]
+	if pos == Vector3.ZERO and pick["target"] == null:
+		return null
+	var best: Unit = null
+	var best_d := SQUAD_CLICK_REACH * SQUAD_CLICK_REACH
+	for n in GameManager.unit_grid.query_radius(pos, SQUAD_CLICK_REACH):
+		var e := n as Unit
+		if e == null or e.faction == Constants.FACTION_PLAYER:
+			continue
+		if not _visible_to_player(e):
+			continue
+		var dx: float = e.global_position.x - pos.x
+		var dz: float = e.global_position.z - pos.z
+		var d2: float = dx * dx + dz * dz
+		if d2 < best_d:
+			best_d = d2
+			best   = e
+	return best
+
+## Весь чужой ОТРЯД под курсором — это он получает красные кольца и это он
+## открывается в карточке разведки. Отряд, а не боец: игра оперирует отрядами,
+## и подсветить одного человека из двадцати было бы враньём о том, что будет
+## атаковано
+func enemy_squad_under_cursor(screen_pos: Vector2, use_zone: bool = true) -> Array:
+	var u := enemy_unit_under_cursor(screen_pos, use_zone)
+	if u == null:
+		return []
+	if u.squad_id <= 0:
+		return [u]
+	var out: Array = []
+	for m in GameManager.squad_members(u.squad_id):
+		var mu := m as Unit
+		# В отряде подсвечиваем только тех, кого игрок реально видит: половина
+		# строя может стоять в тумане, и рисовать кольца по ней — выдавать
+		# позицию, которую туман как раз и скрывает
+		if mu != null and _visible_to_player(mu):
+			out.append(mu)
+	return out if not out.is_empty() else [u]
+
+## Открыть карточку разведки по этому бойцу. Возвращает false, если разведывать
+## нечего (никого не видно) — тогда клик остаётся обычным «снять выделение»
+func _set_recon(u: Unit) -> bool:
+	var members: Array = []
+	if u.squad_id > 0:
+		for m in GameManager.squad_members(u.squad_id):
+			var mu := m as Unit
+			if mu != null and not mu.is_dead():
+				members.append(mu)
+	if members.is_empty():
+		members = [u]
+	recon_units = members
+	GameManager.on_recon_changed(recon_units)
+	return true
+
+## Закрыть карточку разведки. Отдельного уведомления HUD НЕ шлёт намеренно:
+## любой путь, который снимает разведку, тут же выделяет что-то своё (или
+## пустоту), а show_selection гасит карточку сам. Лишний вызов заставил бы
+## панель пересобираться дважды за клик
+func clear_recon() -> void:
+	recon_units.clear()
+
 func _clear_selection() -> void:
 	for u in selected_units:
 		if is_instance_valid(u) and u.has_method("set_selected"):
@@ -1021,6 +1254,105 @@ func _selection_can_attack() -> bool:
 			return true
 	return false
 
+# ═════════════════════════════════════════════════════════════════════════════
+# ЖЁСТКИЙ КОНТРАКТ: ЧТО ПОДСВЕЧЕНО — ТО И БУДЕТ ПРИКАЗАНО
+# ═════════════════════════════════════════════════════════════════════════════
+# Маска луча вынесена в отдельную функцию, а разбор наведения ходит РОВНО ТЕМ ЖЕ
+# путём, что и разбор клика. Это не «красиво», это единственный способ дать
+# обещание, которое нельзя нарушить: подсветка не «показывает похожее», она
+# показывает результат того же самого вычисления, которое через мгновение
+# выполнит правая кнопка. Раньше наведение (Main._update_hover_cursor) и приказ
+# (_handle_right_click) собирали свои маски по отдельности, и они уже разошлись:
+# у наведения LAYER_RESOURCES стоял ВСЕГДА, а у приказа — только при выделенном
+# рабочем. Курсор обещал сбор там, где клик его не отдавал
+func order_pick_mask() -> int:
+	# LAYER_RUINS есть ТОЛЬКО в маске правого клика: руину нельзя выделить,
+	# но по ней можно отдать приказ «отстроить» (см. _try_rebuild_ruin)
+	#
+	# LAYER_RESOURCES — ТОЛЬКО ЕСЛИ В ВЫДЕЛЕНИИ ЕСТЬ РАБОЧИЙ (см. selection_has_worker)
+	var mask: int = Constants.LAYER_UNITS | Constants.LAYER_BUILDINGS \
+		| Constants.LAYER_RUINS | Constants.LAYER_GROUND
+	if selection_has_worker():
+		mask |= Constants.LAYER_RESOURCES
+	return mask
+
+## КЛИК В ПРОСВЕТ МЕЖДУ САМОРОДКАМИ — ЭТО КЛИК ПО КУЧЕ.
+## Куча руды это полтора десятка кусков с промежутками, и целится игрок в
+## МЕСТОРОЖДЕНИЕ (именно его и обводит зелёный овал), а не в конкретный
+## самородок. Попадание мимо куска, но внутрь овала, обязано читаться как приказ
+## на добычу, иначе «клик по подсвеченной зоне» — обещание, которое сдерживается
+## через раз. Это ровно тот же приём, которым промах мимо модели у вражеского
+## строя читается как приказ атаки (см. _enemy_in_squad_zone).
+##
+## Проверка — ЭЛЛИПС, ровно тот, что рисует подсветка (Main.res_clusters.half
+## плюс CLUSTER_RIM): обещание и его исполнение обязаны совпадать по геометрии,
+## а не «примерно». Куч на карте пара десятков, цикл дешёвый и крутится только
+## по наведению и по клику
+func _ore_in_cluster_zone(ground: Vector3) -> ResourceNode:
+	var m = GameManager.main
+	if m == null or not is_instance_valid(m):
+		return null
+	var rim: float = m.CLUSTER_RIM
+	var best_cid: int = 0
+	var best_norm := 1.0
+	for cid in m.res_clusters:
+		var info: Dictionary = m.res_clusters[cid]
+		var c: Vector3 = info["center"]
+		var half: Vector2 = info["half"]
+		var ax: float = half.x + rim
+		var az: float = half.y + rim
+		if ax <= 0.0 or az <= 0.0:
+			continue
+		var nx: float = (ground.x - c.x) / ax
+		var nz: float = (ground.z - c.z) / az
+		var norm: float = nx * nx + nz * nz
+		# Внутри овала и ближе к его середине, чем предыдущий кандидат: кучи
+		# могут перекрываться краями, и выигрывает та, в которую целились
+		if norm <= 1.0 and norm < best_norm:
+			best_norm = norm
+			best_cid  = int(cid)
+	if best_cid == 0:
+		return null
+	# Отдаём БЛИЖАЙШИЙ К ТОЧКЕ КЛИКА живой кусок этой кучи, а не первый попавшийся:
+	# бригада должна начать с того края, куда показали
+	var best: ResourceNode = null
+	var best_d2 := INF
+	for n in GameManager.nodes_in_group_cached("resource_nodes"):
+		var rn := n as ResourceNode
+		if rn == null or rn.cluster_id != best_cid or not rn.is_gatherable():
+			continue
+		var d2: float = Vector2(rn.global_position.x - ground.x,
+			rn.global_position.z - ground.z).length_squared()
+		if d2 < best_d2:
+			best_d2 = d2
+			best = rn
+	return best
+
+## ЖИЛА, НА КОТОРУЮ ПОКАЗЫВАЕТ ЭТОТ РАЗБОР КЛИКА. Единая точка: ею пользуется
+## и подсветка наведения, и правый клик, поэтому «промах в просвет кучи»
+## работает в обоих одинаково по построению, а не по совпадению
+func gather_target_from_pick(pick: Dictionary) -> ResourceNode:
+	var rn := pick["target"] as ResourceNode
+	if rn != null:
+		return rn if rn.is_gatherable() else null
+	# Под курсором нашлось здание/боец/руина — это не приказ на добычу
+	if pick["target"] != null:
+		return null
+	return _ore_in_cluster_zone(pick["position"])
+
+## НА КАКУЮ ЖИЛУ СЕЙЧАС ПОКАЖЕТ ПРИКАЗ. null — ни на какую (курсор над
+## интерфейсом, над своим бойцом, над зданием, над пустой землёй, или в
+## выделении нет рабочего).
+## Это ЕДИНСТВЕННЫЙ ответ на вопрос «по чему я сейчас кликну»: его рисует
+## подсветка (Main._update_hover_highlight) и его же исполняет _handle_right_click
+func resource_under_cursor(screen_pos: Vector2) -> ResourceNode:
+	if camera == null or _over_ui(screen_pos):
+		return null
+	_purge_invalid()
+	if selected_units.is_empty() or not selection_has_worker():
+		return null
+	return gather_target_from_pick(_pick_at(screen_pos, order_pick_mask()))
+
 func _handle_right_click(screen_pos: Vector2, run: bool = false) -> void:
 	# ПКМ по панели — тоже не приказ миру (см. _over_ui): иначе правый клик по
 	# ячейке очереди, снимающий заказ, заодно гнал бы выделенный отряд в точку
@@ -1030,15 +1362,9 @@ func _handle_right_click(screen_pos: Vector2, run: bool = false) -> void:
 	_purge_invalid()
 	if selected_units.is_empty():
 		return
-	# LAYER_RUINS есть ТОЛЬКО в маске правого клика: руину нельзя выделить,
-	# но по ней можно отдать приказ «отстроить» (см. _try_rebuild_ruin)
-	#
-	# LAYER_RESOURCES — ТОЛЬКО ЕСЛИ В ВЫДЕЛЕНИИ ЕСТЬ РАБОЧИЙ (см. selection_has_worker)
-	var mask: int = Constants.LAYER_UNITS | Constants.LAYER_BUILDINGS \
-		| Constants.LAYER_RUINS | Constants.LAYER_GROUND
-	if selection_has_worker():
-		mask |= Constants.LAYER_RESOURCES
-	var pick := _pick_at(screen_pos, mask)
+	# Маска — общая с подсветкой наведения (см. order_pick_mask): то, что
+	# подсвечено зелёным, обязано быть тем же самым узлом, что придёт сюда
+	var pick := _pick_at(screen_pos, order_pick_mask())
 	var target = pick["target"]
 	var pos: Vector3 = pick["position"]
 	if target == null and pos == Vector3.ZERO:
@@ -1074,6 +1400,15 @@ func _handle_right_click(screen_pos: Vector2, run: bool = false) -> void:
 	# куда пойдут новые отряды (см. Building.set_rally_point)
 	if _try_set_rally(pos, target):
 		return
+
+	# ── ПРОМАХ В ПРОСВЕТ КУЧИ РУДЫ = ПРИКАЗ НА КУЧУ ─────────────────────────
+	# Только когда луч не нашёл вообще ничего (под курсором грунт) и только при
+	# выделенном рабочем. Явный клик по дереву, зданию или бойцу здесь уже
+	# отработал и не перебивается — см. gather_target_from_pick
+	if target == null and selection_has_worker():
+		var ore := _ore_in_cluster_zone(pos)
+		if ore != null:
+			target = ore
 
 	var is_gather_cmd: bool = target != null and target is ResourceNode
 	var is_attack_cmd: bool = target != null and (target is Unit or target is Building) and target.faction != Constants.FACTION_PLAYER

@@ -43,6 +43,16 @@ func _run() -> void:
 	main = load("res://scenes/Main.tscn").instantiate()
 	get_tree().root.add_child(main)
 	await frames(5)
+	# ── ТУМАН ВЫКЛЮЧЕН НАМЕРЕННО ────────────────────────────────────────────
+	# Пространственный звук и дрожание ствола теперь ГЛУШАТСЯ вне освещённой
+	# зоны (защита от «нахожу базу врага на слух», см. AudioManager._audible_at
+	# и ResourceNode.shake). Этот стенд проверяет не туман, а сам звук/дрожь, и
+	# ставит свои объекты там, где своих юнитов нет, — то есть в темноте.
+	# enabled = false заставляет is_lit отвечать «видно везде» (штатный
+	# выключатель FogOfWar), и стенд снова меряет то, ради чего написан.
+	# Саму отсечку по туману стережёт qa_fog
+	if GameManager.fog != null:
+		GameManager.fog.enabled = false
 
 	await _a_buses()
 	await _b_assets()

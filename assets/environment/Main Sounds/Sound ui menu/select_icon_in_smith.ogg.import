@@ -1,0 +1,19 @@
+[remap]
+
+importer="oggvorbisstr"
+type="AudioStreamOggVorbis"
+uid="uid://bwqt24kex5pik"
+path="res://.godot/imported/select_icon_in_smith.ogg-dda78507dbe015e55ef3ba8ad6edc287.oggvorbisstr"
+
+[deps]
+
+source_file="res://assets/environment/Main Sounds/Sound ui menu/select_icon_in_smith.ogg"
+dest_files=["res://.godot/imported/select_icon_in_smith.ogg-dda78507dbe015e55ef3ba8ad6edc287.oggvorbisstr"]
+
+[params]
+
+loop=false
+loop_offset=0
+bpm=0
+beat_count=0
+bar_beats=4

@@ -21,6 +21,11 @@ const PRELOAD_SCENES := {
 	"archer":   preload("res://scenes/units/Archer.tscn"),
 	"warrior":  preload("res://scenes/units/Warrior.tscn"),
 	"monk":     preload("res://scenes/units/Monk.tscn"),
+	# ГОБЛИНЫ. Регистрация нужна не ради кнопок найма (у орды нет панели), а
+	# ради Castle._revive_one: доукомплектование отряда в хижине берёт сцену
+	# отсюда, и без записи разбитый отряд выходил бы из хижины прежним
+	"goblin_spearman": preload("res://scenes/units/GoblinSpearman.tscn"),
+	"goblin_rider":    preload("res://scenes/units/GoblinPigRider.tscn"),
 }
 
 ## Есть ли чем исполнить заказ на такого бойца. Спрашивают и очередь найма, и
@@ -55,13 +60,17 @@ func _ready() -> void:
 	current_health = max_health
 	collision_layer = Constants.LAYER_BUILDINGS
 	collision_mask = 0
+	# ── ВОРОТА ЗАВОДЯТСЯ ЗДЕСЬ, А НЕ ЛЕНИВО ─────────────────────────────────
+	# _gate_position() зовут в том числе из _physics_process (сторожевой обход
+	# гарнизона в Castle), а add_child в момент, когда движок обходит дерево,
+	# отбивается — узел не добавляется, его global_position равен ЛОКАЛЬНОЙ
+	# точке, и ворота оказываются у начала координат карты. Ровно так и вышло:
+	# qa_garrison показал отряд, вечно идущий к точке (0, 0, 6.5) вместо замка
+	_ensure_spawn_point()
 	_build_visual()
 	_maybe_load_building_sprite()
 	add_to_group("all_buildings")
-	if faction == Constants.FACTION_PLAYER:
-		add_to_group("player_buildings")
-	else:
-		add_to_group("enemy_buildings")
+	add_to_group(Constants.building_group(faction))
 	if is_dropoff:
 		GameManager.register_dropoff(faction, self)
 	# Постройка, возведённая при поднятом тумблере Alt, сразу получает полоску
@@ -226,6 +235,20 @@ static func sprite_quad_size(tex: Texture2D, box: Vector3) -> Vector2:
 		aspect = 1.0
 	return Vector2(w, w / aspect)
 
+## ── АНИМИРОВАННАЯ ПОСТРОЙКА ────────────────────────────────────────────────
+## Ноль — статичная картинка (все здания людей). Больше нуля — лента листается
+## с этой частотой: так у хижины гоблинов идёт дым из трубы. Здание при этом
+## остаётся неподвижным, к камере не доворачивается и от билборда не зависит
+func sprite_fps() -> float:
+	return 0.0
+
+## Сдвиг фазы ленты. Берётся от номера узла, а не случайно: два прогона стенда
+## обязаны давать одну картинку, а десять соседних хижин — разный такт дыма
+func sprite_frame_phase() -> float:
+	if sprite_fps() <= 0.0:
+		return 0.0
+	return float(get_instance_id() % 97) * 0.13
+
 func _maybe_load_building_sprite() -> void:
 	# ЦВЕТ ФРАКЦИИ в приоритете: Castle.png из «{Цвет} Buildings».
 	# sprite_path остаётся запасным путём, если цветного набора нет
@@ -252,7 +275,8 @@ func _maybe_load_building_sprite() -> void:
 	# вращение постройки на месте вокруг своей оси. Теперь ориентация мировая:
 	# спрайт зафиксирован фасадом на +Z (исходное направление взгляда камеры,
 	# _orbit_yaw = 0) и с камерой не связан вообще.
-	quad.material = _BBUtil.make_static_material(tex)
+	quad.material = _BBUtil.make_static_material(tex, Color.WHITE, 0.5,
+		sprite_fps(), sprite_frame_phase())
 	var billboard := MeshInstance3D.new()
 	billboard.name = "BuildingSprite"
 	billboard.mesh = quad
@@ -499,6 +523,13 @@ func queue_unit(unit_name: String, cost: Dictionary, build_time: float) -> bool:
 	production_queue.append({"name": unit_name, "time": build_time, "size": sz,
 		"cols": squad_cols, "spacing": squad_spacing, "cost": cost.duplicate()})
 	set_process(true)   # заказ есть — здание просыпается (см. _process)
+	# ЗВУК ЗАКАЗА — ОДИН НА ВСЕ ЗДАНИЯ И ВСЕ РОДА ВОЙСК. Точка выбрана здесь, а
+	# не на кнопках панели, ровно по той же причине, по какой здесь же стоит
+	# списание ресурсов: заказ приходит не только с кнопки (ИИ, стенды,
+	# горячие клавиши), а прозвучать он должен тогда и только тогда, когда
+	# действительно принят и оплачен. Чужие заказы молчат — интерфейс наш
+	if faction == Constants.FACTION_PLAYER:
+		AudioManager.play_ui("order_unit")
 	return true
 
 # ── ПОКАДРОВЫЙ ВЫХОД ОТРЯДА (борьба с фризом) ────────────────────────────────
@@ -634,7 +665,9 @@ static func square_cols(total: int, fallback: int = 4) -> int:
 		return maxi(fallback, 1)
 	return maxi(int(ceil(sqrt(float(total)))), 1)
 
-## Единичный вектор «на фронт» — от постройки к середине карты
+## Единичный вектор «на фронт» — от постройки к середине карты.
+## ЭТО НЕ НАПРАВЛЕНИЕ ВОРОТ (см. facade_dir): им пользуется ИИ, чтобы понять,
+## куда обращена база, а ворота теперь привязаны к рисунку, а не к карте
 func front_dir() -> Vector3:
 	var d := -global_position
 	d.y = 0.0
@@ -642,12 +675,80 @@ func front_dir() -> Vector3:
 		return Vector3.BACK
 	return d.normalized()
 
-## Обновить направление ворот по фактическому положению постройки
+# ═════════════════════════════════════════════════════════════════════════════
+# ТОЧКА ВЫХОДА — УЗЕЛ SpawnPoint У НАРИСОВАННЫХ ДВЕРЕЙ
+# ═════════════════════════════════════════════════════════════════════════════
+# ПОЧЕМУ БОЙЦЫ ВЫХОДИЛИ СБОКУ. Причина не в пивоте: пивот здания как раз в
+# порядке — спрайт стоит нижней кромкой на грунте ровно в своей точке
+# (см. _maybe_load_building_sprite). Дело было в РАССОГЛАСОВАНИИ ДВУХ ФАСАДОВ:
+#
+#   • картинка здания прибита фасадом строго на мировой +Z и с камерой не
+#     связана вовсе (make_static_material, поворот узла нулевой) — то есть
+#     нарисованная дверь ВСЕГДА обращена к нижнему краю экрана;
+#   • а ворота считались как front_dir() — «от постройки к середине карты», то
+#     есть в произвольную сторону, зависящую от того, где здание построено.
+#
+# База игрока стоит в углу, значит front_dir смотрит по диагонали — и отряд
+# выходил из угла/боковой стены, ровно как на скриншоте с копейщиками.
+# Разъехались две стороны, каждая из которых по отдельности «правильная»;
+# найти это можно было только сопоставив их между собой.
+#
+# ТЕПЕРЬ ворота — это НАСТОЯЩИЙ УЗЕЛ Marker3D с именем SpawnPoint, стоящий у
+# нарисованных дверей, и весь спавн идёт строго через его global_position.
+# (В задании был Marker2D — но игра трёхмерная, и двумерный маркер тут просто
+# не имеет мировой точки, которую можно отдать бойцу.)
+#
+# Здания в этом проекте собираются кодом, а не сценами (руками написаны только
+# MainMenu.tscn и Main.tscn), поэтому узел создаётся в _ready. Смысл требования
+# от этого не меняется: точка выхода стала ОДНИМ ЯВНЫМ МЕСТОМ, которое видно в
+# дереве сцены, можно подвинуть одной строкой и увидеть в отладчике — вместо
+# формулы, размазанной по трём файлам.
+const SPAWN_POINT_NAME := "SpawnPoint"
+
+## Узел ворот. Создаётся в _ready, живёт под зданием, ездит вместе с ним
+var spawn_point: Marker3D = null
+
+## КУДА СМОТРИТ НАРИСОВАННЫЙ ФАСАД. Мировой +Z и ничего больше: спрайт
+## постройки зафиксирован именно так (см. _maybe_load_building_sprite), а
+## процедурная коробка симметрична и своего «переда» не имеет вовсе
+func facade_dir() -> Vector3:
+	return Vector3.BACK
+
+## Насколько точка выхода вынесена вперёд от центра здания.
+## По умолчанию — до передней стены плюс зазор; замок переопределяет (у него
+## ворота в надвратной башне, см. Castle.GATE_DISTANCE)
+func gate_depth() -> float:
+	return build_size.z * 0.5 + GATE_CLEARANCE
+
+func _ensure_spawn_point() -> void:
+	if spawn_point != null and is_instance_valid(spawn_point):
+		return
+	spawn_point = Marker3D.new()
+	spawn_point.name = SPAWN_POINT_NAME
+	add_child(spawn_point)
+	# Стенд может собрать здание вне дерева — тогда add_child промолчит, а
+	# _gate_position() уйдёт на запасной путь (см. там же)
+	if spawn_point.get_parent() != self:
+		spawn_point = null
+
+## Обновить положение ворот. Дёшево и идемпотентно, поэтому зовётся из
+## _gate_position каждый раз: build_size может быть выставлен наследником уже
+## после _ready, а здание — переехать (стройплощадка → готовое здание)
 func _face_front() -> void:
-	spawn_offset = front_dir() * (maxf(build_size.x, build_size.z) * 0.5 + GATE_CLEARANCE)
+	spawn_offset = facade_dir() * gate_depth()
+	if spawn_point != null and is_instance_valid(spawn_point):
+		spawn_point.position = spawn_offset
 
 func _gate_position() -> Vector3:
 	_face_front()
+	# ЧИТАЕМ У УЗЛА, а не складываем позицию с офсетом: если маркер кто-то
+	# подвинет (в редакторе, в стенде, в будущей сцене здания), спавн обязан
+	# поехать за ним — иначе «точка выхода — это узел» остаётся на словах.
+	# Запасной путь — на случай здания, собранного вне дерева сцены: у такого
+	# маркера нет мировой точки, и читать её значило бы получить локальную
+	if spawn_point != null and is_instance_valid(spawn_point) \
+			and spawn_point.is_inside_tree():
+		return spawn_point.global_position
 	return global_position + spawn_offset
 
 # ОТХОД ОТ ВОРОТ. Отряд появляется вплотную к зданию (иначе бойцы «телепортом»
@@ -702,7 +803,59 @@ var has_rally: bool = false
 ## Флажок точки сбора на земле. Видно, только пока здание выделено
 var _rally_marker: Node3D = null
 
-## Построить маркер: древко + флажок + кольцо на земле. Всё процедурно —
+# ── РАЗМЕРЫ МАРКЕРА ТОЧКИ СБОРА ──────────────────────────────────────────────
+# Заказ владельца: флаг вдвое меньше, тёмно-красный, с раздвоенным язычком;
+# кольцо — тонкое и аккуратное. Все числа ниже — ровно половина прежних, так что
+# «на 50%» здесь буквально: древко 2.6 → 1.3, полотнище 1.1×0.7 → 0.55×0.35.
+const RALLY_POLE_H    := 1.30
+const RALLY_POLE_R    := 0.0275
+const RALLY_FLAG_W    := 0.55
+const RALLY_FLAG_H    := 0.35
+## Глубина выреза «ласточкина хвоста» в долях ширины полотнища
+const RALLY_FLAG_NOTCH := 0.38
+## Кольцо: радиус тоже вдвое меньше прежнего (было 0.9-1.15), а ЛИНИЯ намеренно
+## тонкая — 4 см против прежних 25. Толстый обод на земле читался как блин
+const RALLY_RING_R    := 0.54
+const RALLY_RING_W    := 0.04
+const RALLY_DARK_RED  := Color(0.52, 0.07, 0.09)
+## Кольцо чуть светлее полотнища: тем же тоном тонкая линия по траве не читается
+const RALLY_RING_COLOR := Color(0.74, 0.15, 0.15, 0.85)
+
+## ВЫМПЕЛ С РАЗДВОЕННЫМ ЯЗЫЧКОМ (swallowtail). QuadMesh такую форму не даёт в
+## принципе, поэтому полотнище собирается вручную из трёх треугольников:
+## прямоугольник, у которого со стороны развевания вырезан клин.
+##
+##   (0,+h)┌──────────────┐(w,+h)
+##         │           ╱
+##         │      (w-n,0)      ← вершина выреза
+##         │           ╲
+##   (0,-h)└──────────────┘(w,-h)
+##
+## Начало координат — НА ДРЕВКЕ (x = 0), полотнище уходит в +X. Смещение вбок
+## вшито прямо в вершины, а не задано center_offset, как было у квада: у
+## произвольного ArrayMesh такого поля нет, зато локальные координаты
+## разворачиваются билбордом точно так же — полотнище остаётся у древка с любого
+## ракурса камеры и не разрезается непрозрачным цилиндром пополам
+func _build_rally_flag_mesh() -> ArrayMesh:
+	var w: float = RALLY_FLAG_W
+	var h: float = RALLY_FLAG_H * 0.5
+	var n: float = RALLY_FLAG_W * RALLY_FLAG_NOTCH
+	var v := PackedVector3Array([
+		# верхняя половина: древко-верх, вершина выреза, край-верх
+		Vector3(0.0, h, 0.0), Vector3(w - n, 0.0, 0.0), Vector3(w, h, 0.0),
+		# нижняя половина
+		Vector3(0.0, -h, 0.0), Vector3(w, -h, 0.0), Vector3(w - n, 0.0, 0.0),
+		# перемычка у древка
+		Vector3(0.0, h, 0.0), Vector3(0.0, -h, 0.0), Vector3(w - n, 0.0, 0.0),
+	])
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = v
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	return mesh
+
+## Построить маркер: древко + вымпел + кольцо на земле. Всё процедурно —
 ## отдельной картинки под это в паке нет
 func _build_rally_marker() -> Node3D:
 	var root := Node3D.new()
@@ -710,11 +863,11 @@ func _build_rally_marker() -> Node3D:
 	# Кольцо на земле: видно, даже если флажок заслонён деревом
 	var ring := MeshInstance3D.new()
 	var tor := TorusMesh.new()
-	tor.inner_radius = 0.9
-	tor.outer_radius = 1.15
+	tor.inner_radius = RALLY_RING_R - RALLY_RING_W * 0.5
+	tor.outer_radius = RALLY_RING_R + RALLY_RING_W * 0.5
 	ring.mesh = tor
 	var rm := StandardMaterial3D.new()
-	rm.albedo_color   = Color(0.30, 0.95, 0.35, 0.85)
+	rm.albedo_color   = RALLY_RING_COLOR
 	rm.shading_mode   = BaseMaterial3D.SHADING_MODE_UNSHADED
 	rm.transparency   = BaseMaterial3D.TRANSPARENCY_ALPHA
 	ring.material_override = rm
@@ -723,34 +876,27 @@ func _build_rally_marker() -> Node3D:
 	# Древко
 	var pole := MeshInstance3D.new()
 	var cyl := CylinderMesh.new()
-	cyl.top_radius = 0.055
-	cyl.bottom_radius = 0.055
-	cyl.height = 2.6
+	cyl.top_radius = RALLY_POLE_R
+	cyl.bottom_radius = RALLY_POLE_R
+	cyl.height = RALLY_POLE_H
 	pole.mesh = cyl
 	var pm := StandardMaterial3D.new()
 	pm.albedo_color = Color(0.36, 0.26, 0.14)
 	pole.material_override = pm
-	pole.position.y = 1.3
+	pole.position.y = RALLY_POLE_H * 0.5
 	root.add_child(pole)
-	# Полотнище: билборд, чтобы флажок был виден с любого ракурса
+	# Полотнище: билборд, чтобы вымпел был виден с любого ракурса
 	var flag := MeshInstance3D.new()
-	var quad := QuadMesh.new()
-	quad.size = Vector2(1.1, 0.7)
-	# ПОЛОТНИЩЕ ВИСИТ СБОКУ ОТ ДРЕВКА, А НЕ НАСАЖЕНО НА НЕГО. Раньше квад стоял
-	# ровно по оси древка, непрозрачный цилиндр рассекал его пополам, и вблизи
-	# флажок читался как «палка с двумя зелёными квадратиками» (снимок qa_rally2
-	# r2_02b). Сдвиг задан через center_offset САМОГО МЕША: в отличие от смещения
-	# узла, он живёт в локальных координатах и поворачивается вместе с билбордом,
-	# поэтому полотнище остаётся у древка с любого ракурса камеры
-	quad.center_offset = Vector3(0.56, 0.0, 0.0)
-	flag.mesh = quad
+	flag.mesh = _build_rally_flag_mesh()
 	var fm := StandardMaterial3D.new()
-	fm.albedo_color    = Color(0.25, 0.90, 0.35)
+	fm.albedo_color    = RALLY_DARK_RED
 	fm.shading_mode    = BaseMaterial3D.SHADING_MODE_UNSHADED
 	fm.billboard_mode  = BaseMaterial3D.BILLBOARD_FIXED_Y
 	fm.cull_mode       = BaseMaterial3D.CULL_DISABLED
 	flag.material_override = fm
-	flag.position = Vector3(0.0, 2.25, 0.0)
+	# Полотнище висит у верхушки древка: его центр по высоте на пол-полотнища
+	# ниже среза, иначе верхний угол торчит над палкой
+	flag.position = Vector3(0.0, RALLY_POLE_H - RALLY_FLAG_H * 0.5, 0.0)
 	root.add_child(flag)
 	return root
 

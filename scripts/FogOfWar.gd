@@ -90,6 +90,11 @@ func setup(half_x: float, half_z: float) -> void:
 	_img.fill(Color(0, 0, 0, 1))
 	_tex = ImageTexture.create_from_image(_img)
 	_build_plane()
+	# РАСТИТЕЛЬНОСТЬ ЧИТАЕТ ТУ ЖЕ САМУЮ МАСКУ, чтобы замереть вне видимой зоны
+	# (см. veg_multimesh.gdshader). Отдаём её ОДИН РАЗ: текстура за партию не
+	# подменяется, _upload() обновляет её по месту
+	if GameManager.veg != null:
+		GameManager.veg.set_fog(_tex, Vector2(_half_x, _half_z))
 	_upload()
 
 func _build_plane() -> void:
@@ -240,7 +245,9 @@ func refresh() -> void:
 ## Проход дешёвый: зданий на карте десятки, и идёт он на том же такте, что и
 ## пересчёт маски (UPDATE_INTERVAL), а не в кадре
 func _apply_enemy_building_visibility() -> void:
-	for group in ["enemy_buildings", "construction_sites"]:
+	# Чужие здания ВСЕХ сторон: гоблинская хижина обязана прятаться под пеленой
+	# ровно так же, как красный замок
+	for group in ["enemy_buildings", "goblin_buildings", "construction_sites"]:
 		for b in GameManager.nodes_in_group_cached(String(group)):
 			var bl := b as Node3D
 			if bl == null or not is_instance_valid(bl):
@@ -279,10 +286,25 @@ func _collect_building_sources(out: Dictionary) -> void:
 		var gp := bl.global_position
 		_add_source(out, gp.x, gp.z, _UCfg.BUILDING_VISION + pad)
 	# Стройплощадки — тоже свои глаза: пока замок строится, вокруг него должно
-	# быть видно, иначе бригада работает в темноте
+	# быть видно, иначе бригада работает в темноте.
+	#
+	# ── ТОЛЬКО СВОИ. ЗДЕСЬ БЫЛА ДЫРА, И ЧЕРЕЗ НЕЁ БЫЛА ВИДНА ВСЯ БАЗА ИИ ──────
+	# Группа "construction_sites" ОБЩАЯ на обе стороны (это же отмечено этажом
+	# ниже, в _apply_enemy_building_visibility, — там фракцию проверяют). Здесь
+	# проверки не было, поэтому КАЖДЫЙ фундамент противника раскрывал игроку
+	# круг радиусом BUILDING_VISION (42 м) вокруг себя. ИИ строит барак и кузницу
+	# в первые же минуты — и его база вспыхивала на карте вместе с замком,
+	# стенами и лесом, ровно как на скриншоте владельца. Прятание чужих зданий по
+	# is_seen при этом работало верно: земля-то честно числилась разведанной.
+	#
+	# Это же объясняет, почему дыру не ловили стенды: qa_fog проверяет «свой
+	# юнит раскрывает / отошёл — потемнело», а не «чужая стройка не раскрывает».
+	# Проверка добавлена (qa_fog G1)
 	for s in GameManager.nodes_in_group_cached("construction_sites"):
 		var st := s as Node3D
 		if st == null or not is_instance_valid(st):
+			continue
+		if int(st.get("faction")) != Constants.FACTION_PLAYER:
 			continue
 		var gp2 := st.global_position
 		_add_source(out, gp2.x, gp2.z, _UCfg.BUILDING_VISION + pad)

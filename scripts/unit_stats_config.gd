@@ -97,6 +97,43 @@ const STATS := {
 		"description": "Support unit. Weak in a fight — keep it behind the line.",
 	},
 
+	# ═════════════════════════════════════════════════════════════════════════
+	# ГОБЛИНЫ — ТРЕТЬЯ СТОРОНА (Constants.FACTION_GOBLIN)
+	# ═════════════════════════════════════════════════════════════════════════
+	# Числа здесь, а не в goblin_config: это ХАРАКТЕРИСТИКИ БОЙЦА, и им место в
+	# той же таблице, что и людям, — иначе сравнить копейщика с копейщиком
+	# нельзя, не открыв два файла. В goblin_config живёт ПОВЕДЕНИЕ фракции
+	# (волны, деревня, спячка), а не сила удара.
+	#
+	# Замысел: гоблин по одному слабее человека и берёт числом (отряд 100 против
+	# 20), наездник на кабане — быстрый и бьющий больно, но хрупкий.
+	"goblin_spearman": {
+		"health": 55.0,
+		"movement_speed": 2.2,
+		"attack_1": 9.0,            # «Attack Fast» — три быстрых тычка...
+		"attack_2": 20.0,           # ...затем один «Attack Strong» (ротация 3+1)
+		"attack_range": 2.2,
+		"attack_cooldown": 1.4,
+		"defense": 0.0,
+		"armor": 0.0,
+		"morale": 70.0,
+		"push_force": 0.8,
+		"description": "Goblin spear mob. Weak one on one, dangerous in a hundred.",
+	},
+	"goblin_rider": {
+		"health": 90.0,
+		"movement_speed": 3.4,      # кабан быстрее любой пехоты людей
+		"attack_1": 22.0,
+		"attack_2": 22.0,
+		"attack_range": 1.8,
+		"attack_cooldown": 1.0,
+		"defense": 0.0,
+		"armor": 2.0,
+		"morale": 110.0,
+		"push_force": 2.0,          # кабан продавливает строй сильнее рыцаря
+		"description": "Pig rider. Fast shock cavalry — hits hard, dies fast.",
+	},
+
 	# ── РАБОЧИЙ (Worker / Pawn) — не боец ────────────────────────────────────
 	"worker": {
 		"health": 40.0,
@@ -112,6 +149,9 @@ const STATS := {
 	},
 }
 
+## Размеры гоблинских отрядов лежат в их собственном конфиге (см. squad_size)
+const _GobCfg := preload("res://scripts/goblin/goblin_config.gd")
+
 ## ═══════════════════════════════════════════════════════════════════════════
 ## СТОЙКИ ОТРЯДА (STANCES) — кнопки [АТАКА] / [ЗАЩИТА] на панели отряда
 ## ═══════════════════════════════════════════════════════════════════════════
@@ -121,6 +161,12 @@ const STATS := {
 ##   push_mult         — множитель силы толкания (0.0 = пуш полностью выключен)
 ##   push_resist       — множитель ВХОДЯЩЕГО толчка (0.5 = отбрасывает вдвое слабее)
 ##   attack_speed_mult — множитель СКОРОСТИ атаки (кулдаун делится на него)
+##   move_speed_mult   — множитель СКОРОСТИ ХОДЬБЫ. У обороны 0.65 (штраф −35%):
+##                       строй со щитами и опущенными копьями идёт шагом. Раньше
+##                       это число жило константой Unit.PHALANX_ATTACK_FACTOR и
+##                       не действовало на бегу — боец в обороне, которому дали
+##                       двойной ПКМ, разгонялся до 1.4 базовой, то есть БЫСТРЕЕ
+##                       обычной ходьбы. Теперь штраф стойки применяется всегда
 ##   morale_mult       — множитель морали
 ##   defense_bonus     — плоская добавка к защите
 ##   holds_ground      — true: юнит не преследует цель и не подаётся вперёд
@@ -139,6 +185,7 @@ const STANCES := {
 		"push_mult":         1.0,
 		"push_resist":       1.0,
 		"attack_speed_mult": 1.0,
+		"move_speed_mult":   1.0,
 		"morale_mult":       1.0,
 		"defense_bonus":     0.0,
 		"holds_ground":      false,
@@ -148,6 +195,7 @@ const STANCES := {
 		"push_mult":         0.0,    # своего пуша у фаланги нет вовсе
 		"push_resist":       0.5,    # входящий толчок срезан вдвое (упор щитами)
 		"attack_speed_mult": 1.25,   # +25% скорости атаки
+		"move_speed_mult":   0.65,   # −35% скорости ходьбы (щит/опущенные копья)
 		"morale_mult":       1.30,   # +30% морали
 		"defense_bonus":     5.0,    # +5 защиты
 		"holds_ground":      true,   # с места не сходят (кроме смыкания рядов)
@@ -205,6 +253,30 @@ static func stat(unit_id: String, key: String, default: float = 0.0) -> float:
 # задаётся здесь одной строкой. Переезд папки — правка одной константы.
 # ═════════════════════════════════════════════════════════════════════════════
 const SMITH_ICONS_DIR := "res://assets/factions/humans/icons/buildings/icons_for_smith/"
+
+## ═════════════════════════════════════════════════════════════════════════════
+## ЁМКОСТЬ РУДНИКА (ОДНОЙ КУЧИ ЗОЛОТА ИЛИ КАМНЯ)
+## ═════════════════════════════════════════════════════════════════════════════
+## Куча — ЕДИНЫЙ логический объект с общим запасом (см. MineCluster), поэтому
+## баланс месторождения меняется здесь ОДНОЙ ЦИФРОЙ. Раньше запас складывался из
+## запасов отдельных камушков (Main.PIECE_CLASSES.amount × состав шаблона): чтобы
+## «добавить золота», приходилось править раскладку кучи, то есть её ВНЕШНИЙ ВИД,
+## и наоборот — правка вида молча меняла баланс.
+##
+## Числа общие на все кучи своего типа: разброс по величине месторождений — это
+## отдельное решение, и делать его случайным побочным эффектом того, сколько
+## кусков влезло мимо воды и пятачка базы, точно не стоит
+const DEFAULT_CLUSTER_GOLD  := 50000.0
+const DEFAULT_CLUSTER_STONE := 50000.0
+
+## Ёмкость кучи по виду ресурса ("gold"/"stone"). Строкой, а не числом
+## Constants.RESOURCE_*: конфиг — самостоятельная таблица и про перечисления
+## движка ничего не знает, сопоставление делает вызывающий (Main)
+static func cluster_stock(kind: String) -> float:
+	match kind:
+		"gold":  return DEFAULT_CLUSTER_GOLD
+		"stone": return DEFAULT_CLUSTER_STONE
+	return DEFAULT_CLUSTER_STONE
 
 ## Полный путь к иконке кузницы по ИМЕНИ ФАЙЛА.
 ## Принимает и готовый res://-путь: тогда возвращает его как есть — старые
@@ -291,6 +363,15 @@ const BUILDINGS := {
 		"worker_buildable": false,
 		"icon": "res://assets/factions/humans/icons/buildings/Castle.png",
 	},
+	# ХИЖИНА ГОБЛИНОВ. Игроку не строится (worker_buildable = false): это
+	# здание третьей стороны, оно расставляется генератором деревни
+	"goblin_hut": {
+		"name": "Хижина гоблинов", "max_hp": 600.0, "build_time": 10.0,
+		"size": Vector3(4.0, 3.5, 4.0),
+		"cost_wood": 0.0, "cost_gold": 0.0, "cost_stone": 0.0,
+		"worker_buildable": false,
+		"icon": "",
+	},
 	"barracks": {
 		"name": "Бараки", "max_hp": 10.0, "build_time": 10.0,
 		"size": Vector3(3.5, 2.2, 3.5),
@@ -351,7 +432,10 @@ const SQUAD_SIZE_MONKS     := 10   # монахи — редкий вспомо�
 
 ## Предохранитель от опечатки: заказ больше этого числа обрезается
 ## (Building.queue_unit). Поднимать вместе с SQUAD_SIZE_*.
-const SQUAD_SIZE_HARD_CAP := 60
+## Потолок размера отряда. Поднят с 60 до 100 ради гоблинской орды: у неё в
+## отряде сто копейщиков (goblin_config.SQUAD_SIZE). Людей это не касается —
+## их размеры заданы своими числами и заметно ниже потолка
+const SQUAD_SIZE_HARD_CAP := 100
 
 ## ═══════════════════════════════════════════════════════════════════════════
 ## ОПЫТ ОТРЯДА (VETERANCY) — ЗВЁЗДОЧКИ ЗА УБИЙСТВА, ОТДЕЛЬНО ПО ТИПАМ ЮНИТОВ
@@ -387,9 +471,14 @@ const SQUAD_SIZE_HARD_CAP := 60
 ## Поля бонуса:
 ##   id    — ключ выбора (латиницей)
 ##   name  — подпись кнопки
-##   stat  — какая характеристика растёт:
-##           "attack" | "armor" | "defense" | "speed" | "health"
-##   value — на сколько. Бонус выдаётся КАЖДОЙ модели отряда и читается вживую.
+##   icon  — файл из SMITH_ICONS_DIR
+##   далее — ПОЛНЫЙ ШАБЛОН МОДИФИКАТОРОВ (см. MODIFIERS): все двенадцать ключей,
+##           ненужное нулём. Награда вправе давать сразу несколько — например
+##           «+1 к урону и +0.2 к скорости»: обе строки уже есть, поставьте
+##           числа. Бонус выдаётся КАЖДОЙ модели отряда.
+##   stat / value — В ТАБЛИЦЕ ИХ НЕТ. Короткая пара выводится из модификаторов
+##           при чтении (см. veteran_choices) — держать её здесь вторым
+##           описанием того же числа значило бы завести источник расхождений.
 ##
 ## ВНИМАНИЕ по скорости: базовая скорость юнита ~2-3 м/с, поэтому +5 к скорости
 ## это очень много. Значение оставлено как заказано; если бег окажется
@@ -400,61 +489,201 @@ const SQUAD_SIZE_HARD_CAP := 60
 ## отражают "4 блока для будущей настройки порознь" — правка одного блока
 ## физически не может задеть другой)
 const _VET_BONUS_TEMPLATE := [
-	# Бонус 1
+	# ── УРОВЕНЬ 1 ──────────────────────────────────────────────────────
 	[
-		{"id": "attack",  "name": "+ Урон к Атаке",     "stat": "attack",  "value": 2.0, "icon": "icon_sword.png"},
-		{"id": "armor",   "name": "+ к Броне",     "stat": "armor",   "value": 2.0, "icon": "icon_shield.png"},
-		{"id": "defense", "name": "+ к Защите",    "stat": "defense", "value": 2.0, "icon": "icon_might.png"},
-		{"id": "speed",   "name": "+ к Скорости",  "stat": "speed",   "value": 0.5, "icon": "icon_hand.png"},
-		{"id": "health",  "name": "+ HP",  "stat": "health",  "value": 30.0, "icon": "icon_heart.png"},
+		{"id": "attack", "name": "+ Урон к Атаке", "icon": "icon_sword.png",
+			"bonus_attack": 2.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
+			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		{"id": "armor", "name": "+ к Броне", "icon": "icon_shield.png",
+			"bonus_attack": 0.0, "bonus_armor": 2.0, "bonus_defense": 0.0,
+			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		{"id": "defense", "name": "+ к Защите", "icon": "icon_might.png",
+			"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 2.0,
+			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		{"id": "speed", "name": "+ к Скорости", "icon": "icon_hand.png",
+			"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
+			"bonus_health": 0.0, "bonus_speed": 0.5, "bonus_range": 0.0,
+			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		{"id": "health", "name": "+ HP", "icon": "icon_heart.png",
+			"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
+			"bonus_health": 30.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	],
-	# Бонус 2
+	# ── УРОВЕНЬ 2 ──────────────────────────────────────────────────────
 	[
-		{"id": "attack",  "name": "+ Урон к Атаке",     "stat": "attack",  "value": 3.0, "icon": "icon_sword.png"},
-		{"id": "armor",   "name": "+ к Броне",     "stat": "armor",   "value": 3.0, "icon": "icon_shield.png"},
-		{"id": "defense", "name": "+ к Защите",    "stat": "defense", "value": 3.0, "icon": "icon_might.png"},
-		{"id": "speed",   "name": "+ к Скорости",  "stat": "speed",   "value": 0.5, "icon": "icon_hand.png"},
-		{"id": "health",  "name": "+ HP",  "stat": "health",  "value": 30.0, "icon": "icon_heart.png"},
+		{"id": "attack", "name": "+ Урон к Атаке", "icon": "icon_sword.png",
+			"bonus_attack": 3.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
+			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		{"id": "armor", "name": "+ к Броне", "icon": "icon_shield.png",
+			"bonus_attack": 0.0, "bonus_armor": 3.0, "bonus_defense": 0.0,
+			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		{"id": "defense", "name": "+ к Защите", "icon": "icon_might.png",
+			"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 3.0,
+			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		{"id": "speed", "name": "+ к Скорости", "icon": "icon_hand.png",
+			"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
+			"bonus_health": 0.0, "bonus_speed": 0.5, "bonus_range": 0.0,
+			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		{"id": "health", "name": "+ HP", "icon": "icon_heart.png",
+			"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
+			"bonus_health": 30.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	],
-	# Бонус 3
+	# ── УРОВЕНЬ 3 ──────────────────────────────────────────────────────
 	[
-		{"id": "attack",  "name": "+ Урон к Атаке",     "stat": "attack",  "value": 5.0, "icon": "icon_sword.png"},
-		{"id": "armor",   "name": "+ к Броне",     "stat": "armor",   "value": 5.0, "icon": "icon_shield.png"},
-		{"id": "defense", "name": "+ к Защите",    "stat": "defense", "value": 5.0, "icon": "icon_might.png"},
-		{"id": "speed",   "name": "+ к Скорости",  "stat": "speed",   "value": 0.3, "icon": "icon_hand.png"},
-		{"id": "health",  "name": "+ HP",  "stat": "health",  "value": 30.0, "icon": "icon_heart.png"},
+		{"id": "attack", "name": "+ Урон к Атаке", "icon": "icon_sword.png",
+			"bonus_attack": 5.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
+			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		{"id": "armor", "name": "+ к Броне", "icon": "icon_shield.png",
+			"bonus_attack": 0.0, "bonus_armor": 5.0, "bonus_defense": 0.0,
+			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		{"id": "defense", "name": "+ к Защите", "icon": "icon_might.png",
+			"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 5.0,
+			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		{"id": "speed", "name": "+ к Скорости", "icon": "icon_hand.png",
+			"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
+			"bonus_health": 0.0, "bonus_speed": 0.3, "bonus_range": 0.0,
+			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		{"id": "health", "name": "+ HP", "icon": "icon_heart.png",
+			"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
+			"bonus_health": 30.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	],
-	# Бонус 4
+	# ── УРОВЕНЬ 4 ──────────────────────────────────────────────────────
 	[
-		{"id": "attack",  "name": "+ Урон к Атаке",     "stat": "attack",  "value": 5.0, "icon": "icon_sword.png"},
-		{"id": "armor",   "name": "+ к Броне",     "stat": "armor",   "value": 5.0, "icon": "icon_shield.png"},
-		{"id": "defense", "name": "+ к Защите",    "stat": "defense", "value": 5.0, "icon": "icon_might.png"},
-		{"id": "speed",   "name": "+ к Скорости",  "stat": "speed",   "value": 0.3, "icon": "icon_hand.png"},
-		{"id": "health",  "name": "+ HP",  "stat": "health",  "value": 30.0, "icon": "icon_heart.png"},
+		{"id": "attack", "name": "+ Урон к Атаке", "icon": "icon_sword.png",
+			"bonus_attack": 5.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
+			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		{"id": "armor", "name": "+ к Броне", "icon": "icon_shield.png",
+			"bonus_attack": 0.0, "bonus_armor": 5.0, "bonus_defense": 0.0,
+			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		{"id": "defense", "name": "+ к Защите", "icon": "icon_might.png",
+			"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 5.0,
+			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		{"id": "speed", "name": "+ к Скорости", "icon": "icon_hand.png",
+			"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
+			"bonus_health": 0.0, "bonus_speed": 0.3, "bonus_range": 0.0,
+			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		{"id": "health", "name": "+ HP", "icon": "icon_heart.png",
+			"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
+			"bonus_health": 30.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	],
-	# Бонус 5
+	# ── УРОВЕНЬ 5 ──────────────────────────────────────────────────────
 	[
-		{"id": "attack",  "name": "+ Урон к Атаке",     "stat": "attack",  "value": 5.0, "icon": "icon_sword.png"},
-		{"id": "armor",   "name": "+ к Броне",     "stat": "armor",   "value": 5.0, "icon": "icon_shield.png"},
-		{"id": "defense", "name": "+ к Защите",    "stat": "defense", "value": 5.0, "icon": "icon_might.png"},
-		{"id": "speed",   "name": "+ к Скорости",  "stat": "speed",   "value": 0.3, "icon": "icon_hand.png"},
-		{"id": "health",  "name": "+ HP",  "stat": "health",  "value": 30.0, "icon": "icon_heart.png"},
+		{"id": "attack", "name": "+ Урон к Атаке", "icon": "icon_sword.png",
+			"bonus_attack": 5.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
+			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		{"id": "armor", "name": "+ к Броне", "icon": "icon_shield.png",
+			"bonus_attack": 0.0, "bonus_armor": 5.0, "bonus_defense": 0.0,
+			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		{"id": "defense", "name": "+ к Защите", "icon": "icon_might.png",
+			"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 5.0,
+			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		{"id": "speed", "name": "+ к Скорости", "icon": "icon_hand.png",
+			"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
+			"bonus_health": 0.0, "bonus_speed": 0.3, "bonus_range": 0.0,
+			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		{"id": "health", "name": "+ HP", "icon": "icon_heart.png",
+			"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
+			"bonus_health": 30.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	],
-	# Бонус 6 — первый «серебряный» потолок
+	# ── УРОВЕНЬ 6 ──────────────────────────────────────────────────────
 	[
-		{"id": "attack",  "name": "+ Урон к Атаке",     "stat": "attack",  "value": 6.0, "icon": "icon_sword.png"},
-		{"id": "armor",   "name": "+ к Броне",     "stat": "armor",   "value": 6.0, "icon": "icon_shield.png"},
-		{"id": "defense", "name": "+ к Защите",    "stat": "defense", "value": 6.0, "icon": "icon_might.png"},
-		{"id": "speed",   "name": "+ к Скорости",  "stat": "speed",   "value": 0.3, "icon": "icon_hand.png"},
-		{"id": "health",  "name": "+ HP",  "stat": "health",  "value": 40.0, "icon": "icon_heart.png"},
+		{"id": "attack", "name": "+ Урон к Атаке", "icon": "icon_sword.png",
+			"bonus_attack": 6.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
+			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		{"id": "armor", "name": "+ к Броне", "icon": "icon_shield.png",
+			"bonus_attack": 0.0, "bonus_armor": 6.0, "bonus_defense": 0.0,
+			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		{"id": "defense", "name": "+ к Защите", "icon": "icon_might.png",
+			"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 6.0,
+			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		{"id": "speed", "name": "+ к Скорости", "icon": "icon_hand.png",
+			"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
+			"bonus_health": 0.0, "bonus_speed": 0.3, "bonus_range": 0.0,
+			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		{"id": "health", "name": "+ HP", "icon": "icon_heart.png",
+			"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
+			"bonus_health": 40.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	],
-	# Бонус 7 — «красная звезда», высший грейд
+	# ── УРОВЕНЬ 7 ──────────────────────────────────────────────────────
 	[
-		{"id": "attack",  "name": "+ Урон к Атаке",     "stat": "attack",  "value": 8.0, "icon": "icon_sword.png"},
-		{"id": "armor",   "name": "+ к Броне",     "stat": "armor",   "value": 8.0, "icon": "icon_shield.png"},
-		{"id": "defense", "name": "+ к Защите",    "stat": "defense", "value": 8.0, "icon": "icon_might.png"},
-		{"id": "speed",   "name": "+ к Скорости",  "stat": "speed",   "value": 0.4, "icon": "icon_hand.png"},
-		{"id": "health",  "name": "+ HP",  "stat": "health",  "value": 50.0, "icon": "icon_heart.png"},
+		{"id": "attack", "name": "+ Урон к Атаке", "icon": "icon_sword.png",
+			"bonus_attack": 8.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
+			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		{"id": "armor", "name": "+ к Броне", "icon": "icon_shield.png",
+			"bonus_attack": 0.0, "bonus_armor": 8.0, "bonus_defense": 0.0,
+			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		{"id": "defense", "name": "+ к Защите", "icon": "icon_might.png",
+			"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 8.0,
+			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		{"id": "speed", "name": "+ к Скорости", "icon": "icon_hand.png",
+			"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
+			"bonus_health": 0.0, "bonus_speed": 0.4, "bonus_range": 0.0,
+			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		{"id": "health", "name": "+ HP", "icon": "icon_heart.png",
+			"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
+			"bonus_health": 50.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	],
 ]
 
@@ -471,6 +700,14 @@ static var VET_CONFIG: Dictionary = {
 	"warrior":  {"thresholds": [40, 100, 200, 300, 400, 500, 600], "bonuses": _VET_BONUS_TEMPLATE.duplicate(true)},
 	"archer":   {"thresholds": [40, 100, 200, 300, 400, 500, 600], "bonuses": _VET_BONUS_TEMPLATE.duplicate(true)},
 	"monk":     {"thresholds": [40, 100, 200, 300, 400, 500, 600], "bonuses": _VET_BONUS_TEMPLATE.duplicate(true)},
+	# ── ГОБЛИНЫ: ШКАЛА ЛЮДЕЙ ЦЕЛИКОМ (заказ владельца) ──────────────────────
+	# Тот же шаблон наград и та же лестница порогов. Записи отдельные, а не
+	# «сослаться на копейщика»: VET_CONFIG — static var, её правят вживую, и
+	# общая ссылка означала бы, что правка гоблинам молча меняет людей
+	"goblin_spearman": {"thresholds": [40, 100, 200, 300, 400, 500, 600],
+		"bonuses": _VET_BONUS_TEMPLATE.duplicate(true)},
+	"goblin_rider":    {"thresholds": [40, 100, 200, 300, 400, 500, 600],
+		"bonuses": _VET_BONUS_TEMPLATE.duplicate(true)},
 }
 
 ## ═══════════════════════════════════════════════════════════════════════════
@@ -550,12 +787,55 @@ static func veteran_level_for_kills(unit_type: String, kills: int) -> int:
 			lvl = i + 1
 	return lvl
 
-## Пять вариантов улучшения на уровне level (1..max) у данного типа юнита
+## ── СОКРАЩЁННАЯ ФОРМА НАГРАДЫ: stat/value ────────────────────────────────────
+## Награда за ветеранство описана ТЕМ ЖЕ шаблоном модификаторов, что и узел
+## кузницы (см. MODIFIERS): все двенадцать ключей, ненужное нулём. Но панель,
+## ИИ и старые стенды спрашивают у награды короткую пару «какая характеристика
+## и на сколько», и держать её в таблице ВТОРОЙ РАЗ нельзя — два описания
+## одного числа рано или поздно разъедутся. Поэтому пара ВЫВОДИТСЯ из
+## модификаторов при чтении, а в таблице её нет вовсе
+const _MOD_TO_STAT := {
+	"bonus_attack": "attack", "bonus_armor": "armor", "bonus_defense": "defense",
+	"bonus_health": "health", "bonus_speed": "speed", "bonus_range": "range",
+	"bonus_cooldown": "cooldown", "bonus_spread": "spread", "bonus_push": "push",
+	"bonus_morale": "morale", "bonus_carry": "carry", "bonus_gather": "gather",
+}
+
+## Короткое имя характеристики по ключу модификатора ("bonus_attack" → "attack")
+static func modifier_stat_name(key: String) -> String:
+	return String(_MOD_TO_STAT.get(key, key))
+
+## Только НЕНУЛЕВЫЕ модификаторы записи — то, что она реально даёт
+static func nonzero_modifiers(src: Dictionary) -> Dictionary:
+	var out: Dictionary = {}
+	for k in BONUS_KEYS:
+		var key: String = String(k)
+		var v: float = float(src.get(key, 0.0))
+		if v != 0.0:
+			out[key] = v
+	return out
+
+## Пять вариантов улучшения на уровне level (1..max) у данного типа юнита.
+## Каждый вариант дополняется выведенными stat/value (см. выше)
 static func veteran_choices(unit_type: String, level: int) -> Array:
 	var b: Array = _vet_bonuses(unit_type)
 	if level < 1 or level > b.size():
 		return []
-	return b[level - 1]
+	var lst: Array = b[level - 1]
+	# Дополняем ОДИН РАЗ и прямо в записи: VET_CONFIG живёт всю партию, а
+	# пересобирать список на каждое открытие панели незачем
+	for e in lst:
+		var d: Dictionary = e
+		if d.has("stat"):
+			continue
+		var nz: Dictionary = nonzero_modifiers(d)
+		var first: String = ""
+		for k in nz:
+			first = String(k)
+			break
+		d["stat"]  = modifier_stat_name(first) if first != "" else ""
+		d["value"] = float(nz.get(first, 0.0)) if first != "" else 0.0
+	return lst
 
 ## Описание конкретного выбора НА КОНКРЕТНОМ УРОВНЕ (нужно, чтобы посчитать,
 ## сколько реально дал бонус: value одного и того же id по уровням разное).
@@ -617,6 +897,13 @@ static func squad_size(unit_id: String) -> int:
 		"archer":   return SQUAD_SIZE_ARCHERS
 		"warrior":  return SQUAD_SIZE_SWORDSMEN
 		"monk":     return SQUAD_SIZE_MONKS
+	# ГОБЛИНЫ ОТВЕЧАЮТ СВОИМ КОНФИГОМ. Спрашивают отсюда все, кто считает
+	# «сколько бойцов положено отряду», — в том числе доукомплектование в
+	# гарнизоне (Castle.garrison_missing). Если бы здесь осталась единица,
+	# отряд гоблинов, ушедший лечиться, вышел бы обратно составом в одного
+	var gs: Variant = _GobCfg.SQUAD_SIZE.get(unit_id)
+	if gs != null:
+		return int(gs)
 	return 1
 
 ## ═══════════════════════════════════════════════════════════════════════════
@@ -809,9 +1096,146 @@ const UPGRADE_SLOTS := [
 static func upgrade_research_time(slot: Dictionary) -> float:
 	return maxf(float(slot.get("research_time", DEFAULT_RESEARCH_TIME)), 0.0)
 
-## Все ключи бонусов — по ним GameManager накапливает суммы
-const BONUS_KEYS := ["bonus_attack", "bonus_armor", "bonus_health",
-					 "bonus_speed", "bonus_push", "bonus_morale"]
+## Все ключи бонусов — по ним GameManager накапливает суммы.
+##
+## ДВА ПОСЛЕДНИХ — ЭКОНОМИЧЕСКИЕ, ветка рабочего в кузнице (forge_config.UNITS.worker):
+##   bonus_carry  — прибавка к грузу за одну ходку (Worker.gather_amount)
+##   bonus_gather — СЕКУНДЫ ДОЛОЙ из цикла добычи (Worker._cycle_time). Знак тут
+##                  такой же, как у всех: положительное значение — это хорошо,
+##                  просто вычитается, а не прибавляется. Иначе балансная
+##                  таблица держала бы один ключ с обратным знаком, и в ней
+##                  рано или поздно ошиблись бы
+## Список — ЕДИНСТВЕННОЕ место, где ключ объявляется: GameManager копит суммы,
+## а всплывающие окна HUD печатают строки, перебирая именно его
+## ═══════════════════════════════════════════════════════════════════════════
+## ЕДИНЫЙ ШАБЛОН МОДИФИКАТОРОВ — ОДИН НА ВСЮ ИГРУ
+## ═══════════════════════════════════════════════════════════════════════════
+## Здесь перечислены ВСЕ модификаторы, какие в игре есть. Любой узел кузницы и
+## любая награда за ветеранство несут ЭТОТ ЖЕ набор ключей целиком: то, что узел
+## не даёт, стоит нулём. Смысл ровно в правке баланса вручную — чтобы добавить
+## узлу дальность, не надо помнить, как называется ключ и куда его дописать:
+## строка уже есть, в ней ноль, замените его числом.
+##
+## ЗНАК ВЕЗДЕ ОДИН: положительное значение — это ХОРОШО. Там, где по смыслу надо
+## уменьшить (перезарядка, разброс, цикл добычи), число вычитается в коде, а в
+## таблице стоит со знаком плюс. Одна колонка с обратным знаком в балансной
+## таблице — гарантированная ошибка при правке.
+##
+##   bonus_attack    — прибавка к урону удара
+##   bonus_armor     — прибавка к броне (гасит входящий урон)
+##   bonus_defense   — прибавка к защите (второй слагаемый той же формулы)
+##   bonus_health    — прибавка к запасу HP (выдаётся сразу и живым бойцам)
+##   bonus_speed     — прибавка к скорости передвижения, м/с
+##   bonus_range     — прибавка к ДАЛЬНОСТИ атаки, м
+##   bonus_cooldown  — СЕКУНД ДОЛОЙ с перезарядки удара (то же, что «скорость
+##                     атаки»), пол — MIN_COOLDOWN
+##   bonus_spread    — НАСКОЛЬКО ПЛОТНЕЕ ложится стрельба: доля 0..1, на которую
+##                     срезается случайный разброс стрелка (0.25 = «на четверть
+##                     кучнее»). Ближнего боя не касается
+##   bonus_push      — прибавка к напору в свалке стенка-на-стенку
+##   bonus_morale    — прибавка к морали
+##   bonus_carry     — прибавка к грузу рабочего за одну ходку
+##   bonus_gather    — СЕКУНД ДОЛОЙ из цикла добычи, пол — Worker.MIN_CYCLE_TIME
+##
+## Порядок ключей здесь — это порядок строк во всплывающих окнах.
+const MODIFIERS := {
+	"bonus_attack":   0.0,
+	"bonus_armor":    0.0,
+	"bonus_defense":  0.0,
+	"bonus_health":   0.0,
+	"bonus_speed":    0.0,
+	"bonus_range":    0.0,
+	"bonus_cooldown": 0.0,
+	"bonus_spread":   0.0,
+	"bonus_push":     0.0,
+	"bonus_morale":   0.0,
+	"bonus_carry":    0.0,
+	"bonus_gather":   0.0,
+}
+
+## Нижний предел перезарядки: bonus_cooldown не может ускорить удар до нуля
+const MIN_COOLDOWN := 0.25
+
+
+## ═══════════════════════════════════════════════════════════════════════════
+## БАЛЛИСТИКА ЛУЧНИКА — ВСЕ ЧИСЛА ЗДЕСЬ, В КОДЕ ТОЛЬКО ФОРМУЛА
+## ═══════════════════════════════════════════════════════════════════════════
+## ARCHER_LEAD_FACTOR — доля честного упреждения, которую стрелок реально
+## выносит вперёд: точка = позиция цели + скорость × время_полёта × фактор.
+##
+## Значение 0.08 — заказ владельца (было 0.65) и оно подтверждается картинкой.
+## Полное упреждение при дальности 20 м и скорости стрелы 9 м/с даёт время
+## полёта ~2.2 с; бегущая цель за это время проходит ~9 м, и стрелы ложились
+## ЗА ПОЛТОРА КОРПУСА ВПЕРЕДИ строя — на скриншотах владельца это «дорога из
+## стрел» в чистом поле рядом с противником. Промахи по бегущему при малом
+## упреждении никуда не деваются: за них отвечает разброс SCATTER_PER_SPEED,
+## и это ровно то, что просили сохранить.
+const ARCHER_LEAD_FACTOR := 0.08
+## Потолок выноса в метрах. Даже при странных скоростях цели упреждение не
+## имеет права увести точку прицеливания в пустое поле
+const ARCHER_LEAD_MAX := 2.5
+
+## ── КУЧНОСТЬ И ТЕМП ПО ВЫУЧКЕ ОТРЯДА ───────────────────────────────────────
+## Индекс — уровень ветеранства отряда (0 = новобранцы). Значение сверх
+## последней записи держится последним, как и в лестнице звёздочек.
+##   spread   — МНОЖИТЕЛЬ разброса: у новобранцев шире, у ветеранов кучнее
+##   fire     — МНОЖИТЕЛЬ ТЕМПА стрельбы (кулдаун делится на него)
+## Это отдельная лестница, а не bonus_spread/bonus_cooldown кузницы: те
+## складываются по фракции, а эти зарабатывает КОНКРЕТНЫЙ отряд в бою
+const ARCHER_DRILL := [
+	{"spread": 1.35, "fire": 0.85},   # 0 — новобранцы: шире и медленнее
+	{"spread": 1.20, "fire": 0.92},
+	{"spread": 1.08, "fire": 0.97},
+	{"spread": 1.00, "fire": 1.00},   # 3 — уставная норма
+	{"spread": 0.90, "fire": 1.06},
+	{"spread": 0.82, "fire": 1.12},
+	{"spread": 0.74, "fire": 1.18},
+	{"spread": 0.66, "fire": 1.25},   # 7 — красная звезда
+]
+
+## Один ряд лестницы выучки по уровню отряда
+static func archer_drill(level: int) -> Dictionary:
+	if ARCHER_DRILL.is_empty():
+		return {"spread": 1.0, "fire": 1.0}
+	return ARCHER_DRILL[clampi(level, 0, ARCHER_DRILL.size() - 1)]
+
+## ── ЗАЛП: МИНИМАЛЬНОЕ НАКРЫТИЕ ─────────────────────────────────────────────
+## Радиус «тучи» берётся по габариту вражеского строя, но НИЖЕ этого не падает
+## никогда. Иначе залп по одиночке (и по отряду из одного бойца, и по зданию)
+## схлопывался в одну точку: все стрелы входили в первого же встречного, а
+## девятнадцать из двадцати списывались в уже мёртвого. Залп — это накрытие
+## площади, и площадь у него есть всегда
+const VOLLEY_MIN_SPREAD := 1.10
+
+## ── СПЛОЧЁННОСТЬ ОТРЯДА ────────────────────────────────────────────────────
+## Дальше этого от центра отряда боец не остаётся: если он ничем не занят,
+## отряд его подзывает (см. GameManager._cohesion_guard). Не сила и не поле —
+## разовый приказ на возврат, редкий и с остыванием, как смыкание рядов
+const SQUAD_COHESION_DIST := 14.0
+## Как часто отряду разрешено подзывать отставших, мс
+const SQUAD_COHESION_COOLDOWN_MS := 2500
+
+## Все ключи бонусов — по ним GameManager накапливает суммы, а всплывающие окна
+## HUD печатают строки. Это ровно ключи MODIFIERS, списком: перебирать словарь
+## приходится в горячих местах, а массив ключей строится один раз
+const BONUS_KEYS := ["bonus_attack", "bonus_armor", "bonus_defense",
+					 "bonus_health", "bonus_speed", "bonus_range",
+					 "bonus_cooldown", "bonus_spread",
+					 "bonus_push", "bonus_morale",
+					 "bonus_carry", "bonus_gather"]
+
+## Шаблон с нулями — КОПИЯ, а не сам словарь: вызывающий волен его править
+static func zero_modifiers() -> Dictionary:
+	return MODIFIERS.duplicate()
+
+## Дополнить запись недостающими ключами шаблона (значения не трогаются).
+## Нужен для узлов, которые ещё не расписаны целиком, и для стендов
+static func with_all_modifiers(src: Dictionary) -> Dictionary:
+	var out: Dictionary = src.duplicate()
+	for k in MODIFIERS:
+		if not out.has(k):
+			out[k] = 0.0
+	return out
 
 ## ═══════════════════════════════════════════════════════════════════════════
 ## ОБЗОР (ТУМАН ВОЙНЫ)

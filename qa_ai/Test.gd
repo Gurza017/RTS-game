@@ -175,6 +175,14 @@ func flush(bld: Building, cap: int = 400) -> void:
 ## РЕАЛЬНОГО прихода артели (это и есть проверяемое поведение: ИИ действительно
 ## посылает рабочих на стройку), а сам прогресс доматываем.
 ## Возвращает число достроенных зданий
+## ЖДЁМ ФИЗИЧЕСКИЕ КАДРЫ, А НЕ ОТРИСОВОЧНЫЕ.
+##
+## Здесь стоял `await process_frame`, и «240 кадров» означало не 4 секунды
+## симуляции, а «столько, сколько успеет отрисовка» — в headless она обгоняет
+## фиксированные 60 Гц физики, причём тем сильнее, чем дешевле кадр. Артель ИИ
+## физически не успевала дойти до аварийного фундамента, и проверка 7 падала на
+## ровном месте, реагируя на посторонние правки производительности. Это тот
+## самый разбор, что записан в CLAUDE.md про Engine.max_fps = 0
 func _finish_sites(max_frames: int = 240) -> int:
 	var done := 0
 	var guard := 0
@@ -190,7 +198,7 @@ func _finish_sites(max_frames: int = 240) -> int:
 			if s.builder_count() > 0:
 				s.progress = s.build_time
 				done += 1
-		await get_tree().process_frame
+		await get_tree().physics_frame
 		guard += 1
 	return done
 
@@ -384,6 +392,7 @@ func _test_roles() -> void:
 	var guard_total := 0
 	var guard_by_type: Dictionary = {}
 	var guard_posts: Array = []
+	var guard_post_type: Array = []
 	var field_targets: Array = []
 	for s in ai.squads:
 		var sq: Dictionary = s
@@ -395,6 +404,7 @@ func _test_roles() -> void:
 			guard_total += 1
 			guard_by_type[uid] = int(guard_by_type.get(uid, 0)) + 1
 			guard_posts.append(sq["target"] as Vector3)
+			guard_post_type.append(uid)
 			var all_def := true
 			for m in members:
 				if (m as Unit).stance != _UCfg.STANCE_DEFENSE:
@@ -426,16 +436,32 @@ func _test_roles() -> void:
 			min_gap = minf(min_gap, a.distance_to(b))
 	if guard_posts.size() < 2:
 		min_gap = -1.0
+	# ── ГАРНИЗОН БОЛЬШЕ НЕ КОЛЬЦО, А ЗАСЛОН ЛИЦОМ К ПРОТИВНИКУ ──────────────
+	# Здесь стояла проверка «все посты на радиусе GUARD_RING». Она отражала
+	# прежнее требование и покраснела, как только владелец заказал заслон:
+	# копейщики перед зданиями, стрелки за их спинами. Кольцо это требование
+	# выполнить не может в принципе — половина постов на нём смотрит в тыл, а
+	# род войск оно не различает вовсе.
+	# Проверяем НОВОЕ свойство: построение развёрнуто на противника, и
+	# копейщики стоят глубже по курсу, чем лучники (то есть впереди них)
+	var scr_course: Vector3 = ai._defense_course(castle) if castle != null else Vector3.FORWARD
 	var ring_ok := true
 	var ring_r: Array = []
-	for p in guard_posts:
-		var pv: Vector3 = p
+	var depth_by_type: Dictionary = {}
+	for pi in range(guard_posts.size()):
+		var pv: Vector3 = guard_posts[pi]
 		var d: float = pv.distance_to(castle.global_position) if castle != null else 0.0
 		ring_r.append(snappedf(d, 0.1))
-		if absf(d - ai.GUARD_RING) > 1.0:
+		var depth: float = (pv - castle.global_position).dot(scr_course) if castle != null else 0.0
+		depth_by_type[String(guard_post_type[pi])] = snappedf(depth, 0.1)
+		# Ни один пост не смотрит в тыл: заслон стоит между замком и врагом
+		if depth <= 0.0:
 			ring_ok = false
-	print("  посты гарнизона: радиусы от замка=%s (GUARD_RING=%.0f), минимальный зазор между постами=%.1f м" % [
-		str(ring_r), ai.GUARD_RING, min_gap])
+	if depth_by_type.has("spearman") and depth_by_type.has("archer"):
+		if float(depth_by_type["spearman"]) <= float(depth_by_type["archer"]):
+			ring_ok = false
+	print("  посты гарнизона: радиусы от замка=%s, глубина по курсу на врага=%s, минимальный зазор=%.1f м" % [
+		str(ring_r), str(depth_by_type), min_gap])
 	# Излишки — у озера
 	var field_far := 0
 	var min_field_gap := 1.0e9
@@ -496,7 +522,8 @@ func _test_roles() -> void:
 	verdict("5 все гарнизонные бойцы в стойке ЗАЩИТА",
 		guard_total > 0 and guard_stance_ok == guard_total,
 		"%d из %d" % [guard_stance_ok, guard_total])
-	verdict("5 посты гарнизона на кольце вокруг замка", ring_ok, "радиусы=%s" % str(ring_r))
+	verdict("5 гарнизон стоит заслоном лицом к врагу, копейщики впереди лучников",
+		ring_ok, "глубина по курсу на врага=%s" % str(depth_by_type))
 	verdict("5 посты гарнизона разнесены (не в одной точке)", min_gap > 2.0,
 		"минимальный зазор=%.1f м" % min_gap)
 
@@ -523,6 +550,12 @@ func _test_assault_and_tactics() -> void:
 		# ШТУРМОВАЯ раскладка вызывается НАПРЯМУЮ. При DEFENSIVE_MODE обычный
 		# tick() уводит отряды в заслон, и тактики волны никогда бы не строились,
 		# хотя сам код раскладки живой и используется для глубины в обороне
+		# ВОЛНА СЧИТАЕТСЯ УЖЕ СОБРАННОЙ. С авг. 2026 атака начинается не по
+		# факту набора лимита, а после сбора на точке (EnemyAI._mustered): до
+		# сбора все отряды идут К НЕЙ, и штурмовой раскладки просто нет. Здесь
+		# проверяется именно раскладка, то есть стадия ПОСЛЕ сбора — сам сбор
+		# проверяется отдельно, ниже
+		ai._wave_out = true
 		ai._command_squads(_enemy_castle())
 		await frames(2)
 		var tid: String = String(ai._tactic.get("id", "-"))
@@ -599,33 +632,79 @@ func _test_assault_and_tactics() -> void:
 			dw, "" if has_w else " (в волне нет)"])
 		if not all3:
 			print("      в волне представлены не все типы — проверка глубины пропущена")
-		if tid == "archers_front" and all3:
-			verdict("6 archers_front: лучники впереди, рыцари сзади",
-				da > 0.0 and dw < 0.0 and da > ds and ds > dw,
-				"лучники=%+.1f копейщики=%+.1f рыцари=%+.1f" % [da, ds, dw])
-		elif tid == "spears_back":
-			var fa: Array = flank_by_type.get("archer", [])
-			var has_plus := false
-			var has_minus := false
-			for v in fa:
-				if float(v) > 1.0: has_plus = true
-				if float(v) < -1.0: has_minus = true
-			if all3:
-				verdict("6 spears_back: рыцари впереди, копейщики сзади",
-					dw > 0.0 and ds < 0.0 and dw > da and da > ds,
-					"рыцари=%+.1f лучники=%+.1f копейщики=%+.1f" % [dw, da, ds])
-			# Проверка обоих флангов имеет смысл только при 2+ полевых
-			# отрядах лучников: один отряд физически не может стоять с двух краёв
-			if fa.size() >= 2:
-				verdict("6 spears_back: лучники по ОБА фланга",
-					has_plus and has_minus, "фланги лучников=%s" % str(fa))
-			else:
-				print("      полевых отрядов лучников=%d — обоих флангов не набрать, " % fa.size()
-					+ "проверка на прогоне с archer>=3; фланги=%s" % str(fa))
-		elif tid == "one_mass" and all3:
-			verdict("6 one_mass: все на нулевой глубине",
-				absf(da) < 0.01 and absf(ds) < 0.01 and absf(dw) < 0.01,
-				"лучники=%+.1f копейщики=%+.1f рыцари=%+.1f" % [da, ds, dw])
+		# ── ТРЕБОВАНИЕ РАЗВЕРНУЛОСЬ (заказ владельца, авг. 2026) ────────────
+		# Здесь проверялся порядок родов, СВОЙ У КАЖДОЙ ТАКТИКИ: «archers_front»
+		# требовала лучников впереди копейщиков, «spears_back» — рыцарей впереди
+		# всех. Теперь боевой порядок ЕДИНЫЙ и является инвариантом: копейщики
+		# держат первую линию, лучники стоят строго за их спинами, мечники — по
+		# краям. Тактики различаются глубиной и шириной, а не тем, кто ведёт.
+		#
+		# Поэтому проверка одна на все тактики и утверждает СВОЙСТВО строя, а не
+		# числа из таблицы: поменяются глубины — стенд не покраснеет
+		if all3:
+			verdict("6 «%s»: копейщики впереди, лучники за их спинами" % tid,
+				ds > da, "копейщики=%+.1f лучники=%+.1f (больше — ближе к игроку)" % [ds, da])
+			verdict("6 «%s»: лучники не выставлены перед стеной копий" % tid,
+				da <= ds, "лучники=%+.1f копейщики=%+.1f" % [da, ds])
+		var fw: Array = flank_by_type.get("warrior", [])
+		var w_plus := false
+		var w_minus := false
+		for v in fw:
+			if float(v) > 1.0: w_plus = true
+			if float(v) < -1.0: w_minus = true
+		# Оба края разом набираются только при двух и более полевых отрядах
+		# мечников: один отряд физически не может стоять слева и справа
+		if fw.size() >= 2:
+			verdict("6 «%s»: мечники разведены по ОБОИМ краям" % tid,
+				w_plus and w_minus, "фланги мечников=%s" % str(fw))
+		elif fw.size() == 1:
+			verdict("6 «%s»: единственный отряд мечников ушёл на край" % tid,
+				absf(float(fw[0])) > 1.0, "фланг мечников=%s" % str(fw))
+		else:
+			print("      полевых отрядов мечников нет — проверка флангов пропущена")
+
+	# ═════════════════════════════════════════════════════════════════════════
+	# 6д. СБОР ПЕРЕД АТАКОЙ: волна выходит целиком, а не по одному
+	# ═════════════════════════════════════════════════════════════════════════
+	# До сбора все полевые отряды обязаны идти К ТОЧКЕ СБОРА, а не на базу
+	# игрока; после сбора — на базу. Это и есть требование «нападают единой
+	# волной, а не поодиночке»
+	var rally: Vector3 = ai._rally_point()
+	ai._wave_out = false
+	ai._command_squads(_enemy_castle())
+	await frames(2)
+	var to_rally := 0
+	var to_base := 0
+	var field_n := 0
+	for s in ai.squads:
+		var sq: Dictionary = s
+		if String(sq["role"]) == ai.ROLE_GUARD:
+			continue
+		field_n += 1
+		var t: Vector3 = sq["target"]
+		if Vector2(t.x - rally.x, t.z - rally.z).length() < 40.0:
+			to_rally += 1
+		if Vector2(t.x - pcastle.global_position.x,
+				t.z - pcastle.global_position.z).length() < 40.0:
+			to_base += 1
+	print("  до сбора: к точке сбора идут %d из %d, на базу игрока %d" % [
+		to_rally, field_n, to_base])
+	verdict("6д до сбора волна идёт на точку сбора, а не на базу игрока",
+		field_n == 0 or to_rally >= to_base,
+		"к сбору=%d, на базу=%d" % [to_rally, to_base])
+	# Собрать волну искусственно: расставить всех у точки сбора
+	for s in ai.squads:
+		var sq2: Dictionary = s
+		for m in (sq2["members"] as Array):
+			var u := m as Unit
+			if u != null and is_instance_valid(u):
+				u.global_position = rally + Vector3(randf() * 4.0 - 2.0, 0.0,
+					randf() * 4.0 - 2.0)
+				u.sync_row()
+	await frames(2)
+	var mustered: bool = ai._mustered(ai.squads, rally)
+	verdict("6е собравшаяся волна опознаётся как собранная", mustered,
+		"_mustered=%s" % str(mustered))
 
 func _avg(arr: Array) -> float:
 	if arr.is_empty():

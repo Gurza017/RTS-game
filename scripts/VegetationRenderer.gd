@@ -45,6 +45,9 @@ class Bucket:
 
 	var mmi: MultiMeshInstance3D
 	var mm: MultiMesh
+	## Материал бакета. Хранится ссылкой, потому что в него дописывается маска
+	## тумана уже после создания (см. VegetationRenderer.set_fog)
+	var mat: ShaderMaterial = null
 	var free: Array = []
 	var capacity: int = 0
 	var buf: PackedFloat32Array = PackedFloat32Array()
@@ -82,6 +85,17 @@ class Bucket:
 		buf[o + 15] = 1.0
 		dirty = true
 
+	## Только сила подсветки (COLOR.b, см. veg_multimesh.gdshader). Отдельным
+	## методом, а не через write(): подсветка меняется по наведению мыши, то есть
+	## потенциально каждый кадр, и переписывать ради неё двенадцать float
+	## трансформа незачем
+	func write_highlight(idx: int, v: float) -> void:
+		var o: int = idx * STRIDE + 14
+		if is_equal_approx(buf[o], v):
+			return
+		buf[o] = v
+		dirty = true
+
 	## Только положение: дрожание ствола при рубке. Масштаб и цвет на месте
 	func write_pos(idx: int, pos: Vector3) -> void:
 		var o: int = idx * STRIDE
@@ -114,6 +128,9 @@ class Slot:
 	var phase01: float = 0.0
 	var cycle01: float = 0.0
 	var pos: Vector3 = Vector3.ZERO
+	## Текущая сила подсветки наведения (COLOR.b). Дублируется здесь, чтобы
+	## «подсветить уже подсвеченное» не лезло в буфер вообще
+	var highlight: float = 0.0
 
 	## Порог «сдвинулось» — АБСОЛЮТНЫЙ квадрат расстояния (0.01 мм), а не
 	## Vector3.is_equal_approx. У того допуск растёт вместе с величиной
@@ -136,6 +153,30 @@ class Slot:
 
 var _buckets: Dictionary = {}     # ключ -> Bucket
 var _dirty_any: bool = false
+
+## ── МАСКА ТУМАНА ДЛЯ ОСТАНОВКИ КАЧАНИЯ ──────────────────────────────────────
+## Растение вне освещённой зоны замирает (см. veg_multimesh.gdshader). Маска
+## отдаётся ОДИН РАЗ НА БАКЕТ, а не на растение: бакетов единицы, растений
+## тысячи, и вопрос «видно ли меня» решает сам шейдер по мировой точке
+## экземпляра. Значения запоминаются, потому что бакеты создаются лениво — по
+## мере того, как встречаются новые виды растений, в том числе уже после того,
+## как туман собрался
+var _fog_tex: Texture2D = null
+var _fog_half: Vector2 = Vector2.ZERO
+
+## Подключить маску тумана. Зовёт FogOfWar.setup(); текстура у тумана одна и та
+## же на всю партию (обновляется по месту), поэтому вызов нужен ровно один
+func set_fog(tex: Texture2D, half: Vector2) -> void:
+	_fog_tex = tex
+	_fog_half = half
+	for k in _buckets:
+		_apply_fog_to(_buckets[k])
+
+func _apply_fog_to(b: Bucket) -> void:
+	if b == null or b.mat == null or _fog_tex == null:
+		return
+	b.mat.set_shader_parameter("fog_mask", _fog_tex)
+	b.mat.set_shader_parameter("fog_half", _fog_half)
 
 ## Ключ бакета: лента плюс пропорции квада. Размер в ключ НЕ входит — он живёт
 ## в масштабе экземпляра, иначе каждый куст со своим случайным размером
@@ -167,6 +208,8 @@ func _get_or_make(tex: Texture2D, frames: int, aspect: float,
 	# приоритетом 1 и не должен казаться утопленным в куст (см. BillboardUtil)
 	mat.render_priority = 0
 	quad.material = mat
+	b.mat = mat
+	_apply_fog_to(b)
 
 	b.mm = MultiMesh.new()
 	b.mm.transform_format = MultiMesh.TRANSFORM_3D
@@ -218,6 +261,19 @@ func remove(s: Slot) -> void:
 	s.bucket.hide_slot(s.index)
 	s.bucket.free.append(s.index)
 	s.bucket = null
+	_dirty_any = true
+
+## Подсветить растение при наведении (0 — обычное, 1 — подсвечено).
+## Помечает бакет грязным только при РЕАЛЬНОМ изменении (см. write_highlight):
+## наведение опрашивается по таймеру, и «подсветить то же самое» обязано быть
+## бесплатным, иначе лес отдавался бы в RenderingServer на каждом опросе
+func set_highlight(s: Slot, v: float) -> void:
+	if s == null or s.bucket == null:
+		return
+	if is_equal_approx(s.highlight, v):
+		return
+	s.highlight = v
+	s.bucket.write_highlight(s.index, v)
 	_dirty_any = true
 
 ## Сдвинуть растение (дрожание ствола при рубке)

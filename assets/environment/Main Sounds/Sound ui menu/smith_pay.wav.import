@@ -1,0 +1,24 @@
+[remap]
+
+importer="wav"
+type="AudioStreamWAV"
+uid="uid://drxt3xfay2p6n"
+path="res://.godot/imported/smith_pay.wav-7e24ee3179bbb8dc99ac8404e8f8c36a.sample"
+
+[deps]
+
+source_file="res://assets/environment/Main Sounds/Sound ui menu/smith_pay.wav"
+dest_files=["res://.godot/imported/smith_pay.wav-7e24ee3179bbb8dc99ac8404e8f8c36a.sample"]
+
+[params]
+
+force/8_bit=false
+force/mono=false
+force/max_rate=false
+force/max_rate_hz=44100
+edit/trim=false
+edit/normalize=false
+edit/loop_mode=0
+edit/loop_begin=0
+edit/loop_end=-1
+compress/mode=2

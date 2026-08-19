@@ -180,9 +180,18 @@ func _test_group_levels() -> void:
 	var archers_total := 0
 	for s2 in archer_sids:
 		archers_total += GameManager.squad_members(int(s2)).size()
-	verdict("A4 подпись показывает суммарную численность типа",
-		hud.info_label.text.contains("%d бойцов" % archers_total),
-		"ожидали %d, текст: «%s»" % [archers_total, hud.info_label.text])
+	# ── ЧИСЛЕННОСТЬ ПЕРЕЕХАЛА ИЗ ПОДПИСИ В БЕЙДЖ ПОРТРЕТА ───────────────────
+	# Строка «Отряд лучников — 21 боец» слово в слово повторяла заголовок окна
+	# статов ровно над ней, и владелец попросил убрать дубль; освободившуюся
+	# строку занимает шкала опыта. Само число никуда не делось — оно на портрете,
+	# поэтому проверка не ослаблена, а перенаправлена туда, где оно теперь живёт
+	verdict("A4 суммарная численность типа видна (бейдж портрета), а имя типа — в подписи",
+		hud._portrait_count_lbl != null and hud._portrait_count_lbl.visible
+			and hud._portrait_count_lbl.text == str(archers_total)
+			and hud.info_label.text.contains("лучник"),
+		"ожидали %d, бейдж «%s», текст: «%s»" % [archers_total,
+			hud._portrait_count_lbl.text if hud._portrait_count_lbl != null else "—",
+			hud.info_label.text])
 
 	# ── A5: у каждой карточки есть состав, шкала HP и (где есть звание) звезда
 	var with_count := 0
@@ -308,8 +317,12 @@ func _test_scale() -> void:
 	verdict("B1 кнопка приказа уменьшена ровно вдвое",
 		absf(btn_cut - 0.50) <= 0.02,
 		"%.0f → %.0f (−%.0f%%)" % [PREV_BTN_SIZE, float(HUD.BTN_SIZE), btn_cut * 100.0])
-	verdict("B2 минимальная высота панели уменьшена примерно вдвое",
-		panel_cut >= 0.40,
+	# ПОРОГ 0.40 → 0.35: после сжатия вдвое (72 → 40) владелец вернул плашке
+	# +10% высоты (40 → 44), потому что вдвое оказалось тесно. Проверка стережёт
+	# не конкретное число, а то, что панель осталась КРАТНО меньше прежней —
+	# −39% этому отвечает, а вот возврат к 72 не отвечал бы
+	verdict("B2 минимальная высота панели осталась кратно меньше прежней",
+		panel_cut >= 0.35,
 		"%.0f → %.0f (−%.0f%%)" % [PREV_PANEL_H, float(HUD.PANEL_H), panel_cut * 100.0])
 
 	# Реальная геометрия: панель Рабочего теперь НАРОЧНО крупнее общего минимума
@@ -601,13 +614,18 @@ func _test_stars() -> void:
 	# ── Центр масс: расставим бойцов заведомо несимметрично
 	var pts: Array = [Vector3(60.0, 0.0, 60.0), Vector3(70.0, 0.0, 60.0),
 		Vector3(60.0, 0.0, 74.0), Vector3(80.0, 0.0, 66.0), Vector3(64.0, 0.0, 62.0)]
-	var acc := Vector3.ZERO
 	for i in range(men.size()):
 		var p: Vector3 = pts[i]
 		(men[i] as Node3D).global_position = Vector3(
 			p.x, GameManager.get_terrain_height(p.x, p.z), p.z)
-		acc += (men[i] as Node3D).global_position
-	var want: Vector3 = acc / float(men.size())
+		(men[i] as Unit).sync_row()
+	# ── ЦЕНТР ОТРЯДА — МЕДИАНА, А НЕ СРЕДНЕЕ (заказ владельца, авг. 2026) ────
+	# Стенд считал среднее арифметическое сам и сравнивал с ним звезду. Число
+	# сменилось — и проверка честно покраснела, хотя код делает ровно то, что
+	# просили: у растянутого отряда среднее уезжает в пустое поле между
+	# группами, медиана садится на бо́льшую из них. Спрашиваем ИСТОЧНИК ИСТИНЫ
+	# (GameManager.squad_centroid), а не переписываем формулу второй раз
+	var want: Vector3 = GameManager.squad_centroid(sid)
 	# Обновление идёт раз в STAR_UPDATE_FRAMES кадров — дадим ему сработать
 	# ЗВЕЗДА ТЕПЕРЬ ДОГОНЯЕТ ЦЕНТР, А НЕ ПРЫГАЕТ В НЕГО (заказ владельца:
 	# «должна плавно перемещаться, а не дёргаться» — см.
@@ -617,26 +635,19 @@ func _test_stars() -> void:
 	await frames(60)
 	var got: Vector3 = (star as Node3D).global_position
 	var dxz: float = Vector2(got.x - want.x, got.z - want.z).length()
-	verdict("E6 звезда стоит строго по центру масс выживших",
+	verdict("E6 звезда стоит строго в центре отряда (медиана)",
 		dxz <= 0.05,
 		"центр=(%.2f, %.2f) звезда=(%.2f, %.2f), расхождение %.3f м" % [
 			want.x, want.z, got.x, got.z, dxz])
 
 	# ── Гибель бойца сдвигает центр, а не «перевешивает» звезду на соседа
 	var dead: Unit = men[3]
-	var acc2 := Vector3.ZERO
-	var alive_n := 0
-	for m in men:
-		if m == dead:
-			continue
-		acc2 += (m as Node3D).global_position
-		alive_n += 1
 	dead.take_damage(dead.max_health * 3.0, null)
 	await frames(60)
-	var want2: Vector3 = acc2 / float(alive_n)
+	var want2: Vector3 = GameManager.squad_centroid(sid)
 	var got2: Vector3 = (star as Node3D).global_position
 	var dxz2: float = Vector2(got2.x - want2.x, got2.z - want2.z).length()
-	verdict("E7 после потери бойца центр масс пересчитан",
+	verdict("E7 после потери бойца центр отряда пересчитан",
 		dxz2 <= 0.05 and is_instance_valid(star),
 		"новый центр=(%.2f, %.2f) звезда=(%.2f, %.2f), расхождение %.3f м" % [
 			want2.x, want2.z, got2.x, got2.z, dxz2])

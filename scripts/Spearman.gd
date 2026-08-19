@@ -8,6 +8,30 @@ var _dir_sprite: Sprite3D = null
 var _dir_textures: Dictionary = {}   # ключ: "idle"|"run"|"attack_down" и т.д.
 var _dir_frames: Dictionary = {}     # ключ → число кадров в горизонтальном шите
 var _cur_tex_key: String = ""        # последний применённый ключ (для dedupe)
+## ── КЛЮЧИ ПОЗ ЛЕЖАТ ГОТОВЫМИ, А НЕ СКЛЕИВАЮТСЯ КАЖДЫЙ РАЗ ───────────────────
+## Здесь было `"attack_" + (result[0] as String)`, а сектор возвращался НОВЫМ
+## Array из двух элементов. То есть на КАЖДОЕ обновление позы приходились две
+## аллокации кучи, а обновлений в контактном бою около восьмисот в кадр
+## (замер счётчиками: 34 788 полных обновлений слота за 90 кадров).
+## Строка в горячем пути — известная и уже однажды оплаченная в этом проекте
+## ошибка (см. шапку FarUnitRenderer про сборку ключа бакета).
+##
+## Теперь сектор — это ИНДЕКС, а ключ берётся из готовой таблицы по индексу.
+## Ни одной аллокации, а сравнение `tex_key == _cur_tex_key` для одинаковых
+## литералов сводится к сравнению ссылок на общую строку.
+const SECTOR_MIRROR := [false, false, false, true, true, true, false, false]
+const ATTACK_KEYS := ["attack_right", "attack_downright", "attack_down",
+	"attack_downright", "attack_right", "attack_upright", "attack_up",
+	"attack_upright"]
+const DEFENCE_KEYS := ["defence_right", "defence_downright", "defence_down",
+	"defence_downright", "defence_right", "defence_upright", "defence_up",
+	"defence_upright"]
+## Род текущей позы, чтобы не сканировать строку begins_with() в горячем пути:
+## 0 — обычная (idle/run), 1 — attack_*, 2 — defence_*
+const KIND_PLAIN := 0
+const KIND_ATTACK := 1
+const KIND_DEFENCE := 2
+var _cur_kind: int = KIND_PLAIN
 var _used_color_folder: bool = false # спрайты взяты из цветной папки фракции
 
 func _ready() -> void:
@@ -207,8 +231,19 @@ func _apply_dir_tex(key: String) -> void:
 	# при каждом повороте вида
 	var new_frames: int = _dir_frames.get(key, 1)
 	if new_frames != _look_frames:
-		_anim_phase = 0.0
+		# Своя фаза у каждого бойца — иначе шеренга дышит в один такт
+		# (см. Unit._anim_offset). Удары начинаются с нуля: замах обязан быть
+		# виден с первого кадра
+		_anim_phase = 0.0 if key.begins_with("attack") 			else _anim_offset * float(maxi(new_frames, 1))
 	_cur_tex_key = key
+	# Род позы запоминается ЧИСЛОМ: begins_with() сканирует строку, а спрашивают
+	# о нём из горячего пути (разворот спрайта и решение «можно ли спать»)
+	if key.begins_with("attack"):
+		_cur_kind = KIND_ATTACK
+	elif key.begins_with("defence"):
+		_cur_kind = KIND_DEFENCE
+	else:
+		_cur_kind = KIND_PLAIN
 	# ── ВИД ЖИВЁТ ЧИСЛАМИ (см. Unit._look_bind) ──────────────────────────────
 	# Лента, число кадров и темп листания — поля бойца. Узел Sprite3D в общей
 	# отрисовке невидим, и запись в его texture/hframes/frame означала бы
@@ -251,7 +286,7 @@ func _update_sprite_flip() -> void:
 	# Условие по ТЕКУЩЕМУ ЛИСТУ, а не по состоянию FSM: в State.ATTACKING боец
 	# может бежать к далёкой цели с обычным листом "run", и его зеркало обязан
 	# считать базовый механизм — иначе бегущий на врага копейщик едет спиной
-	if _cur_tex_key.begins_with("attack") or _cur_tex_key.begins_with("defence"):
+	if _cur_kind != KIND_PLAIN:
 		return
 	super._update_sprite_flip()
 
@@ -280,7 +315,7 @@ func _process_can_sleep() -> bool:
 	# положения камеры (см. _screen_angle), поэтому стоящий боец в такой позе
 	# обязан пересчитывать сектор — иначе при облёте камеры копья передней
 	# шеренги остались бы направленными «в старую сторону экрана»
-	if _cur_tex_key.begins_with("defence") or _cur_tex_key.begins_with("attack"):
+	if _cur_kind != KIND_PLAIN:
 		return false
 	# Спать можно, если в ТЕКУЩЕМ шите один кадр — листать нечего
 	return int(_dir_frames.get(_cur_tex_key, 1)) <= 1
@@ -389,35 +424,35 @@ func _update_dir_sprite() -> void:
 			if _spear_leveled():
 				# Передние шеренги идут с копьями наперевес, в сторону марша
 				var mdir := velocity if velocity.length() > 0.05 else _facing
-				var mres := _facing_to_dir_key(mdir.normalized())
-				tex_key = "defence_" + (mres[0] as String)
-				_set_dir_flip(mres[1] as bool)
+				var msec := _facing_to_dir_key(mdir.normalized())
+				tex_key = DEFENCE_KEYS[msec]
+				_set_dir_flip(SECTOR_MIRROR[msec])
 			else:
 				tex_key = "run"       # задние ряды — копьё вверх
 		State.ATTACKING:
 			# Вектор НА СВОЕГО противника: у каждого бойца он свой, поэтому
 			# шеренга бьёт «веером» по реальным целям, а не вся в одну сторону
 			var dir := _own_enemy_dir()
-			var result := _facing_to_dir_key(dir)
+			var sec := _facing_to_dir_key(dir)
 			if not target_in_range():
 				# БЕЖИМ К ЦЕЛИ, А НЕ МАШЕМ КОПЬЁМ В ВОЗДУХ. Поза удара включается
 				# строго после входа в зону поражения; по дороге это обычный бег
 				# (у передних шеренг — марш с копьём наперевес в сторону цели)
 				if _spear_leveled():
-					tex_key = "defence_" + (result[0] as String)
-					_set_dir_flip(result[1] as bool)
+					tex_key = DEFENCE_KEYS[sec]
+					_set_dir_flip(SECTOR_MIRROR[sec])
 				else:
 					tex_key = "run"
 			else:
-				tex_key  = "attack_" + (result[0] as String)
-				_set_dir_flip(result[1] as bool)
+				tex_key = ATTACK_KEYS[sec]
+				_set_dir_flip(SECTOR_MIRROR[sec])
 		_:
 			# На месте передние ряды ДЕРЖАТ копьё выставленным (defence),
 			# задние стоят с поднятым (idle)
 			if _spear_leveled():
-				var sres := _facing_to_dir_key(_facing.normalized())
-				tex_key = "defence_" + (sres[0] as String)
-				_set_dir_flip(sres[1] as bool)
+				var ssec := _facing_to_dir_key(_facing.normalized())
+				tex_key = DEFENCE_KEYS[ssec]
+				_set_dir_flip(SECTOR_MIRROR[ssec])
 			else:
 				tex_key = "idle"
 			# flip_h у idle НЕ трогаем: этим занимается _update_sprite_flip.
@@ -432,13 +467,19 @@ func _update_dir_sprite() -> void:
 func _own_enemy_dir() -> Vector3:
 	var dir := Vector3.ZERO
 	if attack_target != null and is_instance_valid(attack_target):
-		dir = attack_target.global_position - global_position
+		# Дешёвые точки: эта функция зовётся из выбора позы, то есть сотни раз
+		# в кадр (см. Unit.world_pos_cheap)
+		# Дешёвые точки: эта функция зовётся из выбора позы, сотни раз в кадр
+		# (тот же разбор, что в Unit.target_in_range)
+		var tu2 := attack_target as Unit
+		var tp2: Vector3 = tu2.position if (tu2 != null and tu2._local_xform) 			else attack_target.global_position
+		dir = tp2 - (position if _local_xform else global_position)
 		dir.y = 0.0
 	if dir.length_squared() < 1e-6:
 		# Цель уже мертва/не назначена — берём ближайшего врага в радиусе удара
 		var near := _find_nearest_enemy_in_range(attack_range * 1.5)
 		if near != null:
-			dir = near.global_position - global_position
+			dir = near.global_position - (position if _local_xform else global_position)
 			dir.y = 0.0
 	if dir.length_squared() < 1e-6:
 		dir = velocity if velocity.length() > 0.05 else _facing
@@ -484,7 +525,8 @@ func _screen_angle(facing: Vector3) -> float:
 	# Знак sy инвертирован: в прежней мировой формуле «к зрителю» давало +z
 	return rad_to_deg(atan2(-sy, sx))
 
-func _facing_to_dir_key(facing: Vector3) -> Array:
+## Возвращает НОМЕР СЕКТОРА (0..7), а не пару в новом массиве: см. таблицы выше
+func _facing_to_dir_key(facing: Vector3) -> int:
 	var ang := _screen_angle(facing)
 	if ang < 0.0: ang += 360.0
 	var sector := int(round(ang / 45.0)) % 8
@@ -494,7 +536,15 @@ func _facing_to_dir_key(facing: Vector3) -> Array:
 		if delta < 22.5 + HYSTERESIS_DEG:
 			sector = _cur_sector      # ещё в зоне удержания — ракурс не меняем
 	_cur_sector = sector
-	return _sector_to_key(sector)
+	return sector
+
+## Прежняя форма — возвращала [имя, зеркало] НОВЫМ массивом на каждый вызов.
+## Оставлена для тех, кому нужна пара; горячий путь пользуется индексом
+static func _sector_to_key(sector: int) -> Array:
+	return [SECTOR_NAMES[sector % 8], SECTOR_MIRROR[sector % 8]]
+
+const SECTOR_NAMES := ["right", "downright", "down", "downright",
+	"right", "upright", "up", "upright"]
 
 # Разница углов в диапазоне [-180, 180]
 static func _angle_diff(a: float, b: float) -> float:
@@ -503,18 +553,8 @@ static func _angle_diff(a: float, b: float) -> float:
 		d += 360.0
 	return d - 180.0
 
-static func _sector_to_key(sector: int) -> Array:
-	# 8 секторов по 45°; atan2(z,x): 0°=right, 90°=down, 180°=left, 270°=up
-	match sector:
-		0: return ["right",     false]   # восток
-		1: return ["downright", false]   # юго-восток
-		2: return ["down",      false]   # юг (к камере)
-		3: return ["downright", true]    # юго-запад — зеркало DownRight
-		4: return ["right",     true]    # запад — зеркало Right
-		5: return ["upright",   true]    # северо-запад — зеркало UpRight
-		6: return ["up",        false]   # север (от камеры)
-		7: return ["upright",   false]   # северо-восток
-	return ["down", false]
+# 8 секторов по 45°; atan2(z,x): 0°=right, 90°=down, 180°=left, 270°=up.
+# Таблицы SECTOR_NAMES/SECTOR_MIRROR/ATTACK_KEYS/DEFENCE_KEYS — вверху файла
 
 # ── Процедурное копьё (fallback) ──────────────────────────────────────────────
 

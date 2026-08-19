@@ -10,7 +10,9 @@ extends Node
 ##   7 УБЫЛЬ       — реестр чистится, пустой отряд исчезает, нет утечек
 ##   8 НАГРУЗКА    — 300+ юнитов, медиана TIME_PHYSICS_PROCESS, reset_squads()
 
-const _UCfg := preload("res://scripts/unit_stats_config.gd")
+const _UCfg   := preload("res://scripts/unit_stats_config.gd")
+const _AICfg  := preload("res://scripts/ai_start_army_limit.gd")
+const _GobCfg := preload("res://scripts/goblin/goblin_config.gd")
 
 var main: Node = null
 var hud = null
@@ -729,10 +731,19 @@ func _test_ui() -> void:
 	var has_stances: bool = ("Attack" in labels) and ("Defend" in labels)
 	verdict("6 кнопки стоек видны сразу при current_group_index()==-1",
 		has_stances and grp == -1, "кнопки=%s, группа=%d" % [str(labels), grp])
-	var want_title: String = "Отряд копейщиков — %d бойцов" % members.size()
-	verdict("6 подпись панели одиночного отряда верна",
-		String(hud.info_label.text) == want_title,
-		"получено «%s», ожидалось «%s»" % [hud.info_label.text, want_title])
+	# ── ЧИСЛЕННОСТЬ УШЛА ИЗ ПОДПИСИ В БЕЙДЖ ПОРТРЕТА ────────────────────────
+	# Строка «Отряд копейщиков — 60 бойцов» дословно повторяла заголовок окна
+	# статов, висящего прямо над ней (заказ владельца — убрать дубли), а
+	# освободившуюся строку занимает шкала опыта. Число никуда не пропало:
+	# проверяем его там, где оно теперь живёт, плюс что имя отряда в подписи
+	# осталось — иначе панель перестала бы отвечать «кто выбран»
+	verdict("6 подпись — имя отряда, численность — на бейдже портрета",
+		String(hud.info_label.text).contains("копейщик")
+			and hud._portrait_count_lbl != null and hud._portrait_count_lbl.visible
+			and hud._portrait_count_lbl.text == str(members.size()),
+		"подпись «%s», бейдж «%s», ожидали %d" % [hud.info_label.text,
+			hud._portrait_count_lbl.text if hud._portrait_count_lbl != null else "—",
+			members.size()])
 
 	# ── ЛУЧНИКИ: другая подпись ──────────────────────────────────────────────
 	var mb: Array = _members(squad_b)
@@ -740,10 +751,14 @@ func _test_ui() -> void:
 	sm._select(mb[0])
 	GameManager.on_selection_changed(sm.selected_units)
 	await frames(2)
-	var want_b: String = "Отряд лучников — %d бойцов" % mb.size()
 	print("  подпись для лучников: «%s»" % hud.info_label.text)
-	verdict("6 подпись отряда лучников верна", String(hud.info_label.text) == want_b,
-		"получено «%s»" % hud.info_label.text)
+	verdict("6 подпись отряда лучников верна (имя + бейдж численности)",
+		String(hud.info_label.text).contains("лучник")
+			and hud._portrait_count_lbl != null
+			and hud._portrait_count_lbl.text == str(mb.size()),
+		"получено «%s», бейдж «%s», ожидали %d" % [hud.info_label.text,
+			hud._portrait_count_lbl.text if hud._portrait_count_lbl != null else "—",
+			mb.size()])
 
 	# ── НЕСКОЛЬКО ОТРЯДОВ СРАЗУ ──────────────────────────────────────────────
 	sm._clear_selection()
@@ -778,10 +793,13 @@ func _test_ui() -> void:
 				and GameManager.squad_type((u as Unit).squad_id) == "spearman":
 			spear_men += 1
 	print("  уровень 2: подпись «%s», кнопки %s" % [hud.info_label.text, str(labels2)])
-	verdict("6 уровень 2 подписан численностью развёрнутого типа",
-		hud._bottom_panel.visible and String(hud.info_label.text).contains(
-			"%d бойцов" % spear_men),
-		"копейщиков=%d, текст «%s»" % [spear_men, hud.info_label.text])
+	verdict("6 уровень 2: тип в подписи, численность типа — на бейдже",
+		hud._bottom_panel.visible
+			and String(hud.info_label.text).contains("копейщик")
+			and hud._portrait_count_lbl != null
+			and hud._portrait_count_lbl.text == str(spear_men),
+		"копейщиков=%d, текст «%s», бейдж «%s»" % [spear_men, hud.info_label.text,
+			hud._portrait_count_lbl.text if hud._portrait_count_lbl != null else "—"])
 	verdict("6 стойки доступны и на нескольких отрядах",
 		("Attack" in labels2) and ("Defend" in labels2), "кнопки=%s" % str(labels2))
 
@@ -997,8 +1015,24 @@ func _test_mass_and_reset() -> void:
 		before_reset, after_reset])
 	print("  живых юнитов ДО reset: %d; после reset висячих/чужих squad_id: %d" % [
 		live_before, stale])
+	# ── ПРОВЕРКА ПЕРЕПИСАНА НА СВОЙСТВО ────────────────────────────────────
+	# Было «после reset отрядов не больше пяти» — то есть в стенде жило знание
+	# о том, СКОЛЬКО отрядов заводит start_game (пять рабочих ИИ). Это число
+	# менялось уже дважды и в последний раз выросло на десять: партия теперь
+	# начинается ещё и с ордой гоблинов в правом верхнем углу.
+	# Утверждаем то, ради чего проверка написана: СТАРЫХ отрядов не осталось, а
+	# нумерация началась заново с единицы
+	# Сколько отрядов ЗАВОДИТ сама start_game — считаем по конфигам, а не по
+	# памяти: стартовые рабочие ИИ (у каждого свой отряд из одного) плюс орда
+	# гоблинов в правом верхнем углу
+	var want_after: int = _AICfg.START_WORKERS + _GobCfg.ARMY_SQUADS
+	var max_id := 0
+	for k in GameManager.squads.keys():
+		max_id = maxi(max_id, int(k))
 	verdict("8 reset_squads() вычистил старый реестр",
-		after_reset <= 5, "после reset=%d" % after_reset)
+		after_reset == want_after and max_id <= want_after,
+		"после reset=%d (ожидалось %d), наибольший id=%d" % [
+			after_reset, want_after, max_id])
 	verdict("8 после reset у живых юнитов нет ЧУЖИХ squad_id", stale == 0,
 		"юнитов с чужим/висячим squad_id=%d из %d" % [stale, live_before])
 

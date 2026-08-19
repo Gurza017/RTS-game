@@ -28,7 +28,12 @@ const _Forge    := preload("res://scripts/forge_config.gd")
 # считает _sync_panel_height() по содержимому (см. её комментарий): в панель
 # высотой 40 не влезают ни второй ряд кнопок кузницы, ни строка производства
 const PANEL_SCALE   := 0.60
-const PANEL_H       := 40      # МИНИМАЛЬНАЯ высота нижней панели (было 72)
+## +10% К ВЫСОТЕ (40 → 44, заказ владельца). Плашка была ужата вдвое в прошлом
+## проходе и на глаз оказалась тесной: в неё надо уместить портрет с бейджем,
+## две строки подписи и шкалу опыта. Проценты честные — всё, что задаёт
+## внутреннюю раскладку (COL_H, PORTRAIT_W), поднято тем же коэффициентом,
+## иначе панель выросла бы одним воздухом
+const PANEL_H       := 44      # МИНИМАЛЬНАЯ высота нижней панели (было 40)
 ## Зазор между панелью и нижней кромкой экрана
 const PANEL_BOTTOM_GAP := 4
 ## ВЕРХНЯЯ КРОМКА ПАНЕЛИ (offset от низа экрана, отрицательный).
@@ -37,9 +42,17 @@ const PANEL_BOTTOM_GAP := 4
 ## что «висит над панелью»: подсказка размещения, полоса гарнизона, панель
 ## статов, всплывающая карточка — им достаточно читать актуальное значение
 var PANEL_TOP: int = -(PANEL_H + PANEL_BOTTOM_GAP)
-const COL_H         := 32      # рабочая высота колонок внутри панели (было 60)
-const PORTRAIT_W    := 30      # (было 54)
-const INFO_W        := 110     # колонка «что выбрано» (было 152)
+const COL_H         := 36      # рабочая высота колонок внутри панели (+10%)
+const PORTRAIT_W    := 33      # (+10%)
+## Колонка «что выбрано» ШИРЕ на 20%: в ней теперь не только подпись, но и
+## ШКАЛА ОПЫТА отряда (см. _update_xp_bar), а узкая колонка резала её в огрызок
+const INFO_W        := 132
+## ── ОТСТУП СОДЕРЖИМОГО ОТ КРАЁВ ПЛАШКИ ──────────────────────────────────────
+## Был нулевым: у StyleBoxFlat content_margin по умолчанию 0, и портрет
+## («шлем») прижимался вплотную к рамке — ровно то, на что жаловался владелец.
+## 6 px по горизонтали — это «минимум 5» из задания с запасом на рамку
+const PANEL_PAD_X   := 6
+const PANEL_PAD_Y   := 3
 # ОЧЕРЕДЬ НАЙМА — сетка МЕЛКИХ иконок, ОДНА НА КАЖДЫЙ ЗАКАЗ (не на тип),
 # в порядке клика: production_queue[0] всегда первая ячейка. До QUEUE_ORDER_MAX
 # заказов сразу, прогресс — только на самой первой (активной) ячейке.
@@ -228,6 +241,13 @@ var _idle_last: int = -1
 var _idle_cycle: int = 0
 
 var info_label: Label
+## ── ШКАЛА ОПЫТА ОТРЯДА (в колонке «что выбрано») ────────────────────────────
+## Заменила вторую строку подписи, дублировавшую заголовок окна статов
+var _xp_bar: ProgressBar = null
+var _xp_label: Label = null
+const XP_BAR_H := 6
+const XP_BAR_COLOR := Color(0.95, 0.74, 0.20)
+
 ## Колонка «что выбрано» целиком. Нужна, чтобы схлопывать её, когда она пуста
 ## (Замок пишет свою строку в шапку панели, а не сюда)
 var _info_col: VBoxContainer = null
@@ -332,6 +352,9 @@ var _idle_widget: Control = null
 ## считающихся по содержимому — см. _sync_panel_grid_widths
 var _btn_spacer: Control = null
 var _btn_right_pad: Control = null
+## Обёртка ряда кнопок: держит зарезервированный габарит и центрирует сетку
+## внутри него (см. _sync_panel_grid_widths)
+var _btn_slot: CenterContainer = null
 
 var _queue_box: GridContainer = null
 ## Жёлтая рамка вокруг сетки заказов — задаёт предел, внутрь которого иконки
@@ -464,6 +487,8 @@ func _hide_castle_caption() -> void:
 func show_hud() -> void:
 	_build_resource_bar()
 	_build_idle_widget()
+	# Стек алертов ветеранства — сразу под плашкой бездельников (см. там же)
+	_build_alert_stack()
 	_build_top_right_widget()
 	_build_bottom_panel()
 	_build_overbar()
@@ -910,11 +935,34 @@ func _trimmed_icon(path: String) -> Texture2D:
 ## не добывают, её дают Домики, поэтому «рабочих на еде» всегда ноль. Вместо
 ## этого секция показывает ОБЩЕЕ число рабочих игрока — тот самый «лимит/число
 ## всех рабочих» из задания
-const RES_WORKER_SECTION := Constants.RESOURCE_FOOD
-## Глиф общей секции — топорик (остаётся, как и просили)
-const RES_WORKER_GLYPH := "🪓"
-## Глиф добывающих секций — КИРКА: это «рабочие на этом ресурсе», а не итог.
-## Разные глифы разводят два разных по смыслу числа без единой подписи
+## ── ОБЩЕГО СЧЁТЧИКА РАБОЧИХ В ПАНЕЛИ БОЛЬШЕ НЕТ (заказ владельца, разворот) ──
+## Секция еды показывала ОБЩЕЕ число рабочих игрока — потому что еду в этой игре
+## не добывают (её дают Домики), и «рабочих на еде» всегда ноль. Владелец
+## попросил обратное: пусть на мясе стоит честный ноль, пока еду никто не
+## добывает. Значит все четыре секции отвечают на ОДИН вопрос — «сколько рабочих
+## сидит на этом ресурсе», — и исключения не осталось вовсе.
+##
+## ЧЕСТНОЕ СЛЕДСТВИЕ: числа «всего рабочих» в интерфейсе теперь нет нигде.
+## Ближайшее по смыслу — счётчик простаивающих (левый верхний виджет).
+## −1 = «такой секции нет»; ветка сохранена, чтобы вернуть общий счётчик было
+## правкой одной строки, а не восстановлением удалённого кода
+const RES_WORKER_SECTION := -1
+## ── ГЛИФ ИНСТРУМЕНТА СВОЙ У КАЖДОГО РЕСУРСА ─────────────────────────────────
+## Была одна кирка на дерево, камень и золото. По лесу это просто неправда:
+## дерево рубят топором, и на скриншоте владельца ⛏ у брёвен читался как ошибка.
+## Инструмент теперь тот же, что у рабочего в анимации (Worker._update_sprite_anim):
+## топор на лесе, кирка на камне и золоте, нож на еде
+const RES_TOOL_GLYPHS := {
+	Constants.RESOURCE_WOOD:  "🪓",
+	Constants.RESOURCE_STONE: "⛏",
+	Constants.RESOURCE_GOLD:  "⛏",
+	# У еды намеренно ОБЩИЙ глиф добычи, а не нож из анимации сбора: 🪓 и ⛏ в
+	# шрифте проекта заведомо рисуются (стоят там не первый месяц), а вводить
+	# третий символ ради секции, где число всегда ноль, — это риск получить
+	# «квадратик» вместо картинки на пустом месте
+	Constants.RESOURCE_FOOD:  "⛏",
+}
+## Запасной глиф для ресурса, которого нет в таблице
 const RES_GATHER_GLYPH := "⛏"
 
 func _build_resource_card(rd: Dictionary) -> Control:
@@ -987,11 +1035,11 @@ func _build_resource_card(rd: Dictionary) -> Control:
 	_res_income_labels[rd["key"]] = income_lbl
 
 	# ── ХВОСТ «ИНСТРУМЕНТ + РАБОЧИЕ» — В КАЖДОЙ СЕКЦИИ ──────────────────────
-	# Кирка и число у дерева/камня/золота — «столько рабочих копает ЭТОТ ресурс»;
-	# топорик у еды — «столько рабочих всего» (см. RES_WORKER_SECTION)
-	var is_total: bool = int(rd["key"]) == RES_WORKER_SECTION
+	# Одно и то же во всех четырёх: «столько рабочих сидит на ЭТОМ ресурсе».
+	# Инструмент свой у каждого — топор на лесе, кирка на камне и золоте, нож на
+	# еде (см. RES_TOOL_GLYPHS)
 	var tool_lbl := Label.new()
-	tool_lbl.text = RES_WORKER_GLYPH if is_total else RES_GATHER_GLYPH
+	tool_lbl.text = String(RES_TOOL_GLYPHS.get(int(rd["key"]), RES_GATHER_GLYPH))
 	tool_lbl.visible = false
 	tool_lbl.add_theme_font_size_override("font_size", 12)
 	tool_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
@@ -1200,6 +1248,11 @@ func _build_bottom_panel() -> void:
 	style.border_width_top = PANEL_BORDER_W; style.border_color = Color(0.30, 0.25, 0.15)
 	style.border_width_left = PANEL_BORDER_W; style.border_width_right = PANEL_BORDER_W
 	_corners(style, 6)
+	# Воздух от рамки до содержимого — иначе портрет прижат к самому краю
+	style.content_margin_left  = PANEL_PAD_X
+	style.content_margin_right = PANEL_PAD_X
+	style.content_margin_top    = PANEL_PAD_Y
+	style.content_margin_bottom = PANEL_PAD_Y
 	_bottom_panel.add_theme_stylebox_override("panel", style)
 	add_child(_bottom_panel)
 	_skin_bottom_panel()
@@ -1246,7 +1299,10 @@ func _build_bottom_panel() -> void:
 	# 21×21 цифра занимала больше половины ширины портрета и закрывала лицо
 	# юнита — та самая жалоба "цифра 2 закрывает портрет". Тёмная обводка
 	# (outline) держит читаемость и без сплошной плашки под цифрой
-	_portrait_count_lbl.add_theme_font_size_override("font_size", 12)
+	# 12 → 10: на плашке отряда в бейдж пишется ЧИСЛЕННОСТЬ (двузначная — «30»),
+	# и двенадцатым кеглем она закрывала шлем целиком. Обводка (outline ниже)
+	# держит читаемость и на десятом
+	_portrait_count_lbl.add_theme_font_size_override("font_size", 10)
 	_portrait_count_lbl.add_theme_color_override("font_color", Color(1.0, 0.96, 0.75))
 	_portrait_count_lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.95))
 	_portrait_count_lbl.add_theme_constant_override("outline_size", 4)
@@ -1269,9 +1325,11 @@ func _build_bottom_panel() -> void:
 	# пикселях, поэтому размер коробки не зависит от размера портрета: она
 	# остаётся маленькой и на обычном (30px), и на укрупнённом (Артель, 45px)
 	_portrait_count_lbl.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_RIGHT)
-	_portrait_count_lbl.offset_left   = -15
-	_portrait_count_lbl.offset_top    = -14
-	_portrait_count_lbl.offset_right  = -2
+	# Коробка сжата под меньший кегль: с прежними −15/−14 бейдж занимал угол,
+	# рассчитанный на 12 px, и вокруг цифры оставался лишний тёмный ореол
+	_portrait_count_lbl.offset_left   = -13
+	_portrait_count_lbl.offset_top    = -12
+	_portrait_count_lbl.offset_right  = -1
 	_portrait_count_lbl.offset_bottom = -1
 	badge_layer.add_child(_portrait_count_lbl)
 
@@ -1329,6 +1387,35 @@ func _build_bottom_panel() -> void:
 	progress_bar.add_theme_stylebox_override("background", pb_bg)
 	progress_bar.add_theme_stylebox_override("fill", pb_fill)
 	info_vbox.add_child(progress_bar)
+
+	# ── ШКАЛА ОПЫТА ОТРЯДА ──────────────────────────────────────────────────
+	# Заказ владельца: вместо второй строки «Отряд мечников — 30 бойцов», которая
+	# слово в слово повторяла заголовок окна статов прямо над ней, — прогресс до
+	# следующего ранга. Дублировался не текст, а ЭКРАННОЕ МЕСТО: одна и та же
+	# фраза стояла двумя строками друг под другом.
+	#
+	# Отдельная шкала, а не переиспользованный progress_bar: тот показывает
+	# производство (найм, исследование) и живёт своей жизнью — у выделенного
+	# барака с очередью нашлись бы обе, и они дрались бы за одну полоску
+	_xp_bar = ProgressBar.new()
+	_xp_bar.name = "SquadXP"
+	_xp_bar.custom_minimum_size = Vector2(INFO_W - 8, XP_BAR_H)
+	_xp_bar.show_percentage = false
+	_xp_bar.visible = false
+	_xp_bar.max_value = 1.0
+	var xp_bg := StyleBoxFlat.new(); xp_bg.bg_color = Color(0.10, 0.09, 0.06); _corners(xp_bg, 3)
+	var xp_fl := StyleBoxFlat.new(); xp_fl.bg_color = XP_BAR_COLOR; _corners(xp_fl, 3)
+	_xp_bar.add_theme_stylebox_override("background", xp_bg)
+	_xp_bar.add_theme_stylebox_override("fill", xp_fl)
+	info_vbox.add_child(_xp_bar)
+
+	_xp_label = Label.new()
+	_xp_label.text = ""
+	_xp_label.visible = false
+	_xp_label.add_theme_font_size_override("font_size", 9)
+	_xp_label.add_theme_color_override("font_color", Color(0.86, 0.78, 0.52))
+	_fix_label(_xp_label, INFO_W, 1)
+	info_vbox.add_child(_xp_label)
 
 	# ОЧЕРЕДЬ НАЙМА: сетка постоянного размера (5×2 = QUEUE_ORDER_MAX ячеек),
 	# одна ячейка на каждый заказ, а не на тип. Пока очередь пуста, сетка
@@ -1394,21 +1481,36 @@ func _build_bottom_panel() -> void:
 	_btn_spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	hbox.add_child(_btn_spacer)
 
-	button_container = GridContainer.new()
-	button_container.columns = BTN_COLS
-	# Минимум под полный ряд кнопок: сетка не «дышит» при смене их числа
-	button_container.custom_minimum_size = Vector2(
-		BTN_COLS * BTN_SIZE + (BTN_COLS - 1) * BTN_GAP, COL_H)
-	button_container.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	# ── КНОПКИ ЦЕНТРИРУЮТСЯ В СВОЁМ МЕСТЕ (заказ владельца) ─────────────────
+	# Габарит держит ОБЁРТКА, а не сама сетка. Причина ровно та же, что у рамки
+	# очереди заказов: место под кнопки зарезервировано на полный ряд BTN_COLS
+	# (это защита от дрожания панели, её трогать нельзя), а кнопок в ряду обычно
+	# три-четыре — и GridContainer, получив ширину на пять, честно кладёт их от
+	# ЛЕВОГО края, оставляя пустой хвост справа. CenterContainer ставит сетку
+	# ровно в середину зарезервированного места, ничего не меняя в её раскладке
+	var btn_slot := CenterContainer.new()
+	btn_slot.name = "ButtonSlot"
+	btn_slot.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
 	# ПО ВЕРТИКАЛЬНОМУ ЦЕНТРУ ПАНЕЛИ, А НЕ ПОД ЕЁ ВЕРХНЕЙ КРОМКОЙ.
 	# По умолчанию контейнер растягивался на всю высоту строки, а GridContainer
-	# кладёт детей от верхнего края — из-за этого кнопки найма и выглядели
-	# «задранными вверх» (жалоба владельца). SHRINK_CENTER даёт контейнеру ровно
-	# его собственную высоту и ставит её в середину панели
+	# кладёт детей от верхнего края — из-за этого кнопки и выглядели
+	# «задранными вверх» (жалоба владельца)
+	btn_slot.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	btn_slot.custom_minimum_size = Vector2(
+		BTN_COLS * BTN_SIZE + (BTN_COLS - 1) * BTN_GAP, COL_H)
+	hbox.add_child(btn_slot)
+	_btn_slot = btn_slot
+
+	button_container = GridContainer.new()
+	button_container.columns = BTN_COLS
+	# У САМОЙ СЕТКИ МИНИМУМА НЕТ: он на обёртке. Минимум на сетке заставил бы
+	# CenterContainer растянуть её на всё место, и центрировать стало бы нечего
+	button_container.custom_minimum_size = Vector2.ZERO
+	button_container.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	button_container.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	button_container.add_theme_constant_override("h_separation", BTN_GAP)
 	button_container.add_theme_constant_override("v_separation", BTN_GAP)
-	hbox.add_child(button_container)
+	btn_slot.add_child(button_container)
 
 	# ОТСТУП ОТ ПРАВОГО КРАЯ. Фиксированная распорка ПОСЛЕ кнопок: у Замка это
 	# ровно CASTLE_BTN_RIGHT_PAD, у остальных выделений — ноль, чтобы не
@@ -1585,9 +1687,85 @@ func show_selection(units: Array) -> void:
 	if button_container == null:
 		return
 	_sel_units = units.duplicate()
+	# ВЫДЕЛЕНИЕ СВОИХ ЗАКРЫВАЕТ РАЗВЕДКУ. Панель одна на двоих, и держать на ней
+	# чужой отряд, пока игрок уже командует своим, значит показывать не тот
+	# объект, которым управляют — самая дорогая ошибка, какую может сделать HUD
+	_recon_units.clear()
 	_expanded_type = ""
 	_rebuild_overbar()
 	_refresh_panel()
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ПАНЕЛЬ РАЗВЕДКИ: ЧУЖОЙ ОТРЯД ПОД ЛУПОЙ
+# ═════════════════════════════════════════════════════════════════════════════
+# Клик по вражескому отряду открывает его карточку: чем он вооружён, что ему
+# дала кузница, сколько звёзд он выслужил. Командных кнопок здесь нет ВООБЩЕ —
+# ни стоек, ни «удерживать позицию», ни найма: чужим отрядом не командуют, и
+# кнопка, которая ничего не делает, хуже её отсутствия.
+#
+# Чужой отряд НЕ ПОПАДАЕТ в selected_units (см. SelectionManager.recon_units) —
+# он живёт в отдельном списке. Это не аккуратность, а безопасность: правый клик
+# перебирает именно selected_units, и вражеский боец в этом списке получил бы
+# приказ от игрока.
+#
+# Статы, разбор бонусов кузницы и ряд заслуженных наград рисует ТА ЖЕ
+# _show_stat_panel, что и для своих: она читает faction у образца, поэтому
+# грейды чужой фракции подставляются сами и отдельной ветки не нужно
+var _recon_units: Array = []
+
+func show_recon(units: Array) -> void:
+	if button_container == null:
+		return
+	_recon_units = units.duplicate()
+	_refresh_panel()
+
+## Живые бойцы разведанного отряда. Отряд могли добить, пока панель открыта
+func _recon_alive() -> Array:
+	var out: Array = []
+	for u in _recon_units:
+		if is_instance_valid(u) and u is Unit and not (u as Unit).is_dead():
+			out.append(u)
+	return out
+
+func _build_recon_panel(members: Array) -> void:
+	var sample: Unit = members[0]
+	var sid: int = sample.squad_id
+	var uid: String = GameManager.squad_type(sid) if sid > 0 else sample.stat_id
+
+	# Портрет в «вражеской» окраске: бордовый вместо синего — панель обязана
+	# отличаться от своей с одного взгляда, до чтения подписи
+	portrait.color = Color(0.28, 0.10, 0.12)
+	if _portrait_icon != null and is_instance_valid(_portrait_icon):
+		var tex := _icon_texture(String(UNIT_ICONS.get(uid, "")))
+		_portrait_icon.texture = tex
+		_portrait_icon.visible = tex != null
+	if _portrait_count_lbl != null and is_instance_valid(_portrait_count_lbl):
+		_portrait_count_lbl.visible = true
+		_portrait_count_lbl.text = str(members.size())
+	if _portrait_stars_lbl != null and is_instance_valid(_portrait_stars_lbl):
+		var lvl: int = GameManager.squad_level(sid) if sid > 0 else 0
+		_portrait_stars_lbl.visible = lvl > 0
+		if lvl > 0:
+			var tier: Dictionary = _UCfg.veteran_star_tier(lvl)
+			_portrait_stars_lbl.text = "★".repeat(int(tier.get("count", 1)))
+			_portrait_stars_lbl.add_theme_color_override("font_color",
+				tier.get("color", Color(1.0, 0.86, 0.25)) as Color)
+			_portrait_stars_lbl.add_theme_font_size_override("font_size",
+				int(round(13.0 * float(tier.get("scale", 1.0)))))
+			_portrait_stars_lbl.tooltip_text = "Ветеранство противника: уровень %d" % lvl
+
+	info_label.text = "%s (враг)\n%d бойцов — разведка" % [_squad_title(uid), members.size()]
+
+	# Кнопок нет вовсе: button_container остался пустым и схлопнется по нулевой
+	# ширине (см. _sync_panel_grid_widths). Полоса карточек отрядов — тоже нет:
+	# кликом по ней выделяют отряд, а чужой выделять нельзя
+	if sid > 0:
+		# ЖИВОЕ ЗДОРОВЬЕ — ТОЛЬКО ЗДЕСЬ: ради него карточку разведки и открывают
+		_show_stat_panel(sid, members, true)
+
+## Разведка активна прямо сейчас (для стендов и для проверок фокуса)
+func recon_visible() -> bool:
+	return not _recon_alive().is_empty()
 
 ## Отрисовать нижнюю панель под текущие _sel_units / _expanded_type.
 ## Отдельно от show_selection: разворот группы (уровень 2) перерисовывает
@@ -1641,6 +1819,21 @@ func _refresh_panel() -> void:
 		show_forge(units[0] as Smithy)
 		return
 	hide_forge()
+
+	# ── РАЗВЕДКА ЧУЖОГО ОТРЯДА ──────────────────────────────────────────────
+	# Решается сразу после кузницы и ДО обоих уровней своего выделения: свои и
+	# чужие в панели не смешиваются никогда, а разведка возможна только при
+	# пустом своём выделении (show_selection гасит её сама)
+	if not _recon_units.is_empty():
+		var alive: Array = _recon_alive()
+		if not alive.is_empty():
+			if _bottom_panel: _bottom_panel.visible = true
+			_build_recon_panel(alive)
+			_sync_panel_grid_widths()
+			_sync_panel_height()
+			return
+		# Отряд добили, пока карточка была открыта — молча закрываем её
+		_recon_units.clear()
 
 	# РАЗВЁРНУТАЯ ГРУППА МОГЛА ПОГИБНУТЬ ЦЕЛИКОМ, пока панель была открыта
 	# (смена выделения при этом не происходит — её некому вызвать). Панель с
@@ -1757,9 +1950,12 @@ func _refresh_panel() -> void:
 			portrait.color = Color(0.10, 0.22, 0.12)
 			info_label.text = "Рабочий  %d/%d HP" % [int(u.current_health), int(u.max_health)]
 			_worker_boost = true
-			if _portrait_wrap != null and is_instance_valid(_portrait_wrap):
-				var wpw_sz: float = PORTRAIT_W * WORKER_ICON_BOOST
-				_portrait_wrap.custom_minimum_size = Vector2(wpw_sz, wpw_sz)
+			# ПОРТРЕТ У РАБОЧЕГО ТЕПЕРЬ ТАКОЙ ЖЕ, КАК У ВСЕХ (заказ владельца —
+			# «шаблон единый для всех типов юнитов»). Его увеличивали заодно с
+			# иконками построек, но портрет к каталогу построек отношения не
+			# имеет: из-за него плашка рабочего была видимо не такой, как у
+			# мечника или лучника. Кнопки построек остаются укрупнёнными —
+			# это про читаемость мелких картинок зданий, а не про шаблон
 			_build_worker_menu(u, [], BTN_SIZE * WORKER_ICON_BOOST, WORKER_ICON_BOOST)
 
 		elif u is Unit and u.display_name == "Мечник" and u.faction == Constants.FACTION_PLAYER:
@@ -1783,9 +1979,12 @@ func _refresh_panel() -> void:
 			portrait.color  = Color(0.10, 0.22, 0.12)
 			info_label.text = "Артель: %d рабочих — строят вместе (быстрее)" % crew.size()
 			_worker_boost = true
-			if _portrait_wrap != null and is_instance_valid(_portrait_wrap):
-				var wpw_sz: float = PORTRAIT_W * WORKER_ICON_BOOST
-				_portrait_wrap.custom_minimum_size = Vector2(wpw_sz, wpw_sz)
+			# ПОРТРЕТ У РАБОЧЕГО ТЕПЕРЬ ТАКОЙ ЖЕ, КАК У ВСЕХ (заказ владельца —
+			# «шаблон единый для всех типов юнитов»). Его увеличивали заодно с
+			# иконками построек, но портрет к каталогу построек отношения не
+			# имеет: из-за него плашка рабочего была видимо не такой, как у
+			# мечника или лучника. Кнопки построек остаются укрупнёнными —
+			# это про читаемость мелких картинок зданий, а не про шаблон
 			_build_worker_menu(crew[0], crew, BTN_SIZE * WORKER_ICON_BOOST, WORKER_ICON_BOOST)
 		else:
 			info_label.text = "Выбрано: %d юнитов" % units.size()
@@ -1802,6 +2001,9 @@ func _refresh_panel() -> void:
 	# Докупка спец-способностей отряду (колонка D древа кузницы) — по той же
 	# причине отдельным вызовом, а не внутри стоек
 	_maybe_add_ability_buttons(units)
+	# «В ЗАМОК» — САМОЙ ПОСЛЕДНЕЙ, чтобы встать в правый конец ряда (см.
+	# _add_to_castle_button)
+	_add_to_castle_button(units)
 	# Разбивка по типам — НЕЗАВИСИМО от стоек. Раньше вызов жил внутри
 	# _maybe_add_stance_buttons, а та выходит досрочно на рабочем или здании в
 	# выделении, — то есть панель не появлялась ровно в смешанном выделении,
@@ -1839,10 +2041,9 @@ func _build_type_detail(unit_id: String) -> void:
 		_portrait_stars_lbl.visible = false
 
 	# ГЛАВНАЯ ЦИФРА УРОВНЯ 2 — «57 бойцов» по этому типу, а не общая по армии
-	# ДВЕ СТРОКИ ЯВНО, а не по переносу: колонка узкая (INFO_W), и одна длинная
-	# строка ломалась в произвольном месте — «Отряд лучников: 24 / бойцов…»
-	info_label.text = "%s\n%d бойцов (%d отр.)" % [
-		_squad_title(unit_id), men, squads]
+	# ОДНА СТРОКА: численность стоит бейджем на портрете, и повторять её текстом
+	# незачем — вторую строку колонки занимает шкала опыта
+	info_label.text = "%s  (%d отр.)" % [_squad_title(unit_id), squads]
 
 	# Кнопки приказов — по бойцам ИМЕННО ЭТОГО типа: панель показывает их,
 	# логично и стойку показывать их же
@@ -1857,12 +2058,12 @@ func _build_type_detail(unit_id: String) -> void:
 		_maybe_add_stance_buttons(members)
 		_maybe_add_guard_toggle(members)
 		_maybe_add_ability_buttons(members)
+		_add_to_castle_button(members)
 	# _maybe_add_stance_buttons переписывает info_label под ВСЁ выделение
 	# (ids он берёт у SelectionManager) — возвращаем подпись типа обратно
-	# ДВЕ СТРОКИ ЯВНО, а не по переносу: колонка узкая (INFO_W), и одна длинная
-	# строка ломалась в произвольном месте — «Отряд лучников: 24 / бойцов…»
-	info_label.text = "%s\n%d бойцов (%d отр.)" % [
-		_squad_title(unit_id), men, squads]
+	# ОДНА СТРОКА: численность стоит бейджем на портрете, и повторять её текстом
+	# незачем — вторую строку колонки занимает шкала опыта
+	info_label.text = "%s  (%d отр.)" % [_squad_title(unit_id), squads]
 
 ## Путь иконки для портрета выбранного — та же таблица, что и у кнопок найма/
 ## построек, чтобы портрет и панель приказов всегда показывали одну картинку
@@ -1974,14 +2175,21 @@ func _maybe_add_stance_buttons(units: Array) -> void:
 	if sid > 0:
 		var tname: String = _squad_title(GameManager.squad_type(sid))
 		var lvl: int = GameManager.squad_level(sid)
-		info_label.text = "%s%s — %d бойцов%s" % [
+		# ── ЧИСЛЕННОСТЬ ОТСЮДА УБРАНА ───────────────────────────────────────
+		# Строка «Отряд мечников — 30 бойцов» слово в слово повторяла заголовок
+		# окна статов, висящего РОВНО НАД НЕЙ, — дублировалось не столько слово,
+		# сколько экранное место. Численность и так стоит бейджем на портрете,
+		# а освободившаяся строка отдана шкале опыта
+		info_label.text = "%s%s%s" % [
 			tname, ("  " + _stars_text(lvl)) if lvl > 0 else "",
-			units.size(), ("  (отряд %d)" % (grp + 1)) if grp >= 0 else ""]
+			("  (отряд %d)" % (grp + 1)) if grp >= 0 else ""]
+		_update_xp_bar(sid)
 		_show_squad_stats(sid, units)
 		# Полная раскладка статов с источниками бонусов — отдельной панелью
 		_show_stat_panel(sid, units)
 	else:
 		info_label.text = "Отрядов: %d — %d бойцов" % [ids.size(), units.size()]
+		_update_xp_bar(0)
 
 	# ВЫБОР ВЕТЕРАНСКОГО БОНУСА важнее стоек: пока игрок не выбрал улучшение,
 	# панель показывает пять кнопок выбора ВМЕСТО [АТАКА]/[ЗАЩИТА].
@@ -2004,25 +2212,117 @@ func _maybe_add_stance_buttons(units: Array) -> void:
 	# Последний аргумент — та самая жёлтая обводка активной стойки (см. _cmd).
 	# Заливка тоже осталась разной, но полагаться на неё одну нельзя: у «Атаки»
 	# оба оттенка тёмно-красные и в глаза разница не бросается
+	# ── ПОРЯДОК И ЦВЕТА КНОПОК ЗАДАНЫ ВЛАДЕЛЬЦЕМ ────────────────────────────
+	# [Атака (красный)] → [Защита (зелёный)] → [Пассивка (жёлтая)] → [To Castle
+	# (тёмно-красный)]. Первые две — здесь; пассивку добавляет
+	# _maybe_add_guard_toggle, «в замок» — _add_to_castle_button, и оба зовутся
+	# ПОСЛЕ этой функции (см. show_selection), поэтому очередь в сетке выходит
+	# ровно та, что заказана.
+	#
+	# «Защита» была СИНЕЙ. Смена на зелёный — не вкусовщина: синий здесь ничему
+	# не соответствовал, а красный/зелёный/жёлтый читаются как «бой / оборона /
+	# постоянный эффект» без единой подписи
 	_cmd("Attack",
-		Color(0.42, 0.14, 0.12) if atk_on else Color(0.24, 0.12, 0.11),
+		Color(0.52, 0.14, 0.12) if atk_on else Color(0.28, 0.12, 0.11),
 		func(): _on_stance_pressed(sm, _UCfg.STANCE_ATTACK),
 		ICON_STANCE_ATTACK, _stance_card(sample, _UCfg.STANCE_ATTACK, atk_on),
 		0.0, 1.0, atk_on)
 	_cmd("Defend",
-		Color(0.14, 0.30, 0.46) if def_on else Color(0.11, 0.18, 0.28),
+		Color(0.16, 0.42, 0.18) if def_on else Color(0.11, 0.22, 0.13),
 		func(): _on_stance_pressed(sm, _UCfg.STANCE_DEFENSE),
 		ICON_STANCE_DEFENSE, _stance_card(sample, _UCfg.STANCE_DEFENSE, def_on),
 		0.0, 1.0, def_on)
-	# ОТПРАВИТЬ ОТРЯД ЛЕЧИТЬСЯ. Отряд сам бежит к ближайшему своему замку,
-	# заходит внутрь и выходит, когда здоровье и состав восстановлены
+
+## Иконка замка для кнопки «в замок» — та же картинка, что у кнопки постройки
+## замка и у его портрета: одна вещь в интерфейсе выглядит одинаково везде
+const ICON_TO_CASTLE := "res://assets/factions/humans/icons/buildings/Castle.png"
+
+## ОТПРАВИТЬ ОТРЯД ЛЕЧИТЬСЯ. Отряд сам бежит к ближайшему своему замку, заходит
+## внутрь и выходит, когда здоровье и состав восстановлены.
+##
+## ОТДЕЛЬНОЙ ФУНКЦИЕЙ И ПОСЛЕДНИМ ВЫЗОВОМ. Раньше кнопка добавлялась внутри
+## _maybe_add_stance_buttons сразу за стойками, то есть ВПЕРЕДИ пассивки, и
+## оказывалась в середине ряда. «В самый правый угол» из задания достигается не
+## якорем (сетка кнопок раскладывает детей по порядку), а тем, что эта кнопка
+## добавляется в button_container ПОСЛЕДНЕЙ
+func _add_to_castle_button(units: Array) -> void:
+	var sm = GameManager.main.selection_manager if GameManager.main != null else null
+	if sm == null or not is_instance_valid(sm):
+		return
+	# Только для СВОИХ боевых юнитов: рабочего в замок отправлять незачем, а
+	# чужой отряд (карточка разведки) приказов не принимает вовсе
+	var any := false
+	for u in units:
+		if not is_instance_valid(u) or not (u is Unit):
+			continue
+		var un := u as Unit
+		if un.faction != Constants.FACTION_PLAYER or un.squad_id <= 0 or un is Worker:
+			continue
+		# ВЫБОР ВЕТЕРАНСКОЙ НАГРАДЫ ЗАНИМАЕТ ВСЮ СЕТКУ ЦЕЛИКОМ. Пока награда не
+		# выбрана, панель показывает пять кнопок выбора ВМЕСТО приказов (см.
+		# _maybe_add_stance_buttons — она ради этого выходит досрочно). Шестая
+		# кнопка, добавленная в обход того выхода, ломала бы ряд: qa_vet сразу
+		# показал «кнопок=6, ожидали 5»
+		if GameManager.squad_pending(un.squad_id) > 0:
+			return
+		any = true
+	if not any:
+		return
 	_cmd("To Castle",
-		Color(0.16, 0.34, 0.16),
+		Color(0.34, 0.08, 0.09),
 		func(): _on_send_to_castle(sm),
-		"", {"title": "Send to castle", "lines": [
-			"The squad marches to the nearest castle",
-			"Heals and refills its ranks inside",
-			"Marches back out on its own when ready"]})
+		ICON_TO_CASTLE, {"title": "В замок", "lines": [
+			"Отряд идёт к ближайшему своему замку",
+			"Внутри лечится и пополняет состав",
+			"Выходит сам, когда готов"]})
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ШКАЛА ОПЫТА ОТРЯДА
+# ═════════════════════════════════════════════════════════════════════════════
+## Прогресс до СЛЕДУЮЩЕГО ранга. Пороги ветеранства берутся из конфига и
+## СЧИТАЮТСЯ ПОВТОРЯЮЩИМИСЯ: VET_CONFIG.thresholds вида [40,40,40,40,40,40,50]
+## — законная запись (одно убийство даёт сразу несколько уровней), и наивное
+## «(kills − порог[lvl−1]) / (порог[lvl] − порог[lvl−1])» делило бы на ноль.
+## Поэтому ищем ближайший порог СТРОГО БОЛЬШЕ текущих убийств и наибольший из
+## уже взятых — так формула верна при любой форме лестницы
+func _xp_progress(unit_id: String, kills: int) -> Dictionary:
+	var top: int = _UCfg.max_veteran_level(unit_id)
+	var prev: int = 0
+	var next: int = -1
+	for l in range(1, top + 1):
+		var t: int = _UCfg.veteran_threshold(unit_id, l)
+		if t <= kills:
+			prev = maxi(prev, t)
+		elif next < 0 or t < next:
+			next = t
+	if next < 0:
+		return {"frac": 1.0, "have": kills, "need": 0, "maxed": true}
+	var span: int = maxi(next - prev, 1)
+	return {"frac": clampf(float(kills - prev) / float(span), 0.0, 1.0),
+		"have": kills - prev, "need": span, "maxed": false}
+
+## Показать шкалу опыта отряда. sid = 0 — спрятать (сборная солянка из нескольких
+## отрядов общего опыта не имеет)
+func _update_xp_bar(sid: int) -> void:
+	if _xp_bar == null or not is_instance_valid(_xp_bar):
+		return
+	if sid <= 0 or not GameManager.squads.has(sid):
+		_xp_bar.visible = false
+		if _xp_label != null and is_instance_valid(_xp_label):
+			_xp_label.visible = false
+		return
+	var uid: String = GameManager.squad_type(sid)
+	var p: Dictionary = _xp_progress(uid, GameManager.squad_kills(sid))
+	_xp_bar.visible = true
+	_xp_bar.value = float(p["frac"])
+	if _xp_label != null and is_instance_valid(_xp_label):
+		_xp_label.visible = true
+		var lvl: int = GameManager.squad_level(sid)
+		if bool(p["maxed"]):
+			_xp_label.text = "Ранг %d — высший" % lvl
+		else:
+			_xp_label.text = "Ранг %d → %d   %d/%d" % [
+				lvl, lvl + 1, int(p["have"]), int(p["need"])]
 
 ## Меч и щит для кнопок стойки
 const ICON_STANCE_ATTACK  := "res://assets/ui/icons_units_human/Attacks_human.png"
@@ -2069,9 +2369,10 @@ func _maybe_add_guard_toggle(units: Array) -> void:
 		if (w as Warrior).auto_guard:
 			on = true
 			break
-	# ЦВЕТ = СОСТОЯНИЕ. Включено — светлая синь с яркой рамкой, выключено —
-	# приглушённый серо-синий: кнопка «тухнет», как и просили
-	var col: Color = Color(0.20, 0.44, 0.62) if on else Color(0.13, 0.15, 0.18)
+	# ЦВЕТ = СОСТОЯНИЕ, И САМ ЦВЕТ = «ПАССИВКА» (жёлтый, заказ владельца).
+	# Включено — тёплый янтарь, выключено — он же, потухший. Синим кнопка спорила
+	# с «Защитой», у которой и иконка щита та же самая
+	var col: Color = Color(0.74, 0.58, 0.12) if on else Color(0.22, 0.19, 0.10)
 	var title: String = "Стена щитов: ВКЛ" if on else "Стена щитов: ВЫКЛ"
 	var btn: Button = _cmd("СТЕНА ЩИТОВ", col,
 		func(): _on_guard_toggle(units, men, not on),
@@ -2161,14 +2462,56 @@ func _maybe_add_ability_buttons(units: Array) -> void:
 		if btn == null:
 			continue
 		if need.is_empty():
-			# Всем выделенным отрядам уже куплено — гасим той же схемой, что и
-			# изученное улучшение в кузнице, чтобы «куплено» выглядело одинаково
+			# ── КУПЛЕНО ─────────────────────────────────────────────────────
+			# Обычная способность просто гаснет, как изученное улучшение в
+			# кузнице. А способность-РЕЖИМ (forge_config toggle) превращается в
+			# переключатель — ровно как «стена щитов» у мечника: горит жёлтой
+			# рамкой, когда включена. Отличать их по id способности здесь нельзя:
+			# панель не должна знать имён, признак живёт в конфиге
+			if _Forge.is_toggle_ability(node):
+				var on: bool = _ability_mode_on(mine, nid)
+				btn.queue_free()
+				_add_ability_toggle(units, mine, nid, node, on)
+				continue
 			_apply_upgrade_state(btn, title, true, false, false)
 		else:
 			var blocker: String = GameManager.squad_ability_blocker(int(need[0]), nid)
 			btn.disabled = not blocker.is_empty()
 			btn.tooltip_text = "%s — %s" % [title, blocker] if not blocker.is_empty() \
 				else "%s — купить этому отряду за %d з" % [title, int(cost)]
+
+## Включён ли режим хоть у одного из выделенных отрядов. «Хоть у одного», а не
+## «у всех», по той же причине, что и у стены щитов: смешанное состояние надо
+## показать как включённое, иначе один отряд с выключённым режимом гасил бы
+## кнопку и игрок не понимал бы, почему остальные стреляют залпом
+func _ability_mode_on(sids: Array, node_id: String) -> bool:
+	for sid in sids:
+		if GameManager.squad_ability_on(int(sid), node_id):
+			return true
+	return false
+
+## КНОПКА-ПЕРЕКЛЮЧАТЕЛЬ КУПЛЕННОГО РЕЖИМА. Цвет и рамка — те же, что у стойки:
+## жёлтая обводка означает «включено» во всём интерфейсе
+func _add_ability_toggle(units: Array, sids: Array, node_id: String,
+		node: Dictionary, on: bool) -> void:
+	var title: String = String(node.get("name", node_id))
+	var col: Color = Color(0.24, 0.40, 0.56) if on else Color(0.13, 0.16, 0.20)
+	var lines: Array = [String(node.get("desc", "")),
+		"Режим отряда: %s" % ("ВКЛЮЧЁН" if on else "выключен"),
+		"Отряд стреляет разом, а не по мере перезарядки",
+		"Стрелы ложатся кучно в центр вражеского строя",
+		"Выключено — каждый стрелок бьёт сам, с обычным разбросом"]
+	var btn: Button = _cmd(title, col,
+		func(): _on_ability_toggle(units, sids, node_id, not on),
+		String(node.get("icon", "")), {"title": title, "lines": lines},
+		0.0, 1.0, on)
+	if btn != null:
+		btn.tooltip_text = "%s — %s" % [title, "ВКЛ" if on else "ВЫКЛ"]
+
+func _on_ability_toggle(units: Array, sids: Array, node_id: String, on: bool) -> void:
+	for sid in sids:
+		GameManager.squad_set_ability(int(sid), node_id, on)
+	show_selection(units)
 
 func _on_buy_squad_ability(units: Array, sids: Array, node_id: String) -> void:
 	var bought := 0
@@ -2671,7 +3014,10 @@ func _stat_formula(nm: String, base: float, forge: float, bonus: float,
 		out += " [color=%s]= %s[/color]" % [TOTAL_COLOR, fmt % total]
 	return out
 
-func _show_stat_panel(squad_id: int, units: Array) -> void:
+## live_hp — печатать ли в заголовке живое здоровье отряда. Для СВОИХ отрядов
+## не печатается (шум: полоски здоровья и так видны на бойцах), для карточки
+## разведки — печатается: это и есть цель разведки
+func _show_stat_panel(squad_id: int, units: Array, live_hp: bool = false) -> void:
 	_hide_stat_panel()
 	var sample: Unit = null
 	for u in units:
@@ -2688,7 +3034,16 @@ func _show_stat_panel(squad_id: int, units: Array) -> void:
 		+ GameManager.get_upgrade(f, "damage")
 	if sample is Archer:
 		atk_smithy += GameManager.get_upgrade(f, "arrow_dmg")
+	# ── HP ИДЁТ ПЕРВЫМ, И БАЗА У НЕГО СЧИТАЕТСЯ ОБРАТНЫМ ХОДОМ ──────────────
+	# Все остальные статы прибавляются от кузницы «вживую» при чтении, поэтому
+	# у них база — это поле юнита, а прирост — отдельное слагаемое. У ЗДОРОВЬЯ
+	# ИНАЧЕ: bonus_health единственный, который нельзя прочитать на лету, и
+	# GameManager._apply_health_bonus_now вписывает его прямо в max_health в
+	# момент исследования. Написать здесь base = max_health значит показать
+	# прирост дважды, поэтому его вычитаем обратно
+	var hp_forge: float = GameManager.unit_bonus(f, uid, "bonus_health")
 	var lines: Array = [
+		_stat_formula("Health",  sample.max_health - hp_forge, hp_forge, 0.0),
 		_stat_formula("Attack",  sample.attack_damage, atk_smithy, sample.vet_attack),
 		_stat_formula("Defense", sample.defense,
 			GameManager.get_upgrade(f, "defense"), sample.vet_defense),
@@ -2720,8 +3075,30 @@ func _show_stat_panel(squad_id: int, units: Array) -> void:
 
 	var lvl_head: int = GameManager.squad_level(squad_id)
 	var head := Label.new()
-	head.text = "%s%s — %d бойцов" % [_squad_title(GameManager.squad_type(squad_id)),
-		("  " + _stars_text(lvl_head)) if lvl_head > 0 else "", units.size()]
+	# ── ЗАГОЛОВОК ОЧИЩЕН ОТ ДУБЛЕЙ (заказ владельца) ────────────────────────
+	# Здесь стояло «Отряд мечников ★ — 30 бойцов  3000/3000 HP». Ровно та же
+	# фраза «Отряд мечников — 30 бойцов» стояла строкой ниже, в плашке юнита, а
+	# численность вдобавок нарисована бейджем на портрете: одно и то же число
+	# сообщалось три раза подряд. Осталось имя и ранг — то, чего больше нигде нет.
+	#
+	# ЖИВОЕ ЗДОРОВЬЕ ОТРЯДА ОСТАВЛЕНО ТОЛЬКО В КАРТОЧКЕ РАЗВЕДКИ. Для своего
+	# отряда это шум (полоски здоровья видны прямо на бойцах), а вот при
+	# разведке чужого строя «сколько в нём осталось прямо сейчас» — ЕДИНСТВЕННОЕ,
+	# ради чего карточку и открывают: строка Health ниже это паспорт модели, а не
+	# состояние отряда
+	var title_txt: String = "%s%s" % [
+		_squad_title(GameManager.squad_type(squad_id)),
+		("  " + _stars_text(lvl_head)) if lvl_head > 0 else ""]
+	if live_hp:
+		var hp_now := 0.0
+		var hp_max := 0.0
+		for u in units:
+			var uu := u as Unit
+			if uu != null and is_instance_valid(uu) and not uu.is_dead():
+				hp_now += uu.current_health
+				hp_max += uu.max_health
+		title_txt += "   %d/%d HP" % [int(round(hp_now)), int(round(hp_max))]
+	head.text = title_txt
 	head.add_theme_font_size_override("font_size", 12)
 	head.add_theme_color_override("font_color", Color(0.95, 0.90, 0.70))
 	_fix_label(head, STAT_PANEL_W - 20, 1)
@@ -2746,7 +3123,22 @@ func _show_stat_panel(squad_id: int, units: Array) -> void:
 	# не учитывала перенос длинного заголовка на вторую строку, и панель
 	# статов наезжала на командную панель ровно под собой
 	_stat_panel = panel
-	await _pin_floater_above(panel, PANEL_TOP - 6, 8.0, STAT_PANEL_W)
+	# ЗАЗОРА МЕЖДУ ОКНОМ И ПЛАШКОЙ НЕТ (заказ владельца). Стояло PANEL_TOP − 6:
+	# шесть пикселей пустоты, из-за которых два тёмных блока читались как два
+	# несвязанных окна, а не как одна панель управления отрядом
+	await _pin_floater_above(panel, PANEL_TOP, 8.0, STAT_PANEL_W)
+	# ── ВЫСОТА ПАНЕЛИ ПЕРЕСЧИТЫВАЕТСЯ ПОЗЖЕ, ЧЕМ МЫ СЮДА ПОПАЛИ ─────────────
+	# _pin_floater_above ждёт кадр (иначе не знает своей высоты), а
+	# _sync_panel_height успевает отработать в ЭТОМ же вызове show_selection и
+	# сдвинуть PANEL_TOP вверх. Сдвиг «всего, что висит над панелью» там есть, но
+	# он применяется ДО нашего пробуждения — и продолжение корутины затирает его
+	# устаревшим числом. Пока зазор был 6 px, а панель ниже, это пряталось; с
+	# нулевым зазором и шкалой опыта окно статов легло прямо на плашку.
+	# Перепривязываемся к ЖИВОМУ PANEL_TOP
+	if is_instance_valid(panel) and not panel.is_queued_for_deletion():
+		var hh: float = panel.get_combined_minimum_size().y
+		panel.offset_bottom = float(PANEL_TOP)
+		panel.offset_top    = float(PANEL_TOP) - hh
 
 # ─────────────────────────────────────────────────────────────────────────────
 # РЯД ЗАРАБОТАННЫХ БОНУСОВ ОТРЯДА
@@ -2959,9 +3351,38 @@ func _build_veteran_menu(squad_id: int, units: Array) -> void:
 	for i in range(choices.size()):
 		var c: Dictionary = choices[i]
 		var idx := i
-		_cmd(String(c.get("name", "+")), Color(0.42, 0.34, 0.08),
+		var b: Button = _cmd(String(c.get("name", "+")), Color(0.42, 0.34, 0.08),
 			func(): _on_veteran_pressed(squad_id, idx),
 			String(c.get("icon", "")), _veteran_card(squad_id, c, lvl))
+		# ── ОБУЧАЮЩАЯ ВСПЫШКА ──────────────────────────────────────────────
+		# Один импульс на открытие панели: кнопки награды ярко вспыхивают и
+		# гаснут. Смысл ровно обучающий — новичок не догадывается, что здесь
+		# ЖДУТ его клика, и панель для него выглядит просто ещё одним рядом
+		# иконок. Цикла тут быть не должно: мигающая без конца панель под рукой
+		# раздражает, в отличие от алерта в углу экрана, который для того и висит
+		if b != null:
+			_flash_once(b, float(i) * VET_FLASH_STAGGER)
+
+## Насколько ярче обычного вспыхивает кнопка награды
+const VET_FLASH_PEAK := 2.4
+## Сколько длится вспышка (вверх и обратно)
+const VET_FLASH_TIME := 0.16
+## Сдвиг между соседними кнопками: волна слева направо читается как «вот этот
+## РЯД ждёт выбора», тогда как пять одновременных вспышек — как сбой отрисовки
+const VET_FLASH_STAGGER := 0.05
+
+## ОДНОКРАТНАЯ ВСПЫШКА узла. Пивот ставится в центр, иначе увеличение масштаба
+## тянет кнопку из своего места в сетке
+func _flash_once(node: Control, delay: float) -> void:
+	node.pivot_offset = node.custom_minimum_size * 0.5
+	var tw := node.create_tween()
+	tw.set_parallel(false)
+	if delay > 0.0:
+		tw.tween_interval(delay)
+	tw.tween_property(node, "modulate", Color(VET_FLASH_PEAK, VET_FLASH_PEAK,
+		VET_FLASH_PEAK, 1.0), VET_FLASH_TIME).set_trans(Tween.TRANS_SINE)
+	tw.tween_property(node, "modulate", Color.WHITE, VET_FLASH_TIME * 1.6) \
+		.set_trans(Tween.TRANS_SINE)
 
 func _veteran_card(squad_id: int, choice: Dictionary, lvl: int) -> Dictionary:
 	var stat: String = String(choice.get("stat", ""))
@@ -3498,7 +3919,7 @@ func _draw_forge_arrows() -> void:
 				if GameManager.is_researched(f, String(p)) else FORGE_ARROW_OFF
 			_forge_arrow(from, to, col)
 		# ── Горизонтальные двусторонние связки: ТОЛЬКО ЛИНИЯ, не зависимость
-		# (см. GRID.link в forge_config). Рисуем один раз на пару — по той
+		# (поле "link" ячейки, forge_config.UNITS). Рисуем один раз на пару — по той
 		# стороне, где ячейка «левее», иначе каждая пара рисуется дважды
 		for l in node.get("link", []):
 			var other: String = String(l)
@@ -3663,8 +4084,15 @@ func _forge_row_locked(f: int, node: Dictionary) -> bool:
 
 const _BONUS_TITLES := {
 	"bonus_attack": "к урону", "bonus_armor": "к броне",
+	"bonus_defense": "к защите",
 	"bonus_health": "к запасу HP", "bonus_speed": "к скорости",
+	"bonus_range": "к дальности, м",
+	"bonus_cooldown": "с долой с перезарядки",
+	"bonus_spread": "к кучности стрельбы",
 	"bonus_push": "к напору", "bonus_morale": "к морали",
+	# Экономические ключи рабочего. bonus_gather СОКРАЩАЕТ цикл, поэтому подпись
+	# читается как «секунды долой», а не «плюс к чему-то» (см. Worker._cycle_time)
+	"bonus_gather": "с долой из цикла добычи", "bonus_carry": "к грузу за ходку",
 }
 
 func _forge_tip_line(box: VBoxContainer, text: String, col: Color, size: int) -> void:
@@ -3992,6 +4420,145 @@ func _apply_idle_state(n: int) -> void:
 		_idle_btn.mouse_filter = Control.MOUSE_FILTER_STOP if n > 0 \
 			else Control.MOUSE_FILTER_IGNORE
 
+# ═════════════════════════════════════════════════════════════════════════════
+# СТЕК АЛЕРТОВ ВЕТЕРАНСТВА — ПОД ПЛАШКОЙ БЕЗДЕЛЬНИКОВ
+# ═════════════════════════════════════════════════════════════════════════════
+# Отряд заслужил ранг, но игрок ещё не выбрал награду — и об этом надо сказать
+# так, чтобы не пришлось искать этот отряд по карте. Под плашкой рабочих растёт
+# вертикальный список иконок: одна на отряд, клик — камера летит к отряду,
+# выделяет его и открывает панель с выбором.
+#
+# ПУСТО — ЗНАЧИТ ПУСТО. Никаких погашенных заглушек: если наград никто не ждёт,
+# под плашкой ничего нет вовсе (заказ владельца). Это принципиально отличает
+# стек от плашки бездельников, которая на нуле именно ТУСКНЕЕТ, а не исчезает:
+# «рабочих без дела ноль» — это ответ, а «наград никто не ждёт» — это отсутствие
+# вопроса.
+const ALERT_ICON     := 44.0
+const ALERT_GAP      := 6
+## Отступ стека от нижней кромки плашки бездельников
+const ALERT_TOP_GAP  := 8.0
+## Пульсация: между какими значениями прозрачности ходит иконка и за сколько
+const ALERT_PULSE_MIN  := 0.55
+const ALERT_PULSE_TIME := 0.65
+
+var _alert_box: VBoxContainer = null
+## Подпись текущего состава стека: пересобираем ТОЛЬКО когда набор отрядов
+## изменился. Иначе пульсация сбрасывалась бы в начало каждые полсекунды
+var _alert_sig: String = ""
+
+func _build_alert_stack() -> void:
+	_alert_box = VBoxContainer.new()
+	_alert_box.name = "VeteranAlerts"
+	_alert_box.position = Vector2(IDLE_WIDGET_LEFT,
+		IDLE_WIDGET_TOP + IDLE_WIDGET_SIZE + ALERT_TOP_GAP)
+	_alert_box.add_theme_constant_override("separation", ALERT_GAP)
+	# Сам контейнер кликов не ловит — их ловят кнопки внутри
+	_alert_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(_alert_box)
+
+## Отряды игрока, ждущие выбора награды
+func _alerting_squads() -> Array:
+	var out: Array = []
+	for key in GameManager.squads.keys():
+		var sid: int = int(key)
+		var sq: Dictionary = GameManager.squads[key]
+		if int(sq.get("faction", -1)) != Constants.FACTION_PLAYER:
+			continue
+		if GameManager.squad_pending(sid) <= 0:
+			continue
+		if GameManager.squad_members(sid).is_empty():
+			continue        # отряд выбит — алерт вместе с ним
+		out.append(sid)
+	out.sort()
+	return out
+
+func _refresh_alert_stack() -> void:
+	if _alert_box == null or not is_instance_valid(_alert_box):
+		return
+	var sids: Array = _alerting_squads()
+	var sig := ""
+	for s in sids:
+		sig += "%d," % int(s)
+	if sig == _alert_sig:
+		return
+	_alert_sig = sig
+	# remove_child ДО queue_free: освобождение отложено до конца кадра, и без
+	# этого одноимённые новые узлы уникализируются (тот же разбор, что у
+	# _rebuild_research_queue)
+	for c in _alert_box.get_children():
+		_alert_box.remove_child(c)
+		c.queue_free()
+	for s in sids:
+		var sid: int = int(s)
+		_alert_box.add_child(_alert_button(sid))
+
+func _alert_button(sid: int) -> Button:
+	var btn := Button.new()
+	btn.name = "VetAlert_%d" % sid
+	btn.custom_minimum_size = Vector2(ALERT_ICON, ALERT_ICON)
+	btn.focus_mode = Control.FOCUS_NONE
+	var st := StyleBoxFlat.new()
+	st.bg_color = Color(0.16, 0.13, 0.04, 0.94)
+	_corners(st, 6); _borders(st, 2)
+	st.border_color = ACTIVE_BORDER_COLOR
+	var hov := st.duplicate() as StyleBoxFlat
+	hov.bg_color = Color(0.26, 0.21, 0.06, 0.98)
+	btn.add_theme_stylebox_override("normal", st)
+	btn.add_theme_stylebox_override("hover", hov)
+	btn.add_theme_stylebox_override("pressed", st)
+	var uid: String = GameManager.squad_type(sid)
+	var tex := _icon_texture(String(UNIT_ICONS.get(uid, "")))
+	if tex != null:
+		btn.add_child(_stretched_icon(tex, 4.0))
+	# Звёздочка в углу — тем же глифом, что и везде: это ветеранство, а не
+	# «какое-то уведомление»
+	var star := Label.new()
+	star.text = "★"
+	star.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	star.add_theme_font_size_override("font_size", 13)
+	star.add_theme_color_override("font_color", Color(1.0, 0.86, 0.30))
+	star.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.95))
+	star.add_theme_constant_override("outline_size", 4)
+	star.set_anchors_and_offsets_preset(Control.PRESET_TOP_LEFT)
+	star.offset_left = 2; star.offset_top = 0
+	star.offset_right = 18; star.offset_bottom = 18
+	btn.add_child(star)
+	btn.tooltip_text = "%s — заслужен ранг, выберите награду (клик — показать)" \
+		% _squad_title(uid)
+	btn.pressed.connect(func(): _on_alert_pressed(sid))
+	# ── ПОДМИГИВАНИЕ ────────────────────────────────────────────────────────
+	# Плавный маятник прозрачности, а не мигание рывком: задача — увести взгляд
+	# в угол экрана, а не спорить с боем за внимание. Твин привязан к самой
+	# кнопке, поэтому исчезает вместе с ней и не требует ручной остановки
+	var tw := btn.create_tween()
+	tw.set_loops()
+	tw.tween_property(btn, "modulate:a", ALERT_PULSE_MIN, ALERT_PULSE_TIME) \
+		.set_trans(Tween.TRANS_SINE)
+	tw.tween_property(btn, "modulate:a", 1.0, ALERT_PULSE_TIME) \
+		.set_trans(Tween.TRANS_SINE)
+	return btn
+
+## Клик по алерту: камера к отряду, отряд выделен, панель открыта с выбором
+func _on_alert_pressed(sid: int) -> void:
+	var men: Array = GameManager.squad_members(sid)
+	if men.is_empty():
+		_alert_sig = ""          # отряд уже выбит — пересобрать стек
+		_refresh_alert_stack()
+		return
+	var main := GameManager.main
+	if main == null or not is_instance_valid(main):
+		return
+	main.focus_camera_on(GameManager.squad_centroid(sid))
+	var sm = main.selection_manager
+	if sm != null and is_instance_valid(sm):
+		sm._clear_selection()
+		for m in men:
+			if is_instance_valid(m):
+				sm._select(m)
+		GameManager.on_selection_changed(sm.selected_units)
+	else:
+		show_selection(men)
+
 func _update_idle_counter(delta: float) -> void:
 	if _idle_btn == null or not is_instance_valid(_idle_btn):
 		return
@@ -4009,6 +4576,10 @@ func _update_idle_counter(delta: float) -> void:
 		if w2 != null and not w2.is_dead() and w2.state == Unit.State.GATHERING:
 			busy += 1
 	AudioManager.active_workers = busy
+	# Стек алертов ветеранства живёт на том же полусекундном такте: он тоже
+	# меняется медленно, а пересборка узлов на каждый кадр сбрасывала бы
+	# пульсацию иконок в начало
+	_refresh_alert_stack()
 	var n: int = _idle_workers().size()
 	if n == _idle_last:
 		return          # ничего не поменялось — не трогаем узлы UI
@@ -4343,7 +4914,13 @@ func _unhandled_input(event: InputEvent) -> void:
 	# паузе ввод до него не доходит — с паузы было бы не сняться. HUD же стоит
 	# в PROCESS_MODE_ALWAYS (см. _ready) и слышит клавиатуру в обоих состояниях.
 	# echo отсекаем: зажатая Z иначе мигала бы паузой с частотой автоповтора
-	if (k.keycode == KEY_Z or k.physical_keycode == KEY_Z) and not k.echo:
+	# ПРОБЕЛ — ВТОРАЯ КЛАВИША ТОЙ ЖЕ ПАУЗЫ (заказ владельца). Именно вторая, а не
+	# замена: Z уже описан в подсказках и в стендах, а пробел — то, что игрок в
+	# тактической игре жмёт не глядя. Обе идут одним путём (toggle_pause), поэтому
+	# «пауза с клавиши» и «пауза с иконки» остаются одним поведением
+	var pause_key: bool = k.keycode == KEY_Z or k.physical_keycode == KEY_Z \
+		or k.keycode == KEY_SPACE or k.physical_keycode == KEY_SPACE
+	if pause_key and not k.echo:
 		# Пока открыт оверлей (меню/победа/поражение) — Z не трогаем: там своя
 		# пауза и свои кнопки, снять её вслепую значило бы продолжить игру
 		# под непрозрачным экраном
@@ -4460,9 +5037,9 @@ func _update_resource_income(delta: float) -> void:
 
 		var workers: int = int(busy.get(key, 0))
 
-		# ЧИСЛО РАБОЧИХ: В ДОБЫВАЮЩИХ СЕКЦИЯХ — НА ЭТОМ РЕСУРСЕ, В СЕКЦИИ ЕДЫ —
-		# ВСЕГО. Разные по смыслу числа, поэтому и глифы разные: кирка против
-		# топорика (см. RES_WORKER_SECTION / RES_GATHER_GLYPH)
+		# ЧИСЛО РАБОЧИХ — ВЕЗДЕ «НА ЭТОМ РЕСУРСЕ». Секция-исключение с общим
+		# счётчиком убрана по заказу владельца: на мясе должен стоять честный
+		# ноль, пока еду дают Домики, а не рабочие (см. RES_WORKER_SECTION)
 		var is_total: bool = key == RES_WORKER_SECTION
 		var shown: int = _total_player_workers() if is_total else workers
 
@@ -4824,6 +5401,20 @@ func _tip_anchor_geometry(anchor: Control, width: float) -> Array:
 	# НИ на кнопку, НИ на панель — берём то из двух ограничений, что выше
 	if _bottom_panel != null and is_instance_valid(_bottom_panel) and _bottom_panel.visible:
 		bottom_y = minf(bottom_y, float(PANEL_TOP) - TIP_GAP)
+	# ── ОКНО НИКОГДА НЕ ЛОЖИТСЯ НА ПАНЕЛЬ СТАТОВ (заказ владельца, критично) ──
+	# Панель статов прижата к левому краю и растёт ВВЕРХ от той же кромки, от
+	# которой растёт и это окно, — то есть они занимают одну и ту же полосу по
+	# вертикали ПО ПОСТРОЕНИЮ, и проверять вертикаль незачем: если прямоугольники
+	# пересекаются по горизонтали, они пересекаются. Кнопки способностей стоят в
+	# левой половине панели, поэтому наложение случалось на каждом наведении.
+	# Сдвигаем окно ВПРАВО за панель статов — ровно то «аккуратно справа», что
+	# просили; если правее места нет, упираемся в край экрана и окно всё равно
+	# оказывается настолько правее, насколько экран позволяет
+	if _stat_panel != null and is_instance_valid(_stat_panel) and _stat_panel.visible:
+		var sp: Rect2 = _stat_panel.get_global_rect()
+		var right_of: float = sp.position.x + sp.size.x + TIP_GAP
+		if px < right_of:
+			px = minf(right_of, maxf(vp.x - width - TIP_SCREEN_PAD, TIP_SCREEN_PAD))
 	return [px, bottom_y]
 
 func _ignore_mouse_tree(n: Node) -> void:
@@ -5062,9 +5653,16 @@ func _building_card(build_id: String) -> Dictionary:
 func _upgrade_card(slot: Dictionary, faction: int) -> Dictionary:
 	var upg_id: String = String(slot.get("id", ""))
 	var lines: Array = [String(slot.get("desc", ""))]
+	# Ключ, которого здесь нет, раньше ронял карточку на String(null): human[k] у
+	# отсутствующего ключа — Nil. Читаем через get с запасным значением, чтобы
+	# добавленный в BONUS_KEYS ключ в худшем случае показался своим именем, а не
+	# уронил панель
 	var human := {
 		"bonus_attack": "урону", "bonus_armor": "броне", "bonus_health": "HP",
+		"bonus_defense": "защите", "bonus_range": "дальности",
+		"bonus_cooldown": "с долой с перезарядки", "bonus_spread": "кучности",
 		"bonus_speed": "скорости", "bonus_push": "напору", "bonus_morale": "морали",
+		"bonus_carry": "грузу за ходку", "bonus_gather": "с долой из цикла добычи",
 	}
 	for key in _UCfg.BONUS_KEYS:
 		var k: String = String(key)
@@ -5072,7 +5670,8 @@ func _upgrade_card(slot: Dictionary, faction: int) -> Dictionary:
 		if v == 0.0:
 			continue
 		var sign_s: String = "+" if v > 0.0 else ""
-		lines.append("%s%s к %s" % [sign_s, ("%.1f" % v).trim_suffix(".0"), String(human[k])])
+		lines.append("%s%s к %s" % [sign_s, ("%.1f" % v).trim_suffix(".0"),
+			String(human.get(k, k))])
 	var who: Array = []
 	for e in slot.get("applies_to", []):
 		var uid: String = String(e)
@@ -5129,6 +5728,12 @@ func _queue_signature(bld: Building) -> String:
 ## ширину, как только появляется первый ребёнок. Вызывается и после сборки
 ## кнопок выделения (show_selection), и после пересборки очереди найма
 ## (_rebuild_queue) — это два независимых источника содержимого этих колонок
+## Зарезервированный габарит ряда кнопок. Пишется В ОБЁРТКУ, а не в сетку —
+## иначе центрировать было бы нечего (см. _btn_slot)
+func _slot_min(sz: Vector2) -> void:
+	if _btn_slot != null and is_instance_valid(_btn_slot):
+		_btn_slot.custom_minimum_size = sz
+
 func _sync_panel_grid_widths() -> void:
 	# ОТСТУП КНОПОК НАЙМА ОТ ПРАВОГО КРАЯ — ТОЛЬКО У ЗАМКА. У остальных панелей
 	# ширина считается ПО СОДЕРЖИМОМУ (_sync_panel_height), и фиксированные 15 px
@@ -5141,8 +5746,11 @@ func _sync_panel_grid_widths() -> void:
 		# qa_hud5 C8г дал 28.7, когда за распоркой стояла ещё и полоса отрядов).
 		# Поэтому распорке достаётся ОСТАТОК, а на экране выходит ровно
 		# CASTLE_BTN_RIGHT_PAD
+		# …а с появлением внутреннего отступа плашки (PANEL_PAD_X) слагаемых
+		# стало четыре: разделитель + распорка + рамка + этот отступ
 		var pad: float = maxf(0.0,
-			CASTLE_BTN_RIGHT_PAD - float(PANEL_HBOX_SEP) - float(PANEL_BORDER_W))
+			CASTLE_BTN_RIGHT_PAD - float(PANEL_HBOX_SEP) - float(PANEL_BORDER_W)
+			- float(PANEL_PAD_X))
 		_btn_right_pad.custom_minimum_size = \
 			Vector2(pad, 0.0) if _castle_boost else Vector2.ZERO
 	# КОЛОНКА «ЧТО ВЫБРАНО» СХЛОПЫВАЕТСЯ, КОГДА ПУСТА. У Замка строка
@@ -5158,6 +5766,10 @@ func _sync_panel_grid_widths() -> void:
 	if button_container != null and is_instance_valid(button_container):
 		var has_btns: bool = button_container.get_child_count() > 0
 		button_container.visible = has_btns
+		# ГАБАРИТ ДЕРЖИТ ОБЁРТКА (см. _btn_slot): сетка внутри центрируется, а
+		# зарезервированное место остаётся тем же, что и было
+		if _btn_slot != null and is_instance_valid(_btn_slot):
+			_btn_slot.visible = has_btns
 		if has_btns and _castle_boost:
 			# ЗАМОК: РОВНО 2 кнопки укрупнённого размера, ВСЕГДА (найм рабочего
 			# и рыцаря есть у любого своего Замка) — жёсткая сетка на BTN_COLS
@@ -5165,8 +5777,7 @@ func _sync_panel_grid_widths() -> void:
 			var n: int = button_container.get_child_count()
 			var big: float = BTN_SIZE * CASTLE_PANEL_BOOST
 			button_container.columns = n
-			button_container.custom_minimum_size = \
-				Vector2(n * big + float(n - 1) * BTN_GAP, big)
+			_slot_min(Vector2(n * big + float(n - 1) * BTN_GAP, big))
 		elif has_btns and _worker_boost:
 			# АРТЕЛЬ: каталог построек (сейчас 4 — Бараки/Кузница/Рудник/Дом)
 			# всегда укладывается в один ряд при BTN_COLS=5, поэтому здесь тоже
@@ -5175,13 +5786,12 @@ func _sync_panel_grid_widths() -> void:
 			var wn: int = button_container.get_child_count()
 			var wbig: float = BTN_SIZE * WORKER_ICON_BOOST
 			button_container.columns = wn
-			button_container.custom_minimum_size = \
-				Vector2(wn * wbig + float(wn - 1) * BTN_GAP, wbig)
+			_slot_min(Vector2(wn * wbig + float(wn - 1) * BTN_GAP, wbig))
 		else:
 			button_container.columns = BTN_COLS
-			button_container.custom_minimum_size = Vector2(
+			_slot_min(Vector2(
 				(BTN_COLS * BTN_SIZE + (BTN_COLS - 1) * BTN_GAP) if has_btns else 0.0,
-				COL_H)
+				COL_H))
 	if _queue_box != null and is_instance_valid(_queue_box) \
 			and _queue_frame != null and is_instance_valid(_queue_frame):
 		var has_q: bool = _queue_box.get_child_count() > 0

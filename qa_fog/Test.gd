@@ -57,6 +57,8 @@ func _run() -> void:
 	await _c_vision()
 	await _d_hiding()
 	await _e_castle()
+	await _f_leaks()
+	await _g_sites()
 
 	print("\n═════ ИТОГ ═════")
 	for e in _log:
@@ -227,6 +229,10 @@ func _d_hiding() -> void:
 
 	verdict("D1 место чужого действительно в тумане",
 		not fog.is_lit(dark.x, dark.z), "просматривается=%s" % fog.is_lit(dark.x, dark.z))
+	# НИКОГДА НЕ ВИДЕННЫЙ ГАСНЕТ СРАЗУ. Задержка гашения (см. D6 ниже) — это
+	# «последнее, что ты видел», и на бойца, которого не видели ни разу, она не
+	# распространяется: иначе свежий вражеский найм мигал бы на экране в кадре
+	# своего появления
 	verdict("D2 чужой в тумане снят с общей отрисовки",
 		not GameManager.far_units.is_registered(foe),
 		"в отрисовке=%s" % str(GameManager.far_units.is_registered(foe)))
@@ -251,8 +257,26 @@ func _d_hiding() -> void:
 		GameManager.far_units.is_registered(ally),
 		"в отрисовке=%s" % str(GameManager.far_units.is_registered(ally)))
 
-	foe.queue_free()
+	# ── D6: УХОД ИЗ ВИДУ ГАСИТ НЕ МГНОВЕННО ─────────────────────────────────
+	# Маска пересчитывается семь раз в секунду, а бойцы на кромке видимости всё
+	# время переступают туда и обратно: мгновенное гашение давало дребезг —
+	# «армия мерцает» из отчёта владельца. Проверяем ОБА конца правила: сразу
+	# после ухода наблюдателя враг ещё нарисован, спустя задержку — снят.
+	# Проверять это можно только на бойце, которого УЖЕ ВИДЕЛИ (см. D2)
 	ally.queue_free()
+	await pframes(2)
+	fog.refresh()
+	await frames(2)
+	verdict("D6а сразу после ухода наблюдателя враг ещё нарисован",
+		GameManager.far_units.is_registered(foe),
+		"в отрисовке=%s (задержка %.2f с)" % [
+			str(GameManager.far_units.is_registered(foe)), Unit.FOG_HIDE_GRACE])
+	await frames(int(Unit.FOG_HIDE_GRACE * 60.0) + 40)
+	verdict("D6б спустя задержку враг снят с отрисовки",
+		not GameManager.far_units.is_registered(foe),
+		"в отрисовке=%s" % str(GameManager.far_units.is_registered(foe)))
+
+	foe.queue_free()
 	await pframes(2)
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -361,3 +385,146 @@ func _e_castle() -> void:
 	main.fog.refresh()
 	verdict("E9 достроенный замок раскрывает туман вокруг себя",
 		main.fog.is_lit(a.x, a.z), "у замка видно=%s" % main.fog.is_lit(a.x, a.z))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# F. ТУМАН ГЛУШИТ ЗВУК И АНИМАЦИЮ (защита от «нахожу базу на слух»)
+# ═════════════════════════════════════════════════════════════════════════════
+# Пелена скрывает картинку, но по стуку топоров и лязгу боя из черноты игрок
+# безошибочно находил чужую базу, ни разу туда не заглянув. Здесь проверяется,
+# что этой лазейки нет — и что при этом СВОЯ, освещённая земля звучит и дрожит
+# как прежде: отсечка, глушащая всё подряд, была бы не лучше дыры.
+func _f_leaks() -> void:
+	print("
+═════ F. ЗВУК И АНИМАЦИЯ ПОД ТУМАНОМ ═════")
+	main.fog.enabled = true
+	main.fog.refresh()
+
+	# Точка заведомо неразведанная: дальний угол карты, своих там нет
+	var dark := Vector3(GameManager.map_lim_x * 0.9, 0.0, GameManager.map_lim_z * 0.9)
+	# …и заведомо освещённая: там, где стоит стартовая площадка игрока
+	# ТИП УКАЗАН ЯВНО: main здесь без типа, поэтому `:=` не может вывести тип из
+	# его константы — та самая грабля GDScript 4.6 из CLAUDE.md. Скрипт при этом
+	# не компилируется ВОВСЕ, сцена остаётся без него, стенд не доходит даже до
+	# первого print и просто висит: искать такое по пустому выводу бесполезно,
+	# надо запускать с --quit-after и читать голову лога
+	var lit: Vector3 = main.PLAYER_BASE_ANCHOR
+	print("  тёмная точка видна=%s, светлая точка видна=%s" % [
+		str(main.fog.is_lit(dark.x, dark.z)), str(main.fog.is_lit(lit.x, lit.z))])
+	verdict("F0 контрольные точки: одна в тумане, вторая на свету",
+		not main.fog.is_lit(dark.x, dark.z) and main.fog.is_lit(lit.x, lit.z))
+
+	# ── ЗВУК ────────────────────────────────────────────────────────────────
+	# play_3d возвращает false, если звук не пошёл. Слушателя двигать не нужно:
+	# отсечка по туману стоит РАНЬШЕ отсечки по расстоянию, и именно это и
+	# проверяется — иначе «не слышно» могло бы означать просто «далеко»
+	AudioManager.enabled = true
+	var dark_ok: bool = AudioManager.play_3d("chop", dark)
+	# ДВЕ ПРОВЕРКИ, А НЕ ОДНА. play_3d отбивает звук ещё и по расстоянию до
+	# слушателя, поэтому «вернул false» само по себе не доказывает, что сработал
+	# именно туман — тёмная точка заодно и далеко. Ворота проверяем отдельно
+	verdict("F1 из неразведанной зоны звук не идёт", not dark_ok
+			and not AudioManager._audible_at(dark)
+			and AudioManager._audible_at(lit),
+		"play_3d=%s, ворота: тьма=%s свет=%s" % [str(dark_ok),
+			str(AudioManager._audible_at(dark)), str(AudioManager._audible_at(lit))])
+
+	# ── ДРОЖАНИЕ СТВОЛА ─────────────────────────────────────────────────────
+	var t_dark := ResourceNode.new()
+	t_dark.resource_type = Constants.RESOURCE_WOOD
+	t_dark.remaining = 500.0
+	main.world_add(t_dark)
+	t_dark.global_position = Vector3(dark.x, GameManager.get_terrain_height(dark.x, dark.z), dark.z)
+	await frames(4)
+	t_dark._shake_power = 0.0
+	t_dark.shake()
+	verdict("F2 дерево в тумане не дрожит от рубки", t_dark._shake_power <= 0.0,
+		"сила дрожи %.2f" % t_dark._shake_power)
+
+	var t_lit := ResourceNode.new()
+	t_lit.resource_type = Constants.RESOURCE_WOOD
+	t_lit.remaining = 500.0
+	main.world_add(t_lit)
+	t_lit.global_position = Vector3(lit.x, GameManager.get_terrain_height(lit.x, lit.z), lit.z)
+	await frames(4)
+	t_lit._shake_power = 0.0
+	t_lit.shake()
+	verdict("F3 на своей, видимой земле дрожь работает как прежде",
+		t_lit._shake_power > 0.0, "сила дрожи %.2f" % t_lit._shake_power)
+
+	# ── ВЫКЛЮЧАТЕЛЬ ТУМАНА СНИМАЕТ ОТСЕЧКУ ЦЕЛИКОМ ─────────────────────────
+	# На него опираются все стенды звука и растительности (qa_audio, qa_audio2,
+	# qa_tree, qa_veg): если бы отсечка его не слушалась, они молча меряли бы
+	# не то, что написано в их вердиктах
+	main.fog.enabled = false
+	# Проверяются ИМЕННО ВОРОТА, а не play_3d целиком: у того есть свои законные
+	# отсечки (расстояние до слушателя, лимит голосов, прореживание по
+	# плотности), и в дальней точке он честно промолчит даже без тумана —
+	# на этом первая версия проверки и провалилась
+	verdict("F4 выключенный туман снова пропускает звук отовсюду",
+		AudioManager._audible_at(dark),
+		"ворота в тёмной точке при выключенном тумане: %s"
+			% str(AudioManager._audible_at(dark)))
+	t_dark.queue_free()
+	t_lit.queue_free()
+	await frames(2)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# G. ЧУЖАЯ СТРОЙКА НЕ РАСКРЫВАЕТ КАРТУ
+# ═════════════════════════════════════════════════════════════════════════════
+# ЗДЕСЬ БЫЛА ДЫРА, ЧЕРЕЗ КОТОРУЮ БЫЛА ВИДНА ВСЯ БАЗА ИИ. Группа
+# "construction_sites" общая на обе стороны, и сбор источников обзора
+# (FogOfWar._collect_building_sources) брал из неё ВСЕ площадки без проверки
+# фракции: каждый фундамент противника раскрывал игроку круг радиусом
+# BUILDING_VISION. ИИ ставит барак и кузницу в первые минуты — и его база
+# вспыхивала на карте вместе с замком и лесом.
+#
+# Прежние проверки этого не ловили: они спрашивали «свой юнит раскрывает / ушёл
+# — потемнело», а не «чужая стройка НЕ раскрывает».
+func _g_sites() -> void:
+	print("
+═════ G. ЧУЖАЯ СТРОЙКА ═════")
+	main.fog.enabled = true
+	main.fog.reset()
+	main.fog.refresh()
+	var spot := Vector3(-20.0, 0.0, 55.0)
+	verdict("G0 место заведомо неразведано", not main.fog.is_seen(spot.x, spot.z))
+
+	var site = load("res://scripts/ConstructionSite.gd").new()
+	site.faction     = Constants.FACTION_ENEMY
+	site.target_id   = "barracks"
+	site.target_name = "Бараки"
+	site.build_time  = 99.0
+	site.build_size  = Vector3(3.5, 2.2, 3.5)
+	main.world_add(site)
+	site.global_position = Vector3(spot.x, main.get_terrain_height(spot.x, spot.z), spot.z)
+	await pframes(3)
+	main.fog.refresh()
+	await pframes(2)
+	verdict("G1 фундамент ПРОТИВНИКА не раскрывает туман вокруг себя",
+		not main.fog.is_lit(spot.x, spot.z) and not main.fog.is_seen(spot.x, spot.z),
+		"видно=%s, разведано=%s" % [str(main.fog.is_lit(spot.x, spot.z)),
+			str(main.fog.is_seen(spot.x, spot.z))])
+	site.queue_free()
+	await pframes(2)
+
+	# ── КОНТРОЛЬ: СВОЯ СТРОЙКА РАСКРЫВАЕТ ─────────────────────────────────
+	# Без этой половины проверка прошла бы и на коде, где стройки не раскрывают
+	# туман ВООБЩЕ — а бригада тогда работала бы в темноте
+	var mine = load("res://scripts/ConstructionSite.gd").new()
+	mine.faction     = Constants.FACTION_PLAYER
+	mine.target_id   = "barracks"
+	mine.target_name = "Бараки"
+	mine.build_time  = 99.0
+	mine.build_size  = Vector3(3.5, 2.2, 3.5)
+	main.world_add(mine)
+	mine.global_position = Vector3(spot.x, main.get_terrain_height(spot.x, spot.z), spot.z)
+	await pframes(3)
+	main.fog.refresh()
+	await pframes(2)
+	verdict("G2 СВОЯ стройка туман раскрывает (бригада не работает в темноте)",
+		main.fog.is_lit(spot.x, spot.z),
+		"видно=%s" % str(main.fog.is_lit(spot.x, spot.z)))
+	mine.queue_free()
+	await pframes(2)

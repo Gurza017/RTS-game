@@ -314,9 +314,12 @@ func _test_kill_sources() -> void:
 	await frames(1)
 	hero.command_attack(v, true)
 	var k0: int = GameManager.squad_kills(sid)
+	# ЖДЁМ ФИЗИЧЕСКИЕ КАДРЫ, А НЕ КАДРЫ ОТРИСОВКИ. При Engine.max_fps = 0
+	# отрисовка обгоняет фиксированные 60 Гц физики, и «400 кадров» означали
+	# то полсекунды симуляции, то семь — отсюда и плавающая краснота
 	var waited := 0
 	while waited < 400 and is_instance_valid(v) and not v.is_dead():
-		await get_tree().process_frame
+		await get_tree().physics_frame
 		waited += 1
 	var k1: int = GameManager.squad_kills(sid)
 	print("  ближний бой: цель убита за %d кадров, счёт %d → %d" % [waited, k0, k1])
@@ -338,8 +341,12 @@ func _test_kill_sources() -> void:
 	arch.command_attack(av, true)
 	var ak0: int = GameManager.squad_kills(asid)
 	waited = 0
-	while waited < 600 and is_instance_valid(av) and not av.is_dead():
-		await get_tree().process_frame
+	# Запас по времени щедрый НАМЕРЕННО: проверка про ЗАЧЁТ ФРАГА, а не про
+	# меткость. Разброс стрелка случайный, и у отряда нулевого уровня выучки
+	# он ещё и шире (unit_stats_config.ARCHER_DRILL) — короткий бюджет делал
+	# вердикт про бухгалтерию убийств броском монеты
+	while waited < 1200 and is_instance_valid(av) and not av.is_dead():
+		await get_tree().physics_frame
 		waited += 1
 	var ak1: int = GameManager.squad_kills(asid)
 	print("  стрела: цель убита за %d кадров, счёт отряда лучников %d → %d" % [
@@ -450,8 +457,12 @@ func _test_star_and_choice() -> void:
 	# проверяется ПОСЛЕ того, как отряд стоит и сглаживание сошлось, а допуск
 	# берётся сантиметровый, а не нулевой: GameManager.STAR_FOLLOW подтягивает
 	# звезду экспоненциально и точного равенства не даёт никогда
-	for _i in range(40):
-		await get_tree().process_frame
+	# Сорока кадров сглаживанию не всегда хватало: звезда подтягивается
+	# экспоненциально, а центр отряда — МЕДИАНА и потому переступает
+	# скачками, когда очередной боец пересекает середину строя. Ждём вдвое
+	# дольше и по ФИЗИЧЕСКИМ кадрам (движение живёт в них)
+	for _i in range(90):
+		await get_tree().physics_frame
 	var want_c: Vector3 = GameManager.squad_centroid(squad)
 	var got_c: Vector3 = (star as Node3D).global_position if star != null else Vector3.ZERO
 	verdict("4 звезда стоит по центру масс отряда, а не на бойце",

@@ -39,6 +39,16 @@ func _run() -> void:
 	get_tree().root.add_child(main)
 	GameManager.world_bounds_enabled = false
 	preload("res://scripts/perf_config.gd").sprite_lod = false
+	# ── ТУМАН ВЫКЛЮЧЕН НАМЕРЕННО ────────────────────────────────────────────
+	# Пространственный звук и дрожание ствола теперь ГЛУШАТСЯ вне освещённой
+	# зоны (защита от «нахожу базу врага на слух», см. AudioManager._audible_at
+	# и ResourceNode.shake). Этот стенд проверяет не туман, а сам звук/дрожь, и
+	# ставит свои объекты там, где своих юнитов нет, — то есть в темноте.
+	# enabled = false заставляет is_lit отвечать «видно везде» (штатный
+	# выключатель FogOfWar), и стенд снова меряет то, ради чего написан.
+	# Саму отсечку по туману стережёт qa_fog
+	if GameManager.fog != null:
+		GameManager.fog.enabled = false
 	if main.enemy_ai != null:
 		main.enemy_ai.set_process(false)
 	await frames(3)
@@ -104,11 +114,17 @@ func _test_shake_and_sound() -> void:
 	print("\n═════ B. ВИБРАЦИЯ И ЗВУК ═════")
 	# Темп взмаха задаёт И дрожь, И звук — они синхронны по построению
 	var rate: float = Worker.CHOP_SWING_RATE
-	print("  темп взмаха=%.2f (было 3.5), амплитуда дрожи=%.3f (было 0.02)" % [
+	print("  темп взмаха=%.2f, амплитуда дрожи=%.3f (было 0.02)" % [
 		rate, ResourceNode.SHAKE_AMPLITUDE])
-	verdict("B1 темп взмаха поднят примерно на 30%",
-		absf(rate / 3.5 - 1.30) < 0.02, "стало %.2f против 3.5 (+%.0f%%)"
-			% [rate, (rate / 3.5 - 1.0) * 100.0])
+	# ЗДЕСЬ СТОЯЛО «ровно +30% против 3.5» — устаревшее требование прошлого
+	# захода, и оно покраснело, как только владелец попросил ещё больше звуков
+	# топора. Проверяем СВОЙСТВО, а не число: рубка не реже удара в секунду и
+	# заведомо чаще удара киркой. Точный темп — предмет баланса, а не стенда
+	var chop_hz: float = rate / TAU
+	var mine_hz: float = Worker.MINE_SWING_RATE / TAU
+	verdict("B1 рубка не реже удара в секунду и чаще кирки",
+		chop_hz >= 0.99 and chop_hz > mine_hz,
+		"топор %.2f уд/с, кирка %.2f уд/с" % [chop_hz, mine_hz])
 	verdict("B2 амплитуда дрожи заметно выросла",
 		ResourceNode.SHAKE_AMPLITUDE >= 0.02 * 2.0,
 		"амплитуда %.3f" % ResourceNode.SHAKE_AMPLITUDE)

@@ -129,7 +129,13 @@ func register(unit: Unit, world_root: Node3D) -> void:
 
 ## Убрать полоску. Идемпотентно
 func unregister(unit: Unit) -> void:
-	if not _slot.has(unit):
+	_drop_slot(unit)
+
+## Variant, а не Unit, по той же причине, что и в SelectionDecalRenderer:
+## ключом может оказаться уже освобождённый объект, и typed-параметр бросил бы
+## «Trying to assign invalid previously freed instance» прямо на вызове
+func _drop_slot(unit) -> void:
+	if not _slot.has(unit) or _layer == null:
 		return
 	var idx: int = _slot[unit]
 	_layer.hide_slot(idx)
@@ -145,7 +151,9 @@ func registered_count() -> int:
 
 func _write(unit: Unit) -> void:
 	var idx: int = _slot[unit]
-	var p: Vector3 = unit.global_position
+	# Та же оговорка, что у колец выделения: полоска висит над НАРИСОВАННЫМ
+	# бойцом, а картинка сглаживается между физическими шагами
+	var p: Vector3 = unit.draw_position()
 	var frac: float = 0.0
 	if unit.max_health > 0.0:
 		frac = clampf(unit.current_health / unit.max_health, 0.0, 1.0)
@@ -156,14 +164,19 @@ func _write(unit: Unit) -> void:
 
 ## Подтянуть полоски за бойцами и за их здоровьем. Зовётся раз в кадр из
 ## GameManager рядом с метками выделения; неподвижных и нераненых пропускаем
+## ПРОВЕРКА ЖИВОСТИ — ДО ПРИВЕДЕНИЯ К ТИПУ. Разбор см. в
+## SelectionDecalRenderer.update_all: `var u: Unit = <освобождённый>` падает сам,
+## не дав is_instance_valid ни одного шанса сработать
 func update_all() -> void:
 	if _slot.is_empty():
 		return
+	var stale: Array = []
 	for unit in _slot:
-		var u: Unit = unit
-		if not is_instance_valid(u):
+		if not is_instance_valid(unit):
+			stale.append(unit)
 			continue
-		var p: Vector3 = u.global_position
+		var u: Unit = unit
+		var p: Vector3 = u.draw_position()
 		var frac: float = 0.0
 		if u.max_health > 0.0:
 			frac = clampf(u.current_health / u.max_health, 0.0, 1.0)
@@ -175,6 +188,8 @@ func update_all() -> void:
 		if dx * dx + dz * dz < 0.0004 and absf(frac - was.z) < 0.002:
 			continue
 		_write(u)
+	for k in stale:
+		_drop_slot(k)
 
 func flush() -> void:
 	if _layer != null:

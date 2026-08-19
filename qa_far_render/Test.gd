@@ -54,8 +54,13 @@ func _run() -> void:
 	print("╚══════════════════════════════════════════════════════════════════╝")
 
 	var Far := load("res://scripts/FarUnitRenderer.gd")
-	var far = Far.new()
 	var world: Node3D = main._world
+	# Снимок чужих слоёв ДО создания своего отрисовщика (см. разбор ниже)
+	var _pre_existing := {}
+	for child in world.get_children():
+		if child is MultiMeshInstance3D:
+			_pre_existing[child] = true
+	var far = Far.new()
 
 	# ═════ 1. РЕГИСТРАЦИЯ И СЧЁТ ═════
 	var units: Array = []
@@ -69,9 +74,16 @@ func _run() -> void:
 	verdict("1 все 50 юнитов зарегистрированы", far.registered_count() == 50,
 		"registered_count=%d" % far.registered_count())
 
+	# ── СЧИТАЕМ ТОЛЬКО СВОИ БАКЕТЫ ──────────────────────────────────────────
+	# Проверка перебирала ВСЕ узлы MultiMeshInstance3D под миром, а там живут не
+	# только бакеты этого стенда: растительность заводит по узлу на каждую ленту
+	# (сколько их окажется — зависит от случайной карты), плюс полоски здоровья и
+	# метки выделения. То есть число зависело от розыгрыша карты, а не от того,
+	# что стенд проверяет. Считаем узлы, появившиеся ПОСЛЕ создания своего
+	# отрисовщика: это ровно его бакеты
 	var bucket_nodes := 0
 	for child in world.get_children():
-		if child is MultiMeshInstance3D:
+		if child is MultiMeshInstance3D and not _pre_existing.has(child):
 			bucket_nodes += 1
 	# 4 типа × 2 фракции × 1 состояние (все moving=false) = до 8 корзин
 	verdict("1 не больше 8 узлов MultiMeshInstance3D на 4×2×1 связок", bucket_nodes <= 8,

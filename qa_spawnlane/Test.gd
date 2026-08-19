@@ -219,13 +219,22 @@ func _run() -> void:
 	for bb in yards:
 		var yard := bb as Building
 		var g: Vector3 = yard._gate_position()
-		# Ворота обязаны лежать РОВНО перед зданием: по направлению фасада и на
-		# половине габарита плюс порог. Это и есть «прямо напротив, а не сбоку»
-		var fd: Vector3 = yard.front_dir()
+		# Ворота обязаны лежать РОВНО перед НАРИСОВАННЫМ фасадом.
+		#
+		# Здесь стоял front_dir() — «от постройки к середине карты». Ровно это
+		# рассогласование и оказалось причиной жалобы «бойцы выходят сбоку»:
+		# картинка здания прибита фасадом к мировому +Z и от положения на карте
+		# не зависит вовсе, а ворота считались по карте. Проверка честно мерила
+		# снос относительно НЕВЕРНОЙ оси и потому была зелёной, пока баг был жив.
+		# Сверяемся с тем же, с чем сверяется игрок глазами, — с фасадом
+		var fd: Vector3 = yard.facade_dir()
 		var to_gate: Vector3 = g - yard.global_position
 		to_gate.y = 0.0
 		var sidew: float = absf(to_gate.dot(Vector3(-fd.z, 0.0, fd.x)))
 		worst_front = maxf(worst_front, sidew)
+		# …и лежать СНАРУЖИ передней стены, а не внутри коробки здания
+		if to_gate.dot(fd) < yard.build_size.z * 0.5:
+			worst_front = maxf(worst_front, 99.0)
 
 		var seen_before: Array = get_tree().get_nodes_in_group("player_units").duplicate()
 		yard.squad_size = SQUAD

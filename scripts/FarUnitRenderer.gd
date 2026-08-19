@@ -249,7 +249,23 @@ func _get_or_make_bucket(key: String, sheet: Texture2D, frames: int,
 ## собственного спрайта (Unit.sheet_frame), поэтому картинка не меняется
 ## Возвращает слот бойца (или null, если рисовать пока нечего): боец держит
 ## ссылку на него и обновляет позицию напрямую, без поиска по словарю
+# ── СЧЁТЧИКИ ПЕРЕЕЗДОВ МЕЖДУ БАКЕТАМИ ───────────────────────────────────────
+# Смена ленты (анимация, ракурс) переселяет бойца в другой бакет: это снятие
+# слота в одном буфере и занятие в другом, то есть ДВА грязных бакета вместо
+# нуля. В свалке анимации переключаются постоянно, и именно эта величина
+# отвечает на вопрос «сколько стоит бой в отрисовке». Два целых на кадр —
+# счётчики стоят дешевле, чем стоил бы спор о том, велика ли цифра
+var reg_calls: int = 0
+var unreg_calls: int = 0
+var migrations: int = 0
+
+func reset_counters() -> void:
+	reg_calls = 0
+	unreg_calls = 0
+	migrations = 0
+
 func register(unit: Unit, world_root: Node3D, mirror: bool) -> Slot:
+	reg_calls += 1
 	if _slot.has(unit):
 		unregister(unit)
 	var sf: Array = unit.sheet_frame()
@@ -288,6 +304,7 @@ func slot_of(unit: Unit) -> Slot:
 
 ## Убрать бойца из общей отрисовки. Идемпотентно
 func unregister(unit: Unit) -> void:
+	unreg_calls += 1
 	if not _slot.has(unit):
 		return
 	var s: Slot = _slot[unit]
@@ -305,21 +322,35 @@ func unregister(unit: Unit) -> void:
 ## спрайта добавляется здесь из слота
 ## Возвращает АКТУАЛЬНЫЙ слот: при смене ленты боец переезжает в другой бакет,
 ## и прежняя ссылка (Unit._far_slot) становится недействительной
-func refresh(unit: Unit, pos: Vector3, mirror: bool) -> Slot:
-	var s: Slot = _slot.get(unit)
+## ── БЕЗ СЛОВАРЯ И БЕЗ АЛЛОКАЦИИ ─────────────────────────────────────────────
+## Две вещи, которые эта функция делала зря на КАЖДОМ вызове (а их сотни в кадр,
+## ветка vis_far — 3.6 мкс на бойца, вторая по величине статья визуального
+## прохода):
+##   • `_slot.get(unit)` — поиск по словарю с объектом-ключом, хотя вызывающий
+##     (Unit._sync_far_render) держит ПРЯМУЮ ссылку на слот и передаёт её сюда;
+##   • `unit.sheet_frame()` — вызов, СОБИРАЮЩИЙ Array из пяти элементов, то есть
+##     аллокация кучи на каждое обновление позы. Все пять величин — обычные поля
+##     бойца, и прочитать их напрямую дешевле, чем сложить из них массив.
+## Словарь остался для тех, кто ссылки не держит (update_pos, стенды)
+func refresh(unit: Unit, pos: Vector3, mirror: bool, known: Slot = null) -> Slot:
+	var s: Slot = known
+	if s == null:
+		s = _slot.get(unit)
 	if s == null:
 		return null
-	var sf: Array = unit.sheet_frame()
-	if sf.is_empty():
+	if not unit._look_ok:
+		unit._look_bind()
+	var tex: Texture2D = unit._look_tex
+	if tex == null:
 		return s
-	var tex: Texture2D = sf[0]
-	var frames: int    = sf[2]
-	var px: float      = sf[3]
+	var frames: int    = unit._look_frames
+	var px: float      = unit._look_px
 	# СРАВНИВАЕМ СОСТАВЛЯЮЩИЕ КЛЮЧА, А НЕ СОБРАННУЮ СТРОКУ: одинаковая текстура
 	# — это один и тот же объект, сравнение ссылок бесплатно, а "%d|%d|%.5f"
 	# стоило дороже всего остального в этой функции вместе взятого
 	if tex != s.tex or frames != s.frames or not is_equal_approx(px, s.px):
 		# Лента сменилась — это смена ракурса или анимации, событие не покадровое
+		migrations += 1
 		var world_root: Node3D = null
 		if s.bucket != null and s.bucket.mmi != null:
 			world_root = s.bucket.mmi.get_parent()
@@ -329,9 +360,9 @@ func refresh(unit: Unit, pos: Vector3, mirror: bool) -> Slot:
 		return null
 	# Высоту центра берём заново: в запасном режиме (mm_render_all выключен) в
 	# неё подмешано покачивание шага, которое пишет сам узел спрайта
-	s.base_y = sf[4] * _BB.V_STRETCH
+	s.base_y = unit._sprite_base_y * _BB.V_STRETCH
 	var p := Vector3(pos.x, pos.y + s.base_y, pos.z)
-	var frame: int = sf[1]
+	var frame: int = unit._look_frame
 	if frame == s.frame and mirror == s.mirror:
 		# Внешность та же — довольно быстрого пути по позиции
 		s.move_to(pos)

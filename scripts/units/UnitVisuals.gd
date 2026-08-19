@@ -57,6 +57,37 @@ static func ring_mesh() -> TorusMesh:
 	_ring_mesh = torus
 	return _ring_mesh
 
+# ── КРАСНОЕ КОЛЬЦО ПРИЦЕЛИВАНИЯ (НАВЕДЕНИЕ НА ЧУЖОЙ ОТРЯД) ───────────────────
+## То же кольцо, но красное и чуть шире жёлтого. Шире НАМЕРЕННО: свой выделенный
+## отряд и наведённый чужой могут оказаться в кадре рядом, и различать их только
+## по оттенку в плотном строю тяжело — разный радиус читается мгновенно.
+## Заметно плотнее по альфе, чем жёлтое: красное кольцо живёт долю секунды, пока
+## курсор над врагом, и обязано прочитаться сразу
+const RING_HOVER_INNER := 0.31
+const RING_HOVER_OUTER := 0.35
+
+static var _hover_ring_mesh: TorusMesh = null
+
+## Общий меш кольца прицеливания. Ровно один на всю партию — как и жёлтый
+static func hover_ring_mesh() -> TorusMesh:
+	if _hover_ring_mesh != null:
+		return _hover_ring_mesh
+	var torus := TorusMesh.new()
+	torus.inner_radius = RING_HOVER_INNER
+	torus.outer_radius = RING_HOVER_OUTER
+	torus.rings = 12
+	torus.ring_segments = 6
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color    = Color(1.0, 0.16, 0.14, 0.78)
+	mat.shading_mode    = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency    = BaseMaterial3D.TRANSPARENCY_ALPHA
+	# Приоритет выше жёлтого: если под бойцом почему-то оба кольца, сверху
+	# должно лежать то, которое отвечает на действие игрока прямо сейчас
+	mat.render_priority = 2
+	torus.material = mat
+	_hover_ring_mesh = torus
+	return _hover_ring_mesh
+
 # ── МЯГКАЯ ТЕНЬ ПОД НОГАМИ ───────────────────────────────────────────────────
 ## Приплюснута по Z и прижата к земле — читается как тень у ступней,
 ## а не как диск, над которым юнит «висит»

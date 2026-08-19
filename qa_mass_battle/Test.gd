@@ -1,5 +1,7 @@
 extends Node
 
+const _OptCfgG = preload("res://scripts/perf_config.gd")
+
 ## ═══════════════════════════════════════════════════════════════════════════
 ## МАСШТАБ В БОЮ: ДВЕ АРМИИ СХОДЯТСЯ И ДЕРУТСЯ
 ## ═══════════════════════════════════════════════════════════════════════════
@@ -61,6 +63,9 @@ func _run() -> void:
 			if n > 0:
 				_steps = [n]
 	Engine.max_fps = 0
+	# ДЕРЕВНЯ ГОБЛИНОВ ВЫКЛЮЧЕНА: стенд меряет ровно ту армию, которую
+	# заявляет, и не растягивает габарит сетки на свой угол карты
+	_OptCfgG.goblin_village = false
 	main = load("res://scenes/Main.tscn").instantiate()
 	get_tree().root.add_child(main)
 	await frames(6)

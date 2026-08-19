@@ -129,7 +129,13 @@ func _a_scouting() -> void:
 	scout.queue_free()
 	await pframes(3)
 	fog.refresh()
-	await frames(8)
+	# ЖДЁМ ДОЛЬШЕ ЗАДЕРЖКИ ГАШЕНИЯ. Чужой боец гаснет не в тот же кадр, а через
+	# Unit.FOG_HIDE_GRACE: без задержки бойцы на кромке видимости дребезжали с
+	# частотой пересчёта маски («армия мерцает», см. qa_fog D6). Проверка ниже
+	# про «под дымкой войск не видно», а не про скорость гашения
+	# ФИЗИЧЕСКИЕ кадры: обход, который будит спящих чужих бойцов, идёт
+	# в физтике, а при Engine.max_fps = 0 отрисовка обгоняет его в разы
+	await pframes(int(Unit.FOG_HIDE_GRACE * 60.0) + 40)
 
 	verdict("A5 разведчик ушёл — база осталась видна как последнее известное",
 		foe_castle.visible and fog.is_seen(e.x, e.z) and not fog.is_lit(e.x, e.z),
@@ -177,13 +183,23 @@ func _b_resource_bar() -> void:
 		tool_keys.size() == HUD.RES_DEFS.size(),
 		"секции с инструментом: %d из %d" % [tool_keys.size(), HUD.RES_DEFS.size()])
 
-	# B2 — в секции ДЕРЕВА инструмент снова есть, и это КИРКА (добыча),
-	# а не топорик: топорик остался маркером ОБЩЕГО счёта в секции еды
+	# B2 — ИНСТРУМЕНТ СВОЙ У КАЖДОГО РЕСУРСА, и у дерева это ТОПОР.
+	# Проверка требовала кирки на лесе — по лесу это просто неправда, дерево
+	# рубят топором, и владелец попросил заменить глиф. Числа не хардкодим:
+	# ждём ровно то, что стоит в конфиге панели (HUD.RES_TOOL_GLYPHS), и
+	# отдельно — что у дерева и у камня глифы РАЗНЫЕ, иначе замена ничего не
+	# дала бы (см. «Config is the source of truth» в CLAUDE.md)
 	var wood_tool: Label = hud._res_tool_labels.get(Constants.RESOURCE_WOOD)
-	verdict("B2 в секции дерева инструмент добычи (кирка)",
-		wood_tool != null and wood_tool.text == HUD.RES_GATHER_GLYPH,
-		"глиф дерева «%s», ожидали «%s»" % [
-			wood_tool.text if wood_tool != null else "—", HUD.RES_GATHER_GLYPH])
+	var stone_tool: Label = hud._res_tool_labels.get(Constants.RESOURCE_STONE)
+	var want_wood: String = String(HUD.RES_TOOL_GLYPHS.get(Constants.RESOURCE_WOOD, ""))
+	var want_stone: String = String(HUD.RES_TOOL_GLYPHS.get(Constants.RESOURCE_STONE, ""))
+	verdict("B2 у дерева свой инструмент (топор), не такой же, как у камня",
+		wood_tool != null and stone_tool != null
+			and wood_tool.text == want_wood and stone_tool.text == want_stone
+			and want_wood != want_stone,
+		"дерево «%s», камень «%s»" % [
+			wood_tool.text if wood_tool != null else "—",
+			stone_tool.text if stone_tool != null else "—"])
 
 	# B3 — счётчик рабочих тоже в каждой секции
 	var wk_keys: Array = hud._res_workers_labels.keys()
@@ -240,8 +256,16 @@ func _b_resource_bar() -> void:
 	await frames(2)
 	var wl: Label = hud._res_workers_labels.get(Constants.RESOURCE_FOOD)
 	var total: int = hud._total_player_workers()
-	verdict("B6 счётчик в еде показывает всех рабочих игрока",
-		wl != null and wl.visible and wl.text == str(total) and total >= 3,
+	# ── СЕКЦИЯ ЕДЫ БОЛЬШЕ НЕ ИСКЛЮЧЕНИЕ (заказ владельца, разворот) ──────────
+	# Она показывала ОБЩЕЕ число рабочих — потому что еду в этой игре не
+	# добывают. Владелец попросил обратное: пусть стоит честный ноль, пока еду
+	# дают Домики. Проверяем именно новое свойство — что все четыре секции
+	# отвечают на ОДИН вопрос, и на еде это ноль при живых рабочих на других
+	# ресурсах. Существование самих рабочих проверяется отдельно, иначе «ноль»
+	# прошёл бы и на пустой карте
+	verdict("B6 в секции еды честный ноль: еду добывают Домики, а не рабочие",
+		wl != null and wl.visible and wl.text == "0" and total >= 3
+			and HUD.RES_WORKER_SECTION < 0,
 		"на плашке «%s», всего рабочих %d" % [
 			wl.text if wl != null else "—", total])
 	for w in made:

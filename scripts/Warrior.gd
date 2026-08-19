@@ -140,9 +140,13 @@ func _is_front_attack(attacker: Node3D) -> bool:
 		return true          # бьют вплотную сверху — сторону не определить
 	return _facing.normalized().dot(to_atk.normalized()) > GUARD_FRONT_COS
 
-func tick_visual(delta: float, frame: int = -1, anim_every: int = ANIM_EVERY) -> void:
+func tick_visual(delta: float, frame: int = -1, anim_every: int = ANIM_EVERY,
+		view_x: float = 0.0, view_z: float = 0.0, view_r2: float = INF,
+		lerp_k: float = 1.0, mm_all: bool = true, prof: bool = false,
+		fog_on: bool = true) -> void:
 	_update_guard()
-	super.tick_visual(delta, frame, anim_every)
+	super.tick_visual(delta, frame, anim_every, view_x, view_z, view_r2,
+		lerp_k, mm_all, prof, fog_on)
 
 ## Пересчёт признака «щит поднят». Три повода закрыться:
 ##   1) в юнита летит стрела или его только что ударили (_threatened);
@@ -172,11 +176,19 @@ func _update_sprite_anim() -> void:
 		return
 	super._update_sprite_anim()
 
-# МАРШ ПОД ЩИТОМ: мечник не встаёт под обстрелом, а идёт медленнее
+# МАРШ ПОД ЩИТОМ: мечник не встаёт под обстрелом, а идёт медленнее.
+#
+# ШТРАФЫ НЕ ПЕРЕМНОЖАЮТСЯ. Штраф стойки «Защита» (STANCES.move_speed_mult, те же
+# −35%) и штраф поднятого щита — это ОДНО И ТО ЖЕ замедление, названное дважды:
+# боец идёт шагом, прикрываясь. Перемножение давало 0.65 × 0.65 = 0.42, то есть
+# мечник в обороне под обстрелом полз вдвое медленнее заказанного. Берём
+# наибольший штраф из двух, а не их произведение.
 func _effective_speed() -> float:
 	var s: float = super._effective_speed()
 	if _guard_active:
-		s *= GUARD_SPEED_FACTOR
+		var stance_mult: float = _UStats.stance_stat(stance, "move_speed_mult", 1.0)
+		if stance_mult > GUARD_SPEED_FACTOR:
+			s *= GUARD_SPEED_FACTOR / maxf(stance_mult, 0.01)
 	return s
 
 # Сон _process. Базовая версия отказывается спать при любой анимации, кроме

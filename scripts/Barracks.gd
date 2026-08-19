@@ -13,7 +13,10 @@ func _ready() -> void:
 	squad_size    = 20
 	squad_cols    = 5
 	squad_spacing = 0.35
-	spawn_offset  = Vector3(0.0, 0.0, 6.0)
+	# spawn_offset здесь больше не задаётся: точку выхода держит узел SpawnPoint
+	# у нарисованных дверей, и _face_front() перезаписывает офсет по нему
+	# (см. Building — «ТОЧКА ВЫХОДА»). Прежнее число тут только вводило в
+	# заблуждение: оно не действовало ни одного кадра
 	super._ready()
 
 # Цена, время и размер отряда — из конфига (TRAINING["barracks"])

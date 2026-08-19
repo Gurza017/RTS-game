@@ -89,7 +89,7 @@ func _process(_delta: float) -> void:
 	var _vm0: int
 	if _meter: _vm0 = Time.get_ticks_usec()
 	var live_n: int = _live_units.size()
-	var shards: int = _Opt.shards_for(live_n)
+	var shards: int = _Opt.shards_for(active_units())
 	# ── СГЛАЖИВАНИЕ КАРТИНКИ МЕЖДУ ФИЗИЧЕСКИМИ ШАГАМИ ───────────────────────
 	# Боец двигается не каждый кадр отрисовки, а раз в свой физический тик, и при
 	# шардировании — раз в `shards` тиков. На тысяче бойцов шардов два, то есть
@@ -99,26 +99,70 @@ func _process(_delta: float) -> void:
 	# Доля сближения считается ЗДЕСЬ, один раз на кадр: внутри бойца это была бы
 	# пара делений на каждого. Постоянная времени — примерно один интервал его
 	# обновления, тогда картинка догоняет ровно к следующему шагу и не отстаёт
-	var upd: float = float(shards) / 60.0
+	# ── ПОСТОЯННАЯ БЕРЁТСЯ ОТ ВИЗУАЛЬНОГО ТАКТА, А НЕ ОТ ФИЗИЧЕСКОГО ────────
+	# Пока такты совпадали, разницы не было. Но визуальный проход вправе
+	# дробиться чаще (vis_shards_extra), и тогда нарисованная точка обновляется
+	# реже, чем считает эта формула, — сглаживание оказывается настроенным на
+	# более частый шаг и не догоняет. Замер поймал это сразу: «рывок шага»
+	# 1.64 → 1.80-2.32 при добавлении одного визуального шарда
+	var vsh: int = _Opt.vis_shards_for(live_n)
+	var upd: float = float(vsh) / 60.0
 	vis_lerp_k = clampf(_delta / maxf(upd * VIS_SMOOTH_TAU, 0.0005), 0.0, 1.0)
 	# Номер кадра — ОДИН вызов в движок на всю армию, а не по одному на бойца
 	var frame: int = Engine.get_process_frames()
 	# Такт пересчёта позы тоже считается ОДИН раз на всю армию и раздаётся
 	# аргументом (см. perf_config.anim_every_for и шапку Unit.tick_visual)
 	var anim_every: int = _Opt.anim_every_for(live_n)
-	if shards <= 1:
+	# ── ОБЩЕЕ НА АРМИЮ СНИМАЕТСЯ ЗДЕСЬ, ОДИН РАЗ (см. шапку Unit.tick_visual) ─
+	# Точка обзора и четыре настройки одинаковы для всех и менялись бы не чаще
+	# раза в кадр, а читались из КАЖДОГО бойца в КАЖДОМ кадре — семь обращений
+	# к чужим объектам на бойца. Выключенный LOD выражаем бесконечным радиусом:
+	# так у бойца исчезает и ветка, и чтение настройки
+	var vx0: float = _view_x
+	var vz0: float = _view_z
+	var vr2: float = _view_r2 if _Opt.sprite_lod else INF
+	var lerpk: float = vis_lerp_k if _Opt.visual_smoothing else 1.0
+	var mm_all: bool = _Opt.mm_render_all
+	var vprof: bool = _Opt.profile_physics
+	# Туман спрашивается за ВСЮ армию один раз: при выключенном тумане у бойца
+	# исчезают два обращения к чужим объектам на кадр
+	var fog_on: bool = fog != null and (fog as FogOfWar).enabled
+	# Визуальный проход вправе дробиться ЧАЩЕ физического (см.
+	# perf_config.vis_shards_extra): шаг обязан быть верным, картинка — гладкой,
+	# и это разные требования
+	var vshards: int = vsh
+	if vshards <= 1:
 		for u in _live_units:
 			if is_instance_valid(u) and u.is_processing():
-				u.tick_visual(_delta, frame, anim_every)
+				u.tick_visual(_delta, frame, anim_every, vx0, vz0, vr2,
+					lerpk, mm_all, vprof, fog_on)
 	else:
-		var i: int = frame % shards
-		var d: float = _delta * float(shards)
+		var i: int = frame % vshards
+		var d: float = _delta * float(vshards)
 		while i < live_n:
 			var u = _live_units[i]
 			if is_instance_valid(u) and u.is_processing():
-				u.tick_visual(d, frame, anim_every)
-			i += shards
+				u.tick_visual(d, frame, anim_every, vx0, vz0, vr2,
+					lerpk, mm_all, vprof, fog_on)
+			i += vshards
+	# ── ДОВЕДЕНИЕ КАРТИНКИ — БЕЗ ШАРДИРОВАНИЯ ───────────────────────────────
+	# Цикл выше идёт по одному шарду за кадр: при трёх шардах боец получает
+	# новую позицию двадцать раз в секунду, а рисуется шестьдесят. Сглаживание
+	# сидело ВНУТРИ этого цикла и потому срабатывало ровно в момент шага — то
+	# есть не сглаживало ничего, только добавляло отставание. Теперь догон
+	# делает отдельный проход КАЖДЫЙ кадр (см. Unit.tick_draw): он состоит из
+	# чтения строки, одного умножения и записи трёх float в общий буфер.
+	# При одном шарде проход не нужен — там tick_visual и так идёт каждый кадр
+	if shards > 1 and _Opt.draw_catchup:
+		for u in _live_units:
+			if is_instance_valid(u) and u.is_processing():
+				u.tick_draw()
 	if _meter: _Opt.vis_add(Time.get_ticks_usec() - _vm0)
+	# Метки выделения и полоски здоровья — СРАЗУ ПОСЛЕ бойцов и ДО подачи в
+	# рендер: они берут ту же нарисованную точку, которую только что посчитал
+	# tick_visual, и обязаны совпасть с ней кадр в кадр
+	sel_decals.update_all()
+	hp_bars.update_all()
 	far_units.flush()
 	sel_decals.flush()
 	hp_bars.flush()
@@ -167,6 +211,12 @@ func register_unit(u: Unit) -> void:
 	_live_units.append(u)
 
 func unregister_unit(u: Unit) -> void:
+	# СПЯЩИЙ, КОТОРОГО УБИЛИ, ОБЯЗАН ВЫЙТИ И ИЗ СЧЁТЧИКА СПЯЩИХ. Иначе счётчик
+	# растёт над реестром, active_units() уходит в ноль и вся армия сваливается
+	# в один шард независимо от размера
+	if u.dormant:
+		u.dormant = false
+		note_dormant(false)
 	var n: int = _live_units.size()
 	if n == 0:
 		return
@@ -218,23 +268,43 @@ func _physics_process(delta: float) -> void:
 	if _prof: _t0 = Time.get_ticks_usec()
 	_sweep_melee()
 	if _prof: _Opt.prof_add("squad_melee", Time.get_ticks_usec() - _t0)
+	# ── ЗАЛПОВЫЙ ОГОНЬ ЛУЧНИКОВ (см. _sweep_volleys) ───────────────────────
+	# ПОСЛЕ разметки боя и ДО обхода бойцов: окно залпа открывается здесь, а
+	# стрелки, которых обход застанет уже открытым, отстреляются в этом же кадре
+	if _prof: _t0 = Time.get_ticks_usec()
+	_sweep_volleys()
+	if _prof: _Opt.prof_add("squad_volley", Time.get_ticks_usec() - _t0)
 	# ── ОТРЯДЫ, ИДУЩИЕ МАТРИЦЕЙ (Этап 1) ────────────────────────────────────
 	# ПОСЛЕ коридоров (они и дают ответ «путь чист») и ДО обхода бойцов: те,
 	# кого повела матрица, свой тик пропустят
 	if _prof: _t0 = Time.get_ticks_usec()
 	_advance_matrices(delta)
 	if _prof: _Opt.prof_add("squad_matrix", Time.get_ticks_usec() - _t0)
+	# ── ПАКЕТНЫЙ ПРОХОД БОЯ (см. ArmyCore.BatchCombat) ─────────────────────
+	# Стоит ДО обхода армии: он решает, кому в этом кадре вообще нужен полный
+	# боевой автомат. Всем прочим шаг подтягивания уже посчитан по колонкам, и
+	# в интерпретатор они не заходят.
+	#
+	# Отметка кадром, а не флагом на бойце: гасить флаг у трёх тысяч пришлось бы
+	# отдельным проходом, а сравнение с номером кадра само себя обнуляет
+	var shards: int = _Opt.shards_for(active_units())
+	var _bm_now: bool = _Opt.batch_move
+	if _Opt.batch_combat:
+		if _prof: _t0 = Time.get_ticks_usec()
+		atk_need = army.batch_combat(delta, Unit.State.ATTACKING,
+			Unit.PULL_UP_SPEED, Unit.PULL_UP_MAX,
+			shards, Engine.get_physics_frames() % maxi(shards, 1))
+		if _prof: _Opt.prof_add("batch_combat", Time.get_ticks_usec() - _t0)
 	if _prof: _t0 = Time.get_ticks_usec()
 	# ── ЧЕРЕДОВАНИЕ ПО КАДРАМ (см. perf_config.shards_for) ──────────────────
 	# Кадр держит работа в ОДНОМ кадре, а не за секунду. Пока армия невелика,
 	# shards == 1 и это ровно прежний цикл; на пяти тысячах армия делится
 	# надвое, и каждый боец опрашивается через кадр — с удвоенной delta, так
 	# что путь, откаты ударов и таймеры остаются те же
-	var shards: int = _Opt.shards_for(_live_units.size())
 	if shards <= 1:
 		for u in _live_units:
 			if is_instance_valid(u) and u.is_physics_processing():
-				u.tick_physics(delta)
+				u.tick_physics(delta, _prof, _bm_now, bonus_version)
 	else:
 		var n: int = _live_units.size()
 		var i: int = Engine.get_physics_frames() % shards
@@ -242,9 +312,27 @@ func _physics_process(delta: float) -> void:
 		while i < n:
 			var u = _live_units[i]
 			if is_instance_valid(u) and u.is_physics_processing():
-				u.tick_physics(d)
+				u.tick_physics(d, _prof, _bm_now, bonus_version)
 			i += shards
 	if _prof: _Opt.prof_add("!ВЕСЬ ТИК ЮНИТОВ", Time.get_ticks_usec() - _t0)
+	# ── ПАКЕТНЫЙ ШАГ МАРША — ОДНИМ ПРОХОДОМ ПОСЛЕ ВСЕХ (см. ArmySoA.batch_move)
+	# Бойцы в своём тике только ЗАЯВИЛИ желаемое смещение; здесь оно проводится
+	# через всю геометрию шага. Стоит ДО разбора наложения и ПОСЛЕ обхода: сперва
+	# все дошли, куда шли, и лишь потом расталкивание правит итог кадра — тот же
+	# порядок, что был у поштучного пути
+	if _prof: _t0 = Time.get_ticks_usec()
+	_flush_poses()
+	if _prof: _Opt.prof_add("pose_flush", Time.get_ticks_usec() - _t0)
+	if _Opt.batch_move:
+		if _prof: _t0 = Time.get_ticks_usec()
+		army.batch_move_queued(_stq_row, _stq_x, _stq_z, _stq_fl,
+			map_lim_x, map_lim_z, world_bounds_enabled, water_active,
+			Unit.BLOCK_RADIUS, Unit.TRUNK_CLEARANCE, _relief_amp_now(), self)
+		_stq_row.resize(0)
+		_stq_x.resize(0)
+		_stq_z.resize(0)
+		_stq_fl.resize(0)
+		if _prof: _Opt.prof_add("batch_move", Time.get_ticks_usec() - _t0)
 	# ── РАЗБОР НАЛОЖЕНИЯ — ОДНИМ ПРОХОДОМ ПОСЛЕ ВСЕХ (см. ArmySoA) ──────────
 	# ПОСЛЕ обхода: к этому моменту все, кто шёл, уже сдвинулись, и поправка
 	# считается по итоговым точкам кадра, а не по смеси старых и новых.
@@ -254,7 +342,7 @@ func _physics_process(delta: float) -> void:
 	army.batch_separation(delta, Unit.SEP_MIN_DIST, Unit.SEP_MAX_STEP,
 		Unit.SEP_INTERVAL, map_lim_x, map_lim_z,
 		Unit.State.MOVING, Unit.State.ATTACKING, water_active, self,
-		Unit.SEP_DEADZONE)
+		Unit.SEP_DEADZONE, _relief_amp_now())
 	if _prof: _Opt.prof_add("sep_overlap", Time.get_ticks_usec() - _t0)
 	if _meter: _Opt.tick_add(Time.get_ticks_usec() - _tm0)
 	# Спящий (_proc_sleeping) дальний юнит не крутит свой _process и потому сам
@@ -264,11 +352,12 @@ func _physics_process(delta: float) -> void:
 	# дешёвый и достаточно частый, чтобы не быть заметным
 	if Engine.get_physics_frames() % FAR_WAKE_CHECK_FRAMES == 0:
 		_wake_returned_far_units()
-	# Метки выделения едут за своими бойцами. Раньше это делало дерево сцены
-	# (кольцо и тень были детьми юнита), теперь — один проход по выделенным;
-	# неподвижных он пропускает
-	sel_decals.update_all()
-	hp_bars.update_all()
+	# ── МЕТКИ ПОД НОГАМИ ЖИВУТ В ОТРИСОВОЧНОМ ТИКЕ, А НЕ ЗДЕСЬ ──────────────
+	# Кольца, тени и полоски здоровья берут НАРИСОВАННУЮ точку бойца
+	# (Unit.draw_position), а она пересчитывается в _process вместе с самим
+	# спрайтом. Обновлять их в физическом тике значило бы брать позапрошлое
+	# значение — и метка снова разъезжалась бы с картинкой, только уже на
+	# другую долю шага. См. _process выше
 
 const FAR_WAKE_CHECK_FRAMES := 15
 
@@ -316,6 +405,88 @@ var vis_lerp_k: float = 1.0
 ## резче и ближе к правде, больше — плавнее, но с заметным отставанием.
 ## 0.6 подобрано так, чтобы картинка успевала прийти к следующему шагу
 const VIS_SMOOTH_TAU := 0.6
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ОЧЕРЕДЬ ЗАЯВОК НА ШАГ
+# ═══════════════════════════════════════════════════════════════════════════
+# Боец не ходит за границу языков сам. Он кладёт свою заявку СЮДА — обычной
+# записью в Packed-массивы автозагрузки, — а весь список уходит в солвер ОДНИМ
+# вызовом после обхода армии.
+#
+# ЗАЧЕМ. Замер (qa_fx, 3000, фаза контакта): восемьсот заявок в кадр по одному
+# переходу границы каждая, ~2.2 мкс за переход — полторы миллисекунды. При этом
+# 93 % заявок приходят из ОДНОЙ ветки боя (подтягивание рядов), то есть это не
+# разнородная работа, а один и тот же вызов, повторённый восемьсот раз.
+#
+# Массивы принадлежат GameManager, и пишет в них ЕГО ЖЕ метод — иначе запись
+# через чужую ссылку скопировала бы весь Packed-массив на каждый элемент (та же
+# ловушка, что описана у FarUnitRenderer.Bucket).
+var _stq_row := PackedInt32Array()
+var _stq_x := PackedFloat32Array()
+var _stq_z := PackedFloat32Array()
+var _stq_fl := PackedInt32Array()
+
+## Подать заявку на шаг. Зовёт Unit._commit_step
+func queue_step(row: int, sx: float, sz: float, fl: int) -> void:
+	_stq_row.append(row)
+	_stq_x.append(sx)
+	_stq_z.append(sz)
+	_stq_fl.append(fl)
+
+## ── ОЧЕРЕДЬ ПОЗ ─────────────────────────────────────────────────────────────
+## Ровно та же причина, что и у очереди шагов: запись позы шла отдельным
+## переходом границы на каждого бойца (908 в кадр по 2.14 мкс — 1.9 мс).
+## Пропуск неизменившихся поз тут не спасает: в контактном бою подтягиваются
+## почти все, то есть поза меняется у всех
+var _pq_row := PackedInt32Array()
+var _pq_x := PackedFloat32Array()
+var _pq_y := PackedFloat32Array()
+var _pq_z := PackedFloat32Array()
+var _pq_vx := PackedFloat32Array()
+var _pq_vz := PackedFloat32Array()
+var _pq_st := PackedInt32Array()
+var _pq_gate := PackedInt32Array()
+## Маска «нужен полный боевой автомат», по строке на бойца. Ноль — пакетный
+## проход уже всё за него посчитал (см. ArmyCore.BatchCombat). Отдаётся ОДНИМ
+## массивом за кадр: возврат списка объектов стоил дороже, чем экономил
+var atk_need := PackedByteArray()
+var _pq_eff := PackedFloat32Array()
+
+func queue_pose(row: int, p: Vector3, v: Vector3, state: int,
+		gates: int, eff_speed: float) -> void:
+	_pq_row.append(row)
+	_pq_x.append(p.x)
+	_pq_y.append(p.y)
+	_pq_z.append(p.z)
+	_pq_vx.append(v.x)
+	_pq_vz.append(v.z)
+	_pq_st.append(state)
+	_pq_gate.append(gates)
+	_pq_eff.append(eff_speed)
+
+## Отдать накопленные позы солверу. Зовётся ПОСЛЕ обхода армии и ДО пакетного
+## шага: иначе позы «на начало кадра» затёрли бы уже посчитанное перемещение
+func _flush_poses() -> void:
+	if _pq_row.is_empty():
+		return
+	army.write_pose_batch(_pq_row, _pq_x, _pq_y, _pq_z, _pq_vx, _pq_vz, _pq_st,
+		_pq_gate, _pq_eff)
+	_pq_row.resize(0)
+	_pq_gate.resize(0)
+	_pq_eff.resize(0)
+	_pq_x.resize(0)
+	_pq_y.resize(0)
+	_pq_z.resize(0)
+	_pq_vx.resize(0)
+	_pq_vz.resize(0)
+	_pq_st.resize(0)
+
+## Амплитуда рельефа для пакетных проходов. Ноль честно означает и «рельеф
+## выключен» — тогда высота везде нулевая, и пересчитывать нечего
+func _relief_amp_now() -> float:
+	if _relief_amp == 0.0 and main != null:
+		_relief_amp = main.RELIEF_AMP if main.TERRAIN_RELIEF else 0.0
+	return _relief_amp
 
 func _advance_matrices(delta: float) -> void:
 	if not _Opt.squad_matrix or squads.is_empty():
@@ -381,6 +552,8 @@ func _matrix_engage(sid: int):
 	var members: Array = (squads[sid] as Dictionary)["members"]
 	var rows := PackedInt32Array()
 	var live: Array = []
+	var mpx: PackedFloat32Array = army.px
+	var mpz: PackedFloat32Array = army.pz
 	var ax := 0.0
 	var az := 0.0
 	var dx := 0.0
@@ -395,8 +568,8 @@ func _matrix_engage(sid: int):
 		var i: int = u._soa
 		rows.append(i)
 		live.append(u)
-		ax += army.px[i]
-		az += army.pz[i]
+		ax += mpx[i]
+		az += mpz[i]
 		dx += u.move_target.x
 		dz += u.move_target.z
 		# Отряд идёт со скоростью самого медленного — иначе строй растянется
@@ -588,9 +761,26 @@ func _recalc_corridor(sid: int, now: int) -> void:
 	# врага — перехват марша и авто-агро. У лучника они смотрят на 20 м,
 	# поэтому радиус проверки обязан накрывать самый дальнозоркий взгляд в
 	# отряде, иначе отряд «ослепнет» ровно там, где раньше стрелял
+	# ── СОСТАВ СОБИРАЕТСЯ ЗДЕСЬ, ГАБАРИТЫ СЧИТАЕТ СОЛВЕР ────────────────────
+	# Список живых нужен тут же (_push_corridor раздаёт им ответы), а чтение
+	# полей своего же объекта в GDScript стоит копейки. Через границу языков,
+	# наоборот, каждое такое чтение — обращение через Variant, и прежний
+	# harvest_squad, читавший у каждого бойца три свойства, стоил впятеро
+	# дороже всего остального коридора. Границу теперь пересекает ОДИН вызов на
+	# отряд, а точки солвер берёт из своих же колонок — их ведёт пакетный шаг
 	var live: Array = []
-	var box: Array = army.harvest_squad(members, live,
-		Unit.State.DEAD, Unit.AGGRO_RADIUS, Unit.INTERCEPT_MARGIN)
+	var rows := PackedInt32Array()
+	var dead_st: int = Unit.State.DEAD
+	for m in members:
+		if not is_instance_valid(m):
+			continue
+		var mu := m as Unit
+		if mu == null or mu.state == dead_st or mu._soa < 0:
+			continue
+		live.append(mu)
+		rows.append(mu._soa)
+	var box: Array = army.squad_bounds(rows,
+		dead_st, Unit.AGGRO_RADIUS, Unit.INTERCEPT_MARGIN)
 	var n: int = box[0]
 	if n == 0:
 		_corridors.erase(sid)
@@ -618,6 +808,96 @@ func _recalc_corridor(sid: int, now: int) -> void:
 		ttl = 1 + (sid * 37) % CORRIDOR_TTL_MS
 	_corridors[sid] = [now + ttl, clear_trunk, clear_enemy]
 	_push_corridor(live, clear_trunk, clear_enemy)
+	# СПЛОЧЁННОСТЬ: габарит отряда солвер уже посчитал (box[3] — самый дальний
+	# от центра), поэтому в обычном случае это ОДНО СРАВНЕНИЕ и ни одного
+	# лишнего обхода бойцов
+	if float(box[3]) > _cohesion_limit(sid):
+		_cohesion_guard(sid, live, cx, cz, now)
+
+## ── ЖЁСТКАЯ СПЛОЧЁННОСТЬ ОТРЯДА ─────────────────────────────────────────────
+##
+## ЗАЧЕМ. Отряд рассыпался на изолированные кучки и больше никогда не собирался:
+## смыкание рядов (squad_close_ranks) отказывается работать, пока отряд в бою,
+## а «в бою» — это состояние ОТРЯДА, и пока хоть один боец рубится, отставшие на
+## другом конце поля стоят вечно. На скриншотах владельца это два-три мечника
+## поодиночке в чистом поле и звезда отряда между ними.
+##
+## КАК. Это НЕ сила и не поле — это разовый ПРИКАЗ на возврат, редкий и с
+## остыванием, ровно в том же ключе, что и смыкание рядов. Отряд подзывает
+## только тех, кто (а) действительно оторвался, (б) ничем не занят: не дерётся,
+## не бежит, не отходит, не выполняет приказ игрока (замок цели) и не работает.
+## Занятого бойца не трогаем — иначе приказ на возврат отменил бы его бой и
+## получилась бы та самая «пляска», от которой лечит squad_in_combat.
+##
+## Цена: обход состава раз в SQUAD_COHESION_COOLDOWN_MS на отряд И ТОЛЬКО ЕСЛИ
+## отряд действительно растянут сверх нормы.
+## ПРЕДЕЛ РАЗЛЁТА ДЛЯ ЭТОГО ОТРЯДА. Базовое число из конфига — но если игрок
+## сам растянул отряд в длинную шеренгу (ПКМ с протяжкой), его собственная
+## разметка шире, и подзывать по базовому числу означало бы ломать заказанное
+## им построение каждые две с половиной секунды. Берём наибольшее из двух
+func _cohesion_limit(sid: int) -> float:
+	var base: float = _UCfg.SQUAD_COHESION_DIST
+	var sq: Variant = squads.get(sid)
+	if sq == null:
+		return base
+	var slots: Array = (sq as Dictionary).get("slots", [])
+	if slots.is_empty():
+		return base
+	var ax := 0.0
+	var az := 0.0
+	for sl in slots:
+		var v: Vector3 = sl
+		ax += v.x
+		az += v.z
+	ax /= float(slots.size())
+	az /= float(slots.size())
+	var r2 := 0.0
+	for sl in slots:
+		var v2: Vector3 = sl
+		var d2: float = (v2.x - ax) * (v2.x - ax) + (v2.z - az) * (v2.z - az)
+		if d2 > r2:
+			r2 = d2
+	# Запас: боец, идущий на свой слот, ещё не дошёл до него
+	return maxf(base, sqrt(r2) + CORRIDOR_MARGIN)
+
+func _cohesion_guard(sid: int, live: Array, cx: float, cz: float, now: int) -> void:
+	if int(_cohesion_last.get(sid, 0)) > now:
+		return
+	_cohesion_last[sid] = now + _UCfg.SQUAD_COHESION_COOLDOWN_MS
+	var lim: float = _cohesion_limit(sid)
+	var lim2: float = lim * lim
+	var idle_st: int = Unit.State.IDLE
+	var called := 0
+	for m in live:
+		var u := m as Unit
+		if u == null:
+			continue
+		# Занят — не трогаем. Порядок проверок от самой дешёвой к самой дорогой
+		if u.state != idle_st:
+			continue
+		if u.attack_target != null or u.target_lock or u.retreating or u.sprinting:
+			continue
+		if u.garrisoned:
+			continue
+		var dx: float = u.position.x - cx if u._local_xform else u.global_position.x - cx
+		var dz: float = u.position.z - cz if u._local_xform else u.global_position.z - cz
+		if dx * dx + dz * dz <= lim2:
+			continue
+		# Возврат к своим — обычный приказ на движение. Точка берётся с отступом
+		# внутрь: приказ ровно в центр собрал бы отставших в одну точку
+		var d: float = sqrt(dx * dx + dz * dz)
+		var back: float = maxf(d - lim * 0.5, 0.0)
+		var tx: float = u.global_position.x - dx / d * back
+		var tz: float = u.global_position.z - dz / d * back
+		u.command_move(Vector3(tx, get_terrain_height(tx, tz), tz))
+		called += 1
+	if called == 0:
+		# Никого звать не пришлось — снимаем остывание, чтобы следующая проверка
+		# не откладывалась на пустом месте
+		_cohesion_last.erase(sid)
+
+## Когда отряду снова разрешено подзывать отставших (sid -> ticks_msec)
+var _cohesion_last: Dictionary = {}
 
 ## `members` здесь — уже отобранные живые бойцы (см. _recalc_corridor):
 ## повторно проверять ссылку не нужно, между двумя строками никто не умирает
@@ -733,6 +1013,15 @@ func _recalc_melee(sid: int, now: int) -> void:
 	# Столбцы снимаются ОДИН РАЗ перед циклом. `army.px[i]` внутри цикла — это
 	# выборка свойства чужого объекта на каждое обращение, а их здесь четыре на
 	# бойца; та же оговорка, что и во всех остальных проходах по составу
+	# ── КОЛОНКИ СНИМАЮТСЯ ОДНИМ СНИМКОМ, А НЕ ПОШТУЧНО ──────────────────────
+	# Здесь была попытка брать координаты по одной (army.pos_x), и она вышла
+	# боком: каждый такой вызов — переход границы GDScript↔C#, а их тут по два
+	# на бойца. Замер: ветка melee_calc подорожала с 22 до 251 мкс на пересчёт,
+	# то есть 1.8 мс кадра на ровном месте. Снимок отдаёт КОПИЮ массива, но она
+	# одна на отряд и делается раз в MELEE_TTL_MS — против трёх тысяч переходов
+	# границы это несопоставимо дешевле.
+	# Правило, которое отсюда следует: через границу языков ходят ПАКЕТАМИ или
+	# один раз, но никогда — в цикле по бойцам
 	var apx: PackedFloat32Array = army.px
 	var apz: PackedFloat32Array = army.pz
 	var live: Array = []
@@ -810,6 +1099,23 @@ func _recalc_melee(sid: int, now: int) -> void:
 	if _Opt.battle_lines and live.size() >= 2 and have_tgt:
 		_assign_rear(sid, live, free_list, tgt, apx, apz)
 	if _p: _Opt.prof_add("melee_calc", Time.get_ticks_usec() - _t)
+
+## ── СКОЛЬКО БОЙЦОВ ОТРЯДА ПРЯМО СЕЙЧАС ДОСТАЮТ ДО СВОЕЙ ЦЕЛИ ────────────────
+## Это и есть «отряд завязался в ближнем бою» в строгом смысле: не «по нам
+## стреляют» и не «у кого-то есть цель на горизонте», а оружие достаёт.
+## Число уже считается бухгалтерией боя (_recalc_melee, раз в MELEE_TTL_MS на
+## отряд), здесь только чтение — своего обхода состава не появляется.
+##
+## Читатель — EnemyAI._try_retreat: отряд, у которого хоть кто-то в контакте, не
+## разворачивается спиной (см. там же). Ответ может отставать до MELEE_TTL_MS
+## (0.4 с), и это ровно в нужную сторону: отряд, только что вышедший из
+## контакта, ещё полсекунды считается дерущимся и не срывается в бегство на
+## последнем ударе
+func squad_engaged(sid: int) -> int:
+	var row: Variant = _melee.get(sid)
+	if row == null:
+		return 0
+	return int((row as Dictionary).get("engaged", 0))
 
 ## Ширина колонны (файла) поперёк курса. Примерно место одного бойца в шеренге:
 ## уже — и один человек попадёт в два файла, шире — и сосед сбоку сойдёт за
@@ -1040,6 +1346,7 @@ func ruin_sprite_path(faction: int, building_id: String) -> String:
 var upgrades: Dictionary = {
 	Constants.FACTION_PLAYER: {"damage": 0.0, "defense": 0.0, "health": 0.0, "arrow_dmg": 0.0},
 	Constants.FACTION_ENEMY:  {"damage": 0.0, "defense": 0.0, "health": 0.0, "arrow_dmg": 0.0},
+	Constants.FACTION_GOBLIN: {"damage": 0.0, "defense": 0.0, "health": 0.0, "arrow_dmg": 0.0},
 }
 
 func apply_upgrade(faction: int, stat: String, value: float) -> void:
@@ -1240,6 +1547,12 @@ func _accumulate_upgrade(faction: int, slot: Dictionary, upgrade_id: String) -> 
 	var hp_bonus: float = slot.get("bonus_health", 0.0)
 	if hp_bonus != 0.0:
 		_apply_health_bonus_now(faction, slot, hp_bonus)
+	# ДАЛЬНОСТЬ — ровно тот же случай, что и HP, и по той же причине: она лежит
+	# полем и читается в горячих ветках, а не спрашивается у GameManager на
+	# каждый скан (см. Unit._ready). Новорождённые получают её сами
+	var rng_bonus: float = slot.get("bonus_range", 0.0)
+	if rng_bonus != 0.0:
+		_apply_range_bonus_now(faction, slot, rng_bonus)
 
 func _apply_health_bonus_now(faction: int, slot: Dictionary, hp_bonus: float) -> void:
 	var tree := get_tree()
@@ -1253,6 +1566,19 @@ func _apply_health_bonus_now(faction: int, slot: Dictionary, hp_bonus: float) ->
 			continue
 		u.max_health     += hp_bonus
 		u.current_health += hp_bonus
+		u._soa_push_stats()
+
+func _apply_range_bonus_now(faction: int, slot: Dictionary, rng: float) -> void:
+	var tree := get_tree()
+	if tree == null:
+		return
+	for n in tree.get_nodes_in_group("all_units"):
+		var u := n as Unit
+		if u == null or u.faction != faction or u.is_dead():
+			continue
+		if not _UCfg.slot_applies_to(slot, u.stat_id):
+			continue
+		u.attack_range += rng
 		u._soa_push_stats()
 
 func register_dropoff(faction: int, building: Node3D) -> void:
@@ -1278,9 +1604,80 @@ func get_nearest_dropoff(faction: int, from_pos: Vector3) -> Node3D:
 			nearest = b
 	return nearest
 
-func on_selection_changed(units: Array) -> void:
+## ── ЩЕЛЧОК ВЫДЕЛЕНИЯ ───────────────────────────────────────────────────────
+## Здание и отряд звучат по-разному (click1 / click3). Точка выбрана здесь,
+## потому что это ЕДИНСТВЕННАЯ воронка выделения: клик, рамка, горячая группа,
+## виджет бездельников и плашка отрядов приходят все сюда. На кнопках панели
+## пришлось бы вешать звук пять раз и один всё равно бы забылся.
+##
+## Звучит только на РЕАЛЬНУЮ смену набора: панель пересобирается и на обычном
+## обновлении (например, при потере бойца), а щёлкать на это нельзя
+var _sel_sig: String = ""
+
+## Подпись набора + что в нём есть. Возвращает [сменилась ли, есть здание,
+## есть юнит] и запоминает подпись
+func _selection_sig(units: Array) -> Array:
+	var sig := ""
+	var has_building := false
+	var has_unit := false
+	for n in units:
+		if not is_instance_valid(n):
+			continue
+		var nd := n as Node
+		if int(nd.get("faction")) != Constants.FACTION_PLAYER:
+			continue
+		if nd is Building:
+			has_building = true
+		elif nd is Unit:
+			has_unit = true
+		sig += str(nd.get_instance_id()) + ","
+	var changed: bool = sig != _sel_sig
+	_sel_sig = sig
+	return [changed, has_building, has_unit]
+
+func _selection_click_sfx(units: Array) -> void:
+	var r: Array = _selection_sig(units)
+	if not bool(r[0]):
+		return
+	if bool(r[1]):
+		AudioManager.play_ui("pick_building")
+	elif bool(r[2]):
+		AudioManager.play_ui("pick_squad")
+
+## ── СКОЛЬКО БОЙЦОВ РЕАЛЬНО ХОДЯТ ───────────────────────────────────────────
+## Число шардов выводится ОТСЮДА, а не из размера реестра. Спящая деревня
+## гоблинов — это восемь сотен бойцов, которые стоят и не тикают вовсе; считая
+## их, игра уходила в два шарда с первой секунды партии, то есть все ОСТАЛЬНЫЕ
+## начинали двигаться тридцать раз в секунду вместо шестидесяти ни за что.
+## Счётчик ведётся событиями (сон/пробуждение), а не обходом армии
+var dormant_units: int = 0
+
+func active_units() -> int:
+	return maxi(_live_units.size() - dormant_units, 0)
+
+func note_dormant(on: bool) -> void:
+	dormant_units = maxi(dormant_units + (1 if on else -1), 0)
+
+## silent = true — выделение произошло НЕ по клику игрока, а само: игра выбрала
+## заложенный фундамент, достроенный замок, отряд после награды. Щёлкать на это
+## нельзя — звук выделения означает «игрок ткнул в объект», и паразитный клик
+## при закладке крепости владелец услышал сразу
+func on_selection_changed(units: Array, silent: bool = false) -> void:
+	if silent:
+		# Подпись всё равно запоминаем: иначе СЛЕДУЮЩЕЕ обновление той же
+		# панели прозвучит как новое выделение
+		_selection_sig(units)
+	else:
+		_selection_click_sfx(units)
 	if main and main.has_method("on_selection_changed"):
 		main.on_selection_changed(units)
+
+## Открылась/закрылась карточка разведки чужого отряда. Отдельный канал от
+## выделения намеренно: разведанный отряд НЕ выделен и приказов не получает
+## (см. SelectionManager.recon_units)
+func on_recon_changed(units: Array) -> void:
+	if main and main.has_method("on_recon_changed"):
+		main.on_recon_changed(units)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ОТРЯДЫ (SQUADS) — ЕДИНИЦА УПРАВЛЕНИЯ
@@ -2089,6 +2486,189 @@ func squad_buy_ability(sid: int, node_id: String) -> bool:
 	(sq["abilities"] as Dictionary)[node_id] = true
 	return true
 
+# ═════════════════════════════════════════════════════════════════════════════
+# ЗАЛПОВЫЙ ОГОНЬ ЛУЧНИКОВ
+# ═════════════════════════════════════════════════════════════════════════════
+# ЧТО ЭТО. Купленная и ВКЛЮЧЁННАЯ способность (forge_config archer_1d, toggle):
+# отряд перестаёт стрелять вразнобой по мере перезарядки и бьёт РАЗОМ, кучно, в
+# центр масс вражеского строя.
+#
+# ПОЧЕМУ ЭТО СЧИТАЕТ ОТРЯД, А НЕ БОЕЦ. Синхронность по определению не может быть
+# решением одиночки: каждому лучнику надо знать, готовы ли остальные, и это
+# ровно тот же случай, что коридор и разметка линии — один ответ на отряд,
+# розданный вниз. Боец только СПРАШИВАЕТ (Archer._may_strike_now).
+#
+# ── ПОЧЕМУ ОКНО, А НЕ ОДИН КАДР ─────────────────────────────────────────────
+# Обход армии дробится по кадрам (perf_config.shards_for): на большой армии
+# конкретный лучник опрашивается раз в два-три кадра. Признак «залп, огонь!»,
+# живущий один кадр, застал бы треть отряда, и «одновременный залп» развалился
+# бы на три очереди. Поэтому открывается ОКНО в VOLLEY_WINDOW_MS — заведомо
+# длиннее самого редкого опроса и заведомо короче паузы между залпами.
+const VOLLEY_WINDOW_MS := 200
+## Пауза между залпами. Сверх неё лучник всё равно ждёт СВОЮ перезарядку —
+## залп не ускоряет стрельбу, он её синхронизирует
+const VOLLEY_COOLDOWN_MS := 900
+## Какой доли живого состава хватает, чтобы дать команду. Не «всем»: один
+## отставший, которому цель не по дальности, стопорил бы отряд навсегда
+## 0.7, а не «все»: один отставший, которому цель не по дальности, стопорил бы
+## отряд навсегда. И не 0.5 — при половине залп выходит жидким: тот, кто не
+## успел, стреляет уже следующим залпом, а не в этом
+const VOLLEY_READY_FRACTION := 0.7
+
+## Включён ли режим у отряда (куплен и не выключен игроком)
+func squad_ability_on(sid: int, node_id: String) -> bool:
+	if not squad_has_ability(sid, node_id):
+		return false
+	return bool((squads[sid].get("ability_on", {}) as Dictionary).get(node_id, false))
+
+## Включить/выключить купленный режим. Некупленный не включается
+func squad_set_ability(sid: int, node_id: String, on: bool) -> bool:
+	if not squad_has_ability(sid, node_id):
+		return false
+	var sq: Dictionary = squads[sid]
+	if not sq.has("ability_on"):
+		sq["ability_on"] = {}
+	(sq["ability_on"] as Dictionary)[node_id] = on
+	if not on:
+		# Открытое окно закрываем сразу: иначе выключенный режим успел бы
+		# отстреляться ещё раз уже после нажатия
+		sq["volley_until"] = 0
+	return true
+
+## Идёт ли ПРЯМО СЕЙЧАС окно залпа. Спрашивает лучник перед выстрелом
+func squad_volley_open(sid: int) -> bool:
+	if not squads.has(sid):
+		return false
+	return Time.get_ticks_msec() < int((squads[sid] as Dictionary).get("volley_until", 0))
+
+## Точка, в которую бьёт текущий залп (центр масс цели)
+func squad_volley_aim(sid: int) -> Vector3:
+	if not squads.has(sid):
+		return Vector3.ZERO
+	return (squads[sid] as Dictionary).get("volley_aim", Vector3.ZERO)
+
+## Радиус вражеского строя, по которому размазывается «туча» (см. Archer)
+func squad_volley_spread(sid: int) -> float:
+	if not squads.has(sid):
+		return 0.0
+	return float((squads[sid] as Dictionary).get("volley_spread", 0.0))
+
+## Есть ли у отряда ВКЛЮЧЁННЫЙ залп — по конфигу, без имени способности в коде
+func squad_volley_mode(sid: int) -> bool:
+	if not squads.has(sid):
+		return false
+	var node: Dictionary = _Forge.toggle_ability_of(squad_type(sid))
+	if node.is_empty():
+		return false
+	return squad_ability_on(sid, String(node.get("id", "")))
+
+## ТАКТ ЗАЛПОВ. Обходит только те отряды, у которых режим включён: у остальных
+## это одна проверка словаря
+func _sweep_volleys() -> void:
+	var now: int = Time.get_ticks_msec()
+	for key in squads.keys():
+		var sid: int = int(key)
+		var sq: Dictionary = squads[key]
+		# Дешёвый отсев: без единой купленной способности отряду тут делать нечего
+		if (sq.get("ability_on", {}) as Dictionary).is_empty():
+			continue
+		if not squad_volley_mode(sid):
+			continue
+		if now < int(sq.get("volley_until", 0)):
+			continue                      # окно ещё открыто — залп идёт
+		if now < int(sq.get("volley_next", 0)):
+			continue                      # пауза между залпами
+		# ── КТО ГОТОВ ────────────────────────────────────────────────────────
+		# Готов = перезарядился И держит живую цель в пределах дальности.
+		# Заодно копим центр масс ЦЕЛЕЙ: он и есть точка залпа
+		var men: Array = squad_members(sid)
+		if men.is_empty():
+			continue
+		var ready := 0
+		var alive := 0
+		var acc := Vector3.ZERO
+		var n_aim := 0
+		var foe_sid := 0
+		for m in men:
+			var u := m as Unit
+			if u == null or not is_instance_valid(u) or u.is_dead():
+				continue
+			alive += 1
+			var t := u.attack_target as Unit
+			if t == null or not is_instance_valid(t) or t.is_dead():
+				continue
+			if u.global_position.distance_to(t.global_position) > u.attack_range:
+				continue
+			if u._attack_timer > 0.0:
+				continue
+			ready += 1
+			acc += t.global_position
+			n_aim += 1
+			if foe_sid == 0 and t.squad_id > 0:
+				foe_sid = t.squad_id
+		if alive == 0 or n_aim == 0:
+			continue
+		if float(ready) < float(alive) * VOLLEY_READY_FRACTION:
+			continue
+		# ── ТОЧКА ЗАЛПА — ЦЕНТР МАСС ВРАЖЕСКОГО ОТРЯДА ───────────────────────
+		# Именно отряда, а не средней из целей: цели выбираются каждым стрелком
+		# своим сканом, и их среднее смещено к тому флангу, где стрелков больше.
+		# Центр строя противника — то, во что игрок и целится глазами.
+		# Если у цели отряда нет (одиночка, здание) — падаем на среднее из целей
+		var aim: Vector3 = acc / float(n_aim)
+		var spread := 0.0
+		if foe_sid > 0:
+			var c: Vector3 = squad_centroid(foe_sid)
+			if c != Vector3.ZERO:
+				aim = c
+				spread = _squad_spread_radius(foe_sid)
+		sq["volley_aim"]    = aim
+		sq["volley_foe"]    = foe_sid          # см. squad_volley_point
+		sq["volley_spread"] = spread
+		sq["volley_until"]  = now + VOLLEY_WINDOW_MS
+		sq["volley_next"]   = now + VOLLEY_WINDOW_MS + VOLLEY_COOLDOWN_MS
+
+## ТОЧКА ЗАЛПА НА МОМЕНТ ВЫСТРЕЛА, а не на момент открытия окна.
+##
+## Окно живёт VOLLEY_WINDOW_MS (200 мс), и стрелки входят в него вразнобой:
+## тот, кого обход армии опросил последним, целился в центр строя, который
+## противник покинул полсекунды назад. Если вражеский отряд ещё жив — берём
+## его центр СЕЙЧАС; если он выбит или цель была одиночкой/зданием — остаётся
+## записанная точка (лучше устаревшая, чем никакой)
+func squad_volley_point(sid: int) -> Vector3:
+	if not squads.has(sid):
+		return Vector3.ZERO
+	var sq: Dictionary = squads[sid]
+	var foe: int = int(sq.get("volley_foe", 0))
+	if foe > 0:
+		var c: Vector3 = squad_centroid(foe)
+		if c != Vector3.ZERO:
+			return c
+	return sq.get("volley_aim", Vector3.ZERO)
+
+## Радиус, в котором стоит вражеский отряд — по нему «туча» размазывается ровно
+## на строй, а не сходится в одну точку (разбор в Archer._volley_offset).
+##
+## НИЖНЯЯ ГРАНИЦА ЗДЕСЬ НЕ СТАВИТСЯ НАМЕРЕННО: это честный габарит строя, и
+## стенды сравнивают его именно с габаритом. Минимум накрытия накладывает
+## стрелок (unit_stats_config.VOLLEY_MIN_SPREAD) — там, где считается туча
+func _squad_spread_radius(sid: int) -> float:
+	var men: Array = squad_members(sid)
+	if men.size() < 2:
+		return 0.0
+	var c: Vector3 = squad_centroid(sid)
+	var r2 := 0.0
+	for m in men:
+		var u := m as Node3D
+		if u == null or not is_instance_valid(u):
+			continue
+		var dx: float = u.global_position.x - c.x
+		var dz: float = u.global_position.z - c.z
+		var d2: float = dx * dx + dz * dz
+		if d2 > r2:
+			r2 = d2
+	return sqrt(r2)
+
 ## Все отряды фракции: [{"id", "type", "members"}] — только непустые
 func squads_of_faction(p_faction: int) -> Array:
 	var out: Array = []
@@ -2120,7 +2700,24 @@ func reset_squads() -> void:
 		if star != null and is_instance_valid(star):
 			star.queue_free()
 	squads.clear()
+	# ── ВСЯ ПОБОЧНАЯ БУХГАЛТЕРИЯ ОТРЯДОВ ОБНУЛЯЕТСЯ ВМЕСТЕ С НИМИ ───────────
+	# Счётчик id тоже сбрасывается в единицу, поэтому оставленная запись — это
+	# не утечка, а ЛОЖНЫЙ ОТВЕТ про отряд НОВОЙ партии с тем же номером:
+	# коридор сказал бы свежему отряду №1 «чужих рядом нет» (и тот прошёл бы
+	# сквозь вражеский строй до истечения TTL), кэш цели выдал бы освобождённый
+	# объект, а остывание боевого клича съело бы первый приказ
 	_star_goal.clear()
+	_corridors.clear()
+	_cohesion_last.clear()
+	_melee.clear()
+	_cry_last.clear()
+	_squad_target.clear()
+	_squad_face.clear()
+	# Матрицу снимаем через штатный релиз: он ещё и гасит признак «меня ведёт
+	# отряд» у переживших сброс бойцов, чего голый clear() не делает
+	for mk in _matrix.keys():
+		_matrix_release(int(mk))
+	_matrix.clear()
 	_next_squad_id = 1
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2211,15 +2808,23 @@ func apply_veteran_choice(squad_id: int, choice_index: int) -> bool:
 	if choice_index < 0 or choice_index >= choices.size():
 		return false
 	var c: Dictionary = choices[choice_index]
-	var stat: String  = String(c.get("stat", ""))
-	var value: float  = float(c.get("value", 0.0))
 	var sq: Dictionary = squads[squad_id]
 	var b: Dictionary = sq["bonuses"]
-	b[stat] = float(b.get(stat, 0.0)) + value
+	# ── НАГРАДА — ЭТО НАБОР МОДИФИКАТОРОВ, А НЕ ОДНА ПАРА ───────────────────
+	# Таблица наград расписана тем же шаблоном, что и узлы кузницы (все ключи,
+	# ненужное нулём), и вправе дать сразу несколько прибавок. Раньше здесь
+	# читалась одна пара stat/value, то есть вторая прибавка в таблице просто не
+	# сработала бы — молча, что хуже всего
+	var mods: Dictionary = _UCfg.nonzero_modifiers(c)
+	var stat: String = String(c.get("stat", ""))
+	for key in mods:
+		var short: String = _UCfg.modifier_stat_name(String(key))
+		var value: float  = float(mods[key])
+		b[short] = float(b.get(short, 0.0)) + value
+		for m in squad_members(squad_id):
+			_apply_bonus_to_unit(m, short, value)
 	(sq["chosen"] as Array).append(String(c.get("id", stat)))
 	sq["pending"] = int(sq["pending"]) - 1
-	for m in squad_members(squad_id):
-		_apply_bonus_to_unit(m, stat, value)
 	refresh_star(squad_id)
 	return true
 
@@ -2236,6 +2841,21 @@ func _apply_bonus_to_unit(unit: Node, stat: String, value: float) -> void:
 		"health":
 			unit.max_health     += value
 			unit.current_health += value
+		# ── ОСТАЛЬНЫЕ КЛЮЧИ ШАБЛОНА ─────────────────────────────────────────
+		# Пишутся ПРЯМО В ПОЛЯ бойца — тем же приёмом, что и запас HP, и по той
+		# же причине: эти числа читаются в горячих ветках, и заводить под каждое
+		# отдельное поле vet_* значило бы платить за них в каждом кадре
+		"range":    unit.attack_range    += value
+		"cooldown": unit.attack_cooldown = maxf(
+			unit.attack_cooldown - value, _UCfg.MIN_COOLDOWN)
+		"push":     unit.push_force += value
+		"morale":   unit.morale     += value
+		# Кучность и темп добычи полей не имеют — держим их на бойце числом
+		"spread":   unit.vet_spread += value
+		"carry":
+			if unit.has_method("carry_capacity"):
+				unit.gather_amount += value
+		"gather":   unit.vet_gather += value
 	# Ветеранские прибавки меняют то, что лежит в строке ядра армии
 	unit._soa_push_stats()
 
@@ -2305,24 +2925,89 @@ func squad_centroid(squad_id: int) -> Vector3:
 ## Итог: платить отставанием картинки за неизмеримую экономию незачем. Строки
 ## понадобятся здесь тогда, когда они станут обновляться каждый кадр сами —
 ## то есть в Фазе 2, когда из них будет перестраиваться пространственная сетка
+## ── ЦЕНТР ОТРЯДА — МЕДИАНА, А НЕ СРЕДНЕЕ АРИФМЕТИЧЕСКОЕ (заказ владельца) ───
+##
+## Среднее устойчиво ровно до тех пор, пока отряд стоит одним куском. Стоит
+## строю растянуться или расколоться на две группы — а именно это и происходит
+## в бою, когда часть бойцов ушла в свалку, а часть осталась, — и среднее
+## уезжает В ПУСТОЕ ПОЛЕ РОВНО МЕЖДУ НИМИ. На скриншотах владельца это видно
+## буквально: звёзды ветеранства висят в чистом поле, а отряда под ними нет.
+## Туда же попадала точка залпа, точка сбора и цель прицеливания.
+##
+## Медиана по каждой оси отдельно (не геометрическая) — она стоит одну
+## сортировку на отряд вместо итеративного решения, а от выброса защищает так
+## же: половина отряда всегда по одну сторону от неё, половина по другую, и
+## «пустой середины» между двумя кучами не возникает — точка садится на
+## бо́льшую из них.
+##
+## Цена: сортировка ≤60 чисел раз в STAR_UPDATE_FRAMES кадров на отряд.
 func _centroid_of(members: Array) -> Vector3:
-	var acc := Vector3.ZERO
-	var n := 0
+	var xs := PackedFloat32Array()
+	var zs := PackedFloat32Array()
 	for m in members:
 		var u := m as Node3D
 		if u == null or not is_instance_valid(u):
 			continue
-		acc += u.global_position
-		n += 1
+		var p: Vector3 = u.global_position
+		xs.append(p.x)
+		zs.append(p.z)
+	var n: int = xs.size()
 	if n == 0:
 		return Vector3.ZERO
-	return acc / float(n)
+	if n <= 2:
+		# На одном-двух бойцах медиана и среднее совпадают по смыслу, а сортировка
+		# только тратит время
+		var ax := 0.0
+		var az := 0.0
+		for i in range(n):
+			ax += xs[i]
+			az += zs[i]
+		var mx0: float = ax / float(n)
+		var mz0: float = az / float(n)
+		return Vector3(mx0, get_terrain_height(mx0, mz0), mz0)
+	xs.sort()
+	zs.sort()
+	var h: int = n >> 1
+	var mx: float
+	var mz: float
+	if n % 2 == 1:
+		mx = xs[h]
+		mz = zs[h]
+	else:
+		mx = (xs[h - 1] + xs[h]) * 0.5
+		mz = (zs[h - 1] + zs[h]) * 0.5
+	# Высота — у РЕЛЬЕФА под точкой: медиана может прийтись туда, где никто не
+	# стоит, и брать высоту у случайного бойца было бы неверно
+	return Vector3(mx, get_terrain_height(mx, mz), mz)
+
+## ── СОСТАВ, КОТОРЫЙ ВИДНО НА КАРТЕ ──────────────────────────────────────────
+## Гарнизон — это ЖИВЫЕ бойцы: они не павшие, из squad_members не выпадают, и
+## центр масс отряда честно уползал к замку вместе с ними. На экране это
+## выглядело как «звезда отвязалась от отряда и прилипла к зданию»: половина
+## бойцов лечится внутри, а метка стоит над крышей.
+##
+## Всё, что рисуется НАД отрядом, обязано считаться по тем, кого видно.
+## Признак — Unit.garrisoned (его ставит Castle.absorb_unit)
+func _on_map_members(members: Array) -> Array:
+	var out: Array = []
+	for m in members:
+		var u := m as Unit
+		if u == null or not is_instance_valid(u) or u.garrisoned:
+			continue
+		out.append(u)
+	return out
 
 ## Поставить узел звезды над центром масс переданного состава
 func _place_star(star: Node3D, members: Array) -> void:
 	if star == null or not is_instance_valid(star) or members.is_empty():
 		return
-	var c: Vector3 = _centroid_of(members)
+	var shown: Array = _on_map_members(members)
+	if shown.is_empty():
+		# Весь отряд внутри замка — метке над картой стоять негде
+		star.visible = false
+		return
+	star.visible = true
+	var c: Vector3 = _centroid_of(shown)
 	# Высоту берём у РЕЛЬЕФА под центром, а не у случайного бойца: центр масс
 	# может прийтись на точку, где никто не стоит (отряд обтекает дерево)
 	star.global_position = Vector3(c.x,
@@ -2353,6 +3038,14 @@ func _disband_squad(sid: int) -> void:
 	squads.erase(sid)
 	_star_goal.erase(sid)
 	_corridors.erase(sid)
+	_cohesion_last.erase(sid)
+	# Кэши «на отряд» тоже уходят вместе с ним: id внутри партии не переиспользуются,
+	# поэтому это не ошибка ответа, но за длинный бой из сотен расформированных
+	# отрядов словари росли и не убывали
+	_melee.erase(sid)
+	_cry_last.erase(sid)
+	_squad_target.erase(sid)
+	_squad_face.erase(sid)
 	_matrix_release(sid)
 
 ## Куда звезде ехать: sid -> целевая точка. Цель пересчитывается редко, а едет
@@ -2381,15 +3074,25 @@ func _update_squad_stars() -> void:
 			continue
 		if recompute:
 			# Центр берётся по ЖИВЫМ (squad_members отсеивает павших), поэтому
-			# при потерях он сам сдвигается к уцелевшим
-			var men := squad_members(sid)
+			# при потерях он сам сдвигается к уцелевшим, и по тем, кто НА КАРТЕ:
+			# ушедшие в гарнизон тянули метку на замок (см. _on_map_members)
+			var men := _on_map_members(squad_members(sid))
 			if men.is_empty():
+				star.visible = false
 				continue
 			var c := _centroid_of(men)
+			# ── МЕТКА НАД ОТРЯДОМ ПОДЧИНЯЕТСЯ ТУМАНУ ────────────────────────
+			# Звезда — это узел в МИРЕ, а не ребёнок бойца (см. refresh_star), и
+			# потому она не гаснет вместе с ним: сам отряд под пеленой не
+			# рисуется, а красные звёздочки над ним висели прямо поверх черноты
+			# и показывали, где стоит вражеская армия. Ровно та же утечка, что и
+			# со звуком из тумана, только глазами
+			star.visible = fog == null or not is_instance_valid(fog) \
+				or fog.is_lit(c.x, c.z)
 			_star_goal[sid] = Vector3(c.x,
 				get_terrain_height(c.x, c.z) + _VetStar.STAR_HEIGHT, c.z)
 		var goal: Variant = _star_goal.get(sid)
-		if goal == null:
+		if goal == null or not star.visible:
 			continue
 		var g: Vector3 = goal
 		var p: Vector3 = star.global_position
@@ -2449,7 +3152,7 @@ func try_worker_build(worker: Node, build_id: String, crew: Array = []) -> void:
 		return
 	# Кузница у фракции одна
 	if build_id == "smithy":
-		var grp := "player_buildings" if worker.faction == Constants.FACTION_PLAYER else "enemy_buildings"
+		var grp := Constants.building_group(worker.faction)
 		for b in get_tree().get_nodes_in_group(grp):
 			if b is Smithy:
 				return
@@ -2548,7 +3251,7 @@ func try_build_barracks(castle: Building) -> void:
 func try_build_smithy(castle: Building) -> void:
 	if main == null:
 		return
-	var grp := "player_buildings" if castle.faction == Constants.FACTION_PLAYER else "enemy_buildings"
+	var grp := Constants.building_group(castle.faction)
 	for b in get_tree().get_nodes_in_group(grp):
 		if b is Smithy:
 			return  # only one smithy per faction
@@ -2608,6 +3311,38 @@ func find_nearest_resource(from_pos: Vector3, res_type: int) -> ResourceNode:
 		return null
 	return main.find_nearest_resource(from_pos, res_type)
 
+## Следующая жила ПОБЛИЗОСТИ: своя куча (руда) или соседний ствол (лес).
+## null — рядом всё выработано; что делать дальше, решает сам рабочий
+## (см. Worker._auto_find_resource): игроку положено встать, ИИ — идти дальше
+## radius_scale — во сколько раз шире обычного искать (см. Worker.WIDE_SEARCH_SCALE);
+## skip — жила, до которой дойти не удалось, её из поиска исключаем
+func find_next_resource_nearby(from_pos: Vector3, res_type: int,
+		cluster_id: int = 0, radius_scale: float = 1.0,
+		skip: ResourceNode = null) -> ResourceNode:
+	if main == null:
+		return null
+	return main.find_next_resource_nearby(from_pos, res_type, cluster_id,
+		radius_scale, skip)
+
+## ЯКОРЬ КУЧИ — кусок, который стоит до полной её выработки (MineCluster.anchor).
+## Нужен рабочему, чтобы вернуться к работе, когда обычный поиск «рядом» его не
+## нашёл: радиус поиска считается от рабочего, а его могло вытолкнуть в сторону
+func cluster_anchor(cluster_id: int) -> ResourceNode:
+	if main == null or cluster_id <= 0:
+		return null
+	var info: Dictionary = main.res_clusters.get(cluster_id, {})
+	var mine = info.get("mine", null)
+	if mine == null or mine.is_empty():
+		return null
+	return mine.anchor() as ResourceNode
+
+## Ближайший кусок ЛЮБОЙ другой кучи того же типа (рабочие ИИ не застревают)
+func find_next_cluster_resource(from_pos: Vector3, res_type: int,
+		exclude_cluster: int = 0) -> ResourceNode:
+	if main == null:
+		return null
+	return main.find_next_cluster_resource(from_pos, res_type, exclude_cluster)
+
 func get_terrain_height(x: float, z: float) -> float:
 	if main == null:
 		return 0.0
@@ -2662,11 +3397,19 @@ var _arrow_pool: Array = []
 
 ## Выдать стрелу под выстрел. Возвращает узел, уже стоящий в дереве под
 ## `parent` и взведённый на полёт
+## Сколько стрел выпущено за партию. Монотонный, только растёт (см. spawn_arrow)
+var arrows_fired: int = 0
+
 func spawn_arrow(parent: Node, start: Vector3, end_pos: Vector3, dist: float,
 		speed: float, arc_factor: float, dmg: float, who: Node3D,
 		p_faction: int) -> Node3D:
 	if parent == null or not is_instance_valid(parent):
 		return null
+	# СЧЁТЧИК ВЫСТРЕЛОВ, монотонный. Стрелы живут в пуле и не состоят ни в одной
+	# группе, поэтому «сколько выстрелов сделано» иначе не спросить: стенд
+	# qa_volley считает по нему темп стрельбы отряда (залп — это пачки, обычная
+	# стрельба — ровный ручеёк). Один int на выстрел
+	arrows_fired += 1
 	var a: Node3D = null
 	# Пул мог пережить смену сцены: узлы из прошлой партии уже освобождены
 	while not _arrow_pool.is_empty():
@@ -2714,126 +3457,37 @@ func clear_arrow_pool() -> void:
 func arrow_pool_size() -> int:
 	return _arrow_pool.size()
 
-const OBST_CELL := 4.0
-
-var _trunks: Dictionary = {}          # Vector2i -> Array[Vector3(x, z, r)]
-
-
-## Самый толстый комель из поставленных на учёт. Нужен trunk_block, чтобы
-## сузить обход до реально досягаемых клеток: дерево лежит в СВОЕЙ клетке, но
-## дотянуться до нас может из соседней на величину своего радиуса. Только
-## растёт — стволы все одного калибра (ResourceNode.TRUNK_RADIUS), и терять
-## запас на пересчёт при вырубке незачем
-var _trunk_max_r: float = 0.0
-
-func _trunk_cell(x: float, z: float) -> Vector2i:
-	return Vector2i(int(floor(x / OBST_CELL)), int(floor(z / OBST_CELL)))
-
-## Поставить ствол на учёт. Зовёт ResourceNode при появлении дерева
+# ═══════════════════════════════════════════════════════════════════════════
+# РЕЕСТР СТВОЛОВ ПЕРЕЕХАЛ В СОЛВЕР (csharp/ArmyCore.cs)
+# ═══════════════════════════════════════════════════════════════════════════
+# Здесь лежала своя редкая сетка ячейками по 4 м со словарём Vector2i → Array.
+# Она переехала к колонкам по одной причине: trunk_block был ПОСЛЕДНИМ вызовом
+# наружу, остававшимся ВНУТРИ шага бойца. Пока он жил тут, пакетный проход на
+# каждого идущего бойца прыгал из C# обратно в GDScript — то есть платил за
+# переход границы ровно там, где мы её и убирали.
+#
+# Имена и сигнатуры сохранены: ResourceNode, Main и стенды зовут их как раньше.
 func register_trunk(pos: Vector3, radius: float) -> void:
-	var key := _trunk_cell(pos.x, pos.z)
-	if not _trunks.has(key):
-		_trunks[key] = []
-	(_trunks[key] as Array).append(Vector3(pos.x, pos.z, radius))
-	_trunk_max_r = maxf(_trunk_max_r, radius)
+	army.register_trunk(pos, radius)
 
-## Снять с учёта: дерево срублено (пень не мешает) либо выгружено
 func unregister_trunk(pos: Vector3) -> void:
-	var key := _trunk_cell(pos.x, pos.z)
-	if not _trunks.has(key):
-		return
-	var arr: Array = _trunks[key]
-	for i in range(arr.size()):
-		var t: Vector3 = arr[i]
-		if absf(t.x - pos.x) < 0.01 and absf(t.y - pos.z) < 0.01:
-			arr.remove_at(i)
-			return
+	army.unregister_trunk(pos)
 
 func clear_trunks() -> void:
-	_trunks.clear()
-	_trunk_max_r = 0.0
+	army.clear_trunks()
 
 ## Сколько стволов на учёте (для стендов)
 func trunk_count() -> int:
-	var n := 0
-	for k in _trunks:
-		n += (_trunks[k] as Array).size()
-	return n
+	return army.trunk_count()
 
 ## Наталкивается ли точка на ствол. Возвращает вектор ОТ центра ствола к точке,
-## длиной в глубину проникновения; Vector3.ZERO — путь свободен.
-## ГОРЯЧИЙ ПУТЬ: зовётся на каждый шаг каждого юнита — без аллокаций и
-## обращений наружу
-## ЕСТЬ ЛИ ХОТЬ ОДИН СТВОЛ В РАДИУСЕ. Грубый ответ для коридора отряда
-## (см. _recalc_corridor): проверяем только НЕПУСТЫЕ клетки, до содержимого
-## доходим лишь тогда, когда клетка вообще существует. Радиус здесь десятки
-## метров, поэтому клеток может быть много — но зовётся это раз в 0.2 с на
-## отряд, а не 60 раз в секунду на бойца
-func trunk_near(x: float, z: float, radius: float) -> bool:
-	if _trunks.is_empty():
-		return false
-	var reach: float = radius + _trunk_max_r
-	var inv: float = 1.0 / OBST_CELL
-	var cx0: int = int(floor((x - reach) * inv))
-	var cz0: int = int(floor((z - reach) * inv))
-	var cx1: int = int(floor((x + reach) * inv))
-	var cz1: int = int(floor((z + reach) * inv))
-	var lim: float = reach * reach
-	for cx in range(cx0, cx1 + 1):
-		for cz in range(cz0, cz1 + 1):
-			var cell: Variant = _trunks.get(Vector2i(cx, cz))
-			if cell == null:
-				continue
-			for t in (cell as Array):
-				var tv: Vector3 = t
-				var dx: float = x - tv.x
-				var dz: float = z - tv.y
-				if dx * dx + dz * dz < lim:
-					return true
-	return false
-
+## длиной в глубину проникновения; Vector3.ZERO — путь свободен
 func trunk_block(x: float, z: float, body_r: float) -> Vector3:
-	if _trunks.is_empty():
-		return Vector3.ZERO
-	# ОБХОДИМ ТОЛЬКО ТЕ КЛЕТКИ, ДО КОТОРЫХ РЕАЛЬНО ДОТЯГИВАЕМСЯ. Раньше здесь
-	# стояли жёсткие 3×3 вокруг точки — девять словарных поисков на каждый шаг
-	# каждого бойца. Но клетка тут 4 м, а тело вместе с комлем — меньше метра:
-	# соседняя клетка нужна, только когда боец стоит вплотную к её границе.
-	# По диапазону [x-r, x+r] почти всегда выходит ровно одна клетка, у границы
-	# две, и лишь в углу четыре — вместо девяти всегда
-	var reach: float = body_r + _trunk_max_r
-	# Ключи клеток считаем ЗДЕСЬ, а не через _trunk_cell: два вызова
-	# GDScript-функции на каждый шаг каждого бойца ради двух делений
-	var inv: float = 1.0 / OBST_CELL
-	var cx0: int = int(floor((x - reach) * inv))
-	var cz0: int = int(floor((z - reach) * inv))
-	var cx1: int = int(floor((x + reach) * inv))
-	var cz1: int = int(floor((z + reach) * inv))
-	for cx in range(cx0, cx1 + 1):
-		for cz in range(cz0, cz1 + 1):
-			# Пустую ячейку пропускаем БЕЗ аллокации: `get(key, [])` создавал
-			# новый пустой Array на каждую из девяти ячеек на каждый шаг каждого
-			# юнита (замер: ветка mb_trunk — 2.4 мкс на юнита в кадр)
-			var cell: Variant = _trunks.get(Vector2i(cx, cz))
-			if cell == null:
-				continue
-			for t in (cell as Array):
-				var tv: Vector3 = t
-				var dx: float = x - tv.x
-				var dz: float = z - tv.y
-				var rr: float = tv.z + body_r
-				var d2: float = dx * dx + dz * dz
-				if d2 >= rr * rr:
-					continue
-				if d2 < 1e-8:
-					# РОВНО В ЦЕНТРЕ СТВОЛА направление «наружу» не определено.
-					# Молча пропускать нельзя: точка внутри дерева считалась бы
-					# свободной. Выталкиваем в произвольную, но постоянную
-					# сторону — лишь бы вывести наружу
-					return Vector3(rr, 0.0, 0.0)
-				var d: float = sqrt(d2)
-				return Vector3(dx / d, 0.0, dz / d) * (rr - d)
-	return Vector3.ZERO
+	return army.trunk_block(x, z, body_r)
+
+## Есть ли хоть один ствол в радиусе. Грубый ответ для коридора отряда
+func trunk_near(x: float, z: float, radius: float) -> bool:
+	return army.trunk_near(x, z, radius)
 
 ## Точка приказа, вынесенная на сушу. Приказ, пришедший в озеро (клик по воде,
 ## точка сбора ИИ у берега), иначе недостижим: юнит упирается в кромку, а

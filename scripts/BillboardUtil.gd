@@ -257,7 +257,18 @@ static func make_wind_material(tex: Texture2D, modulate: Color = Color.WHITE,
 ## Материал для ЗДАНИЙ: тот же шейдер, но доворот к камере выключен.
 ## Постройка стоит в мировых координатах намертво — при орбите камеры она
 ## не крутится на месте, а честно показывает свой фасад.
-static func make_static_material(tex: Texture2D, modulate: Color = Color.WHITE, scissor: float = 0.5) -> ShaderMaterial:
-	var mat := make_material(tex, modulate, scissor, 0.0)
+## Материал НЕПОДВИЖНОГО объекта (здания): к камере не доворачивается.
+##
+## fps > 0 — лента ЛИСТАЕТСЯ. Здание может быть анимировано, не переставая быть
+## неподвижным: дым из трубы хижины гоблинов — это те же двенадцать кадров в
+## строке, что у растений, и листает их тот же шейдер. Раньше сюда жёстко
+## передавался ноль, и любая многокадровая постройка навсегда замирала на
+## первом кадре.
+## phase — сдвиг фазы: десять хижин рядом не должны пыхтеть в один такт
+static func make_static_material(tex: Texture2D, modulate: Color = Color.WHITE,
+		scissor: float = 0.5, fps: float = 0.0, phase: float = 0.0) -> ShaderMaterial:
+	var mat := make_material(tex, modulate, scissor, fps)
 	mat.set_shader_parameter("world_fixed", 1.0)
+	if phase != 0.0:
+		mat.set_shader_parameter("frame_phase", phase)
 	return mat
