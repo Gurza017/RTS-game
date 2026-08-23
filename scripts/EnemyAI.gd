@@ -38,7 +38,16 @@ const ROLE_RETREAT := "retreat"   # отряд выбит и уходит на �
 
 # Строй отряда при выдаче приказа
 const SQUAD_COLS    := 6
-const SQUAD_SPACING := 0.5
+const SQUAD_SPACING := 0.58
+
+## ── РАЗВЕДКА ФРОНТА ПРОТИВНИКА (см. _enemy_front_normal) ────────────────────
+## В каком радиусе от точки приказа искать чужую линию. Меньше — и отряд не
+## увидит фланг длинной шеренги; больше — и в замер полезут отряды, к которым
+## он не идёт вовсе
+const FRONT_SCAN_R := 45.0
+## Потолок числа точек в замере. Главную ось облака определяют первые же
+## десятки бойцов; обходить тысячу ради того же угла незачем
+const FRONT_SCAN_MAX := 120
 ## Разнос отрядов ОДНОГО типа по фронту волны, метры
 const SQUAD_LATERAL_STEP := 5.0
 ## Насколько далеко от замка встаёт гарнизон
@@ -1040,12 +1049,24 @@ func _assign_home_posts(castle: Castle, home: Array) -> void:
 		_set_role(sq, ROLE_GUARD,
 			_screen_post(castle, uid2, i2, int(total.get(uid2, 1))))
 
-## Точка заслона для отряда рода `uid`, номер `idx` из `count` отрядов этого рода
+## Точка заслона для отряда рода `uid`, номер `idx` из `count` отрядов этого рода.
+##
+## ── ШИРИНА ЗАСЛОНА ПЛАНИРУЕТСЯ ПОД ПОЛНЫЙ ГАРНИЗОН, А НЕ ПОД НАЛИЧНЫЙ ──────
+## Делитель брался из ЖИВОГО числа отрядов этого рода. Значит, каждый
+## доучившийся отряд менял `centered` ВСЕМ своим собратьям — весь заслон
+## переставлялся заново, и так на каждом такте размышления, пока идёт найм.
+## На экране это ровно то, на что пожаловался владелец: защитники стоят
+## «ступеньками» и всё время перетаптываются, вместо того чтобы держать ровный
+## фронт.
+##
+## Теперь места размечены на ПОЛНЫЙ гарнизон (HOME_GUARD_PER_TYPE): пришедший
+## отряд занимает своё место и никого не двигает, а недобранный заслон стоит
+## пореже — что честно и показывает игроку, что оборона ещё не собрана
 func _screen_post(castle: Castle, uid: String, idx: int, count: int) -> Vector3:
 	var course := _defense_course(castle)
 	var right := Vector3(-course.z, 0.0, course.x)
 	var home := castle.global_position
-	var n: int = maxi(count, 1)
+	var n: int = maxi(maxi(count, _AICfg.HOME_GUARD_PER_TYPE), 1)
 	var centered: float = float(idx) - float(n - 1) * 0.5
 	var spot: Vector3
 	match uid:
@@ -1592,6 +1613,16 @@ func _issue_plan(plan: Dictionary) -> int:
 			u.set_stance(stance)
 		var col: int = i % cols
 		var row: int = i / cols
+		# ── МЕСТО В СТРОЮ ПОВОРАЧИВАЕТСЯ ВМЕСТЕ СО СТРОЕМ ───────────────────
+		# Здесь смещения складывались прямо по мировым осям: off_x по X, off_z
+		# по Z. То есть отряд ВСЕГДА строился решёткой «по горизонтали и
+		# вертикали карты», как бы он ни шёл и куда бы ни смотрел. Курс при
+		# этом честно вычислялся и честно передавался бойцам — но на РАЗМЕТКУ
+		# не влиял, и диагональный подход давал столкновение углом.
+		#
+		# Теперь смещения раскладываются по осям самого строя: поперёк — вдоль
+		# шеренги (right), вглубь — НАЗАД от неё (-course), чтобы нулевая
+		# шеренга оставалась передней
 		var off_x: float = (float(col) - float(cols - 1) * 0.5) * SQUAD_SPACING
 		var off_z: float = float(row) * SQUAD_SPACING
 		u.formation_row = row
@@ -1603,26 +1634,46 @@ func _issue_plan(plan: Dictionary) -> int:
 			if flank_close:
 				u.command_attack(prey, true, true)
 			else:
-				u.command_move(center + Vector3(off_x, 0.0, off_z), false,
+				u.command_move(_slot_at(center, course, off_x, off_z), false,
 					course, false, false, true)
 		elif role == ROLE_KITE:
 			# ОТХОД ЗА СПИНУ СВОИХ. Не режим отхода (retreating): лучники
 			# обязаны продолжать стрелять, а тот режим глушит авто-агро
-			u.command_move(center + Vector3(off_x, 0.0, off_z), false, course)
+			u.command_move(_slot_at(center, course, off_x, off_z), false, course)
 		elif threat != null:
 			# ПРОТИВНИК В ЗОНЕ — ДЕРЁМСЯ ВСЕЙ СЕКЦИЕЙ, ОДНОЙ ЦЕЛЬЮ НА ОТРЯД
 			u.command_attack(prey if prey != null else threat, true, true)
 		elif holds:
 			# Вокруг тихо: гарнизон и заслон встают на пост и держат его
-			u.command_move(center + Vector3(off_x, 0.0, off_z), false, course)
+			_hold_at(u, _slot_at(center, course, off_x, off_z), course)
 		elif role == ROLE_PATROL:
 			# Патруль обходит свою дугу; в бой втягивается авто-агро
-			u.command_move(center + Vector3(off_x, 0.0, off_z), true, course)
+			u.command_move(_slot_at(center, course, off_x, off_z), true, course)
 		elif prey != null:
 			u.command_attack(prey, true, true)
 		else:
-			u.command_move(center + Vector3(off_x, 0.0, off_z), false, course)
+			_hold_at(u, _slot_at(center, course, off_x, off_z), course)
 	return maxi(done, 1)
+
+## ── ПРИКАЗ «СТОЙ, ГДЕ СТОИШЬ» НЕ ОТДАЁТСЯ ПОВТОРНО ─────────────────────────
+## Такт размышления идёт раз в THINK_INTERVAL (2 с), и гарнизон получал
+## command_move на СВОЙ ЖЕ пост каждые две секунды. Приказ будит бойца, метит
+## позу грязной и переводит его в MOVING на один шаг — со стороны это ровно
+## тот «нервный тик», на который пожаловался владелец: стоящая вражеская армия
+## дёргается вся разом раз в пару секунд.
+##
+## Пропускаем приказ ТОЛЬКО стоящему и ТОЛЬКО уже пришедшему: идущий, отставший
+## или сбитый с места получает его как прежде, иначе отряд перестал бы
+## возвращаться на пост после стычки
+const HOLD_EPS := 0.35
+
+func _hold_at(u: Unit, slot: Vector3, course: Vector3) -> void:
+	if u.state == Unit.State.IDLE:
+		var dx: float = u.global_position.x - slot.x
+		var dz: float = u.global_position.z - slot.z
+		if dx * dx + dz * dz <= HOLD_EPS * HOLD_EPS:
+			return
+	u.command_move(slot, false, course)
 
 ## Центр масс всей полевой волны — от него считается курс боевого порядка
 func _field_centroid(field: Array) -> Vector3:
@@ -1654,16 +1705,110 @@ func _squad_centroid(members: Array) -> Vector3:
 		return Vector3.ZERO
 	return GameManager._centroid_of(live)
 
+## ── МЕСТО В СТРОЮ, ПОВЁРНУТОМ ПО КУРСУ ─────────────────────────────────────
+## off_x — поперёк шеренги, off_z — вглубь строя (номер шеренги). Раскладывает
+## их по осям САМОГО СТРОЯ, а не по осям карты: right = перпендикуляр к курсу,
+## глубина отсчитывается НАЗАД от фронта, чтобы нулевая шеренга оставалась
+## передней. Пустой курс (отряд уже стоит в точке приказа) возвращает прежнюю
+## раскладку по мировым осям — иначе строй схлопнулся бы в точку
+func _slot_at(center: Vector3, course: Vector3, off_x: float, off_z: float) -> Vector3:
+	if course.length_squared() < 0.0001:
+		return center + Vector3(off_x, 0.0, off_z)
+	var right := Vector3(-course.z, 0.0, course.x)
+	return center + right * off_x - course * off_z
+
 func _order_course(members: Array, center: Vector3) -> Vector3:
 	var centroid := Vector3.ZERO
 	for m in members:
 		centroid += (m as Node3D).global_position
 	centroid /= float(members.size())
+	# ── СТРОЙ ВСТАЁТ ПАРАЛЛЕЛЬНО ФРОНТУ ПРОТИВНИКА ──────────────────────────
+	# Направление марша — не то же самое, что нужное направление СТРОЯ. Линия
+	# игрока стоит под своим углом, и отряд, подходящий к ней по диагонали,
+	# упирался в неё углом: первыми в бой входили два-три бойца с края, а
+	# остальные толпились сзади. Отсюда и «неаккуратные столкновения углом».
+	#
+	# Если фронт противника читается (см. _enemy_front_normal), курс берём по
+	# его нормали: шеренга ложится ВДОЛЬ чужой шеренги. Не читается — остаётся
+	# прежнее поведение, направление марша
+	var front := _enemy_front_normal(center, centroid)
+	if front != Vector3.ZERO:
+		return front
 	var course := center - centroid
 	course.y = 0.0
 	if course.length() < 0.01:
 		return Vector3.ZERO
 	return course.normalized()
+
+## ── КУДА СМОТРИТ ФРОНТ ПРОТИВНИКА ──────────────────────────────────────────
+## Возвращает единичную НОРМАЛЬ к линии противника (то есть направление, в
+## котором обязан смотреть наш строй), или Vector3.ZERO, если противника рядом
+## слишком мало и линии не видно.
+##
+## Как считается. Берём людей игрока в радиусе FRONT_SCAN_R вокруг точки
+## приказа и находим главную ось их облака — направление наибольшего разброса.
+## Для шеренги это и есть линия фронта, под каким бы углом она ни стояла.
+## Математика простая: два элемента ковариации по XZ и угол главной оси через
+## atan2(2*Sxz, Sxx-Szz)/2 — ни матриц, ни итераций.
+##
+## Нормаль ориентируется НА противника: из двух перпендикуляров берём тот, что
+## смотрит от нашего центра к центру их облака.
+##
+## Цена: один обход группы игрока на отряд в такт размышления (раз в две
+## секунды), с ранним отсевом по квадрату расстояния. Это тот же порядок, что у
+## соседнего _nearest_player_target, и на такте ИИ он уже оплачен
+func _enemy_front_normal(center: Vector3, from: Vector3) -> Vector3:
+	var sx := 0.0
+	var sz := 0.0
+	var n := 0
+	var pts: Array = []
+	var r2: float = FRONT_SCAN_R * FRONT_SCAN_R
+	for u in main.get_tree().get_nodes_in_group("player_units"):
+		if u == null or not is_instance_valid(u):
+			continue
+		var pu := u as Unit
+		if pu == null or pu.is_dead():
+			continue
+		var p: Vector3 = pu.global_position
+		var dx: float = p.x - center.x
+		var dz: float = p.z - center.z
+		if dx * dx + dz * dz > r2:
+			continue
+		pts.append(Vector2(p.x, p.z))
+		sx += p.x
+		sz += p.z
+		n += 1
+		if n >= FRONT_SCAN_MAX:
+			break
+	# Меньше трёх точек — это не линия, а случайные одиночки: угол по ним был
+	# бы шумом, и строй разворачивало бы от каждого забредшего рабочего
+	if n < 3:
+		return Vector3.ZERO
+	var mx: float = sx / float(n)
+	var mz: float = sz / float(n)
+	var cxx := 0.0
+	var czz := 0.0
+	var cxz := 0.0
+	for q in pts:
+		var v: Vector2 = q
+		var ax: float = v.x - mx
+		var az: float = v.y - mz
+		cxx += ax * ax
+		czz += az * az
+		cxz += ax * az
+	# Облако круглое (толпа, а не шеренга) — направления у него нет
+	if absf(cxx - czz) < 0.01 and absf(cxz) < 0.01:
+		return Vector3.ZERO
+	var ang: float = 0.5 * atan2(2.0 * cxz, cxx - czz)
+	# Главная ось — вдоль линии; нормаль к ней повёрнута на 90°
+	var nrm := Vector3(-sin(ang), 0.0, cos(ang))
+	# Ориентируем НА противника: иначе строй встал бы к нему спиной
+	var to_them := Vector3(mx - from.x, 0.0, mz - from.z)
+	if to_them.length() < 0.01:
+		return Vector3.ZERO
+	if nrm.dot(to_them.normalized()) < 0.0:
+		nrm = -nrm
+	return nrm.normalized()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ЦЕЛИ И ЗАМЕРЫ ОБСТАНОВКИ

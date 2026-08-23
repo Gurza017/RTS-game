@@ -85,7 +85,7 @@ const STATS := {
 	# ── МОНАХ (Monk) — вспомогательный юнит, слаб в бою ──────────────────────
 	"monk": {
 		"health": 60.0,
-		"movement_speed": 2.6,
+		"movement_speed": 2.0,
 		"attack_1": 6.0,
 		"attack_2": 6.0,
 		"attack_range": 1.4,
@@ -108,11 +108,11 @@ const STATS := {
 	# Замысел: гоблин по одному слабее человека и берёт числом (отряд 100 против
 	# 20), наездник на кабане — быстрый и бьющий больно, но хрупкий.
 	"goblin_spearman": {
-		"health": 55.0,
+		"health": 75.0,
 		"movement_speed": 2.2,
 		"attack_1": 9.0,            # «Attack Fast» — три быстрых тычка...
-		"attack_2": 20.0,           # ...затем один «Attack Strong» (ротация 3+1)
-		"attack_range": 2.2,
+		"attack_2": 15.0,           # ...затем один «Attack Strong» (ротация 3+1)
+		"attack_range": 1.6,
 		"attack_cooldown": 1.4,
 		"defense": 0.0,
 		"armor": 0.0,
@@ -121,8 +121,18 @@ const STATS := {
 		"description": "Goblin spear mob. Weak one on one, dangerous in a hundred.",
 	},
 	"goblin_rider": {
-		"health": 90.0,
-		"movement_speed": 3.4,      # кабан быстрее любой пехоты людей
+		"health": 150.0,
+		# ── СКОРОСТЬ КАБАНА: ЗАКАЗ ВЛАДЕЛЬЦА «РАССЕКАТЬ ПОЛЕ» ─────────────
+		# Было 3.4 — это 1.55 от пешего гоблина (2.2) и 1.7 от людской пехоты
+		# (2.0). Замер (qa_cavalry, блок A) показал, что и в чистом поле, и в
+		# плотном строю всадник идёт РОВНО свою скорость, без единого троттля:
+		# «едут вровень с пехотой» было впечатлением от самого числа, а не от
+		# кода. Поэтому лечится оно числом же.
+		#
+		# 4.6 — это 2.1 от пешего гоблина и 2.3 от людского копейщика: конница
+		# обгоняет строй вдвое, то есть успевает обойти его с фланга за то
+		# время, пока фаланга разворачивается
+		"movement_speed": 4.6,
 		"attack_1": 22.0,
 		"attack_2": 22.0,
 		"attack_range": 1.8,
@@ -130,7 +140,27 @@ const STATS := {
 		"defense": 0.0,
 		"armor": 2.0,
 		"morale": 110.0,
-		"push_force": 2.0,          # кабан продавливает строй сильнее рыцаря
+		"push_force": 15.0,          # кабан продавливает строй сильнее рыцаря
+		# ── УДАРНАЯ КОННИЦА: ТОЛЧОК ВДВОЕ И ПОЧТИ НА КАЖДЫЙ УДАР ───────────
+		# Одного push_force для этого мало, и вот почему. Смещение считается
+		# как clampf(разница напора × 0.15, 0.04, 0.4) — то есть ПОТОЛОК 0.4 м
+		# срабатывает уже при разнице в три единицы. У кабана против копейщика
+		# разница около четырнадцати: пятнадцать в конфиге и три в конфиге
+		# давали ОДНО И ТО ЖЕ смещение, потолок съедал всю разницу.
+		#
+		# charge_push_mult применяется ПОСЛЕ потолка — это и есть заказанное
+		# «вдвое». push_every переводит толчок с «раз в десять ударов» на
+		# «через один»: при кулдауне 1.0 с прежний строй продавливался на семь
+		# сантиметров раз в десять секунд, чего на экране не видно вовсе
+		# 3.5, а не 2.0: замер прорыва (qa_cavalry, блок E — три отряда кабанов
+		# против трёх отрядов копейщиков) показал, что при двойке стадо в строй
+		# ВХОДИТ, но насквозь не проходит — центр массы застревал в двух метрах
+		# перед исходной линией. Заказ владельца прямой: «прорывая центр фаланги
+		# насквозь», и мерится он именно этим числом
+		"charge_push_mult": 3.5,
+		# Толчок на КАЖДЫЙ удар. При «через один» кабан с кулдауном 1.0 с давил
+		# раз в две секунды — на экране это не напор, а переминание
+		"push_every": 1,
 		"description": "Pig rider. Fast shock cavalry — hits hard, dies fast.",
 	},
 
@@ -327,10 +357,10 @@ static func smith_icon(icon_name: String) -> Texture2D:
 # (см. starting_resources), поэтому убрать позицию можно просто удалив строку
 # ═════════════════════════════════════════════════════════════════════════════
 const PLAYER_STARTING_RESOURCES := {
-	Constants.RESOURCE_WOOD:  450.0,   # хватает на Замок (300) и запас на первую постройку
-	Constants.RESOURCE_GOLD:  250.0,
-	Constants.RESOURCE_STONE: 100.0,
-	Constants.RESOURCE_FOOD:  100.0,
+	Constants.RESOURCE_WOOD:  4500.0,   # хватает на Замок (300) и запас на первую постройку
+	Constants.RESOURCE_GOLD:  2500.0,
+	Constants.RESOURCE_STONE: 1000.0,
+	Constants.RESOURCE_FOOD:  1000.0,
 }
 
 const AI_STARTING_RESOURCES := {
@@ -356,7 +386,7 @@ static func starting_resources(faction: int) -> Dictionary:
 
 const BUILDINGS := {
 	"castle": {
-		"name": "Замок", "max_hp": 1800.0,
+		"name": "Замок", "max_hp": 3800.0,
 		"build_time": 10.0,                       # ставится готовым с первого клика
 		"size": Vector3(8.0, 6.0, 8.0),
 		"cost_wood": 300.0, "cost_gold": .0, "cost_stone": 0.0,
@@ -373,14 +403,14 @@ const BUILDINGS := {
 		"icon": "",
 	},
 	"barracks": {
-		"name": "Бараки", "max_hp": 10.0, "build_time": 10.0,
+		"name": "Бараки", "max_hp": 1000.0, "build_time": 10.0,
 		"size": Vector3(3.5, 2.2, 3.5),
 		"cost_wood": 0.0, "cost_gold": 0.0, "cost_stone": 0.0,
 		"worker_buildable": true,
 		"icon": "res://assets/factions/humans/icons/buildings/Barracks.png",
 	},
 	"smithy": {
-		"name": "Кузница", "max_hp": 10.0, "build_time": 10.0,
+		"name": "Кузница", "max_hp": 1000.0, "build_time": 10.0,
 		"size": Vector3(4.0, 3.0, 4.0),
 		"cost_wood": 0.0, "cost_gold": 2.0, "cost_stone": .0,
 		"worker_buildable": true,
@@ -696,17 +726,17 @@ const _VET_BONUS_TEMPLATE := [
 ## раз при загрузке скрипта, значения дальше можно менять по каждому ключу
 ## порознь, ничего не задевая
 static var VET_CONFIG: Dictionary = {
-	"spearman": {"thresholds": [40, 100, 200, 300, 400, 500, 600], "bonuses": _VET_BONUS_TEMPLATE.duplicate(true)},
-	"warrior":  {"thresholds": [40, 100, 200, 300, 400, 500, 600], "bonuses": _VET_BONUS_TEMPLATE.duplicate(true)},
-	"archer":   {"thresholds": [40, 100, 200, 300, 400, 500, 600], "bonuses": _VET_BONUS_TEMPLATE.duplicate(true)},
+	"spearman": {"thresholds": [100, 200, 400, 600, 800, 1000, 1300], "bonuses": _VET_BONUS_TEMPLATE.duplicate(true)},
+	"warrior":  {"thresholds": [100, 200, 400, 600, 800, 1000, 1300], "bonuses": _VET_BONUS_TEMPLATE.duplicate(true)},
+	"archer":   {"thresholds": [100, 200, 400, 600, 800, 1000, 1300], "bonuses": _VET_BONUS_TEMPLATE.duplicate(true)},
 	"monk":     {"thresholds": [40, 100, 200, 300, 400, 500, 600], "bonuses": _VET_BONUS_TEMPLATE.duplicate(true)},
 	# ── ГОБЛИНЫ: ШКАЛА ЛЮДЕЙ ЦЕЛИКОМ (заказ владельца) ──────────────────────
 	# Тот же шаблон наград и та же лестница порогов. Записи отдельные, а не
 	# «сослаться на копейщика»: VET_CONFIG — static var, её правят вживую, и
 	# общая ссылка означала бы, что правка гоблинам молча меняет людей
-	"goblin_spearman": {"thresholds": [40, 100, 200, 300, 400, 500, 600],
+	"goblin_spearman": {"thresholds": [100, 200, 400, 600, 800, 1000, 1300],
 		"bonuses": _VET_BONUS_TEMPLATE.duplicate(true)},
-	"goblin_rider":    {"thresholds": [40, 100, 200, 300, 400, 500, 600],
+	"goblin_rider":    {"thresholds": [140, 240, 400, 600, 800, 1000, 1600],
 		"bonuses": _VET_BONUS_TEMPLATE.duplicate(true)},
 }
 
@@ -715,7 +745,7 @@ static var VET_CONFIG: Dictionary = {
 ## ═══════════════════════════════════════════════════════════════════════════
 ## Единственный источник правды и для 3D-звезды над отрядом (VeterancyStar.gd),
 ## и для строки звёзд на панели (HUD._portrait_stars_lbl). Формат:
-##   count — сколько звёзд рисовать, tier — "bronze" | "silver" | "red"
+##   count — сколько звёзд рисовать, tier — "bronze" | "silver" | "gold"
 ## Уровень выше последней записи берёт последнюю (высший грейд не «пропадает»)
 const VET_STAR_TIERS := [
 	{"count": 1, "tier": "bronze"},
@@ -724,23 +754,36 @@ const VET_STAR_TIERS := [
 	{"count": 1, "tier": "silver"},
 	{"count": 2, "tier": "silver"},
 	{"count": 3, "tier": "silver"},
-	{"count": 1, "tier": "red"},
+	{"count": 1, "tier": "gold"},
 ]
 
-## Цвета грейдов. Бронза — тёмно-рыжая, серебро — холодное белое,
-## красная — бордовая, цвета крови
+## ── ЦВЕТА ГРЕЙДОВ ──────────────────────────────────────────────────────────
+## Заказ владельца: яркие и контрастные вместо грязной бронзы и вылинявшего
+## серебра. Прежние 0.72/0.43/0.20 и 0.78/0.83/0.88 на зелёной траве и на
+## светлом шлеме читались одинаково бурыми пятнами.
+##
+## ВЕРХНИЙ ГРЕЙД НАЗЫВАЕТСЯ "gold", А НЕ "red". Ключ переименован вместе с
+## цветом, и это исправление старой неправды: значение у него было янтарное
+## (0.95, 0.72, 0.18), а имя и комментарий обещали «бордовую, цвета крови».
+## Ключ читается только здесь, в VET_STAR_TIERS и VET_TIER_SCALE
 const VET_TIER_COLORS := {
-	"bronze": Color(0.72, 0.43, 0.20),
-	"silver": Color(0.78, 0.83, 0.88),
-	"red":    Color(0.95, 0.72, 0.18),
+	"bronze": Color(0.95, 0.55, 0.15),
+	"silver": Color(0.85, 0.95, 1.00),
+	"gold":   Color(1.00, 0.82, 0.10),
 }
 
-## Во сколько раз звезда грейда крупнее базовой. Красная — заметно больше
+## ОБВОДКА ЗВЕЗДЫ. Один тёмный контур на все грейды: звезда висит и над
+## зелёной травой, и над тёмной кроной, и над светлым шлемом, и без обводки
+## любой из ярких цветов выше на одном из этих фонов теряется. Цвет не чёрный,
+## а чуть синеватый — так он ложится в общую палитру арта
+const VET_STAR_OUTLINE := Color(0.08, 0.08, 0.10, 0.9)
+
+## Во сколько раз звезда грейда крупнее базовой. Золотая — заметно больше
 ## бронзы и серебра (заказ владельца), остальные в базовом размере
 const VET_TIER_SCALE := {
 	"bronze": 1.0,
 	"silver": 1.0,
-	"red":    1.35,
+	"gold":   1.35,
 }
 
 ## Описание грейда уровня lvl: {"count": int, "tier": String,
@@ -755,6 +798,7 @@ static func veteran_star_tier(lvl: int) -> Dictionary:
 		"count": int(d.get("count", 1)),
 		"tier":  tier,
 		"color": VET_TIER_COLORS.get(tier, Color.WHITE) as Color,
+		"outline": VET_STAR_OUTLINE,
 		"scale": float(VET_TIER_SCALE.get(tier, 1.0)),
 	}
 
@@ -1190,7 +1234,7 @@ const ARCHER_DRILL := [
 	{"spread": 0.90, "fire": 1.06},
 	{"spread": 0.82, "fire": 1.12},
 	{"spread": 0.74, "fire": 1.18},
-	{"spread": 0.66, "fire": 1.25},   # 7 — красная звезда
+	{"spread": 0.66, "fire": 1.25},   # 7 — золотая звезда
 ]
 
 ## Один ряд лестницы выучки по уровню отряда

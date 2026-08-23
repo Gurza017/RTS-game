@@ -254,12 +254,23 @@ func _test_arrow_lifetime() -> void:
 	print("\n═════ 4. СТРЕЛЫ ИСЧЕЗАЮТ ═════")
 	# ЧИСЛО НЕ ХАРДКОДИТСЯ. Заказ звучал как «стрела живёт от ВЫСТРЕЛА, а не от
 	# втыкания» — вот это свойство и проверяем; сама длительность с тех пор
-	# пересматривалась (15.0 → 10.5, −30%: воткнувшиеся стрелы копились залпами
-	# и держали лишние прозрачные квады), и стенд обязан следовать за кодом
-	print("  Arrow.MAX_LIFETIME = %.1f c" % Arrow.MAX_LIFETIME)
-	verdict("4 у стрелы есть конечный срок жизни, заведённый от выстрела",
-		Arrow.MAX_LIFETIME > 0.0 and Arrow.MAX_LIFETIME < 60.0,
-		"MAX_LIFETIME=%.1f" % Arrow.MAX_LIFETIME)
+	# пересматривалась не раз, и стенд обязан следовать за кодом.
+	#
+	# СРОКОВ ТЕПЕРЬ ДВА, и это не усложнение ради усложнения: у летящей стрелы
+	# срок — страховка от зависшей (MAX_FLIGHT_SEC), у воткнувшейся — картина
+	# поля боя (STUCK_LIFETIME, заказанные владельцем 30-60 с). Проверяем оба
+	# и то, что конечны они оба
+	print("  Arrow.MAX_FLIGHT_SEC = %.1f c, Arrow.STUCK_LIFETIME = %.1f c"
+		% [Arrow.MAX_FLIGHT_SEC, Arrow.STUCK_LIFETIME])
+	verdict("4 у летящей стрелы есть конечный срок, заведённый от выстрела",
+		Arrow.MAX_FLIGHT_SEC > 0.0 and Arrow.MAX_FLIGHT_SEC < 60.0,
+		"MAX_FLIGHT_SEC=%.1f" % Arrow.MAX_FLIGHT_SEC)
+	verdict("4а воткнувшаяся стрела лежит заказанные 30-60 секунд",
+		Arrow.STUCK_LIFETIME >= 30.0 and Arrow.STUCK_LIFETIME <= 60.0,
+		"STUCK_LIFETIME=%.1f" % Arrow.STUCK_LIFETIME)
+	verdict("4б растворение укладывается в срок жизни стрелы",
+		Arrow.STUCK_FADE > 0.0 and Arrow.STUCK_FADE < Arrow.STUCK_LIFETIME,
+		"STUCK_FADE=%.1f из %.1f" % [Arrow.STUCK_FADE, Arrow.STUCK_LIFETIME])
 
 	# Пускаем стрелу в пустоту: она воткнётся и должна исчезнуть по общему сроку
 	var a := Arrow.new()

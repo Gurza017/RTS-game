@@ -149,6 +149,113 @@ func _a_decals() -> void:
 		hov < 0.02, "макс. расхождение %.3f м" % hov)
 	GameManager.sel_decals.clear_hover()
 
+	# ── A6. СРАВНИВАЕМ БУФЕР СО СПРАЙТОМ, А НЕ С draw_position() ───────────
+	# A1/A2 выше меряют расхождение метки с draw_position() — а метка ИЗ НЕЁ и
+	# берётся, то есть проверяют сами себя. Настоящий вопрос другой: совпадает
+	# ли точка, записанная в буфер КОЛЬЦА, с точкой, записанной в буфер
+	# СПРАЙТА. Расходятся они там, где спрайт в буфер не пишется вовсе, а
+	# draw_position всё равно уехала (см. Unit.tick_visual и Slot.move_to)
+	var slot_gap := 0.0
+	var checked := 0
+	for u in men:
+		var unit: Unit = u
+		var slot = GameManager.far_units._slot.get(unit, null)
+		var ring: Vector3 = GameManager.sel_decals._last_pos.get(unit, Vector3.INF)
+		if slot == null or ring.x == INF:
+			continue
+		checked += 1
+		slot_gap = maxf(slot_gap, Vector2(slot.pos.x - ring.x, slot.pos.z - ring.z).length())
+	verdict("A6 кольцо и СПРАЙТ записаны в одну и ту же точку",
+		checked > 0 and slot_gap < 0.05,
+		"проверено %d, макс. расхождение буферов %.3f м" % [checked, slot_gap])
+
+	# ── A7. ДАЛЬШЕ LOD-РАДИУСА — НО НА ЭКРАНЕ ──────────────────────────────
+	# Отдалённая ортокамера показывает на земле две-три сотни метров, а
+	# LOD-радиус был постоянным (perf_config.lod_radius, 90 м от фокуса). Всё,
+	# что дальше, считалось «невидимым» — и такому бойцу переставали писать
+	# позицию в общий буфер. Спрайт застывал, кольцо (оно берёт нарисованную
+	# точку, а её сглаживание двигает каждый кадр) уезжало вперёд, и раз в
+	# anim_every тактов спрайт догонял рывком. Ровно то, что владелец увидел
+	# как «пехота едет с замершими ногами, кольца отстают».
+	#
+	# Проверяем ОБА конца: и что радиус слушается камеры, и что позиция
+	# пишется даже тому, кого LOD видимым не считает
+	# КАМЕРУ ПРИБИВАЕМ: её _process зовёт update_view_point каждый кадр и
+	# перепишет точку обзора своей. Бойцов ставим ВНУТРИ карты, но в
+	# противоположном от точки обзора углу — за границей их зажал бы
+	# world_bounds и они бы вовсе не пошли, а стенд намерил бы «не отстают»
+	# на неподвижных (первый прогон именно так и прошёл вхолостую)
+	if main._camera != null:
+		(main._camera as Node).set_process(false)
+	var far_men: Array = []
+	var fsid: int = GameManager.new_squad(Constants.FACTION_PLAYER, "spearman")
+	for i in range(4):
+		var fu := _make("spearman")
+		fu.faction = Constants.FACTION_PLAYER
+		main.world_add(fu)
+		fu.global_position = Vector3(100.0 + float(i) * 2.0, 0.0, 40.0)
+		fu.sync_row()
+		GameManager.add_to_squad(fsid, fu)
+		far_men.append(fu)
+	await pframes(4)
+	# Точка обзора — в дальнем углу: бойцы в двух с лишним сотнях метров от неё,
+	# то есть заведомо за настроечным LOD-радиусом, но «на экране»
+	GameManager.update_view_point(Vector3(-120.0, 0.0, -60.0), 300.0)
+	for u in far_men:
+		sm._select(u)
+	GameManager.on_selection_changed(sm.selected_units)
+	for u in far_men:
+		(u as Unit).command_move((u as Node3D).global_position + Vector3(-30.0, 0, 0))
+	_Opt.tick_shards_force = 3
+	# ЖДЁМ СОБЫТИЯ, А НЕ ЧИСЛА КАДРОВ: на загруженной машине (а стенды в этом
+	# проекте гоняют пачками) фиксированные 90 кадров то дают три метра хода,
+	# то полтора, и проверка мигает. Ждём, пока боец реально пройдёт свои метры
+	var start_x: float = (far_men[0] as Node3D).global_position.x
+	var walked := 0.0
+	for _i in range(600):
+		await get_tree().process_frame
+		walked = absf((far_men[0] as Node3D).global_position.x - start_x)
+		if walked > 2.0:
+			break
+	var far_gap := 0.0
+	var moved := 0
+	for u in far_men:
+		var unit: Unit = u
+		var slot = GameManager.far_units._slot.get(unit, null)
+		var ring: Vector3 = GameManager.sel_decals._last_pos.get(unit, Vector3.INF)
+		if slot == null or ring.x == INF:
+			continue
+		moved += 1
+		far_gap = maxf(far_gap, Vector2(slot.pos.x - ring.x, slot.pos.z - ring.z).length())
+	# ХОДЬБА — ЧАСТЬ УСЛОВИЯ: на неподвижном отстать нечему, и проверка прошла
+	# бы вхолостую (так и вышло в первом прогоне, когда бойцов зажал world_bounds).
+	#
+	# ЧЕСТНАЯ ОГОВОРКА: на четырёх бойцах эта проверка зелёная и БЕЗ правки —
+	# такт позы здесь короткий, и полный путь дописывает позицию достаточно
+	# часто, чтобы расхождение не успело накопиться. Настоящее расхождение
+	# живёт на масштабе, где визуальный проход дроблён на четыре шарда, а такт
+	# позы растянут до пяти; его меряет qa_fps (строка «расхождение кольца со
+	# спрайтом»). Здесь проверяется само СВОЙСТВО — что дальний от точки обзора
+	# боец вообще получает перенос слота
+	verdict("A7 дальний от фокуса боец: спрайт не отстаёт от кольца",
+		moved == far_men.size() and walked > 1.0 and far_gap < 0.05,
+		"проверено %d из %d, прошёл %.1f м, расхождение %.3f м" % [
+			moved, far_men.size(), walked, far_gap])
+	# И радиус LOD обязан ПРИНИМАТЬ значение от камеры, а не оставаться на
+	# своих девяноста метрах. Проверяем СРАЗУ после вызова: камера в игре зовёт
+	# update_view_point каждый кадр и на следующем же перепишет радиус своим
+	# (при штатном зуме он меньше настроечного, и это правильно)
+	GameManager.update_view_point(Vector3.ZERO, 300.0)
+	var got_r: float = sqrt(GameManager._view_r2)
+	verdict("A7б радиус LOD принимает значение от камеры",
+		got_r > _Opt.lod_radius + 1.0,
+		"радиус %.0f м при настройке %.0f м" % [got_r, _Opt.lod_radius])
+	_Opt.tick_shards_force = 0
+	sm._clear_selection()
+	for u in far_men:
+		(u as Node).queue_free()
+	await pframes(3)
+
 	_Opt.tick_shards_force = 0
 	GameManager.set_hp_bars_forced(false)
 	sm._clear_selection()

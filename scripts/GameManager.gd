@@ -15,6 +15,22 @@ var veg = load("res://scripts/VegetationRenderer.gd").new()
 ## Полоски здоровья — тоже общим MultiMesh (см. HpBarRenderer.gd). Замер: узлами
 ## на бойца тумблер Alt стоил +2.8 мс и +720 вызовов отрисовки на 600 бойцах
 var hp_bars = load("res://scripts/HpBarRenderer.gd").new()
+## Тела павших — тоже общим MultiMesh (см. CorpseRenderer.gd). Труп не юнит:
+## ни строки в ядре армии, ни состояния, ни физического тика — он заводится
+## уже ПОСЛЕ того, как боец снял с себя всё это в _die()
+var corpses = load("res://scripts/CorpseRenderer.gd").new()
+## ── ЧТО ОТРЯДУ ПРИКАЗАНО ПРЯМО СЕЙЧАС ──────────────────────────────────────
+## sid -> {"kind": ORDER_MOVE | ORDER_ATTACK, "pos": Vector3, "target": Node}.
+## Заводится в SelectionManager при ПКМ и живёт до исполнения. Нужен ровно для
+## одного: показать игроку, кому и куда он уже приказал, — и показать это СНОВА,
+## когда он вернётся к этому отряду через полминуты (см. _refresh_order_marks).
+##
+## Сама логика боя этот словарь не читает: приказ живёт в бойцах, здесь только
+## его отражение для глаз. Иначе получилось бы второе, конкурирующее хранилище
+## приказов — а одно уже есть
+var squad_orders: Dictionary = {}
+const ORDER_MOVE := 0
+const ORDER_ATTACK := 1
 ## ЯДРО АРМИИ В МАССИВАХ (см. scripts/army/ArmySoA.gd). Строку заводит сам боец
 ## в _ready и отдаёт в _exit_tree; пишет в неё он же, сквозь, из тех мест, где
 ## и так менял эти величины. Читают — только ПАКЕТНЫЕ обходы: коридоры отрядов
@@ -133,7 +149,7 @@ func _process(_delta: float) -> void:
 	var vshards: int = vsh
 	if vshards <= 1:
 		for u in _live_units:
-			if is_instance_valid(u) and u.is_processing():
+			if is_instance_valid(u) and u.draw_on:
 				u.tick_visual(_delta, frame, anim_every, vx0, vz0, vr2,
 					lerpk, mm_all, vprof, fog_on)
 	else:
@@ -141,7 +157,7 @@ func _process(_delta: float) -> void:
 		var d: float = _delta * float(vshards)
 		while i < live_n:
 			var u = _live_units[i]
-			if is_instance_valid(u) and u.is_processing():
+			if is_instance_valid(u) and u.draw_on:
 				u.tick_visual(d, frame, anim_every, vx0, vz0, vr2,
 					lerpk, mm_all, vprof, fog_on)
 			i += vshards
@@ -155,23 +171,51 @@ func _process(_delta: float) -> void:
 	# При одном шарде проход не нужен — там tick_visual и так идёт каждый кадр
 	if shards > 1 and _Opt.draw_catchup:
 		for u in _live_units:
-			if is_instance_valid(u) and u.is_processing():
+			if is_instance_valid(u) and u.draw_on:
 				u.tick_draw()
-	if _meter: _Opt.vis_add(Time.get_ticks_usec() - _vm0)
 	# Метки выделения и полоски здоровья — СРАЗУ ПОСЛЕ бойцов и ДО подачи в
 	# рендер: они берут ту же нарисованную точку, которую только что посчитал
 	# tick_visual, и обязаны совпасть с ней кадр в кадр
+	# ── ХВОСТ КАДРА ЗАМЕРЯЕТСЯ ОТДЕЛЬНЫМИ ВЕТКАМИ ──────────────────────────
+	# До этого весь хвост шёл мимо профиля: разбивка показывала только тик
+	# бойцов, а «остальное» приходилось считать вычитанием из общего кадра.
+	# Между тем подача буферов в рендер (far_units.flush → set_buffer на бакет)
+	# растёт прямо с числом бойцов и в тик бойцов не входит вовсе
+	var _t1: int
+	if vprof: _t1 = Time.get_ticks_usec()
 	sel_decals.update_all()
 	hp_bars.update_all()
+	if vprof: _Opt.prof_add("draw_decals", Time.get_ticks_usec() - _t1)
+	if vprof: _t1 = Time.get_ticks_usec()
 	far_units.flush()
 	sel_decals.flush()
 	hp_bars.flush()
+	if vprof: _Opt.prof_add("draw_flush", Time.get_ticks_usec() - _t1)
 	# Растительность не ходит: flush сам ничего не делает, пока никто ничего не
 	# сажал и не рубил (см. VegetationRenderer._dirty_any)
 	veg.flush()
+	# Тела павших: ход и подача рядом с остальной наземной отрисовкой. Пока
+	# никто не растворяется, update() не делает ни одной операции, а flush()
+	# молчит, пока в буфер никто не писал
+	corpses.update(_delta)
+	corpses.flush()
+	# Указатели отданных приказов: пересчитываются по выделению и гаснут сами,
+	# когда отряд дошёл (см. _refresh_order_marks)
+	if vprof: _t1 = Time.get_ticks_usec()
+	_refresh_order_marks(_delta)
+	sel_decals.flush_orders()
+	if vprof: _Opt.prof_add("draw_orders", Time.get_ticks_usec() - _t1)
 	# Звёзды ветеранства едут за центрами масс отрядов (см. _update_squad_stars).
 	# Стоит ПОСЛЕ тика бойцов: позиции за этот кадр уже окончательные
+	if vprof: _t1 = Time.get_ticks_usec()
 	_update_squad_stars()
+	if vprof: _Opt.prof_add("draw_stars", Time.get_ticks_usec() - _t1)
+	# ── СЧЁТЧИК ЗАКРЫВАЕТСЯ ЗДЕСЬ, А НЕ ПОСЛЕ ЦИКЛА ПО БОЙЦАМ ──────────────
+	# Он стоял сразу за обходом армии и не видел ВЕСЬ хвост кадра: метки,
+	# подачу буферов в рендер, тела, указатели приказов, звёзды. Из-за этого
+	# «цена визуального тика» выходила заведомо заниженной, и в разборе кадра
+	# не сходилась примерно треть времени
+	if _meter: _Opt.vis_add(Time.get_ticks_usec() - _vm0)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ЦЕНТРАЛИЗОВАННЫЙ ФИЗ. ТИК ЮНИТОВ (см. шапку Unit.tick_physics)
@@ -303,7 +347,7 @@ func _physics_process(delta: float) -> void:
 	# что путь, откаты ударов и таймеры остаются те же
 	if shards <= 1:
 		for u in _live_units:
-			if is_instance_valid(u) and u.is_physics_processing():
+			if is_instance_valid(u) and u.tick_on:
 				u.tick_physics(delta, _prof, _bm_now, bonus_version)
 	else:
 		var n: int = _live_units.size()
@@ -311,7 +355,7 @@ func _physics_process(delta: float) -> void:
 		var d: float = delta * float(shards)
 		while i < n:
 			var u = _live_units[i]
-			if is_instance_valid(u) and u.is_physics_processing():
+			if is_instance_valid(u) and u.tick_on:
 				u.tick_physics(d, _prof, _bm_now, bonus_version)
 			i += shards
 	if _prof: _Opt.prof_add("!ВЕСЬ ТИК ЮНИТОВ", Time.get_ticks_usec() - _t0)
@@ -768,8 +812,25 @@ func _recalc_corridor(sid: int, now: int) -> void:
 	# harvest_squad, читавший у каждого бойца три свойства, стоил впятеро
 	# дороже всего остального коридора. Границу теперь пересекает ОДИН вызов на
 	# отряд, а точки солвер берёт из своих же колонок — их ведёт пакетный шаг
-	var live: Array = []
-	var rows := PackedInt32Array()
+	# ── ПОДВЕТКИ ЗАМЕРЯЮТСЯ ПОРОЗНЬ ────────────────────────────────────────
+	# Ветка squad_corridor стоила 0.75 мс кадра одним куском, и по этому числу
+	# нельзя было понять, что именно в ней дорого: обход состава, габариты в
+	# солвере, поиск стволов, поиск чужих или раздача ответа. Пять пар
+	# get_ticks_usec на ОТРЯД (а не на бойца) — это доли процента от самой ветки
+	var _cp: bool = _Opt.profile_physics
+	var _ct: int
+	if _cp: _ct = Time.get_ticks_usec()
+	# ── СПИСОК ЖИВЫХ ПЕРЕИСПОЛЬЗУЕТСЯ, А НЕ СОБИРАЕТСЯ ЗАНОВО ──────────────
+	# Два массива на отряд каждые 200 мс — это две аллокации и обход состава;
+	# замер (qa_fps, 4000 юнитов) дал 29 мкс на отряд, 0.33 мс кадра только на
+	# сборку. Массивы держатся при отряде и ЧИСТЯТСЯ, а не создаются: у
+	# Array.clear() ёмкость сохраняется, то есть повторная сборка идёт без
+	# выделения памяти. Валидность при этом проверяется КАЖДЫЙ раз, как и
+	# раньше, — кэшируется контейнер, а не его содержимое
+	var live: Array = sq.get("live_cache", [])
+	var rows: PackedInt32Array = sq.get("rows_cache", PackedInt32Array())
+	live.clear()
+	rows.clear()
 	var dead_st: int = Unit.State.DEAD
 	for m in members:
 		if not is_instance_valid(m):
@@ -779,8 +840,13 @@ func _recalc_corridor(sid: int, now: int) -> void:
 			continue
 		live.append(mu)
 		rows.append(mu._soa)
+	(sq as Dictionary)["live_cache"] = live
+	(sq as Dictionary)["rows_cache"] = rows
+	if _cp: _Opt.prof_add("cor_harvest", Time.get_ticks_usec() - _ct)
+	if _cp: _ct = Time.get_ticks_usec()
 	var box: Array = army.squad_bounds(rows,
 		dead_st, Unit.AGGRO_RADIUS, Unit.INTERCEPT_MARGIN)
+	if _cp: _Opt.prof_add("cor_bounds", Time.get_ticks_usec() - _ct)
 	var n: int = box[0]
 	if n == 0:
 		_corridors.erase(sid)
@@ -792,9 +858,13 @@ func _recalc_corridor(sid: int, now: int) -> void:
 	var radius: float = float(box[3]) + CORRIDOR_MARGIN
 	# Стволы мешают только телу бойца — их достаточно искать по габаритам;
 	# чужих ищем на всю дальность внимания отряда.
+	if _cp: _ct = Time.get_ticks_usec()
 	var clear_trunk: bool = not trunk_near(cx, cz, radius)
+	if _cp: _Opt.prof_add("cor_trunk", Time.get_ticks_usec() - _ct)
+	if _cp: _ct = Time.get_ticks_usec()
 	var clear_enemy: bool = not unit_grid.enemy_near(
 		Vector3(cx, 0.0, cz), fac, radius + watch)
+	if _cp: _Opt.prof_add("cor_enemy", Time.get_ticks_usec() - _ct)
 	# ПЕРВЫЙ СРОК — УКОРОЧЕННЫЙ И СВОЙ У КАЖДОГО ОТРЯДА (см. шапку выше про
 	# синхронность). Дальше отряд живёт обычным TTL, и разведённые фазы держатся
 	# сами. Смещение берётся ОТ НОМЕРА ОТРЯДА, а не случайным: одинаковый прогон
@@ -807,12 +877,72 @@ func _recalc_corridor(sid: int, now: int) -> void:
 	if not _corridors.has(sid):
 		ttl = 1 + (sid * 37) % CORRIDOR_TTL_MS
 	_corridors[sid] = [now + ttl, clear_trunk, clear_enemy]
+	if _cp: _ct = Time.get_ticks_usec()
 	_push_corridor(live, clear_trunk, clear_enemy)
+	if _cp: _Opt.prof_add("cor_push", Time.get_ticks_usec() - _ct)
+	# ── РЯДЫ ФАЛАНГИ СЧИТАЮТСЯ ЗДЕСЬ ЖЕ, ОДНИМ ВЫЗОВОМ НА ОТРЯД ────────────
+	# Состав и строки уже собраны выше — ровно то, что нужно SquadRanks, и
+	# ни одной лишней итерации. Персональный allies_ahead стоил 0.96 мс кадра
+	# на четырёх тысячах (112 вызовов по 8.6 мкс), причём дорога была не
+	# работа, а путь наружу: два прыжка по GDScript и переход границы НА
+	# КАЖДОГО бойца. Такт совпадает: коридор пересчитывается раз в 200 мс,
+	# ряд требовался раз в 250 мс (Unit.RANK_RECHECK)
+	if _cp: _ct = Time.get_ticks_usec()
+	_push_squad_ranks(sid, live, dead_st)
+	if _cp: _Opt.prof_add("cor_ranks", Time.get_ticks_usec() - _ct)
 	# СПЛОЧЁННОСТЬ: габарит отряда солвер уже посчитал (box[3] — самый дальний
 	# от центра), поэтому в обычном случае это ОДНО СРАВНЕНИЕ и ни одного
 	# лишнего обхода бойцов
+	if _cp: _ct = Time.get_ticks_usec()
 	if float(box[3]) > _cohesion_limit(sid):
 		_cohesion_guard(sid, live, cx, cz, now)
+	if _cp: _Opt.prof_add("cor_cohesion", Time.get_ticks_usec() - _ct)
+
+## ── РЯД КАЖДОГО БОЙЦА ФАЛАНГИ — ОДНИМ СКАНОМ НА ОТРЯД ──────────────────────
+## Шеренга обязана смотреть в одну сторону (см. Unit._phalanx_dir), поэтому
+## направление одно на всех, а строки уходят в солвер пачкой.
+##
+## КТО ВЫПАДАЕТ ИЗ ПАЧКИ. Только тот, у кого собственное направление разошлось
+## с общим больше чем на несколько градусов: у него нет курса отряда и он
+## смотрит на своего врага. Такой боец считает ряд сам, прежним путём — веток
+## поведения не прибавилось, прибавилась только пачка для общего случая
+func _push_squad_ranks(sid: int, live: Array, dead_st: int) -> void:
+	if live.is_empty():
+		return
+	# ── НАПРАВЛЕНИЕ СНИМАЕТСЯ ОДИН РАЗ НА ОТРЯД, А НЕ У КАЖДОГО БОЙЦА ──────
+	# Первая версия спрашивала _phalanx_dir() у каждого члена (и дважды: в
+	# поиске ведущего и в фильтре) — а он ходит в этот же автозагрузочный
+	# словарь. Полторы сотни межобъектных обращений на отряд съели весь
+	# выигрыш и сверх того: замер показал 107 мкс на отряд и ветку
+	# squad_corridor 0.78 → 2.19 мс. Здесь те же два обращения, но на ВЕСЬ
+	# отряд, и порядок источников тот же, что у Unit._phalanx_dir
+	var dir: Vector3 = squad_enemy_dir(sid)
+	if not (dir.length_squared() > 1e-6 and squad_in_combat(sid)):
+		var course: Vector3 = squad_course(sid)
+		if course.length_squared() > 1e-6:
+			dir = course
+	if dir.length_squared() < 1e-6:
+		# У отряда нет ни курса, ни общего врага: у каждого бойца своё
+		# направление, и пачкой их не посчитать. Считают сами, прежним путём
+		return
+	var sub := PackedInt32Array()
+	var subu: Array = []
+	for m in live:
+		var u2: Unit = m
+		if u2.state == dead_st or u2._soa < 0 or not u2._stance_holds_ground():
+			continue
+		sub.append(u2._soa)
+		subu.append(u2)
+	if sub.is_empty():
+		return
+	var ranks: PackedInt32Array = unit_grid.squad_ranks(sub, dir,
+		Unit.FILE_LOOK_AHEAD, Unit.FILE_HALF_WIDTH)
+	if ranks.size() != subu.size():
+		return
+	for i in range(subu.size()):
+		var u3: Unit = subu[i]
+		u3._live_rank = ranks[i]
+		u3._rank_fresh = true
 
 ## ── ЖЁСТКАЯ СПЛОЧЁННОСТЬ ОТРЯДА ─────────────────────────────────────────────
 ##
@@ -1715,6 +1845,9 @@ func new_squad(p_faction: int, unit_type: String) -> int:
 		"star": null,      # узел звёздочки (висит на командире)
 		# ── РАЗМЕТКА СТРОЯ (см. squad_set_formation) ──
 		"slots": [],              # точки построения, по шеренгам от передовой
+		# Насколько разметка прогнута ударами тяжёлой конницы (см. squad_dent).
+		# Обнуляется вместе с самой разметкой: новый приказ — новая линия
+		"dent": 0.0,
 		"course": Vector3.ZERO,   # куда смотрит фронт
 		"slow": false,            # маршевый шаг или быстрый
 		"at_order": 0,            # сколько было бойцов на момент приказа
@@ -1783,6 +1916,86 @@ func remove_from_squad(unit: Node) -> void:
 		refresh_star(sid)
 
 ## Живые бойцы отряда (пустой массив — отряда нет). Заодно чистит битые ссылки.
+# ═════════════════════════════════════════════════════════════════════════════
+# УКАЗАТЕЛИ ОТДАННОГО ПРИКАЗА
+# ═════════════════════════════════════════════════════════════════════════════
+## Запомнить, что отряду только что приказали. Зовёт SelectionManager из
+## обработчика ПКМ — там же, где приказ реально раздаётся бойцам
+func squad_note_order(sid: int, kind: int, pos: Vector3, target: Node = null) -> void:
+	if sid <= 0:
+		return
+	squad_orders[sid] = {"kind": kind, "pos": pos, "target": target}
+
+func squad_clear_order(sid: int) -> void:
+	squad_orders.erase(sid)
+
+## Насколько близко к точке приказа отряд считается ДОШЕДШИМ. Метка снимается
+## по этому радиусу, а не по «все до единого встали»: в строю всегда найдётся
+## отстающий, и метка залипала бы навсегда — ровно та жалоба, с которой всё
+## началось
+const ORDER_MARK_ARRIVE := 3.0
+
+## Пересобрать указатели под ТЕКУЩЕЕ выделение. Каждый кадр, но дёшево:
+## выделенных отрядов единицы, а работа на отряд — один медианный центр.
+##
+## Здесь же приказ и УМИРАЕТ: дошли до точки — метка снята; цель приказа
+## погибла — снята тоже. Ничего не надо гасить руками из мест вызова
+func _refresh_order_marks(delta: float) -> void:
+	_order_phase += delta
+	var sm = null
+	if main != null:
+		sm = main.get("selection_manager")
+	if sm == null:
+		sel_decals.set_move_marks([], null, 0.0)
+		sel_decals.set_order_targets([], null)
+		return
+	var world = main.world_root()
+	# Какие отряды сейчас выделены. Множеством, а не списком: один отряд
+	# встречается в выделении столько раз, сколько в нём бойцов
+	var sids: Dictionary = {}
+	for u in sm.selected_units:
+		if u == null or not is_instance_valid(u):
+			continue
+		var uu := u as Unit
+		if uu == null or uu.squad_id <= 0:
+			continue
+		sids[uu.squad_id] = true
+
+	var dests: Array = []
+	var foes: Array = []
+	var done: Array = []
+	for sid in sids:
+		var ord: Dictionary = squad_orders.get(sid, {})
+		if ord.is_empty():
+			continue
+		if int(ord.get("kind", ORDER_MOVE)) == ORDER_ATTACK:
+			var tgt = ord.get("target")
+			# Цель истреблена — приказ исполнен, показывать нечего
+			if tgt == null or not is_instance_valid(tgt) 					or (tgt is Unit and (tgt as Unit).is_dead()):
+				done.append(sid)
+				continue
+			# Кольцами обводится ВЕСЬ отряд цели, а не один боец: приказ отдан
+			# по отряду, и подсветка обязана отвечать тем же
+			if tgt is Unit and (tgt as Unit).squad_id > 0:
+				for m in squad_members((tgt as Unit).squad_id):
+					if is_instance_valid(m) and not (m as Unit).is_dead():
+						foes.append(m)
+			elif tgt is Unit:
+				foes.append(tgt)
+			continue
+		var goal: Vector3 = ord.get("pos", Vector3.ZERO)
+		var c: Vector3 = _centroid_of(squad_members(sid))
+		if Vector2(c.x - goal.x, c.z - goal.z).length() <= ORDER_MARK_ARRIVE:
+			done.append(sid)
+			continue
+		dests.append(Vector3(goal.x, get_terrain_height(goal.x, goal.z), goal.z))
+	for sid in done:
+		squad_orders.erase(sid)
+	sel_decals.set_move_marks(dests, world, _order_phase)
+	sel_decals.set_order_targets(foes, world)
+
+var _order_phase: float = 0.0
+
 func squad_members(squad_id: int) -> Array:
 	if not squads.has(squad_id):
 		return []
@@ -1825,6 +2038,9 @@ func squad_set_formation(sid: int, slots: Array, course: Vector3, slow: bool) ->
 		return
 	var sq: Dictionary = squads[sid]
 	sq["slots"]      = slots.duplicate()
+	# Новая разметка — новая линия: накопленная вмятина от конницы обнуляется,
+	# иначе потолок DENT_MAX_TOTAL остался бы выбранным на всю партию
+	sq["dent"]       = 0.0
 	sq["course"]     = course
 	sq["slow"]       = slow
 	# Сколько бойцов было на момент приказа: по убыли считается доля потерь
@@ -1904,11 +2120,76 @@ func squad_has_formation(sid: int) -> bool:
 		return false
 	return not (squads[sid].get("slots", []) as Array).is_empty()
 
+## ── ВМЯТИНА В СТРОЮ ОТ УДАРА ТЯЖЁЛОЙ КОННИЦЫ ────────────────────────────────
+## Заказ владельца: кабан, влетевший в шеренгу, обязан ЗРИМО прогнуть её, а не
+## просто отпихнуть пару моделей.
+##
+## Почему одного толчка мало. Отброшенный боец держится за своё МЕСТО В
+## РАЗМЕТКЕ (`slots`): первое же смыкание рядов вернёт его туда, и от удара не
+## останется следа. Гнуть надо саму разметку — тогда строй перестраивается уже
+## прогнутым, и вмятина живёт, пока отряд не получит новый приказ.
+##
+## ЧТО ИМЕННО ДЕЛАЕМ. Места в радиусе DENT_RADIUS от точки удара уезжают НАЗАД
+## по направлению удара, с затуханием от центра к краю: получается вмятина, а
+## не сдвиг всей линии. Урона это не касается вовсе — двигаются только точки.
+##
+## ПОЧЕМУ ЕСТЬ ПОТОЛОК. Без него отряд, в который долго бьёт конница, уезжал бы
+## разметкой через всю карту, и «сомкнуть ряды» отправляло бы выживших в поле
+## за краем боя. Суммарная вмятина одного места ограничена DENT_MAX_TOTAL.
+##
+## ПОЧЕМУ НЕ ЗОВЁМ ЗДЕСЬ ЖЕ squad_close_ranks. Смыкание шлёт command_move
+## КАЖДОМУ бойцу, а он снимает цель атаки: в разгар рубки это остановило бы бой
+## (ровно от этого и заведено правило squad_in_combat). Вмятина ждёт своего
+## часа — её подхватит первое же штатное смыкание, когда драка закончится
+const DENT_RADIUS := 3.0
+const DENT_MAX_TOTAL := 4.0
+
+func squad_dent(sid: int, at: Vector3, dirn: Vector3, depth: float) -> void:
+	if sid <= 0 or depth <= 0.0 or not squads.has(sid):
+		return
+	var sq: Dictionary = squads[sid]
+	var slots: Array = sq.get("slots", [])
+	if slots.is_empty():
+		return
+	var d := Vector3(dirn.x, 0.0, dirn.z)
+	if d.length_squared() < 1e-6:
+		return
+	d = d.normalized()
+	# Сколько эта разметка уже прогнута. Считается отрядом, а не местом:
+	# иначе пришлось бы держать по числу на каждый слот
+	var used: float = float(sq.get("dent", 0.0))
+	if used >= DENT_MAX_TOTAL:
+		return
+	var step: float = minf(depth, DENT_MAX_TOTAL - used)
+	var r2: float = DENT_RADIUS * DENT_RADIUS
+	var touched := false
+	for i in range(slots.size()):
+		var p: Vector3 = slots[i]
+		var dx: float = p.x - at.x
+		var dz: float = p.z - at.z
+		var q: float = dx * dx + dz * dz
+		if q > r2:
+			continue
+		# Затухание от центра удара к краю: в точке удара — полный шаг, на
+		# границе радиуса — ноль. Без него вмятина была бы плоской ступенькой
+		var k: float = 1.0 - sqrt(q) / DENT_RADIUS
+		slots[i] = p + d * (step * k)
+		touched = true
+	if touched:
+		sq["dent"] = used + step
+
+## Насколько разметка отряда уже прогнута ударами конницы (стенды)
+func squad_dent_depth(sid: int) -> float:
+	if sid <= 0 or not squads.has(sid):
+		return 0.0
+	return float((squads[sid] as Dictionary).get("dent", 0.0))
+
 ## Снять разметку: отряд получил приказ, не связанный со строем (атака, гарнизон)
 func squad_clear_formation(sid: int) -> void:
 	if sid <= 0 or not squads.has(sid):
 		return
 	(squads[sid] as Dictionary)["slots"] = []
+	(squads[sid] as Dictionary)["dent"] = 0.0
 
 ## ── ОТРЯД «В БОЮ» ────────────────────────────────────────────────────────────
 ## Раньше "сомкнуть ряды" звалось БЕЗУСЛОВНО каждым бойцом, у которого лично
@@ -3439,6 +3720,76 @@ func spawn_arrow(parent: Node, start: Vector3, end_pos: Vector3, dist: float,
 		a.call("launch")
 	return a
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ПОТОЛОК ЧИСЛА ТОРЧАЩИХ СТРЕЛ
+#
+# Здесь ЖЕ раньше жила spawn_stuck_arrow — «рождение декоративной стрелы, уже
+# воткнувшейся»: тела, добитые залпом, добирали ею вторую и третью стрелу.
+# Её убрали вместе с самим правилом (см. CorpseRenderer.MAX_ARROWS_PER_CORPSE),
+# и по той же причине, по которой заведён этот потолок.
+#
+# ПОЧЕМУ ПОТОЛОК ВООБЩЕ НУЖЕН. Стрела — это УЗЕЛ со своим QuadMesh и своим
+# ShaderMaterial, то есть отдельный вызов отрисовки; общего MultiMesh у стрел
+# нет (ось у каждой своя, а квад разворачивает вокруг неё шейдер). Считаем:
+# кулдаун лучника 4 с, промахом кончается больше половины выстрелов, торчит
+# промах STUCK_LIFETIME = 45 с. Значит поле копит примерно N·45/8 торчащих
+# стрел на N стрелков — на трёхстах лучниках это под две тысячи вызовов
+# отрисовки, лежащих на лугу. Ровно это и роняло кадр в затяжной перестрелке.
+#
+# ПОЧЕМУ ПОТОЛОК, А НЕ КОРОТКИЙ СРОК. Сорок пять секунд — заказ владельца:
+# место обстрела обязано читаться щетиной стрел ещё долго после того, как бой
+# ушёл дальше. Срок мы не трогаем; ограничиваем ЧИСЛО. Пока стрел меньше
+# потолка, картина ровно та, что заказана; когда больше — самые старые
+# истаивают, и щетина остаётся там, где стреляют СЕЙЧАС.
+#
+# ПРОТИВ ПОТОЛКА СЧИТАЮТСЯ ТОЛЬКО НЕГАСНУЩИЕ. Догорающая остаётся в списке до
+# конца растворения, и учёт по всей длине давал бы лавину: каждая новая стрела
+# видела бы перебор и отправляла гаснуть ещё одну. Эту самую ошибку стенд
+# qa_corpse уже ловил на телах (см. CorpseRenderer.spawn)
+const MAX_STUCK_ARROWS := 160
+## Насколько быстро истаивает вытесненная потолком. Заметно короче обычного
+## растворения (Arrow.STUCK_FADE = 4 с): пока она гаснет, её место считается
+## освободившимся, и на длинном растворении поле успевало бы уходить за
+## потолок на весь залп
+const STUCK_ARROW_EVICT_FADE := 0.6
+
+var _stuck_arrows: Array = []
+
+## Стрела воткнулась (в грунт или в тело) — взять её на учёт и, если поле
+## переполнено, отправить догорать самые старые
+func note_stuck_arrow(a: Node3D) -> void:
+	if a == null or not is_instance_valid(a):
+		return
+	_stuck_arrows.append(a)
+	if _stuck_arrows.size() <= MAX_STUCK_ARROWS:
+		return
+	# Проход от самых старых. Мусорные записи (узел освобождён мимо пула —
+	# смена сцены, стенд) вычищаются здесь же: без этого список рос бы вечно и
+	# потолок начал бы гасить живые стрелы вместо давно исчезнувших
+	var keep: Array = []
+	var over: int = _stuck_arrows.size() - MAX_STUCK_ARROWS
+	for old in _stuck_arrows:
+		if old == null or not is_instance_valid(old):
+			over -= 1
+			continue
+		if over > 0:
+			over -= 1
+			# Догорающая место уже освобождает — второй раз её не трогаем
+			if not old.is_fading():
+				old.fade_out_in(STUCK_ARROW_EVICT_FADE)
+		keep.append(old)
+	_stuck_arrows = keep
+
+## Стрела ушла с поля (догорела, вытеснена, вернулась в пул)
+func forget_stuck_arrow(a: Node3D) -> void:
+	if _stuck_arrows.is_empty():
+		return
+	_stuck_arrows.erase(a)
+
+## Сколько стрел торчит на поле прямо сейчас (стенды)
+func stuck_arrow_count() -> int:
+	return _stuck_arrows.size()
+
 ## Принять погасшую стрелу обратно (зовёт Arrow._despawn)
 func recycle_arrow(a: Node3D) -> void:
 	if _arrow_pool.size() >= ARROW_POOL_MAX:
@@ -3452,6 +3803,8 @@ func clear_arrow_pool() -> void:
 		if is_instance_valid(a):
 			a.queue_free()
 	_arrow_pool.clear()
+	# Реестр торчащих держит узлы прошлой сцены — та же оговорка, что у пула
+	_stuck_arrows.clear()
 
 ## Сколько стрел лежит наготове (стенды)
 func arrow_pool_size() -> int:
@@ -3536,10 +3889,25 @@ var _view_x: float = 0.0
 var _view_z: float = 0.0
 var _view_r2: float = 1e18
 
-func update_view_point(pos: Vector3) -> void:
+## ── РАДИУС «ВИДНО» ОБЯЗАН СЛЕДОВАТЬ ЗА ЗУМОМ ────────────────────────────────
+## Здесь стоял ОДИН радиус на все случаи — `lod_radius`, девяносто метров от
+## точки фокуса. Пока камера подведена близко, это честно. Но отдалённая
+## ортокамера показывает на земле полосу в две-три сотни метров, и всё, что
+## дальше девяноста от центра экрана, считалось «невидимым», оставаясь при
+## этом НА ЭКРАНЕ. Такому бойцу переставали считать позу, кадр ленты и — что
+## хуже — перенос его слота в общий буфер. Отсюда все три жалобы разом:
+## «пехота едет с замершими ногами», «рабочие рубят без анимации» и «жёлтые
+## кольца отстают от бойцов» (кольцо-то берёт нарисованную точку, которую
+## сглаживание честно двигает каждый кадр, а сам спрайт стоит).
+##
+## Теперь радиус — это МАКСИМУМ из настроечного и фактически видимой на земле
+## полосы, которую сообщает камера. Экономия LOD остаётся там, где ей и место:
+## за краем экрана
+func update_view_point(pos: Vector3, ground_radius: float = 0.0) -> void:
 	_view_x = pos.x
 	_view_z = pos.z
-	_view_r2 = _Opt.lod_radius * _Opt.lod_radius
+	var r: float = maxf(_Opt.lod_radius, ground_radius)
+	_view_r2 = r * r
 
 ## ── ОСИ КАМЕРЫ, СНЯТЫЕ РАЗ В КАДР ───────────────────────────────────────────
 ## Спрайты — билборды, поэтому «влево/вправо» и выбор ракурса из 8 секторов

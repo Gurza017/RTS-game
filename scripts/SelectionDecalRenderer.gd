@@ -237,6 +237,110 @@ func set_hover_units(units: Array, world_root: Node3D) -> void:
 		_hover_write(idx, (u as Unit).global_position)
 		_hover_last[u] = (u as Unit).global_position
 
+# ═════════════════════════════════════════════════════════════════════════════
+# УКАЗАТЕЛИ ОТДАННОГО ПРИКАЗА
+# ═════════════════════════════════════════════════════════════════════════════
+## Два слоя, оба поверх той же машинерии, что и кольца выделения.
+##
+## ЗАЧЕМ. Игрок отдал приказ и через полминуты не помнит, кому и куда. Кольца
+## прицеливания (_hover) отвечают на вопрос «на кого я НАВЁЛСЯ», а эти — на
+## вопрос «что этому отряду УЖЕ приказано». Поэтому они не гаснут по уходу
+## курсора и появляются заново при повторном выделении отряда.
+##
+## Метка точки движения СНИМАЕТСЯ САМА, когда отряд дошёл: за этим следит
+## владелец приказов (GameManager.squad_orders), сюда приходит уже готовый
+## список того, что показывать в этом кадре.
+var _order_ring: Layer = null            # красные кольца на приказанной цели
+var _order_slot: Dictionary = {}
+var _dest: Layer = null                  # метки точек, куда послан отряд
+var _dest_n: int = 0
+
+## КОЛЬЦА НА ЦЕЛИ ПРИКАЗА. Набором целиком, как и у прицеливания: разницу с
+## прошлым кадром считать удобнее здесь, чем в местах вызова
+func set_order_targets(units: Array, world_root: Node3D) -> void:
+	var keep: Dictionary = {}
+	for u in units:
+		if is_instance_valid(u) and u is Unit:
+			keep[u] = true
+	var drop: Array = []
+	for u in _order_slot:
+		if not keep.has(u) or not is_instance_valid(u):
+			drop.append(u)
+	for u in drop:
+		_order_drop(u)
+	if keep.is_empty():
+		return
+	if _order_ring == null:
+		_order_ring = _make_layer(_Vis.hover_ring_mesh(), world_root)
+	for u in keep:
+		var pos: Vector3 = (u as Unit).global_position
+		if _order_slot.has(u):
+			# Цель ЖИВАЯ и ходит: кольцо обязано ехать за ней, иначе оно
+			# остаётся лежать там, где враг был в момент приказа
+			_order_ring.write(int(_order_slot[u]), _ID0, _ID1, _ID2,
+				Vector3(pos.x, pos.y + _Vis.RING_Y, pos.z))
+			continue
+		if _order_ring.free.is_empty():
+			var new_cap: int = _order_ring.capacity + GROW_STEP
+			_order_ring.grow(GROW_STEP)
+			for i in range(new_cap - GROW_STEP, new_cap):
+				_order_ring.free.append(i)
+		var idx: int = _order_ring.free.pop_back()
+		_order_slot[u] = idx
+		_order_ring.write(idx, _ID0, _ID1, _ID2,
+			Vector3(pos.x, pos.y + _Vis.RING_Y, pos.z))
+
+func drop_order_target(u) -> void:
+	_order_drop(u)
+
+func _order_drop(u) -> void:
+	if not _order_slot.has(u) or _order_ring == null:
+		return
+	_order_ring.hide_slot(int(_order_slot[u]))
+	_order_ring.free.append(int(_order_slot[u]))
+	_order_slot.erase(u)
+
+## МЕТКИ ТОЧЕК НАЗНАЧЕНИЯ. Не по объектам, а списком точек: их единицы (по
+## одной на выделенный отряд), и держать под них словарь незачем — слой просто
+## переписывается целиком каждый кадр.
+##
+## `phase` — время в секундах: от него метка мягко пульсирует. Пульсация здесь
+## масштабом, а не прозрачностью: у кольца материал общий на весь слой, и
+## менять в нём альфу означало бы мигать всеми метками разом
+## Масштаб метки. Заказ владельца — вдвое меньше прежнего (было 5.0): метка
+## обязана читаться как ТОЧКА, куда отряд идёт, а не как площадь, которую он
+## займёт. Толщина линии при этом задана не здесь, а в самом меше
+## (UnitVisuals.dest_ring_mesh) — масштаб тянул бы её вместе с радиусом
+const DEST_SCALE := 2.5
+const DEST_PULSE := 0.18
+
+func set_move_marks(points: Array, world_root: Node3D, phase: float) -> void:
+	if points.is_empty():
+		if _dest != null and _dest_n > 0:
+			for i in range(_dest_n):
+				_dest.hide_slot(i)
+			_dest_n = 0
+		return
+	if _dest == null:
+		_dest = _make_layer(_Vis.dest_ring_mesh(), world_root)
+	while _dest.capacity < points.size():
+		_dest.grow(GROW_STEP)
+	var k: float = DEST_SCALE * (1.0 + DEST_PULSE * sin(phase * 3.0))
+	for i in range(points.size()):
+		var p: Vector3 = points[i]
+		_dest.write(i, Vector3(k, 0.0, 0.0), Vector3(0.0, 1.0, 0.0),
+			Vector3(0.0, 0.0, k), Vector3(p.x, p.y + _Vis.RING_Y, p.z))
+	# Лишние места прошлого кадра гасим: отряд сняли с выделения — метка ушла
+	for i in range(points.size(), _dest_n):
+		_dest.hide_slot(i)
+	_dest_n = points.size()
+
+func flush_orders() -> void:
+	if _order_ring != null:
+		_order_ring.flush()
+	if _dest != null:
+		_dest.flush()
+
 ## Снять бойца с прицельной подсветки. Идемпотентно и БЕЗ обращения к объекту —
 ## зовётся в том числе из Unit._exit_tree, то есть на уже умирающем бойце
 func drop_hover(u) -> void:

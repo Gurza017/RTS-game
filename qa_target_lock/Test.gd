@@ -17,7 +17,10 @@ extends Node
 ##   D. ОБСТРЕЛ НЕ СБИВАЕТ — стрелок сбоку не разворачивает запертый отряд
 ##      (приоритет №1 против №3, авто-агро);
 ##   E. ЗАМОК СНИМАЕТСЯ — приказом движения и по истреблении вражеского отряда,
-##      после чего снова работает обычное авто-агро.
+##      после чего снова работает обычное авто-агро;
+##   F. ЛУЧНИК НЕ ПЕРЕВОДИТ ЗАЛП НА БЛИЖНИХ — приказ по дальнему отряду
+##      стрелков держится, даже когда чужие копейщики стоят вдвое ближе и
+##      даже когда назначенная цель на время выходит из дальности выстрела.
 ##
 ## Запуск: godot --headless --path . res://qa_target_lock/Test.tscn
 
@@ -145,6 +148,7 @@ func _run() -> void:
 	await _c_archer_speed()
 	await _d_ignores_harassment()
 	await _e_lock_releases()
+	await _f_archer_keeps_order()
 
 	print("\n═════ ИТОГ ═════")
 	for row in _log:
@@ -430,3 +434,92 @@ func _e_lock_releases() -> void:
 		"зацепили %d из %d" % [caught, _alive(men).size()])
 
 	await _cleanup([men, target, fresh])
+
+# ═════════════════════════════════════════════════════════════════════════════
+# F. ЛУЧНИКИ ДЕРЖАТ ПРИКАЗ, А НЕ БЬЮТ ПО БЛИЖНИМ
+# ═════════════════════════════════════════════════════════════════════════════
+## Жалоба владельца дословно: выделяю лучников, ПКМ по вражескому отряду
+## лучников — а мои стреляют по копейщикам, которые ближе.
+##
+## Механизм был такой. Стрелок не преследует (Archer.pursues_target = false):
+## стоит назначенной цели отойти за дальность выстрела, и _process_attack
+## бросает её и переводит бойца в ПОКОЙ. Замок приказа при этом ОСТАЁТСЯ
+## взведённым, но покой обслуживает авто-агро — а оно замка не читало вовсе и
+## честно выдавало ближайшего противника. Приказ игрока подменялся молча.
+##
+## Проверяется поэтому не «сразу после клика» (так работало и раньше), а
+## именно этот стык: цель ушла из дальности, рядом стоит кто-то ближе.
+func _f_archer_keeps_order() -> void:
+	print("
+═════ F. ЛУЧНИК НЕ ПЕРЕВОДИТ ЗАЛП НА БЛИЖНИХ ═════")
+	var rng: float = _UStatsRange()
+	var p0 := Vector3(900, 0, 0)
+	var men := _squad("archer", Constants.FACTION_PLAYER, p0, 6)
+	# НАЗНАЧЕННЫЙ отряд — вражеские лучники, в пределах выстрела
+	var target := _squad("archer", Constants.FACTION_ENEMY,
+		p0 + Vector3(0, 0, rng * 0.8), 6)
+	# ОТВЛЕЧЕНИЕ — копейщики ВДВОЕ ближе и сбоку: ровно то, во что стрелки
+	# начинали бить вместо приказа
+	var decoy := _squad("spearman", Constants.FACTION_ENEMY,
+		p0 + Vector3(rng * 0.35, 0, 0.0), 6)
+	# БЕССМЕРТНЫ ВСЕ ТРОЕ, и свои в том числе. Первый прогон стенда шёл без
+	# этого: вражеские лучники и копейщики выбивали наблюдаемый отряд за время
+	# наблюдения, и проверки F3-F5 честно проходили на пустом списке («0 из 0»)
+	for arr in [men, target, decoy]:
+		for u in arr:
+			(u as Unit).max_health = 1e9
+			(u as Unit).current_health = 1e9
+	var tsid := _sid_of(target)
+	var dsid := _sid_of(decoy)
+
+	for u in men:
+		(u as Unit).command_attack(target[0], true, true, true)
+	await frames(60)
+	verdict("F1 залп ушёл по назначенному отряду, а не по ближним",
+		_aiming_at_squad(men, tsid) == _alive(men).size()
+			and _aiming_at_squad(men, dsid) == 0,
+		"на цели %d, на отвлечении %d из %d" % [
+			_aiming_at_squad(men, tsid), _aiming_at_squad(men, dsid),
+			_alive(men).size()])
+
+	# ── ЦЕЛЬ ОТОШЛА ЗА ДАЛЬНОСТЬ ВЫСТРЕЛА ──────────────────────────────────
+	# Переносим её руками: важно не КАК она ушла, а что стрелок остался без
+	# цели, имея под боком чужой отряд ближе
+	for u in target:
+		if is_instance_valid(u):
+			(u as Unit).global_position += Vector3(0, 0, rng * 0.9)
+			(u as Unit).sync_row()
+	var stolen := 0
+	var lock_kept := 0
+	for i in range(600):
+		await get_tree().physics_frame
+		stolen = maxi(stolen, _aiming_at_squad(men, dsid))
+	for u in men:
+		if is_instance_valid(u) and bool((u as Unit).target_lock):
+			lock_kept += 1
+	verdict("F2 ушедшая за дальность цель не отдаёт залп ближним",
+		stolen == 0, "переключились на копейщиков: %d" % stolen)
+	verdict("F3 замок приказа пережил выход цели из дальности",
+		lock_kept == _alive(men).size(),
+		"замок держат %d из %d" % [lock_kept, _alive(men).size()])
+
+	# ── ЦЕЛЬ ВЕРНУЛАСЬ — ОГОНЬ ВОЗОБНОВЛЯЕТСЯ САМ ──────────────────────────
+	for u in target:
+		if is_instance_valid(u):
+			(u as Unit).global_position -= Vector3(0, 0, rng * 0.9)
+			(u as Unit).sync_row()
+	await frames(240)
+	verdict("F4 вернувшаяся цель снова принимает залп",
+		_aiming_at_squad(men, tsid) >= _alive(men).size() - 1,
+		"на цели %d из %d" % [_aiming_at_squad(men, tsid), _alive(men).size()])
+
+	# ── ОТРЯД ИСТРЕБЛЁН — ПРИКАЗ ИСЧЕРПАН, АВТО-АГРО СНОВА РАБОТАЕТ ────────
+	for u in target:
+		if is_instance_valid(u):
+			(u as Unit).queue_free()
+	await frames(300)
+	verdict("F5 после истребления цели лучники сами берут ближних",
+		_aiming_at_squad(men, dsid) > 0,
+		"на отвлечении %d из %d" % [_aiming_at_squad(men, dsid), _alive(men).size()])
+
+	await _cleanup([men, decoy])

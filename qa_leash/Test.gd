@@ -189,9 +189,101 @@ func _run() -> void:
 		if is_instance_valid(u): (u as Node).queue_free()
 	await frames(3)
 
+	await _test_pursuit_limit()
+	await _test_sprint_cost()
+
 	print("\n═════ ИТОГ ═════")
 	for row in _log:
 		print("  %-58s%s" % [String(row[0]), "ПРОШЛО" if bool(row[1]) else "НЕ ПРОШЛО"])
 	print("  провалов: %d из %d" % [_fail, _pass + _fail])
 	print("\n=== LEASH TEST DONE ===")
 	get_tree().quit()
+
+# ═════════════════════════════════════════════════════════════════════════════
+# P. ПОВОДОК ПОГОНИ: ЗА ОТСТУПИВШИМ ГОНИМСЯ ДО ПРЕДЕЛА, А НЕ ДО КРАЯ КАРТЫ
+# ═════════════════════════════════════════════════════════════════════════════
+## Приказ атаковать выдан, боец цель ДОСТАЛ, после чего цель убегает. Проверяем,
+## что погоня обрывается сама и боец возвращается на пост, а не тянется за
+## жертвой через полкарты, растягивая отряд в нитку.
+##
+## Числа читаются из кода (Unit.PURSUIT_LIMIT), а не хардкодятся: заказана
+## вилка «10 шагов, 5-8 м», её и проверяем как СВОЙСТВО
+func _test_pursuit_limit() -> void:
+	verdict("P1 поводок погони — заказанные 5-8 м",
+		Unit.PURSUIT_LIMIT >= 5.0 and Unit.PURSUIT_LIMIT <= 8.0,
+		"PURSUIT_LIMIT = %.1f м" % Unit.PURSUIT_LIMIT)
+
+	var post := Vector3(300.0, 0.0, 300.0)
+	var hunter := _new("warrior", Constants.FACTION_PLAYER, post)
+	var prey := _new("worker", Constants.FACTION_ENEMY, post + Vector3(1.0, 0.0, 0.0))
+	await frames(2)
+	# Пост назначается приказом на движение: от него боец и считает возврат
+	hunter.command_move(post)
+	await frames(20)
+	hunter.command_attack(prey, true, true)
+	var touched := false
+	for _i in range(240):
+		await get_tree().physics_frame
+		if hunter._engaged_once:
+			touched = true
+			break
+	verdict("P2 боец достал цель — отсюда считается погоня", touched,
+		"первое касание: %s" % str(touched))
+
+	# Жертва убегает по прямой, заведомо дальше поводка
+	var fled := 0.0
+	for _i in range(900):
+		await get_tree().physics_frame
+		if not is_instance_valid(prey) or prey.is_dead():
+			break
+		fled += 0.05
+		prey.global_position = post + Vector3(1.0 + fled, 0.0, 0.0)
+		prey.sync_row()
+		if hunter.attack_target == null:
+			break
+	var gave_up: bool = is_instance_valid(hunter) and hunter.attack_target == null
+	var chased: float = hunter.global_position.distance_to(post) if is_instance_valid(hunter) else -1.0
+	verdict("P3 погоня оборвана сама, цель забыта", gave_up,
+		"цель у преследователя: %s" % ("снята" if gave_up else "есть"))
+	verdict("P4 ушёл в пределах поводка, а не через полкарты",
+		chased >= 0.0 and chased <= Unit.PURSUIT_LIMIT * 2.0,
+		"удалился на %.1f м при поводке %.1f м" % [chased, Unit.PURSUIT_LIMIT])
+
+	for u in [hunter, prey]:
+		if is_instance_valid(u): (u as Node).queue_free()
+	await frames(3)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# S. ЦЕНА БЕГА: БЫСТРЕЕ НА 35% И БОЛЬНЕЕ НА 35%
+# ═════════════════════════════════════════════════════════════════════════════
+## Бег по двойному ПКМ раньше был ходом без единого минуса. Заказ владельца:
+## +35% скорости и +35% входящего урона. Проверяем оба числа и то, что второе
+## реально доходит до здоровья, а не только записано константой
+func _test_sprint_cost() -> void:
+	verdict("S1 бег даёт заказанные +35% скорости",
+		absf(Unit.SPRINT_SPEED_FACTOR - 1.35) < 0.001,
+		"SPRINT_SPEED_FACTOR = %.2f" % Unit.SPRINT_SPEED_FACTOR)
+	verdict("S2 бег стоит заказанных +30-35% входящего урона",
+		Unit.SPRINT_DAMAGE_MULT >= 1.30 and Unit.SPRINT_DAMAGE_MULT <= 1.35,
+		"SPRINT_DAMAGE_MULT = %.2f" % Unit.SPRINT_DAMAGE_MULT)
+
+	# ЗАМЕР, А НЕ КОНСТАНТА: одинаковый удар по стоящему и по бегущему
+	var calm := _new("warrior", Constants.FACTION_PLAYER, Vector3(400.0, 0.0, 400.0))
+	var runner := _new("warrior", Constants.FACTION_PLAYER, Vector3(404.0, 0.0, 400.0))
+	await frames(2)
+	runner._set_sprinting(true)
+	var hp0: float = calm.current_health
+	var hp1: float = runner.current_health
+	calm.take_damage(100.0, null)
+	runner.take_damage(100.0, null)
+	var d_calm: float = hp0 - calm.current_health
+	var d_run: float = hp1 - runner.current_health
+	var ratio: float = d_run / maxf(d_calm, 0.0001)
+	verdict("S3 по бегущему удар доходит сильнее ровно на множитель",
+		absf(ratio - Unit.SPRINT_DAMAGE_MULT) < 0.02,
+		"стоящему %.1f, бегущему %.1f, отношение %.2f при множителе %.2f"
+			% [d_calm, d_run, ratio, Unit.SPRINT_DAMAGE_MULT])
+
+	for u in [calm, runner]:
+		if is_instance_valid(u): (u as Node).queue_free()
+	await frames(3)

@@ -218,10 +218,10 @@ func _c_damage() -> void:
 	melee.global_position = Vector3(3, 0, -400)
 	await frames(3)
 	# Мечник не должен убегать в атаку и менять _facing посреди замера
-	front.set_process(false); front.set_physics_process(false)
-	back.set_process(false);  back.set_physics_process(false)
-	melee.set_process(false); melee.set_physics_process(false)
-	w.set_physics_process(false)
+	front.set_draw(false); front.set_tick(false)
+	back.set_draw(false);  back.set_tick(false)
+	melee.set_draw(false); melee.set_tick(false)
+	w.set_tick(false)
 	# ВАЖНО: ракурс задаётся ПОСЛЕ ожидания кадров. Лучники — живые враги и
 	# успевают выстрелить, а notify_incoming_fire разворачивает стоящего лицом к
 	# стрелку. Если не переставить _facing здесь, «спереди» и «сзади» в замере
@@ -251,7 +251,7 @@ func _c_damage() -> void:
 	verdict("C4 щит не даёт бессмертия", guard_arrow > 0.0, "%.3f" % guard_arrow)
 
 	# Предупреждение о выстреле поднимает щит ДО прилёта стрелы
-	w.set_physics_process(true)
+	w.set_tick(true)
 	w._guard_active = false
 	w._threat_until_ms = 0
 	w.state = Unit.State.IDLE
@@ -278,10 +278,24 @@ func _d_idle() -> void:
 	var w := _new_warrior(Vector3(0, 0, -400))
 	await frames(10)
 	var asp := w._active_sprite as AnimatedSprite3D
-	verdict("D1 стоя без дела щит поднят", w.is_guarding(),
+	# ── ТРЕБОВАНИЕ РАЗВЁРНУТО ВЛАДЕЛЬЦЕМ ───────────────────────────────────
+	# Было: «стоя без дела щит поднят». Стало прямо наоборот — в покое щит
+	# ОПУЩЕН, поднимается только на включённый режим обороны или на первый же
+	# прилёт. Причина простая: любой боец между приказами — это IDLE, то есть
+	# под старым правилом вся армия и весь гарнизон жили в оборонительной позе
+	verdict("D1 стоя без дела щит ОПУЩЕН", not w.is_guarding(),
 		"state=%d guard=%s" % [w.state, w.is_guarding()])
-	verdict("D2 играет анимация guard", asp != null and asp.animation == Warrior.GUARD_ANIM,
+	verdict("D2 в покое играет обычная поза, а не guard",
+		asp != null and asp.animation != Warrior.GUARD_ANIM,
 		"anim=%s" % (asp.animation if asp else "нет"))
+	# ── А ВОТ РЕЖИМ ОБОРОНЫ ЩИТ ПОДНИМАЕТ ──────────────────────────────────
+	# «При включении режима» из заказа — это стойка «Защита», её включает игрок
+	w.set_stance("defense")
+	w._update_guard()
+	verdict("D1б включённая оборона поднимает щит и в покое", w.is_guarding(),
+		"stance=%s guard=%s" % [w.stance, w.is_guarding()])
+	w.set_stance("attack")
+	w._update_guard()
 
 	# Замах опускает щит: одновременно бить и закрываться нельзя
 	w._anim_lock_until_ms = Time.get_ticks_msec() + 400
@@ -341,7 +355,7 @@ func _f_disabled() -> void:
 	w._facing = Vector3(1, 0, 0)
 	var arch := _new_archer(Vector3(10, 0, -400))
 	await frames(3)
-	arch.set_process(false); arch.set_physics_process(false)
+	arch.set_draw(false); arch.set_tick(false)
 	w.set_auto_guard(false)
 	await frames(5)
 
@@ -351,7 +365,7 @@ func _f_disabled() -> void:
 	w._update_guard()
 	verdict("F2 стрелы игнорируются", not w.is_guarding() and not w._threatened())
 
-	w.set_physics_process(false)
+	w.set_tick(false)
 	var dealt: float = _hit(w, arch, 40.0, false)
 	w._update_guard()
 	var still_off: bool = not w.is_guarding()
@@ -365,12 +379,14 @@ func _f_disabled() -> void:
 	verdict("F4 скорость полная (100%%)", absf(w._effective_speed() - full) < 0.001,
 		"%.2f м/с" % full)
 
-	# Обратно включаем — механика оживает
+	# Обратно включаем — механика оживает. Проверяется РЕАКЦИЯ НА УГРОЗУ, а не
+	# покой: в покое щит теперь опущен по заказу владельца (см. D1)
 	w.set_auto_guard(true)
 	w.state = Unit.State.IDLE
+	w._mark_threat()
 	w._update_guard()
-	verdict("F5 повторное включение возвращает щит", w.is_guarding(),
-		"урон без щита был %.1f" % dealt)
+	verdict("F5 повторное включение возвращает реакцию на угрозу", w.is_guarding(),
+		"урон без щита был %.1f, угроза=%s" % [dealt, str(w._threatened())])
 
 	w.queue_free(); arch.queue_free()
 	await frames(2)
@@ -517,8 +533,8 @@ func _i_order() -> void:
 	var w := _new_warrior(Vector3(0, 0, -480))
 	var arch := _new_archer(Vector3(20, 0, -480))
 	await frames(3)
-	arch.set_process(false); arch.set_physics_process(false)
-	w.set_physics_process(false)
+	arch.set_draw(false); arch.set_tick(false)
+	w.set_tick(false)
 
 	# Мечник ИДЁТ и ни о чём не подозревает: угрозы не было, щит опущен
 	w.state = Unit.State.MOVING
@@ -531,7 +547,7 @@ func _i_order() -> void:
 	var ref := _new_warrior(Vector3(0, 0, -490))
 	ref._facing = Vector3(1, 0, 0)
 	await frames(3)
-	ref.set_physics_process(false)
+	ref.set_tick(false)
 	ref.set_auto_guard(false)
 	ref.current_health = ref.max_health
 	ref.take_damage(40.0, arch)
@@ -564,7 +580,7 @@ func _i_order() -> void:
 	main.world_add(melee)
 	melee.global_position = Vector3(2, 0, -480)
 	await frames(3)
-	melee.set_process(false); melee.set_physics_process(false)
+	melee.set_draw(false); melee.set_tick(false)
 	w.state = Unit.State.MOVING
 	w._threat_until_ms = 0
 	w._update_guard()
@@ -593,7 +609,10 @@ func _j_wake_speed() -> void:
 		await get_tree().process_frame
 	var slept: bool = not w.is_processing()
 	var guarded: bool = w.is_guarding()
-	verdict("J1 стоящий заснул со щитом", slept and guarded,
+	# Щит в покое опущен (см. D1), поэтому проверяется только САМ СОН: он и
+	# был опасным местом — спящему выключен _process, а именно он пересчитывает
+	# _guard_active, и взведённый флаг остался бы висеть навсегда
+	verdict("J1 стоящий без дела заснул", slept,
 		"спит=%s щит=%s" % [slept, guarded])
 
 	# Приказ идти. Проверяем СЛЕДУЮЩИЙ же кадр: если _process не проснулся,

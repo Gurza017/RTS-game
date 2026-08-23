@@ -15,9 +15,24 @@ extends Node
 
 const _OptCfg = preload("res://scripts/perf_config.gd")
 
-const SQUADS := 15
-const SIZE   := 54
-const COLS   := 9
+## ЧИСЛА ОТРЯДА ПЕРЕОПРЕДЕЛЯЮТСЯ АРГУМЕНТОМ, а не правкой файла: тот же стенд
+## нужен и на 810 бойцах (случай из отчёта), и на 2000-5000 (заказ владельца на
+## 80 FPS). Запуск: `... res://qa_march_perf/Test.tscn -- squads=40 size=54`
+static var SQUADS := 15
+static var SIZE   := 54
+static var COLS   := 9
+
+## Разбор аргументов. Отдельным методом, чтобы стенд читал их РАНЬШЕ спавна и
+## печатал в шапке уже настоящие числа
+func _read_args() -> void:
+	for a in OS.get_cmdline_user_args():
+		var s: String = String(a)
+		if s.begins_with("squads="):
+			SQUADS = maxi(int(s.substr(7)), 1)
+		elif s.begins_with("size="):
+			SIZE = maxi(int(s.substr(5)), 1)
+		elif s.begins_with("cols="):
+			COLS = maxi(int(s.substr(5)), 1)
 
 var main = null
 var _units: Array = []
@@ -183,8 +198,15 @@ func _spawn() -> void:
 		# ВОЙСКА СТАВЯТСЯ В КАДР. Ортокамера смотрит в (0,0) с size 48, поэтому
 		# блок 5×3 отрядов с шагом 10×8 м умещается целиком; иначе пирамида
 		# видимости отсекает спрайты и стенд меряет пустой экран
-		var base_x: float = -22.0 + float(s % 5) * 10.0
-		var base_z: float = -14.0 + float(s / 5) * 8.0
+		# Сетка отрядов КВАДРАТНАЯ по числу отрядов, а не «пять в ряд»: на
+		# сорока отрядах ряд из пяти уходил бы вглубь на шестьдесят метров,
+		# пирамида видимости срезала бы половину армии, и стенд мерил бы
+		# половину нагрузки под видом целой
+		var per_row: int = int(ceil(sqrt(float(SQUADS))))
+		var span_x: float = float(per_row - 1) * 10.0
+		var span_z: float = float((SQUADS - 1) / per_row) * 8.0
+		var base_x: float = -span_x * 0.5 + float(s % per_row) * 10.0
+		var base_z: float = -span_z * 0.5 + float(s / per_row) * 8.0
 		for i in range(SIZE):
 			var u: Unit = Spearman.new()
 			u.faction = Constants.FACTION_PLAYER
@@ -251,6 +273,7 @@ func _march(center: Vector3) -> void:
 		GameManager.squad_set_formation(int(sid), slots, course, false)
 
 func _run() -> void:
+	_read_args()
 	get_tree().root.size = Vector2i(1280, 720)
 	DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
 	Engine.max_fps = 0
@@ -271,6 +294,9 @@ func _run() -> void:
 	await _measure("фон (пустая карта)")
 	_spawn()
 	print("  поставлено бойцов: %d" % _units.size())
+	# ВСЯ АРМИЯ ОБЯЗАНА БЫТЬ В КАДРЕ. Иначе стенд меряет отсечение пирамидой
+	# видимости, а не отрисовку войск (см. _visibility_note)
+	_fit_camera()
 	# Прогрев: первый спавн разбирает спрайтлисты
 	await frames(180)
 
@@ -336,3 +362,22 @@ func _run() -> void:
 
 	print("\n=== MARCH PERF DONE ===")
 	get_tree().quit()
+
+## Раздвинуть ортокамеру так, чтобы блок отрядов помещался целиком
+func _fit_camera() -> void:
+	var cam := get_viewport().get_camera_3d()
+	if cam == null:
+		return
+	var lo := Vector2(1e9, 1e9)
+	var hi := Vector2(-1e9, -1e9)
+	for u in _units:
+		if not is_instance_valid(u):
+			continue
+		var p: Vector3 = (u as Node3D).global_position
+		lo.x = minf(lo.x, p.x); lo.y = minf(lo.y, p.z)
+		hi.x = maxf(hi.x, p.x); hi.y = maxf(hi.y, p.z)
+	if lo.x > hi.x:
+		return
+	# Наклон камеры сплющивает глубину — по оси Z запас больше
+	var want: float = maxf((hi.x - lo.x) * 1.15, (hi.y - lo.y) * 1.7) + 8.0
+	(cam as Camera3D).size = maxf(want, 24.0)

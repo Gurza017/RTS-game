@@ -111,6 +111,14 @@ class Bucket:
 		buf[o + 11] = pos.z
 		dirty = true
 
+	## ТОЛЬКО НОМЕР КАДРА — ОДИН float. Нужен затем, что лента листается ЧАЩЕ,
+	## чем пересчитывается вся внешность: походка идёт на 6-10 кадрах в секунду
+	## и обязана доезжать до буфера на каждом своём шаге, а разбор спрайта
+	## (лента, зеркало, размер) стоит на порядок дороже и идёт раз в anim_every
+	func write_frame(idx: int, frame: int) -> void:
+		buf[idx * STRIDE + 12] = float(frame) / 255.0
+		dirty = true
+
 	## Спрятать слот — нулевая матрица (MultiMesh не умеет «скрыть экземпляр»,
 	## зато вырожденный треугольник растеризатор отбрасывает сразу)
 	func hide_slot(idx: int) -> void:
@@ -175,6 +183,15 @@ class Slot:
 			return
 		pos = Vector3(px, py, pz)
 		bucket.write_pos(index, pos)
+
+	## БЫСТРЫЙ ПУТЬ ЛИСТАНИЯ ЛЕНТЫ. Зовёт сам боец, когда шагнул кадр походки
+	## (см. Unit._advance_look_frame): в буфер уходит один float, разбора
+	## спрайта и поиска бакета тут нет
+	func set_frame(f: int) -> void:
+		if f == frame:
+			return
+		frame = f
+		bucket.write_frame(index, f)
 
 var _buckets: Dictionary = {}      # ключ ленты -> Bucket
 var _slot: Dictionary = {}         # Unit -> Slot

@@ -124,8 +124,8 @@ func absorb_unit(u: Unit) -> void:
 	# «Invalid assignment of property collision_layer» ПОСРЕДИ функции: всё, что
 	# ниже, — снятие с тика, вычистка из сетки и из групп фракции — не
 	# выполнялось вовсе. Отряд числился в замке, но продолжал жить на карте.
-	u.set_process(false)
-	u.set_physics_process(false)
+	u.set_draw(false)
+	u.set_tick(false)
 	GameManager.unit_grid.remove(u)
 	# Вне групп фракции боец не попадает ни в поиск целей, ни в подсчёты ИИ
 	for g in Constants.UNIT_GROUPS.values():
@@ -149,8 +149,8 @@ func release_unit(u: Unit, at: Vector3) -> void:
 		u.add_to_group("player_units")
 	else:
 		u.add_to_group("enemy_units")
-	u.set_process(true)
-	u.set_physics_process(true)
+	u.set_draw(true)
+	u.set_tick(true)
 	# Слот в общей отрисовке выдаётся заново: пока боец сидел внутри, его там не было
 	u.enter_render()
 	# Строку ядра армии тоже надо поправить руками: бойца перенесли В ОБХОД тика

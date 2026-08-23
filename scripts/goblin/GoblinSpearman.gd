@@ -56,6 +56,14 @@ func _strike_damage() -> float:
 	_play_attack_anim("attack1", 380)
 	return attack_damage
 
+## ── ЛИЧНЫЙ ГАБАРИТ ─────────────────────────────────────────────────────────
+## Спрайт гоблина в SIZE_SCALE раз крупнее людского, и общая на всю армию
+## Unit.SEP_MIN_DIST оставляла бы орду слипшейся в сплошной ковёр. Раздвигать
+## ради этого ВСЮ пехоту нельзя — у людей строй выверен по своим числам,
+## поэтому радиус личный, колонкой в солвере (ArmySoA.set_sep_radius)
+func sep_radius() -> float:
+	return SEP_MIN_DIST * _GobCfgV.SIZE_SCALE
+
 func _sfx_swing() -> String:
 	return "spear_hit"
 

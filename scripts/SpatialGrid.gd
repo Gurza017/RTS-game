@@ -95,6 +95,17 @@ func allies_ahead(node: Node3D, dir: Vector3, look: float, half_width: float) ->
 		return 0
 	return _core().AlliesAhead(u._soa, dir.x, dir.z, look, half_width)
 
+## ── РЯДЫ ЦЕЛОГО ОТРЯДА ЗА ОДИН ПЕРЕХОД ГРАНИЦЫ ─────────────────────────────
+## То же, что allies_ahead, но пачкой строк и с ОДНИМ направлением на всех:
+## шеренга и так обязана смотреть в одну сторону. Ради этого метод и заведён —
+## персональный вызов стоил 8.6 мкс, из которых сам скан копеечный, а остальное
+## путь наружу (см. ArmyCore.SquadRanks)
+func squad_ranks(rows: PackedInt32Array, dir: Vector3,
+		look: float, half_width: float) -> PackedInt32Array:
+	if rows.is_empty():
+		return PackedInt32Array()
+	return _core().SquadRanks(rows, dir.x, dir.z, look, half_width)
+
 func nearest_enemy_offset(node: Node3D, radius: float) -> Vector3:
 	var u := node as Unit
 	if u == null or u._soa < 0:
@@ -116,6 +127,17 @@ func best_enemy(node: Node3D, radius: float, crowd_penalty: float) -> Node3D:
 		return null
 	return _core().BestEnemy(u._soa, radius, crowd_penalty)
 
-## Все бойцы в радиусе от точки. Холодный путь (клик, попадание стрелы)
+## Все бойцы в радиусе от точки. Холодный путь (разбор клика)
 func query_radius(pos: Vector3, radius: float) -> Array:
 	return _core().QueryRadius(pos.x, pos.z, radius)
+
+## ── ПЕРВЫЙ ЖИВОЙ ЧУЖОЙ В РАДИУСЕ ОТ ТОЧКИ ──────────────────────────────────
+## Для летящей стрелы (Arrow._check_hit). От query_radius отличается тем, что
+## НЕ СТРОИТ МАССИВ: отбор «свой/мёртвый» делает сам солвер и отдаёт одного
+## бойца. Стрел в воздухе десятки, и проверяются они каждый кадр полёта —
+## мусорный Godot-массив на каждую был заметной статьёй расхода залпа.
+##
+## `fac` — фракция СТРЕЛКА: всё, что не она, для стрелы цель (гоблины враждебны
+## всем, поэтому «не моя фракция» и есть верное правило)
+func enemy_at(pos: Vector3, radius: float, fac: int) -> Node3D:
+	return _core().EnemyAt(pos.x, pos.z, radius, fac)

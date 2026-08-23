@@ -76,7 +76,7 @@ func _spawn(kind: String, pos: Vector3) -> Unit:
 	main.world_add(u)
 	u.global_position = Vector3(pos.x, GameManager.get_terrain_height(pos.x, pos.z), pos.z)
 	u.sync_row()
-	u.set_physics_process(false)     # план считается по СТОЯЩИМ: ходьба здесь лишняя
+	u.set_tick(false)     # план считается по СТОЯЩИМ: ходьба здесь лишняя
 	return u
 
 ## Отряд из n бойцов кучкой вокруг точки

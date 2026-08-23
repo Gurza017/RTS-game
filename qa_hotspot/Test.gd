@@ -120,14 +120,14 @@ func _run() -> void:
 	# Визуальный тик армии целиком (LOD, поза, запись в MultiMesh)
 	for u in _units:
 		if is_instance_valid(u):
-			(u as Unit).set_process(false)
+			(u as Unit).set_draw(false)
 	await _frames(20)
 	_rows.append(await _sample("7.   − визуальный тик юнитов"))
 
 	# И сама логика
 	for u in _units:
 		if is_instance_valid(u):
-			(u as Unit).set_physics_process(false)
+			(u as Unit).set_tick(false)
 	await _frames(20)
 	_rows.append(await _sample("8.   − физический тик юнитов"))
 

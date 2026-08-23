@@ -221,7 +221,7 @@ func _d_phalanx() -> void:
 		fu.max_health     = 1e9
 		fu.current_health = 1e9
 		fu.attack_damage  = 0.0
-		fu.set_physics_process(false)
+		fu.set_tick(false)
 	await frames(45)
 
 	var t_switch: int = Time.get_ticks_msec()

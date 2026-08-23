@@ -5,8 +5,8 @@ const DRAG_THRESHOLD        := 6.0
 const GROUP_DOUBLE_TAP_TIME := 0.35
 const DOUBLE_CLICK_TIME     := 0.35  # сек — окно двойного клика ЛКМ
 # Строй «плечом к плечу»: интервалы вдвое меньше прежних (было 1.0 / 1.1)
-const UNIT_SPACING          := 0.5   # метров между юнитами в шеренге
-const ROW_DEPTH             := 0.55  # метров между рядами
+const UNIT_SPACING          := 0.58  # метров между юнитами в шеренге
+const ROW_DEPTH             := 0.62  # метров между рядами
 
 ## Combined Arms: базовый класс раскладки по эшелонам (копейщики/лучники/
 ## мечники). Грузится через preload — новый файл, без class_name (см. шапку
@@ -19,6 +19,18 @@ const RANK_GAP              := 2.2
 
 var camera: Camera3D
 var selected_units: Array  = []
+## ── ЧЛЕНСТВО В ВЫДЕЛЕНИИ — СЛОВАРЁМ, А НЕ ПОИСКОМ ПО МАССИВУ ────────────────
+## Тот же набор, что и selected_units, но ключами. Заведён ради одной строки:
+## `_select_one` проверяла `node in selected_units`, то есть ЛИНЕЙНЫМ перебором
+## всего выделения на каждого добавляемого бойца. Выделение армии целиком
+## разворачивается по отрядам (клик по бойцу тянет весь его отряд), поэтому
+## добавлений столько же, сколько бойцов, и стоимость выходила квадратичной.
+## Замер (qa_fps, 2000 бойцов): разбор одного «выделить всё» — 1271 мс, то есть
+## полторы секунды намертво замершей игры. Со словарём — единицы миллисекунд.
+##
+## Правится ТОЛЬКО вместе с selected_units и только в четырёх местах:
+## _select_one, _purge_invalid, keep_only_type, _clear_selection
+var _sel_set: Dictionary = {}
 var drag_start: Vector2    = Vector2.ZERO
 var drag_rect_ui: ColorRect
 
@@ -600,6 +612,39 @@ func _update_formation_preview(mouse_screen: Vector2) -> void:
 # а растянутая линия — бегом врассыпную. То есть жест, которым игрок задаёт
 # строгий строй, этот строй как раз и ломал.
 # ═════════════════════════════════════════════════════════════════════════════
+## ── НИ ОДИН ВЫДЕЛЕННЫЙ БОЕЦ НЕ ОСТАЁТСЯ БЕЗ ПРИКАЗА ────────────────────────
+## Жалоба владельца: из пяти выделенных отрядов один игнорирует команду и
+## остаётся стоять с жёлтым кольцом. Так и было — и не в одном месте:
+##   • эшелон, которому не хватило длины нарисованной линии, ПРОПУСКАЛСЯ
+##     целиком (_layered_formation_slots, ветка `continue`);
+##   • бойцы вне реестра отрядов (sid = 0) выпадали из сетки блоков
+##     (_issue_group_grid_move) — а она при этом возвращала «приказ отдан»;
+##   • несовпадение числа мест и бойцов ОТМЕНЯЛО ВЕСЬ приказ разом
+##     (`if slots.size() < flat.size(): return`).
+##
+## Ловить каждый случай по отдельности бессмысленно — их будет ещё, раскладка
+## строя живёт и меняется. Здесь стоит ОБЩАЯ страховка: кто не получил места в
+## плане, идёт в точку приказа обычным шагом. Это хуже строя, но несравнимо
+## лучше «отряд не пошёл».
+##
+## Возвращает, скольких пришлось спасать: число читает стенд qa_orders — в
+## норме оно ноль, и рост означает, что раскладка снова начала терять людей
+var last_unordered: int = 0
+
+func _order_leftovers(movable: Array, served: Array, fallback: Vector3,
+		course: Vector3, run: bool = false) -> int:
+	var got: Dictionary = {}
+	for u in served:
+		got[u] = true
+	var n := 0
+	for u in movable:
+		if got.has(u) or not is_instance_valid(u):
+			continue
+		u.command_move(fallback, false, course, false, true, run)
+		n += 1
+	last_unordered = n
+	return n
+
 func _execute_line_formation(line_start: Vector3, line_end: Vector3) -> void:
 	var movable: Array = []
 	for u in selected_units:
@@ -632,14 +677,17 @@ func _execute_line_formation(line_start: Vector3, line_end: Vector3) -> void:
 		flat  = plan["flat"]
 		slots = plan["slots"]
 		rows  = plan["rows"]
-	if slots.size() < flat.size():
-		return
+	# ── НЕСОВПАДЕНИЕ ЧИСЛА МЕСТ НЕ ОТМЕНЯЕТ ПРИКАЗ ──────────────────────────
+	# Здесь стоял `return`: план вышел короче состава — и НИКТО никуда не шёл,
+	# включая отряды, места которым посчитались нормально. Теперь обслуживаем
+	# столько, сколько мест есть, а остальных подбирает страховка ниже
+	var served: int = mini(slots.size(), flat.size())
 	# ЕДИНЫЙ ФРОНТ: направление взгляда считается ОДИН РАЗ по нарисованной
 	# линии и выдаётся всем бойцам. Тот же вектор рисует превью формации,
 	# так что отряд встаёт ровно так, как игрок видел при растягивании
 	var line_dir   := line_vec.normalized()
 	var facing_dir := Vector3(line_dir.z, 0.0, -line_dir.x)
-	for i in range(flat.size()):
+	for i in range(served):
 		# Ряд в фаланге — для порядка построения (глубина в шеренге)
 		flat[i].formation_row = int(rows[i])
 		# player_order = true: приказ игрока непрерываем FORCED_MOVE_SEC секунд
@@ -650,6 +698,10 @@ func _execute_line_formation(line_start: Vector3, line_end: Vector3) -> void:
 	# ряды: выживших пересаживают на первые места списка, и задняя шеренга
 	# переходит вперёд на места павших (см. GameManager.squad_close_ranks)
 	_remember_formation(flat, slots, facing_dir, true)
+	# ── И НИКОГО НЕ ЗАБЫЛИ ──────────────────────────────────────────────────
+	# Эшелон, которому не хватило длины линии, план пропускает целиком; после
+	# этого его бойцы стояли с жёлтым кольцом и без приказа
+	_order_leftovers(movable, flat.slice(0, served), line_start, facing_dir)
 
 # ─── Существующие методы ─────────────────────────────────────────────────────
 
@@ -1002,6 +1054,14 @@ func _handle_box_select(a: Vector2, b: Vector2, additive: bool) -> void:
 
 func _purge_invalid() -> void:
 	selected_units = selected_units.filter(func(u): return is_instance_valid(u))
+	_sel_rebuild()
+
+## Пересобрать словарь членства по массиву. Зовётся везде, где массив меняют
+## не добавлением одного узла
+func _sel_rebuild() -> void:
+	_sel_set.clear()
+	for u in selected_units:
+		_sel_set[u] = true
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ВЫДЕЛЕНИЕ ИДЁТ ОТРЯДАМИ, А НЕ БОЙЦАМИ
@@ -1023,9 +1083,10 @@ func _select(node) -> void:
 
 ## Один узел в выделение, без разворачивания на отряд
 func _select_one(node) -> void:
-	if node in selected_units:
+	if _sel_set.has(node):
 		return
 	selected_units.append(node)
+	_sel_set[node] = true
 	if node.has_method("set_selected"):
 		node.set_selected(true)
 
@@ -1050,6 +1111,7 @@ func keep_only_type(unit_id: String) -> void:
 		elif u.has_method("set_selected"):
 			u.set_selected(false)
 	selected_units = keep
+	_sel_rebuild()
 	GameManager.on_selection_changed(selected_units)
 
 ## Идентификаторы выделенных отрядов (для панелей интерфейса)
@@ -1172,6 +1234,7 @@ func _clear_selection() -> void:
 		if is_instance_valid(u) and u.has_method("set_selected"):
 			u.set_selected(false)
 	selected_units.clear()
+	_sel_set.clear()
 
 ## ЭТО ВТОРОЙ ПКМ ПОДРЯД В ТУ ЖЕ ТОЧКУ?
 ## Возвращает true и СБРАСЫВАЕТ счётчик (тройной клик — это не два бега подряд,
@@ -1449,6 +1512,14 @@ func _handle_right_click(screen_pos: Vector2, run: bool = false) -> void:
 		# (см. _order_battle_cry). Сбор ресурсов поводом не является
 		if is_attack_cmd:
 			_order_battle_cry(selected_units)
+			# ── ЧТО ПРИКАЗАНО, ИГРОК ОБЯЗАН ВИДЕТЬ ──────────────────────────
+			# Приказ запоминается за отрядом и подсвечивает цель красным
+			# кольцом — в том числе ПОЗЖЕ, когда игрок вернётся к этому отряду
+			# (см. GameManager._refresh_order_marks). Снимется сам, когда цель
+			# истребят
+			for sid2 in atk_squads:
+				GameManager.squad_note_order(int(sid2), GameManager.ORDER_ATTACK,
+					(target as Node3D).global_position, target)
 		# РАЗМЕТКУ СТРОЯ НА ВРЕМЯ АТАКИ НЕ СТИРАЕМ — ОНА ПРОСТО НЕ ДЕЙСТВУЕТ.
 		# Смыкание рядов зовёт command_move каждому бойцу и сняло бы замок цели
 		# посреди исполнения приказа, поэтому оно заблокировано, пока замок жив
@@ -1528,10 +1599,21 @@ func _issue_formation_move(center: Vector3, run: bool = false) -> void:
 # посередине, а не прижимается к флангу.
 # ═════════════════════════════════════════════════════════════════════════════
 
-## Просвет между соседними блоками отрядов, метры. Заметно больше интервала
-## между шеренгами ВНУТРИ отряда (ROW_DEPTH): это граница между отрядами, и
-## по ней должно быть видно, где кончается один блок и начинается другой
-const GROUP_CELL_GAP := 3.0
+## Просвет между соседними блоками отрядов, метры. Больше интервала между
+## шеренгами ВНУТРИ отряда (ROW_DEPTH): это граница между отрядами, и по ней
+## должно быть видно, где кончается один блок и начинается другой.
+##
+## ЗАКАЗ ВЛАДЕЛЬЦА — ПЛОТНЕЕ. Было 3.0, и на нескольких отрядах группа
+## расползалась по полю: блоки стояли на таком расстоянии, что читались как
+## отдельные кучки, а не как одно войско у указанной точки. Метр — это всё ещё
+## видимая граница между блоками (внутри отряда интервал вчетверо меньше), но
+## уже не поле между ними
+const GROUP_CELL_GAP := 1.0
+
+## Потолок габарита ячейки, метры (см. разбор у cell_w). Двадцать метров — это
+## заведомо больше любого компактного отряда и заведомо меньше растянутой в
+## нитку колонны, из-за которой сетка и разъезжалась
+const GROUP_CELL_MAX := 20.0
 
 ## Насколько отряды считаются стоящими НА ОДНОЙ ГЛУБИНЕ при раздаче ячеек.
 ## Больше обычного разброса центров масс у выровненной группы и заметно меньше
@@ -1582,6 +1664,19 @@ func _issue_group_grid_move(movable: Array, center: Vector3, run: bool) -> bool:
 			squads.append(arr)
 	if squads.size() < 2:
 		return false
+	# ── ОДИНОЧКИ ИЗ ВЫДЕЛЕНИЯ НЕ ПРОПАДАЮТ ─────────────────────────────────
+	# Блоки с sid = 0 (рабочие, бойцы вне реестра отрядов) сеткой не строятся —
+	# у них нет ни своего строя, ни курса. Но приказ они получить ОБЯЗАНЫ:
+	# раньше их просто отбрасывал фильтр выше, а функция возвращала «приказ
+	# отдан», и вызывающий уходил, никого больше не спросив
+	var loose: Array = []
+	for b2 in blocks:
+		var arr2: Array = b2
+		if arr2.is_empty():
+			continue
+		var sid2: int = (arr2[0] as Unit).squad_id if arr2[0] is Unit else 0
+		if sid2 <= 0:
+			loose.append_array(arr2)
 
 	# ЕДИНЫЙ КУРС ВСЕЙ ГРУППЫ: от общего центра масс к точке приказа. По нему
 	# же ориентируется сетка, поэтому «слева/справа/сзади» — это слева, справа
@@ -1599,8 +1694,15 @@ func _issue_group_grid_move(movable: Array, center: Vector3, run: bool) -> bool:
 		var e := _squad_extent(s as Array, course, across)
 		cell_w = maxf(cell_w, e.x)
 		cell_d = maxf(cell_d, e.y)
-	cell_w += GROUP_CELL_GAP
-	cell_d += GROUP_CELL_GAP
+	# ── ЯЧЕЙКА ПО САМОМУ КРУПНОМУ, НО НЕ ПО САМОМУ ШИРОКОМУ ────────────────
+	# Ячейка одна на всех и берётся по МАКСИМУМУ габаритов — иначе ряды
+	# развалятся. Но максимум по разношёрстному выделению задаёт один
+	# растянутый отряд, и все остальные получают ячейку под него: пять
+	# компактных блоков разъезжались, потому что в выделении был один широкий.
+	# Поэтому габарит зажимается сверху: шире GROUP_CELL_MAX ячейка не растёт,
+	# а отряд, который в неё не влез, просто стоит чуть плотнее к соседу
+	cell_w = minf(cell_w, GROUP_CELL_MAX) + GROUP_CELL_GAP
+	cell_d = minf(cell_d, GROUP_CELL_MAX) + GROUP_CELL_GAP
 
 	var n: int = squads.size()
 	var cols: int = mini(_group_grid_cols(n), n)
@@ -1668,6 +1770,11 @@ func _issue_group_grid_move(movable: Array, center: Vector3, run: bool) -> bool:
 		# Внутренний строй отряда переносится как есть; курс — общий на группу,
 		# иначе фланговые блоки пришли бы веером (см. course_override)
 		_issue_march_keeping_shape(squads[i] as Array, cell_centre, false, run, course)
+	# Одиночки — своей ячейкой позади сетки: строя у них нет, но приказ есть
+	if not loose.is_empty():
+		var rows_n: int = int(ceil(float(n) / float(maxi(cols, 1))))
+		_issue_march_keeping_shape(loose,
+			center - course * (float(rows_n) * cell_d), false, run, course)
 	return true
 
 ## ЗАПОМНИТЬ РАЗМЕТКУ ЗА КАЖДЫМ ОТРЯДОМ ВЫДЕЛЕНИЯ.
@@ -1690,6 +1797,16 @@ func _remember_formation(flat: Array, slots: Array, course: Vector3, slow: bool)
 		(by_squad[sid] as Array).append(slots[i])
 	for sid in by_squad:
 		GameManager.squad_set_formation(int(sid), by_squad[sid], course, slow)
+		# ── КУДА ОТРЯД ПОСЛАН, ИГРОК ОБЯЗАН ВИДЕТЬ ──────────────────────────
+		# Метка ложится в СРЕДНЮЮ точку выданных отряду мест, а не в точку
+		# клика: у нескольких отрядов, разведённых по ячейкам, точка клика одна
+		# на всех, и метки легли бы стопкой в одном месте.
+		# Снимется сама, когда отряд дойдёт (GameManager._refresh_order_marks)
+		var acc := Vector3.ZERO
+		for sp in by_squad[sid]:
+			acc += sp as Vector3
+		acc /= float((by_squad[sid] as Array).size())
+		GameManager.squad_note_order(int(sid), GameManager.ORDER_MOVE, acc)
 
 # Общее направление движения отряда: от его центра масс к точке приказа.
 # Нужно, чтобы после прихода ВСЕ смотрели одинаково, а не каждый в свой слот
@@ -1763,9 +1880,14 @@ func current_group_index() -> int:
 		var grp: Array = _groups[idx]
 		if grp.is_empty() or grp.size() != selected_units.size():
 			continue
+		# Членство в группе — тоже словарём: перебор `u in grp` внутри цикла по
+		# выделению давал ту же квадратичную стоимость, что и в _select_one
+		var in_grp: Dictionary = {}
+		for g in grp:
+			in_grp[g] = true
 		var same := true
 		for u in selected_units:
-			if not (u in grp):
+			if not in_grp.has(u):
 				same = false
 				break
 		if same:

@@ -27,6 +27,11 @@ func _strike_damage() -> float:
 	_play_attack_anim("attack", 420)
 	return attack_damage
 
+## Личный габарит: кабан с седоком шире пешего гоблина, но радиус берётся тот
+## же — общий множитель размера орды (см. Unit.sep_radius и goblin_config)
+func sep_radius() -> float:
+	return SEP_MIN_DIST * _GobCfgV.SIZE_SCALE
+
 func _sfx_swing() -> String:
 	return "sword_attack"
 

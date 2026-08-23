@@ -1339,7 +1339,10 @@ func _build_bottom_panel() -> void:
 	_portrait_stars_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_portrait_stars_lbl.add_theme_font_size_override("font_size", 11)
 	_portrait_stars_lbl.add_theme_color_override("font_color", Color(1.0, 0.86, 0.25))
-	_portrait_stars_lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+	# Кант тот же, что у 3D-звезды над отрядом: обводка у звезды одна на игру,
+	# и держать её двумя разными числами в двух файлах незачем
+	_portrait_stars_lbl.add_theme_color_override("font_outline_color",
+		_UCfg.VET_STAR_OUTLINE)
 	_portrait_stars_lbl.add_theme_constant_override("outline_size", 4)
 	_portrait_stars_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_portrait_stars_lbl.vertical_alignment   = VERTICAL_ALIGNMENT_TOP

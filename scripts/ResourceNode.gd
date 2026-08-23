@@ -62,6 +62,9 @@ var _shake_time: float  = 0.0
 ## квада — там есть прозрачные поля). 0.0, пока _maybe_load_sprite() не
 ## отработал (дерево туда не заходит вовсе). См. slot_radius()
 var _visual_half_width: float = 0.0
+## Сколько кадров в ленте нарисованного спрайта (1 — статичная картинка).
+## Заполняет _maybe_load_sprite; читает стенд пропорций
+var sprite_frames_drawn: int = 1
 
 func _ready() -> void:
 	_max_remaining = remaining
@@ -702,8 +705,6 @@ func _build_food() -> void:
 # Вода как ресурс УДАЛЕНА из игры: колодцев на карте нет, рабочие её не
 # добывают, в интерфейсе её тоже нет. Озеро осталось декорацией и препятствием.
 
-const _SHIMMER := preload("res://shaders/gold_shimmer.gdshader")
-
 # Сколько вариантов спрайта есть у каждого типа ресурса
 const GOLD_VARIANTS  := 6    # Gold Stone 1..6
 const STONE_VARIANTS := 4    # Rock1..4
@@ -714,19 +715,68 @@ const STONE_VARIANTS := 4    # Rock1..4
 ## никакого гало шире самородка в текущих файлах уже нет (см. подробный
 ## разбор в _maybe_load_sprite — эта заметка описывала более раннюю версию
 ## арта). Включаем обратно
-## ── АДДИТИВНАЯ АУРА ЗОЛОТА ВЫКЛЮЧЕНА (заказ владельца) ─────────────────────
-## Поверх самородка вторым квадом рисовался *_Highlight.png на аддитивном
-## шейдере. На траве это читалось как «размытое жёлтое пятно ПОД ресурсом» —
-## аддитивное смешивание высветляет и те пиксели, где блик едва заметен, а
-## соседние куски кучи накладывали свои пятна друг на друга.
+## ── ПОКАДРОВАЯ ОБРЕЗКА ЛЕНТЫ ───────────────────────────────────────────────
+## Обычный спрайт обрезается по нарисованному через AtlasTexture: он вырезает
+## ОДИН прямоугольник, и лишние прозрачные поля не тянутся вместе с рисунком.
+## На ЛЕНТЕ этот приём не работает — один прямоугольник захватил бы все кадры
+## разом, и анимация превратилась бы в бегущую строку.
 ##
-## ЧЕСТНОЕ СЛЕДСТВИЕ, О КОТОРОМ НАДО ЗНАТЬ: анимации блеска у золота теперь нет
-## ВООБЩЕ. В арте она существует только в отдельной ленте Gold Stone N_Highlight.png
-## (768×128, 6 кадров); сам Gold Stone N.png — одиночный кадр 128×128, никакой
-## «нативной анимации внутри спрайта» у него нет. Вернуть переливы, не возвращая
-## подложку, можно только одним способом — нарисовать базовый спрайт лентой
-## кадров, и тогда он поедет обычным покадровым путём, как деревья и кусты
-const GOLD_SHIMMER := false
+## Поэтому лента пересобирается: считается общая на все кадры область
+## нарисованного, и из неё складывается новая, узкая лента. Дальше по коду всё
+## считается как для обычного спрайта — размер квада, посадка на грунт,
+## slot_radius, — а кадры листает штатный cyl_billboard.
+##
+## Общая обрезка, а не своя у каждого кадра, — обязательна: у кадров разный
+## рисунок (по самородку ходит глянец), и обрежь каждый по себе, жила дёргалась
+## бы в такт анимации.
+##
+## Результат кэшируется по пути исходника: вариантов золота шесть, а кусков в
+## кучах — десятки
+static var _sheet_cache: Dictionary = {}
+
+## Возвращает [ImageTexture, Rect2i обрезки в пикселях ОДНОГО кадра]
+## или пустой массив, если обрезать нечего
+static func _crop_sheet(tex: Texture2D, frames: int) -> Array:
+	var key: String = tex.resource_path
+	if not key.is_empty() and _sheet_cache.has(key):
+		return _sheet_cache[key]
+	var img: Image = tex.get_image()
+	if img == null:
+		return []
+	if img.is_compressed() and img.decompress() != OK:
+		return []
+	var fw: int = int(img.get_width() / maxi(frames, 1))
+	var fh: int = img.get_height()
+	if fw <= 0 or fh <= 0:
+		return []
+	# Общая на все кадры область нарисованного
+	var lo := Vector2i(fw, fh)
+	var hi := Vector2i(-1, -1)
+	for f in range(frames):
+		var frame_img: Image = img.get_region(Rect2i(f * fw, 0, fw, fh))
+		var r: Rect2i = frame_img.get_used_rect()
+		if r.size.x <= 0 or r.size.y <= 0:
+			continue
+		lo.x = mini(lo.x, r.position.x)
+		lo.y = mini(lo.y, r.position.y)
+		hi.x = maxi(hi.x, r.position.x + r.size.x)
+		hi.y = maxi(hi.y, r.position.y + r.size.y)
+	if hi.x <= lo.x or hi.y <= lo.y:
+		return []
+	var used := Rect2i(lo, hi - lo)
+	if used.position == Vector2i.ZERO and used.size == Vector2i(fw, fh):
+		return []      # обрезать нечего — лента и так плотная
+	var out := Image.create(used.size.x * frames, used.size.y, false,
+		Image.FORMAT_RGBA8)
+	for f in range(frames):
+		out.blit_rect(img,
+			Rect2i(f * fw + used.position.x, used.position.y,
+				used.size.x, used.size.y),
+			Vector2i(f * used.size.x, 0))
+	var res: Array = [ImageTexture.create_from_image(out), used]
+	if not key.is_empty():
+		_sheet_cache[key] = res
+	return res
 
 ## Мировой размер ПОЛНОГО кадра исходника. Ключ к «нерастянутым» спрайтам:
 ## плотность текселей на метр постоянна, а величина куска берётся из того,
@@ -755,13 +805,22 @@ const ZOOM_MAX := 1.75
 
 func _maybe_load_sprite() -> void:
 	var path := ""
-	var hl_path := ""     # парная текстура блика (только у золота)
 	match resource_type:
 		Constants.RESOURCE_GOLD:
 			if res_variant <= 0:
 				res_variant = randi_range(1, GOLD_VARIANTS)
-			path    = "res://assets/environment/resources/Gold Stone %d.png" % res_variant
-			hl_path = "res://assets/environment/resources/Gold Stone %d_Highlight.png" % res_variant
+			# ── АНИМАЦИЯ ЗОЛОТА — ЭТО САМ СПРАЙТ, А НЕ ПОДСВЕТКА ПОВЕРХ ─────
+			# `Gold Stone N.png` — ОДИН кадр 128x128, никакого перелива в нём
+			# нет. Анимация лежит в парном `_Highlight.png` (768x128), и это
+			# НЕ слой блика: все шесть кадров — целый самородок, по которому
+			# ходит глянец. То есть это и есть анимированная версия жилы.
+			#
+			# Раньше её рисовали ВТОРЫМ квадом поверх базового, аддитивным
+			# шейдером — отсюда и жёлтое пятно на траве, из-за которого перелив
+			# сперва выключили целиком, а потом чинили порогом отсечки. Ни того,
+			# ни другого не нужно: лента играется штатным кадровым путём
+			# (cyl_billboard листает кадры сам, им же анимированы деревья)
+			path = "res://assets/environment/resources/Gold Stone %d_Highlight.png" % res_variant
 		Constants.RESOURCE_STONE:
 			if res_variant <= 0:
 				res_variant = randi_range(1, STONE_VARIANTS)
@@ -801,13 +860,36 @@ func _maybe_load_sprite() -> void:
 		if img.decompress() != OK:
 			img = null
 	var draw_tex: Texture2D = tex
-	# used_rect в пикселях ОДНОГО кадра — используется и для квада основного
-	# спрайта ниже, и для обрезки блика (crop_rect в шейдере), поэтому живёт
-	# во внешней области видимости функции, а не только внутри if
+	# Сколько кадров в исходнике: один у камня и мяса, шесть у золота
+	var frames: int = _BBUtil.frame_count(tex)
+	# ── ЧИСЛО КАДРОВ ЗАПОМИНАЕМ ПОЛЕМ ──────────────────────────────────────
+	# У пересобранной ленты нет resource_path, и BillboardUtil.frame_count по
+	# ней падает на угадывание по пропорции — при неквадратной обрезке оно
+	# отвечает «один кадр». Рендеру это не мешает (число кадров уходит в
+	# материал явно), а вот стенду пропорций (qa_aspect) без него не с чем
+	# сравнивать: он делил бы ширину ВСЕЙ ленты на высоту одного кадра
+	sprite_frames_drawn = frames
+	# used_rect в пикселях ОДНОГО кадра — по нему считается размер квада
 	var used_rect := Rect2i(Vector2i.ZERO, tex.get_size())
 	var crop_w: float = tex.get_width()
 	var crop_h: float = tex.get_height()
-	if img != null:
+	if frames > 1:
+		# ── ЛЕНТУ ОБРЕЗАЕМ ПОКАДРОВО, А НЕ ЦЕЛИКОМ ──────────────────────────
+		# AtlasTexture вырезает ОДИН прямоугольник, и на ленте он захватил бы
+		# все шесть кадров разом — анимация превратилась бы в бегущую строку.
+		# Поэтому лента пересобирается: берётся общая на все кадры обрезка, из
+		# неё складывается новая узкая лента, и дальше по коду всё считается
+		# как для обычного спрайта — cyl_billboard листает её сам
+		used_rect = Rect2i(Vector2i.ZERO, Vector2i(tex.get_height(), tex.get_height()))
+		crop_w = float(used_rect.size.x)
+		crop_h = float(used_rect.size.y)
+		var packed: Array = _crop_sheet(tex, frames)
+		if not packed.is_empty():
+			draw_tex = packed[0]
+			used_rect = packed[1]
+			crop_w = float(used_rect.size.x)
+			crop_h = float(used_rect.size.y)
+	elif img != null:
 		var used: Rect2i = img.get_used_rect()
 		if used.size.x > 0 and used.size.y > 0 \
 				and not (used.position == Vector2i.ZERO and used.size == img.get_size()):
@@ -850,7 +932,16 @@ func _maybe_load_sprite() -> void:
 	var h: float = clampf(target_h, natural_h * ZOOM_MIN, natural_h * ZOOM_MAX)
 	var aspect: float = crop_w / crop_h if crop_h > 0.0 else 1.0
 	quad.size = Vector2(h * aspect, h)
-	quad.material = _BBUtil.make_material(draw_tex)
+	var res_mat := _BBUtil.make_material(draw_tex)
+	if frames > 1:
+		# ЧИСЛО КАДРОВ ЗАДАЁМ ЯВНО. У пересобранной ленты нет resource_path, и
+		# BillboardUtil.frame_count падает на угадывание по пропорции — при
+		# неквадратной обрезке оно ошиблось бы. Темп и фаза у каждой жилы свои,
+		# иначе вся куча переливается одним тактом
+		res_mat.set_shader_parameter("frame_count", float(frames))
+		res_mat.set_shader_parameter("frame_fps", randf_range(5.0, 8.0))
+		res_mat.set_shader_parameter("frame_phase", randf() * float(frames))
+	quad.material = res_mat
 	# Квад теперь И ЕСТЬ рисунок (без полей) — читает slot_radius(), чтобы
 	# рабочий вставал за краем НАРИСОВАННОГО куска, а не за краем прозрачного
 	# квада
@@ -867,58 +958,14 @@ func _maybe_load_sprite() -> void:
 	_visual_root.add_child(billboard)
 	mesh_instance = billboard
 
-	# ПЕРЕЛИВ ЗОЛОТА.
-	#
-	# Второй квад с *_Highlight.png поверх основного, на АДДИТИВНОМ шейдере
-	# (shaders/gold_shimmer.gdshader). Раньше был выключен: в картинке блика
-	# подозревали мягкое жёлтое гало шире самородка, которое аддитивное
-	# смешивание клало прямо на траву. Проверено попиксельно (2026-08-07,
-	# все 6 вариантов × все 6 кадров): непрозрачная область *_Highlight.png
-	# СОВПАДАЕТ с непрозрачной областью базового спрайта день в день —
-	# гала шире силуэта в текущих файлах нет, подозрение не подтвердилось.
-	# hl_quad ниже получает тот же quad.size, что и обрезанный основной
-	# billboard, а шейдеру передаётся crop_rect — та же обрезка (used_rect),
-	# что ушла в AtlasTexture основного спрайта, в долях ОДНОГО кадра. Блик —
-	# лента из 6 кадров, единым статическим AtlasTexture его не обрезать
-	# (кадр меняется во времени), поэтому обрезка происходит внутри шейдера
-	# (см. gold_shimmer.gdshader), но по тем же координатам — рисунок блика
-	# ложится на рисунок жилы пиксель в пиксель
-	if not GOLD_SHIMMER:
-		return
-	if hl_path.is_empty() or not ResourceLoader.exists(hl_path):
-		return
-	var hl_tex := load(hl_path) as Texture2D
-	if hl_tex == null:
-		return
-	var hl_mat := ShaderMaterial.new()
-	hl_mat.shader = _SHIMMER
-	hl_mat.set_shader_parameter("highlight_tex", hl_tex)
-	# Число кадров считаем ТЕМ ЖЕ детектором, что и для остальных шитов:
-	# у Gold Stone N_Highlight.png их 6 (768x128)
-	var hl_frames: int = _BBUtil.frame_count(hl_tex)
-	hl_mat.set_shader_parameter("frame_count", float(hl_frames))
-	hl_mat.set_shader_parameter("frame_fps",   randf_range(6.0, 9.0))
-	# Фаза в КАДРАХ, а не в радианах: соседние жилы стартуют с разных кадров
-	hl_mat.set_shader_parameter("phase", randf() * float(maxi(hl_frames, 1)))
-	# Обрезка в долях ОДНОГО кадра базовой текстуры (не блика — у них
-	# идентичная непрозрачная область, см. комментарий выше)
-	var base_size: Vector2 = tex.get_size()
-	if base_size.x > 0.0 and base_size.y > 0.0:
-		hl_mat.set_shader_parameter("crop_rect", Vector4(
-			float(used_rect.position.x) / base_size.x,
-			float(used_rect.position.y) / base_size.y,
-			float(used_rect.size.x) / base_size.x,
-			float(used_rect.size.y) / base_size.y))
-	var hl_quad := QuadMesh.new()
-	hl_quad.size = quad.size
-	hl_quad.material = hl_mat
-	var hl_node := MeshInstance3D.new()
-	hl_node.name = "GoldShimmer"
-	hl_node.mesh = hl_quad
-	hl_node.position.y = billboard.position.y
-	# Блик рисуется ПОСЛЕ основного спрайта
-	hl_node.sorting_offset = 0.02
-	_visual_root.add_child(hl_node)
+	# ── АДДИТИВНОГО БЛИКА ВТОРЫМ КВАДОМ ЗДЕСЬ БОЛЬШЕ НЕТ ───────────────────
+	# Стоял второй MeshInstance3D с *_Highlight.png на аддитивном шейдере
+	# (shaders/gold_shimmer.gdshader) — и вся возня вокруг него (порог отсечки
+	# каймы, crop_rect в шейдере, отдельный такт кадров) была решением задачи,
+	# которой нет. `_Highlight.png` — не слой блика поверх жилы, а САМА ЖИЛА,
+	# нарисованная шестью кадрами с ходящим глянцем. Её и рисуем, штатным
+	# кадровым путём (см. выбор `path` в начале функции): один квад, один
+	# обычный материал, никакого аддитивного смешивания и никаких пятен на траве
 
 func extract(amount: float) -> float:
 	# ЖИЛА В КУЧЕ ЧЕРПАЕТ ИЗ ОБЩЕГО ПУЛА. Кусок своего запаса больше не имеет:

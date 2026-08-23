@@ -175,7 +175,7 @@ func _c_sync() -> void:
 		at + Vector3(9.0, 0.0, 0.0))
 	# Врагам стоять: стенд про темп стрельбы, а не про бег
 	for m in _members(foe):
-		(m as Unit).set_physics_process(false)
+		(m as Unit).set_tick(false)
 	ResourceManager.add_resource(f, Constants.RESOURCE_GOLD, 99999.0)
 	GameManager.squad_buy_ability(sid, nid)
 	GameManager.squad_set_ability(sid, nid, true)
@@ -232,7 +232,7 @@ func _d_cluster() -> void:
 	var foe: int = await _make_squad("spearman", Constants.FACTION_ENEMY, 16,
 		at + Vector3(9.0, 0.0, 0.0))
 	for m in _members(foe):
-		(m as Unit).set_physics_process(false)
+		(m as Unit).set_tick(false)
 	ResourceManager.add_resource(f, Constants.RESOURCE_GOLD, 99999.0)
 	GameManager.squad_buy_ability(sid, nid)
 	GameManager.squad_set_ability(sid, nid, true)
@@ -295,7 +295,7 @@ func _e_off() -> void:
 	var foe: int = await _make_squad("spearman", Constants.FACTION_ENEMY, 12,
 		at + Vector3(9.0, 0.0, 0.0))
 	for m in _members(foe):
-		(m as Unit).set_physics_process(false)
+		(m as Unit).set_tick(false)
 	ResourceManager.add_resource(f, Constants.RESOURCE_GOLD, 99999.0)
 	GameManager.squad_buy_ability(sid, nid)   # куплено, но НЕ включено
 

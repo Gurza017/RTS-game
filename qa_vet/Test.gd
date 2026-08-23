@@ -421,7 +421,7 @@ func _level_for_kills(kills: int, unit_type: String = "spearman") -> int:
 
 ## Сколько звёзд нарисовано в ряду: одна пятиконечная = 10 треугольников
 ## СКОЛЬКО ЗВЁЗД ПОЛОЖЕНО НА ЭТОМ УРОВНЕ. Уже не «уровень = число звёзд»:
-## с семью грейдами уровень 4 — это ОДНА серебряная звезда, а 7 — одна красная.
+## с семью грейдами уровень 4 — это ОДНА серебряная звезда, а 7 — одна золотая.
 ## Число берём из конфига (VET_STAR_TIERS), он источник правды
 func _want_stars(lvl: int) -> int:
 	var tier: Dictionary = _UCfg.veteran_star_tier(lvl)
@@ -433,8 +433,19 @@ func _star_rays(star: Node) -> int:
 	var mi := star as MeshInstance3D
 	if mi == null or mi.mesh == null:
 		return 0
-	var faces: PackedVector3Array = mi.mesh.get_faces()
-	return int(round(float(faces.size()) / 3.0 / 10.0))
+	# ── СЧИТАЕМ ТОЛЬКО ВИДИМЫЙ РЯД, А НЕ ВЕСЬ МЕШ ──────────────────────────
+	# У звезды ДВЕ поверхности: 0 — тёмный кант, 1 — заливка цветом грейда
+	# (см. VeterancyStar._make_star_row). get_faces() отдаёт треугольники всех
+	# поверхностей разом, и стенд насчитывал ровно вдвое больше звёзд, чем
+	# нарисовано. Ряд один и тот же в обеих, поэтому берём ПОСЛЕДНЮЮ — ту, что
+	# игрок и видит поверх канта
+	var am := mi.mesh as ArrayMesh
+	if am == null or am.get_surface_count() == 0:
+		var faces: PackedVector3Array = mi.mesh.get_faces()
+		return int(round(float(faces.size()) / 3.0 / 10.0))
+	var arrays: Array = am.surface_get_arrays(am.get_surface_count() - 1)
+	var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+	return int(round(float(verts.size()) / 3.0 / 10.0))
 
 func _test_star_and_choice() -> void:
 	print("\n═════ 4. ЗВЁЗДОЧКА И ВЫБОР БОНУСА ═════")

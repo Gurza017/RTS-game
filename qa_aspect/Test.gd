@@ -212,7 +212,16 @@ func _test_resources() -> void:
 			node.queue_free()
 			await frames(1)
 			continue
+		# ── ПРОПОРЦИЯ СЧИТАЕТСЯ ПО КАДРУ, А НЕ ПО ВСЕЙ ЛЕНТЕ ────────────────
+		# У золота спрайт — ЛЕНТА из шести кадров (по самородку ходит глянец),
+		# и рисуется она покадрово. BillboardUtil.frame_aspect делит на число
+		# кадров сам, но узнать его у пересобранной ленты не может: у неё нет
+		# resource_path, и детектор падает на угадывание по пропорции. Спросим
+		# у самого узла, сколько кадров он нарисовал
 		var want: float = _BB.frame_aspect(tex)
+		var fc_node: int = int(node.get("sprite_frames_drawn"))
+		if fc_node > 1 and _BB.frame_count(tex) <= 1:
+			want /= float(fc_node)
 		var got: float = _quad_aspect(quad)
 		print("  %-8s картинка=%.3f нарисовано=%.3f" % [types[t], want, got])
 		verdict("C %s: пропорции сохранены" % String(types[t]),

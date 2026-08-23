@@ -710,14 +710,14 @@ func _h_stuck() -> void:
 	# Рабочий уже «в состоянии IDLE с назначенной целью»: ровно тот случай,
 	# который и уходил в вечный повтор. Двигаться ему не даём
 	w.state = Unit.State.IDLE
-	w.set_physics_process(false)
+	w.set_tick(false)
 	var issued := 0
 	# APPROACH_GIVE_UP попыток по секунде + запас
 	for i in range(int(Worker.APPROACH_GIVE_UP) + 3):
-		w.set_physics_process(true)
+		w.set_tick(true)
 		w.state = Unit.State.IDLE
 		w.tick_physics(1.0)          # ровно одна секунда — ровно одна попытка
-		w.set_physics_process(false)
+		w.set_tick(false)
 		issued += 1
 		if w.gather_target == null or w.gather_target == near_tree:
 			break
@@ -737,10 +737,10 @@ func _h_stuck() -> void:
 	w.command_gather(far_tree)
 	w.state = Unit.State.IDLE
 	for i in range(int(Worker.APPROACH_GIVE_UP) + 3):
-		w.set_physics_process(true)
+		w.set_tick(true)
 		w.state = Unit.State.IDLE
 		w.tick_physics(1.0)
-		w.set_physics_process(false)
+		w.set_tick(false)
 		if w.gather_target == null:
 			break
 		await frames(1)

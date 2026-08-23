@@ -42,6 +42,11 @@ public partial class ArmyCore : RefCounted
     private float[] _atkRange = Array.Empty<float>();
     private float[] _speed = Array.Empty<float>();
     private float[] _sepT = Array.Empty<float>();
+    // ЛИЧНЫЙ РАДИУС РАСТАЛКИВАНИЯ. Ноль — «как у всех», то есть minDist из
+    // аргумента BatchSeparation; ненулевое значение перекрывает его для этой
+    // строки. Заведён ради гоблинов: их спрайт крупнее людского в 1.7 раза, и
+    // единая на всю армию дистанция либо склеивала орду, либо раздвигала людей
+    private float[] _sepR = Array.Empty<float>();
     private float[] _slX = Array.Empty<float>();
     private float[] _slZ = Array.Empty<float>();
     private float[] _stpX = Array.Empty<float>();
@@ -312,7 +317,7 @@ public partial class ArmyCore : RefCounted
         Array.Resize(ref _atkCd, cap); Array.Resize(ref _aggroT, cap);
         Array.Resize(ref _atkDmg, cap); Array.Resize(ref _atkRange, cap);
         Array.Resize(ref _speed, cap);
-        Array.Resize(ref _sepT, cap);
+        Array.Resize(ref _sepT, cap); Array.Resize(ref _sepR, cap);
         Array.Resize(ref _slX, cap); Array.Resize(ref _slZ, cap);
         Array.Resize(ref _stpX, cap); Array.Resize(ref _stpZ, cap);
         Array.Resize(ref _thX, cap); Array.Resize(ref _thZ, cap); Array.Resize(ref _thY, cap);
@@ -353,6 +358,7 @@ public partial class ArmyCore : RefCounted
         // Фаза разбора наложения разводится по номеру строки: иначе весь отряд,
         // вышедший из барака одним заказом, разбирается в один и тот же кадр
         _sepT[i] = (i & 7) * 0.008f;
+        _sepR[i] = 0.0f;
         _stpX[i] = 0; _stpZ[i] = 0;
         _thX[i] = 1e9f; _thZ[i] = 1e9f; _thY[i] = 0;
         _st[i] = 0; _fac[i] = -1; _sq[i] = 0; _flags[i] = 0; _attackers[i] = 0;
@@ -829,6 +835,70 @@ public partial class ArmyCore : RefCounted
         return count;
     }
 
+    /// РЯДЫ ЦЕЛОГО ОТРЯДА ЗА ОДИН ПЕРЕХОД ГРАНИЦЫ.
+    ///
+    /// AlliesAhead считает одного бойца, и звали её персонально: замер
+    /// (qa_fps, 4000 юнитов) дал 112 вызовов в кадр по 8.6 мкс — 0.96 мс,
+    /// самая дорогая строка всего тика. Работа внутри при этом копеечная:
+    /// обойти три десятка ячеек. Дорог был сам путь наружу — два прыжка по
+    /// GDScript плюс переход границы на КАЖДОГО бойца.
+    ///
+    /// Шеренга и так обязана смотреть в одну сторону (см. Unit._phalanx_dir),
+    /// поэтому направление одно на весь отряд, а строки приходят пачкой.
+    /// Пересчёт ряда идёт раз в четверть секунды на отряд — то есть вместо
+    /// сотни переходов в кадр остаётся пять.
+    ///
+    /// Возвращает массив той же длины, что и rows: ряд для каждой строки
+    public int[] SquadRanks(int[] rows, float dxDir, float dzDir,
+        float look, float halfWidth)
+    {
+        int n = rows != null ? rows.Length : 0;
+        var outRanks = new int[n];
+        if (n == 0 || _gw == 0) return outRanks;
+        int dead = DeadState;
+        for (int k = 0; k < n; k++)
+        {
+            int row = rows[k];
+            if (row < 0 || row >= _capacity) { outRanks[k] = 0; continue; }
+            float x = _px[row], z = _pz[row];
+            float mx = x + dxDir * look * 0.5f;
+            float mz = z + dzDir * look * 0.5f;
+            float r = look * 0.5f + halfWidth + _gcell;
+            int cx0 = (int)((mx - r - _gx0) * _ginv);
+            int cz0 = (int)((mz - r - _gz0) * _ginv);
+            int cx1 = (int)((mx + r - _gx0) * _ginv);
+            int cz1 = (int)((mz + r - _gz0) * _ginv);
+            if (cx1 < 0 || cz1 < 0 || cx0 >= _gw || cz0 >= _gh) { outRanks[k] = 0; continue; }
+            if (cx0 < 0) cx0 = 0;
+            if (cz0 < 0) cz0 = 0;
+            if (cx1 >= _gw) cx1 = _gw - 1;
+            if (cz1 >= _gh) cz1 = _gh - 1;
+            int myside = FacSlot(_fac[row]);
+            int count = 0;
+            for (int cz = cz0; cz <= cz1; cz++)
+            {
+                int b = cz * _gw;
+                for (int cx = cx0; cx <= cx1; cx++)
+                {
+                    int j = _head[(b + cx) * Factions + myside];
+                    while (j != -1)
+                    {
+                        if (j == row || _st[j] == dead) { j = _next[j]; continue; }
+                        float dx = _px[j] - x;
+                        float dz = _pz[j] - z;
+                        float along = dx * dxDir + dz * dzDir;
+                        if (along <= 0.12f || along > look) { j = _next[j]; continue; }
+                        float lat = Mathf.Abs(dx * -dzDir + dz * dxDir);
+                        if (lat <= halfWidth) count++;
+                        j = _next[j];
+                    }
+                }
+            }
+            outRanks[k] = count;
+        }
+        return outRanks;
+    }
+
     public Vector3 NearestEnemyOffset(int row, float radius)
     {
         if (row < 0) return Vector3.Zero;
@@ -971,8 +1041,65 @@ public partial class ArmyCore : RefCounted
         return best;
     }
 
-    /// ВСЕ БОЙЦЫ В РАДИУСЕ. Холодный путь: клик мышью, попадание стрелы —
-    /// единственный скан, которому нужны ОБЕ стороны
+    /// ПЕРВЫЙ ЖИВОЙ ЧУЖОЙ В РАДИУСЕ ОТ ТОЧКИ — для летящей стрелы.
+    ///
+    /// От QueryRadius отличается тем, что НЕ СТРОИТ МАССИВ и не отдаёт наружу
+    /// список кандидатов: отбор «своих, мёртвых и пустых слотов» делается прямо
+    /// здесь, а через границу уходит одно значение. Стрел в воздухе десятки, и
+    /// каждая проверяется в каждом кадре полёта — Godot-массив на каждую такую
+    /// проверку был отдельной статьёй расхода залпа (правило №1 в CLAUDE.md).
+    ///
+    /// `fac` — фракция СТРЕЛКА. Цель — всё, что не она: гоблины враждебны всем,
+    /// поэтому делить стороны на «мою и противоположную» здесь нельзя.
+    /// Ближайшего не ищем намеренно: радиус попадания меньше метра, в нём
+    /// физически не помещается двух бойцов настолько по-разному, чтобы выбор
+    /// был виден — а прежний GDScript-разбор точно так же брал первого
+    public Godot.Node3D EnemyAt(float x, float z, float radius, int fac)
+    {
+        if (_gw == 0) return null;
+        int cx0 = (int)((x - radius - _gx0) * _ginv);
+        int cz0 = (int)((z - radius - _gz0) * _ginv);
+        int cx1 = (int)((x + radius - _gx0) * _ginv);
+        int cz1 = (int)((z + radius - _gz0) * _ginv);
+        if (cx1 < 0 || cz1 < 0 || cx0 >= _gw || cz0 >= _gh) return null;
+        if (cx0 < 0) cx0 = 0;
+        if (cz0 < 0) cz0 = 0;
+        if (cx1 >= _gw) cx1 = _gw - 1;
+        if (cz1 >= _gh) cz1 = _gh - 1;
+        int mySlot = FacSlot(fac);
+        float rSq = radius * radius;
+        int dead = DeadState;
+        for (int cz = cz0; cz <= cz1; cz++)
+        {
+            int b = cz * _gw;
+            for (int cx = cx0; cx <= cx1; cx++)
+            {
+                int slot = (b + cx) * Factions;
+                for (int side = 0; side < Factions; side++)
+                {
+                    if (side == mySlot) continue;
+                    int j = _head[slot + side];
+                    while (j != -1)
+                    {
+                        if (_st[j] == dead) { j = _next[j]; continue; }
+                        float dx = x - _px[j];
+                        float dz = z - _pz[j];
+                        if (dx * dx + dz * dz <= rSq)
+                        {
+                            var u = _unitOf[j] as Godot.Node3D;
+                            if (u != null && GodotObject.IsInstanceValid(u))
+                                return u;
+                        }
+                        j = _next[j];
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /// ВСЕ БОЙЦЫ В РАДИУСЕ. Холодный путь: разбор клика мышью — единственный
+    /// скан, которому нужны ОБЕ стороны сразу
     public Godot.Collections.Array QueryRadius(float x, float z, float radius)
     {
         var outArr = new Godot.Collections.Array();
@@ -1296,6 +1423,21 @@ public partial class ArmyCore : RefCounted
     // только пока есть наложение), у идущего по приказу из неё вырезается
     // составляющая ПРОТИВ курса, за край карты она не выталкивает и в воду не
     // выдавливает.
+    /// Личный радиус расталкивания строки. Ноль возвращает её к общей
+    /// дистанции. Ставится один раз при рождении бойца, в покадровый путь не
+    /// входит — границу GDScript-C# этот вызов пересекает не чаще спавна
+    public void SetSepRadius(int row, float r)
+    {
+        if (row < 0 || row >= _capacity) return;
+        _sepR[row] = r > 0.0f ? r : 0.0f;
+    }
+
+    public float GetSepRadius(int row)
+    {
+        if (row < 0 || row >= _capacity) return 0.0f;
+        return _sepR[row];
+    }
+
     public int BatchSeparation(float delta, float minDist, float maxStep, float interval,
         float limX, float limZ, int movingState, int attackingState, bool waterOn,
         GodotObject gm, float deadzone, float reliefAmp)
@@ -1305,18 +1447,31 @@ public partial class ArmyCore : RefCounted
         float maxSq = maxStep * maxStep;
         float nearD = Mathf.Max(minDist - deadzone, 0.0f);
         float nearSq = nearD * nearD;
-        float workD = minDist * WorkOverlap;
-        float workNear = Mathf.Max(workD - deadzone, 0.0f);
-        float workNearSq = workNear * workNear;
         int moved = 0;
         for (int i = 0; i < _capacity; i++)
         {
             if ((_flags[i] & (FPosValid | FDormant)) != FPosValid) continue;
             int s = _st[i];
             if (s == dead) continue;
+            // ЛИЧНЫЙ РАДИУС ПЕРЕКРЫВАЕТ ОБЩИЙ. Поправка считается по СВОЕЙ
+            // норме каждого: крупный сосед отходит дальше, мелкий — на своё.
+            // Равновесие пары выходит по большему из двух радиусов, потому что
+            // тот, кому тесно, продолжает отталкиваться, а поправка монотонна
             float myMin = minDist;
             float myNearSq = nearSq;
-            if ((_flags[i] & FWorking) != 0) { myMin = workD; myNearSq = workNearSq; }
+            float own = _sepR[i];
+            if (own > 0.0f)
+            {
+                myMin = own;
+                float ownNear = Mathf.Max(own - deadzone, 0.0f);
+                myNearSq = ownNear * ownNear;
+            }
+            if ((_flags[i] & FWorking) != 0)
+            {
+                float w = myMin * WorkOverlap;
+                float wNear = Mathf.Max(w - deadzone, 0.0f);
+                myMin = w; myNearSq = wNear * wNear;
+            }
             float t = _sepT[i] - delta;
             if (t > 0.0f) { _sepT[i] = t; continue; }
             _sepT[i] = interval;

@@ -294,8 +294,16 @@ func _on_attack_fired(target: Node3D, damage: float) -> void:
 	# комплект из узлов, меша и материала переживает выстрел и идёт в следующий.
 	# Скорость и высота дуги — из unit_stats_config.gd (навесная траектория);
 	# урон летит вместе со стрелой и списывается только при попадании
-	GameManager.spawn_arrow(parent, from_pos, aim, dist, speed,
+	var shaft = GameManager.spawn_arrow(parent, from_pos, aim, dist, speed,
 		_UStats.stat("archer", "arrow_arc", 0.5), damage, self, faction)
+	# ── СТРЕЛА ПО ЗДАНИЮ ЗАПОМИНАЕТ СВОЮ ЦЕЛЬ ──────────────────────────────
+	# Попадание в бойца стрела ищет сама, сканом сетки (Arrow._check_hit) — но
+	# здание в этой сетке не состоит, и стрелы по стенам просто втыкались в
+	# землю рядом, не нанося ни очка. Сканировать группу зданий на каждую
+	# стрелу в каждом кадре полёта незачем: стрелок и так ЗНАЕТ, куда целится,
+	# и передаёт цель вместе с выстрелом. Проверка одна и в самом конце дуги
+	if shaft != null and target is Building:
+		shaft.set("_hit_node", target)
 
 func _add_bow_procedural() -> void:
 	var bow := MeshInstance3D.new()

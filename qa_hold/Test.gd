@@ -86,7 +86,7 @@ func _a_wall() -> void:
 		men.append(u)
 	# Враг СТОИТ рядом, но вне дистанции копья
 	var foe := _spawn("warrior", Constants.FACTION_ENEMY, Vector3(-200.0, 0.0, -196.5))
-	foe.set_physics_process(false)          # неподвижная мишень
+	foe.set_tick(false)          # неподвижная мишень
 	await pframes(6)
 	var start: Array = []
 	for u in men:
@@ -150,7 +150,7 @@ func _b_close_ranks() -> void:
 		men.append(u)
 	# Враг ВПЕРЕДИ по курсу, чтобы фаланга вообще работала (без врага она спит)
 	var foe := _spawn("warrior", Constants.FACTION_ENEMY, Vector3(-100.0, 0.0, -104.0))
-	foe.set_physics_process(false)
+	foe.set_tick(false)
 	await pframes(10)
 	# Задний боец (последний в списке) стоит дальше всех от врага
 	var back: Unit = men[men.size() - 1]
@@ -184,7 +184,7 @@ func _c_archer_no_chase() -> void:
 		GameManager.add_to_squad(sid, u)
 		men.append(u)
 	var foe := _spawn("warrior", Constants.FACTION_ENEMY, Vector3(0.0, 0.0, -292.0))
-	foe.set_physics_process(false)
+	foe.set_tick(false)
 	await pframes(10)
 	# Приказ игрока по цели В ЗОНЕ ВЫСТРЕЛА — лучники стреляют с места
 	for u in men:
@@ -207,7 +207,7 @@ func _c_archer_no_chase() -> void:
 
 	# Появился новый враг В РАДИУСЕ — по нему открывают огонь, не сходя с места
 	var foe2 := _spawn("warrior", Constants.FACTION_ENEMY, Vector3(3.0, 0.0, -288.0))
-	foe2.set_physics_process(false)
+	foe2.set_tick(false)
 	await pframes(150)
 	var got := 0
 	for u in men:
@@ -240,7 +240,7 @@ func _d_archer_approach() -> void:
 		men.append(u)
 	# Цель ДАЛЕКО за дальностью стрельбы — до неё надо дойти
 	var foe := _spawn("warrior", Constants.FACTION_ENEMY, Vector3(0.0, 0.0, -360.0))
-	foe.set_physics_process(false)
+	foe.set_tick(false)
 	await pframes(10)
 	var d0: float = (men[0] as Unit).global_position.distance_to(foe.global_position)
 	for u in men:

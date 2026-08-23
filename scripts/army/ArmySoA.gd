@@ -168,6 +168,15 @@ func set_faction(i: int, f: int) -> void:
 func set_squad(i: int, s: int) -> void:
 	_c.SetSquad(i, s)
 
+## ЛИЧНЫЙ РАДИУС РАСТАЛКИВАНИЯ строки. Ноль — «как у всех», то есть общая
+## дистанция из аргумента batch_separation. Ставится ОДИН РАЗ при рождении
+## бойца: в покадровый путь этот вызов не входит и границу не греет
+func set_sep_radius(i: int, r: float) -> void:
+	_c.SetSepRadius(i, r)
+
+func get_sep_radius(i: int) -> float:
+	return _c.GetSepRadius(i)
+
 func set_combat(i: int, dmg: float, rng: float, spd: float) -> void:
 	_c.SetCombat(i, dmg, rng, spd)
 
