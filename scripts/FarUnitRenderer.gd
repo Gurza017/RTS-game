@@ -79,8 +79,9 @@ class Bucket:
 		capacity = new_cap
 		dirty = true
 
-	## Полная запись: позиция + кадр + зеркало
-	func write(idx: int, pos: Vector3, frame: int, mirror: bool) -> void:
+	## Полная запись: позиция + кадр + зеркало + состояние урона
+	func write(idx: int, pos: Vector3, frame: int, mirror: bool,
+			flash: float, hp: float) -> void:
 		var o: int = idx * STRIDE
 		buf[o]      = 1.0
 		buf[o + 1]  = 0.0
@@ -98,8 +99,14 @@ class Bucket:
 		# может оказаться восьмибитным), g — признак отражения. См. шапку шейдера
 		buf[o + 12] = float(frame) / 255.0
 		buf[o + 13] = 1.0 if mirror else 0.0
-		buf[o + 14] = 0.0
-		buf[o + 15] = 1.0
+		# ── СОСТОЯНИЕ УРОНА ПЕРЕПИСЫВАЕТСЯ ВМЕСТЕ С ОСТАЛЬНЫМ ───────────────
+		# Здесь стояли константы 0.0 и 1.0 («вспышки нет, боец цел»), и это
+		# было верно, пока каналы были свободны. Теперь нет: полная запись
+		# идёт и при СМЕНЕ ЛЕНТЫ, то есть при каждом переезде в другой бакет,
+		# а в свалке они идут постоянно. Раненый, сменивший позу, на один кадр
+		# становился бы целым — то есть мигал бы чистым спрайтом всю драку
+		buf[o + 14] = flash
+		buf[o + 15] = hp
 		dirty = true
 
 	## Быстрый путь идущего бойца: только три float позиции. Кадр и зеркало
@@ -117,6 +124,16 @@ class Bucket:
 	## (лента, зеркало, размер) стоит на порядок дороже и идёт раз в anim_every
 	func write_frame(idx: int, frame: int) -> void:
 		buf[idx * STRIDE + 12] = float(frame) / 255.0
+		dirty = true
+
+	## ТОЛЬКО СОСТОЯНИЕ УРОНА — ДВА float. Отдельный путь по той же причине,
+	## что и у кадра: вспышка живёт считанные кадры и обязана доезжать до
+	## буфера немедленно, а полный разбор спрайта идёт раз в anim_every и на
+	## отклик от удара опоздал бы на треть секунды
+	func write_dmg(idx: int, flash: float, hp: float) -> void:
+		var o: int = idx * STRIDE
+		buf[o + 14] = flash
+		buf[o + 15] = hp
 		dirty = true
 
 	## Спрятать слот — нулевая матрица (MultiMesh не умеет «скрыть экземпляр»,
@@ -161,6 +178,11 @@ class Slot:
 	var pos: Vector3 = Vector3(1e9, 1e9, 1e9)
 	var frame: int = -1
 	var mirror: bool = false
+	## Состояние урона, лежащее в буфере: вспышка от удара и доля жизни.
+	## Хранится здесь ровно затем же, зачем позиция и кадр, — чтобы не писать
+	## в буфер то, что в нём и так лежит: целый строй не платит ничего
+	var flash: float = 0.0
+	var hp: float = 1.0
 
 	## Порог «боец сдвинулся»: квадрат смещения. 1 мм² — то есть отсекаем
 	## только точные совпадения и шум последнего бита, а не реальное движение
@@ -192,6 +214,17 @@ class Slot:
 			return
 		frame = f
 		bucket.write_frame(index, f)
+
+	## БЫСТРЫЙ ПУТЬ СОСТОЯНИЯ УРОНА. Зовёт сам боец, когда вспышка сдвинулась
+	## или изменилось здоровье (см. Unit.tick_visual). Порог у вспышки — шаг
+	## восьмибитного канала: писать разницу, которой в буфере всё равно не
+	## будет, незачем
+	func set_damage(f: float, h: float) -> void:
+		if absf(f - flash) < 0.004 and absf(h - hp) < 0.004:
+			return
+		flash = f
+		hp = h
+		bucket.write_dmg(index, f, h)
 
 var _buckets: Dictionary = {}      # ключ ленты -> Bucket
 var _slot: Dictionary = {}         # Unit -> Slot
@@ -311,8 +344,13 @@ func register(unit: Unit, world_root: Node3D, mirror: bool) -> Slot:
 	s.frame  = sf[1]
 	s.mirror = mirror
 	s.pos    = unit.global_position + Vector3(0.0, s.base_y, 0.0)
+	# Состояние урона берётся у бойца ЗДЕСЬ ЖЕ: подкрепление выходит целым, а
+	# вот раненый, вернувшийся из тумана или сменивший ленту, обязан выйти в
+	# буфер уже окровавленным — иначе он мигнёт чистым спрайтом
+	s.flash  = unit.hit_flash_level()
+	s.hp     = unit.health_shade()
 	_slot[unit] = s
-	b.write(s.index, s.pos, s.frame, mirror)
+	b.write(s.index, s.pos, s.frame, mirror, s.flash, s.hp)
 	return s
 
 ## Слот бойца или null (для тех, кто держит на него прямую ссылку)
@@ -387,7 +425,7 @@ func refresh(unit: Unit, pos: Vector3, mirror: bool, known: Slot = null) -> Slot
 	s.frame  = frame
 	s.mirror = mirror
 	s.pos    = p
-	s.bucket.write(s.index, p, frame, mirror)
+	s.bucket.write(s.index, p, frame, mirror, s.flash, s.hp)
 	return s
 
 ## БЫСТРЫЙ ПУТЬ ИДУЩЕГО: только позиция, без единого обращения к спрайту.
