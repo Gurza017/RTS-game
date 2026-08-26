@@ -10,6 +10,7 @@ extends Node
 ##   7 ПОПОЛНЕНИЕ— apply_squad_bonuses_to() выдаёт новобранцу всё заслуженное
 ##   8 НАГРУЗКА  — 330 юнитов со звёздами, медиана TIME_PHYSICS_PROCESS
 
+const _Banner := preload("res://scripts/SquadBanner.gd")
 const _UCfg := preload("res://scripts/unit_stats_config.gd")
 const _House := preload("res://scripts/House.gd")
 
@@ -63,6 +64,7 @@ func _run() -> void:
 	await _test_bonus_effects()
 	await _test_ui()
 	await _test_reinforcement()
+	await _test_bearer_returns()
 	await _test_leader_death()
 	await _test_load()
 	_summary()
@@ -293,10 +295,9 @@ func _test_multi_pending() -> void:
 		GameManager.squad_level(sid) == 2, "уровень=%d" % GameManager.squad_level(sid))
 	verdict("2в выдано СРАЗУ ДВЕ награды, а не одна",
 		GameManager.squad_pending(sid) == 2, "pending=%d" % GameManager.squad_pending(sid))
-	var star := _find_star(sid)
-	var rays: int = _star_rays(star)
-	print("  звезда сразу на %d луча(ей)" % rays)
-	verdict("2в звезда сразу показывает 2 уровня", rays == 2, "лучей=%d" % rays)
+	var grade: int = _banner_grade(sid)
+	print("  знамя сразу под грейд %d" % grade)
+	verdict("2в знамя сразу показывает 2 уровня", grade == 2, "грейд=%d" % grade)
 	for m in GameManager.squad_members(sid):
 		(m as Unit)._die()
 	await frames(2)
@@ -402,10 +403,15 @@ func _test_kill_sources() -> void:
 	await frames(2)
 
 # ═════════════════════════════════════════════════════════════════════════════
-func _find_star(sid: int) -> Node:
+## ── ЗВЁЗДЫ ЗАМЕНЕНЫ ЗНАМЁНАМИ (заказ владельца, авг. 2026) ─────────────────
+## Проверки ниже переписаны с «сколько лучей у звезды» на «под какой грейд
+## построено знамя». Смысл у них тот же и остался прежним: метка обязана
+## показывать ровно тот уровень, который отряд заслужил, и обязана появляться на
+## пороге. Менялась не проверка, а то, чем эта метка нарисована.
+func _find_banner(sid: int) -> Node:
 	if not GameManager.squads.has(sid):
 		return null
-	var s = GameManager.squads[sid]["star"]
+	var s = (GameManager.squads[sid] as Dictionary).get("banner")
 	return s if (s != null and is_instance_valid(s)) else null
 
 ## КАКОЙ УРОВЕНЬ ПОЛОЖЕН ЗА ТАКОЙ СЧЁТ — по конфигу и только по нему.
@@ -419,70 +425,48 @@ func _level_for_kills(kills: int, unit_type: String = "spearman") -> int:
 			lvl = i + 1
 	return lvl
 
-## Сколько звёзд нарисовано в ряду: одна пятиконечная = 10 треугольников
-## СКОЛЬКО ЗВЁЗД ПОЛОЖЕНО НА ЭТОМ УРОВНЕ. Уже не «уровень = число звёзд»:
-## с семью грейдами уровень 4 — это ОДНА серебряная звезда, а 7 — одна золотая.
-## Число берём из конфига (VET_STAR_TIERS), он источник правды
-func _want_stars(lvl: int) -> int:
-	var tier: Dictionary = _UCfg.veteran_star_tier(lvl)
-	return int(tier.get("count", 0))
+## Под какой грейд построено знамя. Ноль — знамени нет вовсе
+func _banner_grade(sid: int) -> int:
+	var b := _find_banner(sid)
+	return int(b.shown_level) if b != null else 0
 
-func _star_rays(star: Node) -> int:
-	if star == null:
-		return 0
-	var mi := star as MeshInstance3D
-	if mi == null or mi.mesh == null:
-		return 0
-	# ── СЧИТАЕМ ТОЛЬКО ВИДИМЫЙ РЯД, А НЕ ВЕСЬ МЕШ ──────────────────────────
-	# У звезды ДВЕ поверхности: 0 — тёмный кант, 1 — заливка цветом грейда
-	# (см. VeterancyStar._make_star_row). get_faces() отдаёт треугольники всех
-	# поверхностей разом, и стенд насчитывал ровно вдвое больше звёзд, чем
-	# нарисовано. Ряд один и тот же в обеих, поэтому берём ПОСЛЕДНЮЮ — ту, что
-	# игрок и видит поверх канта
-	var am := mi.mesh as ArrayMesh
-	if am == null or am.get_surface_count() == 0:
-		var faces: PackedVector3Array = mi.mesh.get_faces()
-		return int(round(float(faces.size()) / 3.0 / 10.0))
-	var arrays: Array = am.surface_get_arrays(am.get_surface_count() - 1)
-	var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
-	return int(round(float(verts.size()) / 3.0 / 10.0))
+## Сколько лычек показывает панель на этом уровне. Из того же конфига, по
+## которому нарисовано само знамя (veteran_badge_text) — держать в стенде свою
+## копию шкалы нельзя, она разъедется с игрой при первой правке
+func _want_badge(lvl: int) -> String:
+	return _UCfg.veteran_badge_text(lvl)
 
 func _test_star_and_choice() -> void:
-	print("\n═════ 4. ЗВЁЗДОЧКА И ВЫБОР БОНУСА ═════")
-	var star := _find_star(squad)
-	var host := "—"
-	var hy := 0.0
-	if star != null:
-		host = str(star.get_parent().name)
-		hy = (star as Node3D).position.y
-	print("  звезда есть: %s, висит на «%s», высота над юнитом=%.2f м, лучей=%d" % [
-		str(star != null), host, hy, _star_rays(star)])
-	verdict("4 звёздочка зажглась на пороге", star != null)
-	# ЗВЕЗДА БОЛЬШЕ НЕ ВИСИТ НА БОЙЦЕ. По заказу владельца она стоит строго по
-	# ЦЕНТРУ МАСС отряда (среднее координат всех выживших), а центр масс — не
-	# свойство одного узла, поэтому родителем стал мир, а положение обновляет
-	# GameManager._update_squad_stars(). Проверяем то, что теперь и есть правда:
-	# узел не ребёнок бойца и стоит над средней точкой отряда
-	# ЗВЕЗДА ТЕПЕРЬ ДОГОНЯЕТ ЦЕНТР, А НЕ ПРЫГАЕТ В НЕГО (заказ владельца:
-	# «должна плавно перемещаться, а не дёргаться»). Значит совпадение
-	# проверяется ПОСЛЕ того, как отряд стоит и сглаживание сошлось, а допуск
-	# берётся сантиметровый, а не нулевой: GameManager.STAR_FOLLOW подтягивает
-	# звезду экспоненциально и точного равенства не даёт никогда
-	# Сорока кадров сглаживанию не всегда хватало: звезда подтягивается
-	# экспоненциально, а центр отряда — МЕДИАНА и потому переступает
-	# скачками, когда очередной боец пересекает середину строя. Ждём вдвое
-	# дольше и по ФИЗИЧЕСКИМ кадрам (движение живёт в них)
+	print("\n═════ 4. ЗНАМЯ ВЕТЕРАНСТВА И ВЫБОР БОНУСА ═════")
+	var banner := _find_banner(squad)
+	var bearer = GameManager.squad_bearer(squad)
+	print("  знамя есть: %s, грейд=%d, знаменосец=%s" % [
+		str(banner != null), _banner_grade(squad), str(bearer != null)])
+	verdict("4 знамя зажглось на пороге", banner != null)
+	verdict("4 у знамени есть знаменосец", bearer != null)
+
+	# ── ЗДЕСЬ ПРОВЕРЯЛОСЬ «ЗВЕЗДА СТОИТ ПО ЦЕНТРУ МАСС», И ЭТО РАЗВЁРНУТО ────
+	# Звезда была меткой над отрядом и потому висела над средней точкой — над
+	# местом, где может вообще никого не быть. Знамя — ПРЕДМЕТ В РУКАХ бойца, и
+	# требование теперь ровно обратное: оно обязано стоять НА ЗНАМЕНОСЦЕ.
+	# Допуск — смещение древка от центра бойца плюс сантиметр на сглаживание
+	# картинки (знамя ставится по НАРИСОВАННОЙ точке, см. SquadBanner)
 	for _i in range(90):
 		await get_tree().physics_frame
-	var want_c: Vector3 = GameManager.squad_centroid(squad)
-	var got_c: Vector3 = (star as Node3D).global_position if star != null else Vector3.ZERO
-	verdict("4 звезда стоит по центру масс отряда, а не на бойце",
-		star != null and not (star.get_parent() is Unit)
-		and Vector2(got_c.x - want_c.x, got_c.z - want_c.z).length() <= 0.10,
-		"центр=(%.2f, %.2f) звезда=(%.2f, %.2f)" % [
-			want_c.x, want_c.z, got_c.x, got_c.z])
-	verdict("4 на 1 уровне ровно 1 звезда в ряду", _star_rays(star) == 1,
-		"звёзд=%d" % _star_rays(star))
+	banner = _find_banner(squad)
+	bearer = GameManager.squad_bearer(squad)
+	var bp: Vector3 = (bearer as Unit).draw_position() if bearer != null else Vector3.ZERO
+	var got_c: Vector3 = (banner as Node3D).global_position if banner != null else Vector3.ZERO
+	var off: float = Vector2(got_c.x - bp.x - _Banner.POLE_OFFSET_X,
+		got_c.z - bp.z).length()
+	verdict("4 знамя стоит на знаменосце, а не над центром масс",
+		banner != null and bearer != null and off <= 0.10,
+		"боец=(%.2f, %.2f) знамя=(%.2f, %.2f), расхождение %.3f м" % [
+			bp.x, bp.z, got_c.x, got_c.z, off])
+	verdict("4 знамя не ребёнок бойца (иначе отстаёт от спрайта)",
+		banner != null and not (banner.get_parent() is Unit))
+	verdict("4 на 1 уровне знамя первого грейда", _banner_grade(squad) == 1,
+		"грейд=%d" % _banner_grade(squad))
 
 	var members := GameManager.squad_members(squad)
 	sm._clear_selection()
@@ -494,8 +478,12 @@ func _test_star_and_choice() -> void:
 		labels.append(((b as Button).text if (b as Button).text != "" else (b as Button).tooltip_text))
 	print("  подпись панели: «%s»" % hud.info_label.text)
 	print("  кнопки: %s" % str(labels))
-	verdict("4 на панели ровно 5 кнопок выбора", labels.size() == 5,
-		"кнопок=%d" % labels.size())
+	# СТЕНД НЕ ХАРДКОДИТ ЧИСЛО НАГРАД. Сколько их на уровне —
+	# решает владелец в unit_stats_config; проверять надо СООТВЕТСТВИЕ
+	# панели конфигу, а не равенство пятёрке (правило проекта 10)
+	var want_btn: int = _UCfg.veteran_choices("spearman", 1).size()
+	verdict("4 кнопок на панели столько же, сколько наград в конфиге",
+		labels.size() == want_btn, "кнопок=%d, в конфиге=%d" % [labels.size(), want_btn])
 
 	var atk_before: float = (members[0] as Unit).vet_attack
 	var choices: Array = _UCfg.veteran_choices("spearman", 1)
@@ -563,15 +551,15 @@ func _test_all_levels() -> void:
 		var entry: Dictionary = choices[pick]
 		var ok: bool = GameManager.apply_veteran_choice(squad, pick)
 		if ok:
-			want_total += float(entry.get("value", 0.0))
+			want_total += _reward_sum(entry)
 			awarded += 1
-		var rays: int = _star_rays(_find_star(squad))
-		if rays != _want_stars(GameManager.squad_level(squad)):
+		var grade: int = _banner_grade(squad)
+		if grade != GameManager.squad_level(squad):
 			rays_ok = false
-		print("    уровень %d при %d убийствах, выбрано «%s» (+%.1f) → %s, звёзд=%d" % [
+		print("    уровень %d при %d убийствах, выбрано «%s» (+%.1f) → %s, грейд знамени=%d" % [
 			GameManager.squad_level(squad), GameManager.squad_kills(squad),
 			String(entry.get("name", "?")), float(entry.get("value", 0.0)),
-			str(ok), rays])
+			str(ok), grade])
 	# Добираем награды, накопившиеся на последнем шаге
 	while GameManager.squad_pending(squad) > 0 and guard < 60:
 		guard += 1
@@ -580,17 +568,17 @@ func _test_all_levels() -> void:
 		var pick2: int = mini(lvl2 - 1, ch2.size() - 1)
 		var e2: Dictionary = ch2[pick2]
 		if GameManager.apply_veteran_choice(squad, pick2):
-			want_total += float(e2.get("value", 0.0))
+			want_total += _reward_sum(e2)
 			awarded += 1
 			print("    добор награды на уровне %d: «%s» (+%.1f)" % [
 				lvl2, String(e2.get("name", "?")), float(e2.get("value", 0.0))])
-		if _star_rays(_find_star(squad)) != _want_stars(GameManager.squad_level(squad)):
+		if _banner_grade(squad) != GameManager.squad_level(squad):
 			rays_ok = false
 	verdict("6 достигнут максимальный уровень %d" % maxlvl,
 		GameManager.squad_level(squad) == maxlvl,
 		"уровень=%d" % GameManager.squad_level(squad))
 	verdict("6 все награды выбраны", GameManager.squad_pending(squad) == 0)
-	verdict("4б число звёзд в ряду = грейду уровня на всех уровнях", rays_ok)
+	verdict("4б грейд знамени = уровню отряда на всех уровнях", rays_ok)
 
 	var m0: Unit = GameManager.squad_members(squad)[0]
 	print("  итог по бойцу: атака+%.0f броня+%.0f защита+%.0f скорость+%.1f HP=%.0f" % [
@@ -602,20 +590,40 @@ func _test_all_levels() -> void:
 		total += float(bonuses[k])
 	# Сверяем с суммой того, что РЕАЛЬНО было выбрано (величины взяты из
 	# конфига в момент выбора), а не с числом, посчитанным заранее
-	verdict("6 сумма бонусов совпадает с суммой выбранного по конфигу",
-		absf(total - want_total) < 0.01,
-		"начислено=%.1f, по конфигу должно быть=%.1f (наград выдано %d)"
-			% [total, want_total, awarded])
+	# ОЖИДАЕМОЕ ПЕРЕСЧИТЫВАЕТСЯ ИЗ КОНФИГА ПО СПИСКУ ВЫБРАННОГО,
+	# а не копится по ходу теста. Отряд помнит свой выбор (sq["chosen"],
+	# i-я запись — награда за уровень i+1), и этого достаточно, чтобы
+	# собрать ожидание заново. Накопление по ходу пропускало награды,
+	# выданные не циклом стенда, а подготовкой (arm_squad)
+	var chosen: Array = GameManager.squads[squad].get("chosen", [])
+	var want_cfg := 0.0
+	for ci in range(chosen.size()):
+		var lst: Array = _UCfg.veteran_choices("spearman", ci + 1)
+		for e3 in lst:
+			if String((e3 as Dictionary).get("id", "")) == String(chosen[ci]):
+				want_cfg += _reward_sum(e3)
+				break
+	print("  выбрано по уровням: %s" % str(chosen))
+	verdict("6 сумма начисленного равна сумме модификаторов выбранного",
+		absf(total - want_cfg) < 0.01,
+		"начислено=%.1f, по конфигу=%.1f (наград %d)" % [total, want_cfg, chosen.size()])
 
 	sm._clear_selection()
 	sm._select(GameManager.squad_members(squad)[0])
 	GameManager.on_selection_changed(sm.selected_units)
 	await frames(2)
 	print("  подпись панели с максимумом: «%s»" % hud.info_label.text)
-	verdict("6 в подписи столько ★, сколько положено грейду",
-		hud.info_label.text.count("★") == _want_stars(maxlvl),
-		"звёзд в подписи=%d, ждали %d" % [hud.info_label.text.count("★"),
-			_want_stars(maxlvl)])
+	# ── ЗДЕСЬ ПРОВЕРЯЛСЯ ЗНАЧОК ЛЫЧЕК В ПОДПИСИ, И ТРЕБОВАНИЕ РАЗВЁРНУТО ────
+	# Заказ владельца (авг. 2026): «убрать символьные лычки из заголовков UI»,
+	# а название отряда собирать словами — «Отряд легендарных копейщиков».
+	# Значок остался там, где на слова нет места: на портрете и на карточке
+	# отряда. Проверяем ровно новое требование: в заголовке ЕСТЬ звание и НЕТ
+	# значка
+	verdict("6 в подписи звание словами, а не значок",
+		_UCfg.veteran_rank_name("spearman", maxlvl) in hud.info_label.text
+			and not (_want_badge(maxlvl) in hud.info_label.text),
+		"подпись «%s», ждали «%s» без значка «%s»" % [hud.info_label.text,
+			_UCfg.veteran_rank_name("spearman", maxlvl), _want_badge(maxlvl)])
 
 # ═════════════════════════════════════════════════════════════════════════════
 # 5. БОНУСЫ РАБОТАЮТ В БОЮ
@@ -672,92 +680,82 @@ func measure_taken(target: Unit, amount: float) -> float:
 
 func _test_bonus_effects() -> void:
 	print("\n═════ 5. БОНУСЫ РАБОТАЮТ В БОЮ (фактические числа) ═════")
-	var names: Array = []
-	for c in _UCfg.veteran_choices("spearman", 1):
-		names.append(String((c as Dictionary)["name"]))
+	# ── БЛОК ИДЁТ ПО СОСТАВУ КОНФИГА, А НЕ ПО НОМЕРАМ 0..4 ─────────────────
+	# Прежняя версия брала награды по фиксированным индексам и сверяла эффект
+	# с полем "value". Оба допущения больше неверны: владелец меняет и ЧИСЛО
+	# наград на уровень, и их набор, а сама награда давно не одна пара
+	# stat/value, а НАБОР модификаторов («+3 к Броне» даёт ещё и защиту, и
+	# урон, и минус к скорости). Поэтому каждая награда проверяется ПО СВОИМ
+	# МОДИФИКАТОРАМ: сколько обещала — столько и обязана дать
+	var lst: Array = _UCfg.veteran_choices("spearman", 1)
+	for idx in range(lst.size()):
+		var e: Dictionary = lst[idx]
+		var eid: String = String(e.get("id", ""))
+		var nm: String = String(e.get("name", eid))
+		var at: Vector3 = Vector3(300.0 + float(idx) * 10.0, 0.0, 0.0)
+		var b_atk: float = float(e.get("bonus_attack", 0.0))
+		var b_arm: float = float(e.get("bonus_armor", 0.0))
+		var b_def: float = float(e.get("bonus_defense", 0.0))
+		var b_spd: float = float(e.get("bonus_speed", 0.0))
+		var b_hp: float  = float(e.get("bonus_health", 0.0))
+		if eid == "attack" and b_atk > 0.0:
+			var sq_a: int = await make_squad(1, at)
+			var a: Unit = GameManager.squad_members(sq_a)[0]
+			var r1: Array = await measure_melee(a, at)
+			await arm_squad(sq_a)
+			GameManager.apply_veteran_choice(sq_a, idx)
+			var r2: Array = await measure_melee(a, at)
+			var d_before: float = float(r1[1])
+			var d_after: float = float(r2[1])
+			print("  АТАКА «%s»: сила удара %.1f → %.1f (ждали +%.1f), vet_attack=%.1f" % [
+				nm, d_before, d_after, b_atk, a.vet_attack])
+			verdict("5 «%s» реально увеличила урон на %.1f" % [nm, b_atk],
+				absf((d_after - d_before) - b_atk) < 0.01,
+				"было %.1f стало %.1f" % [d_before, d_after])
+		elif (eid == "armor" or eid == "defense") and (b_arm + b_def) > 0.0:
+			# БРОНЯ И ЗАЩИТА СРЕЗАЮТ УРОН ОДИНАКОВО, поэтому ждём их СУММУ:
+			# награда «+3 к Броне» в конфиге даёт и то, и другое
+			var sq_b: int = await make_squad(1, at)
+			var bu: Unit = GameManager.squad_members(sq_b)[0]
+			var t_before: float = measure_taken(bu, 60.0)
+			await arm_squad(sq_b)
+			GameManager.apply_veteran_choice(sq_b, idx)
+			var t_after: float = measure_taken(bu, 60.0)
+			var want_cut: float = b_arm + b_def
+			print("  ЗАЩИТА «%s»: из 60 прошло %.1f → %.1f (ждали -%.1f), vet_armor=%.1f vet_defense=%.1f" % [
+				nm, t_before, t_after, want_cut, bu.vet_armor, bu.vet_defense])
+			verdict("5 «%s» реально срезала урон на %.1f" % [nm, want_cut],
+				absf((t_before - t_after) - want_cut) < 0.01,
+				"было %.1f стало %.1f" % [t_before, t_after])
+		elif eid == "health" and b_hp > 0.0:
+			var sq_h: int = await make_squad(1, at)
+			var h: Unit = GameManager.squad_members(sq_h)[0]
+			var hp_before: float = h.max_health
+			await arm_squad(sq_h)
+			GameManager.apply_veteran_choice(sq_h, idx)
+			print("  HP «%s»: max_health %.0f → %.0f (ждали +%.0f)" % [
+				nm, hp_before, h.max_health, b_hp])
+			verdict("5 «%s» реально подняла max_health" % nm,
+				absf((h.max_health - hp_before) - b_hp) < 0.01,
+				"было %.0f стало %.0f" % [hp_before, h.max_health])
+		elif eid == "speed" and absf(b_spd) > 0.0:
+			var sq_s: int = await make_squad(1, at)
+			var su: Unit = GameManager.squad_members(sq_s)[0]
+			var v_before: float = su._effective_speed()
+			await arm_squad(sq_s)
+			GameManager.apply_veteran_choice(sq_s, idx)
+			var v_after: float = su._effective_speed()
+			print("  СКОРОСТЬ «%s»: %.2f → %.2f (ждали %+.2f)" % [
+				nm, v_before, v_after, b_spd])
+			verdict("5 «%s» реально изменила _effective_speed()" % nm,
+				absf((v_after - v_before) - b_spd) < 0.01,
+				"было %.2f стало %.2f" % [v_before, v_after])
+		else:
+			# Мораль, напор, откат и прочее здесь не мерятся: их действие
+			# проверяют свои блоки. Строка в печати обязательна — без неё
+			# непонятно, что награда вообще была рассмотрена
+			print("  «%s» (%s): прямого боевого замера нет, пропущена" % [nm, eid])
 
-	# ── 5.1 АТАКА: фактический урон по цели до и после ───────────────────────
-	var s_atk: int = await make_squad(1, Vector3(300.0, 0.0, 0.0))
-	var a: Unit = GameManager.squad_members(s_atk)[0]
-	var r1: Array = await measure_melee(a, Vector3(300.0, 0.0, 0.0))
-	await arm_squad(s_atk)
-	GameManager.apply_veteran_choice(s_atk, 0)          # +Атака
-	var r2: Array = await measure_melee(a, Vector3(300.0, 0.0, 0.0))
-	var hp1: float = float(r1[0])
-	var hp2: float = float(r2[0])
-	var dmg_before: float = float(r1[1])
-	var dmg_after:  float = float(r2[1])
-	var want_atk: float = float((_UCfg.veteran_choices("spearman", 1)[0] as Dictionary)["value"])
-	print("  АТАКА: снято HP %.1f → %.1f; сила удара %.1f → %.1f (прирост %.1f, ждали %.1f), vet_attack=%.1f" % [
-		hp1, hp2, dmg_before, dmg_after, dmg_after - dmg_before, want_atk, a.vet_attack])
-	verdict("5 «%s» реально увеличила урон на %.1f" % [String(names[0]), want_atk],
-		absf((dmg_after - dmg_before) - want_atk) < 0.01,
-		"было %.1f стало %.1f" % [dmg_before, dmg_after])
-
-	# ── 5.2 БРОНЯ: фактическое снижение входящего урона ─────────────────────
-	var s_arm: int = await make_squad(1, Vector3(310.0, 0.0, 0.0))
-	var b: Unit = GameManager.squad_members(s_arm)[0]
-	var take_before: float = measure_taken(b, 60.0)
-	await arm_squad(s_arm)
-	GameManager.apply_veteran_choice(s_arm, 1)          # +Броня
-	var take_after: float = measure_taken(b, 60.0)
-	var want_arm: float = float((_UCfg.veteran_choices("spearman", 1)[1] as Dictionary)["value"])
-	print("  БРОНЯ: из 60 урона прошло %.1f → %.1f (снижение %.1f, ждали %.1f), vet_armor=%.1f" % [
-		take_before, take_after, take_before - take_after, want_arm, b.vet_armor])
-	verdict("5 «%s» реально срезала урон на %.1f" % [String(names[1]), want_arm],
-		absf((take_before - take_after) - want_arm) < 0.01,
-		"было %.1f стало %.1f" % [take_before, take_after])
-
-	# ── 5.3 ЗАЩИТА ──────────────────────────────────────────────────────────
-	var s_def: int = await make_squad(1, Vector3(320.0, 0.0, 0.0))
-	var d: Unit = GameManager.squad_members(s_def)[0]
-	var dtake_before: float = measure_taken(d, 60.0)
-	await arm_squad(s_def)
-	GameManager.apply_veteran_choice(s_def, 2)          # +Защита
-	var dtake_after: float = measure_taken(d, 60.0)
-	var want_def: float = float((_UCfg.veteran_choices("spearman", 1)[2] as Dictionary)["value"])
-	print("  ЗАЩИТА: из 60 урона прошло %.1f → %.1f (снижение %.1f, ждали %.1f), vet_defense=%.1f" % [
-		dtake_before, dtake_after, dtake_before - dtake_after, want_def, d.vet_defense])
-	verdict("5 «%s» реально срезала урон на %.1f" % [String(names[2]), want_def],
-		absf((dtake_before - dtake_after) - want_def) < 0.01,
-		"было %.1f стало %.1f" % [dtake_before, dtake_after])
-
-	# ── 5.4 СКОРОСТЬ ────────────────────────────────────────────────────────
-	var s_spd: int = await make_squad(1, Vector3(330.0, 0.0, 0.0))
-	var s: Unit = GameManager.squad_members(s_spd)[0]
-	var spd_before: float = s._effective_speed()
-	await arm_squad(s_spd)
-	GameManager.apply_veteran_choice(s_spd, 3)          # +Скорость
-	var spd_after: float = s._effective_speed()
-	var want_spd: float = float((_UCfg.veteran_choices("spearman", 1)[3] as Dictionary)["value"])
-	print("  СКОРОСТЬ: _effective_speed() %.2f → %.2f (прирост %.2f, ждали %.2f)" % [
-		spd_before, spd_after, spd_after - spd_before, want_spd])
-	verdict("5 «%s» реально подняла _effective_speed()" % String(names[3]),
-		absf((spd_after - spd_before) - want_spd) < 0.01,
-		"было %.2f стало %.2f" % [spd_before, spd_after])
-
-	# ── 5.5 МАКС. HP ────────────────────────────────────────────────────────
-	var s_hp: int = await make_squad(1, Vector3(340.0, 0.0, 0.0))
-	var h: Unit = GameManager.squad_members(s_hp)[0]
-	var hp_before: float = h.max_health
-	var cur_before: float = h.current_health
-	await arm_squad(s_hp)
-	GameManager.apply_veteran_choice(s_hp, 4)           # +Макс. HP
-	var want_hp: float = float((_UCfg.veteran_choices("spearman", 1)[4] as Dictionary)["value"])
-	print("  HP: max_health %.0f → %.0f, current %.0f → %.0f (ждали +%.0f)" % [
-		hp_before, h.max_health, cur_before, h.current_health, want_hp])
-	verdict("5 «%s» реально подняла max_health" % String(names[4]),
-		absf((h.max_health - hp_before) - want_hp) < 0.01,
-		"было %.0f стало %.0f" % [hp_before, h.max_health])
-
-	for sid in [s_atk, s_arm, s_def, s_spd, s_hp]:
-		for m in GameManager.squad_members(int(sid)):
-			(m as Unit)._die()
-	await frames(2)
-
-# ═════════════════════════════════════════════════════════════════════════════
-# 6. UI: ДВЕ НАКОПЛЕННЫЕ НАГРАДЫ ПОДРЯД
-# ═════════════════════════════════════════════════════════════════════════════
 func button_labels() -> Array:
 	var labels: Array = []
 	for b in hud.button_container.get_children():
@@ -780,23 +778,41 @@ func _test_ui() -> void:
 	print("  pending=%d, подпись: «%s»" % [GameManager.squad_pending(sid), hud.info_label.text])
 	print("  кнопки: %s" % str(l1))
 	print("  строка статов: «%s»" % hud.progress_label.text)
-	verdict("6 при pending>0 ровно 5 кнопок", l1.size() == 5, "кнопок=%d" % l1.size())
+	var want_b1: int = _UCfg.veteran_choices("spearman", maxi(GameManager.squad_level(sid) - GameManager.squad_pending(sid) + 1, 1)).size()
+	verdict("6 при pending>0 кнопок столько же, сколько наград в конфиге",
+		l1.size() == want_b1, "кнопок=%d, в конфиге=%d" % [l1.size(), want_b1])
 	verdict("6 стоек [Attack]/[Defend] на панели нет",
 		not ("Attack" in l1) and not ("Defend" in l1), "кнопки=%s" % str(l1))
-	verdict("6 подпись предупреждает про вторую награду",
-		"Ветеран 1" in hud.info_label.text and "ещё 1" in hud.info_label.text,
-		"«%s»" % hud.info_label.text)
+	# ── СЛУЖЕБНОЙ СТРОКИ «★ Ветеран N» БОЛЬШЕ НЕТ, А ЗВАНИЕ ОСТАЛОСЬ ───────
+	# Требование развёрнуто владельцем (авг. 2026) и тут же уточнено: убрать
+	# надо было СЛУЖЕБНУЮ подсказку, а название со званием («Отряд опытных
+	# копейщиков») — «не убирать ни в коем случае». Вместо подсказки в панели
+	# стоят знамёна рангов (HUD._show_vet_rank_row)
+	verdict("6 вместо служебной подписи показан ряд флажков ранга",
+		hud._vet_rank_row != null and hud._vet_rank_row.visible
+		and hud._vet_rank_row.get_child_count() > 0
+		and not String(hud.info_label.text).contains("выберите награду"),
+		"флажков=%d, подпись «%s»" % [
+			hud._vet_rank_row.get_child_count() if hud._vet_rank_row != null else -1,
+			hud.info_label.text])
 
 	(hud.button_container.get_child(0) as Button).pressed.emit()
 	await frames(3)
 	var l2: Array = button_labels()
 	print("  после ПЕРВОГО выбора: pending=%d, подпись «%s», кнопки %s" % [
 		GameManager.squad_pending(sid), hud.info_label.text, str(l2)])
+	# Второй уровень виден не подписью, а ВТОРЫМ флажком в ряду: у ранга 2 своё
+	# знамя (две лычки), и узел его так и называется — VetFlag_2
+	var flag2: Node = null
+	if hud._vet_rank_row != null:
+		flag2 = hud._vet_rank_row.get_node_or_null("VetFlag_2")
 	verdict("6 после первого выбора панель предлагает ВТОРУЮ награду",
-		GameManager.squad_pending(sid) == 1 and l2.size() == 5
-		and "Ветеран 2" in hud.info_label.text,
-		"pending=%d кнопок=%d «%s»" % [
-			GameManager.squad_pending(sid), l2.size(), hud.info_label.text])
+		GameManager.squad_pending(sid) == 1
+		and l2.size() == _UCfg.veteran_choices("spearman",
+			maxi(GameManager.squad_level(sid) - GameManager.squad_pending(sid) + 1, 1)).size()
+		and flag2 != null,
+		"pending=%d кнопок=%d флажок 2-го ранга=%s" % [
+			GameManager.squad_pending(sid), l2.size(), str(flag2 != null)])
 
 	(hud.button_container.get_child(1) as Button).pressed.emit()
 	await frames(3)
@@ -809,8 +825,11 @@ func _test_ui() -> void:
 		# отряд лечиться). Проверяем СОСТАВ, а не точное число — иначе любая
 		# новая команда отряда будет валить эту проверку на ровном месте
 		("Attack" in l3) and ("Defend" in l3), "кнопки=%s" % str(l3))
-	verdict("6 в подписи 2 звезды", hud.info_label.text.count("★") == 2,
-		"★=%d" % hud.info_label.text.count("★"))
+	verdict("6 в подписи звание второго грейда словами",
+		_UCfg.veteran_rank_name("spearman", 2) in hud.info_label.text
+			and not (_want_badge(2) in hud.info_label.text),
+		"подпись «%s», ждали «%s» без значка «%s»" % [hud.info_label.text,
+			_UCfg.veteran_rank_name("spearman", 2), _want_badge(2)])
 	for m in GameManager.squad_members(sid):
 		(m as Unit)._die()
 	await frames(2)
@@ -856,31 +875,171 @@ func _test_reinforcement() -> void:
 	await frames(2)
 
 # ═════════════════════════════════════════════════════════════════════════════
-func _test_leader_death() -> void:
-	print("\n═════ 4в. ГИБЕЛЬ НОСИТЕЛЯ ЗВЕЗДЫ ═════")
-	var star := _find_star(squad)
-	var old_host: Node = star.get_parent() if star != null else null
-	print("  звезда на «%s», лучей=%d" % [
-		(str(old_host.name) if old_host != null else "—"), _star_rays(star)])
-	(old_host as Unit)._die()
-	await frames(3)
-	var star2 := _find_star(squad)
-	var new_host: Node = star2.get_parent() if star2 != null else null
-	print("  после гибели носителя звезда на «%s» (лучей=%d), отряд жив: %d бойцов" % [
-		(str(new_host.name) if new_host != null else "—"), _star_rays(star2),
-		GameManager.squad_members(squad).size()])
-	verdict("4в звезда перевешена на живого бойца ЭТОГО отряда",
-		star2 != null and new_host != null and new_host != old_host
-		and (new_host as Unit).squad_id == squad)
-	verdict("4в число звёзд после переезда не потерялось",
-		_star_rays(star2) == _want_stars(_UCfg.max_veteran_level("spearman")),
-		"звёзд=%d, ждали %d" % [_star_rays(star2),
-			_want_stars(_UCfg.max_veteran_level("spearman"))])
+# ═════════════════════════════════════════════════════════════════════════════
+# 4г. ЗНАМЯ ВОЗВРАЩАЕТСЯ НА СВОЁ МЕСТО ПРИ ПЕРЕСТРОЕНИИ
+# ═════════════════════════════════════════════════════════════════════════════
+## Заказ владельца: знамя привязано к бойцу ПЕРВОГО РЯДА С КРАЙНЕГО ЛЕВОГО
+## края, а если в бою строй перемешался — знаменосец возвращается на своё место
+## при перестроении.
+##
+## В бою знаменосец меняется по ДРУГОМУ правилу (ближайший к павшему, см. 4в),
+## и это намеренно: выбор по строю уводил бы знамя в тыл через полстроя посреди
+## рубки. Значит, «вернуть на место» обязано случаться ровно в одной точке — в
+## смыкании рядов, то есть по окончании боя.
+func _test_bearer_returns() -> void:
+	print("\n═════ 4г. ВОЗВРАТ ЗНАМЕНОСЦА НА ЛЕВЫЙ ФЛАНГ ═════")
+	var sid: int = await make_squad(12, Vector3(-300.0, 0.0, -300.0))
+	GameManager.squads[sid]["level"] = 2
+	GameManager.refresh_squad_banner(sid)
+	# Курс отряда: без него понятия «первый ряд» и «лево» не существует
+	var course := Vector3(0.0, 0.0, -1.0)
+	var men: Array = GameManager.squad_members(sid)
+	var slots: Array = []
+	for i in range(men.size()):
+		slots.append(Vector3(-300.0 + float(i % 6) * 0.8 - 2.0, 0.0,
+			-300.0 - float(i / 6) * 0.8))
+	GameManager.squad_set_formation(sid, slots, course, false)
+	await frames(4)
 
+	# ── ПЕРЕМЕШИВАЕМ СТРОЙ, как это делает свалка ──────────────────────────
+	for i in range(men.size()):
+		var u := men[i] as Unit
+		var p := Vector3(-300.0 + float((i * 7) % 11) - 5.0, 0.0,
+			-300.0 + float((i * 5) % 9) - 4.0)
+		u.global_position = Vector3(p.x, GameManager.get_terrain_height(p.x, p.z), p.z)
+		u.sync_row()
+	await frames(3)
+
+	# ── ПЕРЕСТРОЕНИЕ ───────────────────────────────────────────────────────
+	var closed: bool = GameManager.squad_close_ranks(sid, true)
+	await frames(3)
+	var bearer = GameManager.squad_bearer(sid)
+	verdict("4г перестроение состоялось и знаменосец есть",
+		closed and bearer != null,
+		"смыкание=%s знаменосец=%s" % [str(closed), str(bearer != null)])
+	if bearer == null:
+		for m in GameManager.squad_members(sid):
+			(m as Unit)._die()
+		await frames(2)
+		return
+
+	# ── ОН ЛИ КРАЙНИЙ ЛЕВЫЙ В ПЕРВОМ РЯДУ ──────────────────────────────────
+	# Считаем ПО МЕСТАМ РАЗМЕТКИ (post_pos), а не по текущим точкам: приказы
+	# только что розданы, никто ещё не сделал ни шагу — ровно та причина, по
+	# которой и сам выбор знаменосца идёт по посту (GameManager._bearer_anchor)
+	var fwd := course.normalized()
+	var left := Vector3(fwd.z, 0.0, -fwd.x)
+	var front := -INF
+	for m in GameManager.squad_members(sid):
+		var mu := m as Unit
+		if mu == null or mu.is_dead():
+			continue
+		var ap: Vector3 = mu.post_pos if mu._post_valid else mu.global_position
+		front = maxf(front, ap.dot(fwd))
+	var best_lat := -INF
+	for m2 in GameManager.squad_members(sid):
+		var mu2 := m2 as Unit
+		if mu2 == null or mu2.is_dead():
+			continue
+		var ap2: Vector3 = mu2.post_pos if mu2._post_valid else mu2.global_position
+		if ap2.dot(fwd) < front - GameManager.BEARER_ROW_BAND:
+			continue
+		best_lat = maxf(best_lat, ap2.dot(left))
+	var bu := bearer as Unit
+	var bp: Vector3 = bu.post_pos if bu._post_valid else bu.global_position
+	var in_front: bool = bp.dot(fwd) >= front - GameManager.BEARER_ROW_BAND
+	var is_left: bool = absf(bp.dot(left) - best_lat) < 0.01
+	print("  знаменосец: глубина %.2f (фронт %.2f), левизна %.2f (крайняя %.2f)"
+		% [bp.dot(fwd), front, bp.dot(left), best_lat])
+	verdict("4г знаменосец стоит в ПЕРВОМ ряду", in_front,
+		"глубина %.2f при фронте %.2f" % [bp.dot(fwd), front])
+	verdict("4г и на КРАЙНЕМ ЛЕВОМ месте этого ряда", is_left,
+		"левизна %.2f, крайняя %.2f" % [bp.dot(left), best_lat])
+	for m in GameManager.squad_members(sid):
+		(m as Unit)._die()
+	await frames(2)
+
+func _test_leader_death() -> void:
+	print("\n═════ 4в. ГИБЕЛЬ ЗНАМЕНОСЦА И ПАДЕНИЕ ЗНАМЕНИ ═════")
+	# ── ЗДЕСЬ ПРОВЕРЯЛОСЬ «ЗВЕЗДА ПЕРЕВЕШЕНА НА ЖИВОГО БОЙЦА», И ЭТО СТАЛО
+	# ПРАВДОЙ ЛИШЬ ТЕПЕРЬ. Звезда к моменту написания блока уже была вынесена
+	# в мир и висела над центром масс — её «носитель» был фикцией, и проверка
+	# мерила get_parent() у узла, чей родитель всегда один и тот же (мир).
+	# У знамени носитель настоящий, и его смена — заказанная механика
+	var lvl0: int = GameManager.squad_level(squad)
+	var banner := _find_banner(squad)
+	var old_bearer = GameManager.squad_bearer(squad)
+	print("  знамя грейда %d, знаменосец «%s»" % [_banner_grade(squad),
+		(str((old_bearer as Node).name) if old_bearer != null else "—")])
+	verdict("4в у отряда есть знаменосец", old_bearer != null)
+	(old_bearer as Unit)._die()
+	await frames(3)
+	var banner2 := _find_banner(squad)
+	var new_bearer = GameManager.squad_bearer(squad)
+	print("  после гибели: знаменосец «%s», грейд=%d, в отряде %d бойцов" % [
+		(str((new_bearer as Node).name) if new_bearer != null else "—"),
+		_banner_grade(squad), GameManager.squad_members(squad).size()])
+	verdict("4в знамя перешло к другому ЖИВОМУ бойцу ЭТОГО отряда",
+		new_bearer != null and new_bearer != old_bearer
+		and (new_bearer as Unit).squad_id == squad
+		and not (new_bearer as Unit).is_dead())
+	verdict("4в само знамя при передаче не пересоздавалось",
+		banner2 != null and banner2 == banner)
+	verdict("4в грейд после передачи не потерялся",
+		_banner_grade(squad) == lvl0,
+		"грейд=%d, ждали %d" % [_banner_grade(squad), lvl0])
+
+	# ── ЗНАМЯ ПОДХВАТЫВАЕТ БЛИЖАЙШИЙ, А НЕ СЛУЧАЙНЫЙ ────────────────────────
+	# Заказ владельца дословно: «знамя переезжает на копьё БЛИЖАЙШЕГО
+	# выжившего». Проверяем свойством: ни один живой боец отряда не стоял к
+	# павшему ближе, чем новый знаменосец
+	var fallen_at: Vector3 = (new_bearer as Unit).global_position
+	var closest_ok := true
+	var nb_d: float = 1e18
 	for m in GameManager.squad_members(squad):
+		var mu := m as Unit
+		if mu == null or mu.is_dead():
+			continue
+		var d: float = Vector2(mu.global_position.x - fallen_at.x,
+			mu.global_position.z - fallen_at.z).length_squared()
+		if mu == new_bearer:
+			nb_d = d
+	for m2 in GameManager.squad_members(squad):
+		var mu2 := m2 as Unit
+		if mu2 == null or mu2.is_dead() or mu2 == new_bearer:
+			continue
+		var d2: float = Vector2(mu2.global_position.x - fallen_at.x,
+			mu2.global_position.z - fallen_at.z).length_squared()
+		if d2 < nb_d - 0.0001:
+			closest_ok = false
+	verdict("4в знамя подхватил ближайший к павшему", closest_ok)
+
+	# ── ГИБНЕТ ПОСЛЕДНИЙ: ЗНАМЯ ПАДАЕТ В СЛОЙ ТЕЛ ──────────────────────────
+	# Заказ владельца: упавшее копьё со знаменем запекается в ТОТ ЖЕ MultiMesh,
+	# что и тела. Значит на поле обязано прибавиться на ОДНО больше, чем павших
+	# бойцов, и НИ ОДНОГО нового узла в мире
+	var live: Array = GameManager.squad_members(squad)
+	var n_live: int = live.size()
+	var corpses0: int = GameManager.corpses.count()
+	var nodes0: int = get_tree().get_node_count()
+	for m in live:
 		(m as Unit)._die()
 	await frames(3)
+	# Укладка отложена на кадр: knock приходит из _exit_tree, когда дерево
+	# занято перестройкой (см. GameManager._drop_squad_banner)
+	for _i in range(4):
+		await get_tree().physics_frame
+	await frames(2)
+	var got: int = GameManager.corpses.count() - corpses0
+	print("  павших %d, тел на поле прибавилось %d (тела + упавшее знамя)" % [
+		n_live, got])
 	verdict("4в отряд расформирован", not GameManager.squads.has(squad))
+	verdict("4в упавшее знамя легло в слой тел, а не пропало",
+		got == n_live + 1, "прибавилось %d, ждали %d" % [got, n_live + 1])
+	# Ни одного узла на упавшее знамя: оно слот в общем буфере
+	var nodes1: int = get_tree().get_node_count()
+	verdict("4в на упавшее знамя не заведено ни одного узла",
+		nodes1 <= nodes0, "узлов было %d, стало %d" % [nodes0, nodes1])
 	var orphan: int = int(Performance.get_monitor(Performance.OBJECT_ORPHAN_NODE_COUNT))
 	print("  осиротевших узлов: %d" % orphan)
 	verdict("4в нет утечки узлов после гибели отряда", orphan == 0, "orphan=%d" % orphan)
@@ -935,8 +1094,8 @@ func _test_load() -> void:
 	for sid in sids:
 		var s: int = int(sid)
 		GameManager.squads[s]["level"] = 3
-		GameManager.refresh_star(s)
-		if _find_star(s) != null:
+		GameManager.refresh_squad_banner(s)
+		if _find_banner(s) != null:
 			stars += 1
 	await frames(3)
 	for sid in sids:
@@ -947,10 +1106,10 @@ func _test_load() -> void:
 
 	print("  медиана TIME_PHYSICS_PROCESS по %d кадрам: без звёзд %.3f мс, со звёздами %.3f мс (дельта %+.3f мс)" % [
 		SAMPLES, base_ms, star_ms, star_ms - base_ms])
-	print("  зажжено звёзд: %d" % stars)
-	verdict("8 все %d отрядов получили звезду" % LOAD_SQUADS, stars == LOAD_SQUADS,
-		"звёзд=%d" % stars)
-	verdict("8 медиана физики со звёздами < 16.6 мс", star_ms < 16.6,
+	print("  зажжено знамён: %d" % stars)
+	verdict("8 все %d отрядов получили знамя" % LOAD_SQUADS, stars == LOAD_SQUADS,
+		"знамён=%d" % stars)
+	verdict("8 медиана физики со знамёнами < 16.6 мс", star_ms < 16.6,
 		"%.3f мс" % star_ms)
 
 	for sid in sids:
@@ -962,3 +1121,15 @@ func _test_load() -> void:
 	print("  после роспуска: осиротевших узлов=%d, узлов в дереве=%d, отрядов в реестре=%d" % [
 		orphan, nodes, GameManager.squads.size()])
 	verdict("8 OBJECT_ORPHAN_NODE_COUNT == 0", orphan == 0, "orphan=%d" % orphan)
+
+
+# СУММА ВСЕХ МОДИФИКАТОРОВ НАГРАДЫ, А НЕ ОДНО ПОЛЕ "value".
+# Награда в конфиге — ПОЛНЫЙ шаблон модификаторов и вправе дать
+# сразу несколько прибавок (так же работает GameManager.apply_veteran_choice).
+# "value" — это короткая ПОДПИСЬ для кнопки, и сверять с ней сумму
+# начисленного — значит сравнивать разные величины
+func _reward_sum(entry: Dictionary) -> float:
+	var t := 0.0
+	for k in _UCfg.nonzero_modifiers(entry):
+		t += float(_UCfg.nonzero_modifiers(entry)[k])
+	return t

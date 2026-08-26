@@ -472,9 +472,14 @@ func _test_regressions() -> void:
 	var n_vet: int = hud.button_container.get_child_count()
 	print("  отряд ждёт награды: кнопок=%d, инфо «%s», фильтр=%s" % [
 		n_vet, hud.info_label.text, "есть" if hud.type_slots() >= 2 else "нет"])
+	# ── ПОДПИСЬ «★ Ветеран N» ЗАМЕНЕНА ФЛАЖКАМИ РАНГА ──────────────────────
+	# Требование развёрнуто владельцем (авг. 2026): текст удалён целиком, на его
+	# месте — знамёна «было → стало» (HUD._show_vet_rank_row). Проверяем то же
+	# самое СВОЙСТВОМ: меню наград открыто и ряд флажков показан
 	verdict("12g ветеранское меню на месте",
-		n_vet > 0 and hud.info_label.text.begins_with("★"),
-		"кнопок %d, «%s»" % [n_vet, hud.info_label.text])
+		n_vet > 0 and hud._vet_rank_row != null and hud._vet_rank_row.visible,
+		"кнопок %d, флажки=%s" % [n_vet,
+			str(hud._vet_rank_row != null and hud._vet_rank_row.visible)])
 	verdict("12h один тип — фильтр не появляется рядом с наградами",
 		hud.type_slots() < 2)
 

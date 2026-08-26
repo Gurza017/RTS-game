@@ -134,6 +134,36 @@ func _run() -> void:
 	cam.jump_to(pile, 11.0)
 	await _shot("pile")
 
+	# ── 2б. ЛЕСЕНКА РАЗЛОЖЕНИЯ ─────────────────────────────────────────────
+	# Заказ владельца: тело лежит пятнадцать минут целым, потом полминуты
+	# разлагается — темнеет, землеет и рассыпается дизером. ПОРОГИ ЗДЕСЬ НЕ
+	# ПРОВЕРЯЮТСЯ, их судят глазом (та же оговорка, что у лесенки ранений в
+	# qa_wound/Shot): headless не собирает ни одного шейдера, и единственный
+	# способ увидеть, что фаза вообще рисуется, — оконный снимок.
+	#
+	# Долю подкручиваем ПРЯМО В БУФЕРЕ бакета, а не ждём тридцать секунд:
+	# доля разложения — это и есть COLOR.b слота (см. mm_corpse.gdshader)
+	var decay: Vector3 = _clear_spot(-140.0)
+	var rot_men: Array = []
+	for i in range(6):
+		rot_men.append(_spawn("res://scenes/units/Spearman.tscn",
+			Constants.FACTION_ENEMY, decay + Vector3(float(i) * 1.7 - 4.2, 0.0, 0.0)))
+	await pframes(6)
+	var first: int = GameManager.corpses.count()
+	for u in rot_men:
+		if is_instance_valid(u):
+			u.take_damage(u.max_health * 10.0 + 1000.0, null)
+	await pframes(4)
+	# Свежее слева, почти растаявшее справа
+	var steps := [1.0, 0.8, 0.6, 0.4, 0.2, 0.05]
+	for i in range(mini(steps.size(), GameManager.corpses.count() - first)):
+		GameManager.corpses.set_dissolve(first + i, float(steps[i]))
+	GameManager.corpses.flush()
+	await pframes(2)
+	cam.jump_to(decay, 9.0)
+	await _shot("decay")
+	print("  лесенка разложения: %s (свежее → растаявшее)" % str(steps))
+
 	# ── 3. СТРЕЛЫ: В ТЕЛАХ И В ГРУНТЕ ──────────────────────────────────────
 	var shot_mob: Array = []
 	for i in range(24):

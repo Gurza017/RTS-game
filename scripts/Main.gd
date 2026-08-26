@@ -1130,6 +1130,13 @@ func focus_camera_on(world_pos: Vector3) -> void:
 	if _camera:
 		_camera.pan_to(world_pos)
 
+## ПЛАВНО перевести камеру. Отличается от focus_camera_on ровно тем, что не
+## швыряет объектив одним кадром: камера доезжает сама, в том числе НА ПАУЗЕ
+## (она в PROCESS_MODE_ALWAYS). Зовёт HUD по клику на значок заслуженного ранга
+func glide_camera_to(world_pos: Vector3) -> void:
+	if _camera:
+		_camera.glide_to(world_pos)
+
 func _apply_custom_cursor() -> void:
 	var tex := _UIAssets.cursor(1)
 	if tex == null:
@@ -1193,16 +1200,47 @@ func _toggle_fullscreen() -> void:
 # лимитов из конфига.
 # ─────────────────────────────────────────────────────────────────────────────
 
+## ── ЧТО СЧИТАЕТСЯ КОНЦОМ ПАРТИИ ────────────────────────────────────────────
+## Прежнее условие требовало, чтобы у противника не осталось НИ ОДНОГО здания.
+## Жалоба владельца: последняя крепость снесена, живых у врага нет, а игра не
+## кончается. Причин было две, и обе честные:
+##   • ИИ закладывал новую крепость и без рабочих (лечится там же, см.
+##     EnemyAI._no_castle) — недостроенный фундамент считался зданием;
+##   • даже без него на карте мог остаться барак или домик, до которого никто
+##     не дошёл, и партия висела, пока игрок не обойдёт всю карту с зачисткой.
+##
+## Требование владельца прямое: нет живых юнитов И снесена ГЛАВНАЯ КРЕПОСТЬ —
+## значит победа. Прежнее условие оставлено рядом как второй путь: фракция без
+## единого здания и без единого юнита разбита в любом случае, даже если замка у
+## неё почему-то не было вовсе.
+##
+## ЖИВЫЕ СЧИТАЮТСЯ ПРОВЕРКОЙ is_dead(), а не размером группы: павший уходит из
+## неё лишь в конце кадра (queue_free отложен), и «группа пуста» на кадр
+## запаздывает
 func _check_victory() -> void:
-	if get_tree().get_nodes_in_group("enemy_buildings").is_empty() and \
-	   get_tree().get_nodes_in_group("enemy_units").is_empty():
+	if _faction_beaten("enemy_units", "enemy_buildings"):
 		_phase = Phase.VICTORY
 		hud.show_victory()
-	elif _castle_placed and \
-		 get_tree().get_nodes_in_group("player_buildings").is_empty() and \
-		 get_tree().get_nodes_in_group("player_units").is_empty():
+	elif _castle_placed and _faction_beaten("player_units", "player_buildings"):
 		_phase = Phase.DEFEAT
 		hud.show_defeat()
+
+## Разбита ли фракция: не осталось живых бойцов И (нет замка ИЛИ нет зданий)
+func _faction_beaten(units_group: String, buildings_group: String) -> bool:
+	for n in get_tree().get_nodes_in_group(units_group):
+		if is_instance_valid(n) and n is Unit and not (n as Unit).is_dead():
+			return false
+	var has_castle := false
+	var has_any := false
+	for b in get_tree().get_nodes_in_group(buildings_group):
+		if not is_instance_valid(b) or not (b is Building):
+			continue
+		if (b as Building).is_dead():
+			continue
+		has_any = true
+		if b is Castle:
+			has_castle = true
+	return not has_castle or not has_any
 
 func restart_game() -> void:
 	get_tree().paused = false
@@ -1884,7 +1922,7 @@ func _grant_goblin_veterancy(sid: int, level: int) -> void:
 				break
 		if not GameManager.apply_veteran_choice(sid, pick):
 			break
-	GameManager.refresh_star(sid)
+	GameManager.refresh_squad_banner(sid)
 
 func _spawn_enemy_base() -> void:
 	var castle := Castle.new()

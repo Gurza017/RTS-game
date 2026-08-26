@@ -114,7 +114,9 @@ func absorb_unit(u: Unit) -> void:
 	if u == null or not is_instance_valid(u) or u.garrisoned:
 		return
 	u.garrisoned = true
-	u.end_retreat()          # дошёл — режим отхода больше не нужен
+	# ПРИНУДИТЕЛЬНО: отход кончился ПО ФАКТУ — боец у ворот, дальше идти некуда.
+	# Обычный вызов отбился бы о замок времени (см. Unit.end_retreat)
+	u.end_retreat(true)      # дошёл — режим отхода больше не нужен
 	u.visible = false
 	# ОБЯЗАТЕЛЬНО вместе с visible: картинка бойца — слот в общем MultiMesh, а он
 	# не под узлом бойца и скрытием узла не гасится (см. Unit.leave_render)
@@ -283,7 +285,10 @@ func _evacuate_on_death() -> void:
 		for m in GameManager.squad_members(int(s)):
 			var u := m as Unit
 			if u != null and is_instance_valid(u):
-				u.end_retreat()
+				# Ворот больше нет — отход отменяется принудительно: цели у него
+				# не осталось, а замок времени держал бы бойца в бесполезном
+				# режиме, где он не дерётся и не отвечает
+				u.end_retreat(true)
 	_incoming.clear()
 
 ## Сколько бойцов не хватает отряду до полного состава

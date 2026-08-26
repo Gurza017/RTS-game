@@ -26,6 +26,13 @@ const ROLE_FIELD   := "field"     # отправлен драться к озе�
 const ROLE_ASSAULT := "assault"   # идёт на базу игрока
 const ROLE_LINE    := "line"      # держит рубеж обороны (DEFENSIVE_MODE)
 const ROLE_PATROL  := "patrol"    # ходит по своей территории (DEFENSIVE_MODE)
+## ── ОТВОЕВАТЬ ЦЕНТР ────────────────────────────────────────────────────────
+## Роль своя, а не ROLE_ASSAULT, и это не косметика: штурм идёт на БАЗУ игрока
+## и в оборонительном режиме запрещён (его отсутствие проверяет qa_ai). Здесь
+## же цель — ЦЕНТР КАРТЫ, то есть спорная земля, которую ИИ по замыслу и
+## обязан держать. Разные цели — разные роли, иначе в отчёте не отличить одно
+## от другого
+const ROLE_RECAP   := "recap"     # общее наступление на центр карты
 ## ── ТАКТИЧЕСКИЕ РОЛИ, ПЕРЕБИВАЮЩИЕ ОПЕРАТИВНЫЕ ──────────────────────────────
 ## Роли выше отвечают на вопрос «где этому отряду быть по плану кампании».
 ## Три роли ниже отвечают на «что делать прямо сейчас» и назначаются ПОВЕРХ
@@ -109,6 +116,7 @@ func reset() -> void:
 	_patrol_phase = 0
 	_patrol_timer = 0.0
 	last_stand   = false
+	recap_center = false
 	last_action  = ""
 
 func _process(delta: float) -> void:
@@ -335,7 +343,18 @@ func _no_castle() -> void:
 	# ── 1. НОВАЯ КРЕПОСТЬ, ЕСЛИ ЕСТЬ НА ЧТО ────────────────────────────────
 	# Одна стройка за раз — общее правило ИИ. Площадка берётся чуть в стороне от
 	# руин: на самих руинах стоит коллайдер обломков
-	if not _site_in_progress():
+	# ── СТРОИТЬ НЕКОМУ — НЕ ЗАКЛАДЫВАЕМ ВОВСЕ ──────────────────────────────
+	# Жалоба владельца: последняя крепость снесена, живых у противника не
+	# осталось, а она «уходит в режим повторной постройки», и партия не
+	# кончается. Так и было: закладка проверяла только деньги. Фундамент
+	# вставал, попадал в группу зданий фракции — и условие победы («у врага не
+	# осталось ни зданий, ни юнитов») переставало выполняться НАВСЕГДА, потому
+	# что достроить фундамент без единого рабочего нельзя.
+	#
+	# Деньги тут вообще ни при чём: строит здания РАБОЧИЙ (ConstructionSite
+	# набирает бригаду), и без него закладка — это не отсрочка поражения, а
+	# вечно недостроенный камень на карте
+	if not _site_in_progress() and _has_living_units():
 		var cost: Dictionary = _UCfg.building_cost("castle")
 		if ResourceManager.can_afford(Constants.FACTION_ENEMY, cost):
 			var spot: Vector3 = GameManager.land_target(
@@ -348,6 +367,15 @@ func _no_castle() -> void:
 
 ## Насколько в сторону от руин закладывается новая крепость, м
 const CASTLE_REBUILD_OFFSET := 9.0
+
+## Остался ли у ИИ хоть один живой юнит ЛЮБОГО рода — включая рабочих.
+## Именно любого: крепость строит рабочий, а держит поле боец, и «фракция ещё
+## жива» означает наличие хоть кого-то из них
+func _has_living_units() -> bool:
+	for n in main.get_tree().get_nodes_in_group("enemy_units"):
+		if is_instance_valid(n) and n is Unit and not (n as Unit).is_dead():
+			return true
+	return false
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ЭКОНОМИКА
@@ -760,9 +788,11 @@ func _command_squads(castle: Castle) -> void:
 		# Фланговые отряды одного типа делятся между левым и правым краем
 		var side: float = -1.0 if i % 2 == 0 else 1.0
 		var off := _AICfg.tactic_offset(_tactic, uid, course, side)
-		# Разнос по фронту внутри своего типа: центрируем ряд отрядов
+		# Разнос по фронту внутри своего типа: центрируем ряд отрядов.
+		# Шаг не уже самого отряда — иначе волна копейщиков схлопывается в
+		# кучу ещё на марше (та же арифметика, что и у заслона)
 		var centered: float = float(i) - float(n - 1) * 0.5
-		off += right * (centered * SQUAD_LATERAL_STEP)
+		off += right * (centered * maxf(SQUAD_LATERAL_STEP, _screen_step_for(uid)))
 		_set_role(sq, role, target_pos + off)
 	_apply_orders()
 
@@ -888,12 +918,16 @@ func _command_last_stand_at(home: Vector3) -> void:
 		idx[uid] = i + 1
 		var n: int = maxi(int(total.get(uid, 1)), 1)
 		var centered: float = float(i) - float(n - 1) * 0.5
+		# Шаг между отрядами одного рода — не уже самого отряда (см. _screen_step_for).
+		# STAND_LINE_WIDTH при семи отрядах копейщиков давала 2.9 м на отряд
+		# шириной 8.7 м: последний рубеж собирался в ту же кучу, от которой
+		# лечили заслон у базы
+		var stand_step: float = maxf(STAND_LINE_WIDTH / float(n), _screen_step_for(uid))
 		var spot: Vector3
 		match uid:
 			"archer":
 				# ЗА СПИНОЙ ПЕХОТЫ: стреляют из-за строя, сами под удар не идут
-				spot = home + course * STAND_BOW_DIST \
-					+ right * (centered * (STAND_LINE_WIDTH / float(n + 1)))
+				spot = home + course * STAND_BOW_DIST + right * (centered * stand_step)
 			"warrior":
 				# ФЛАНГИ: рыцари чередуют левый и правый край
 				var side: float = -1.0 if i % 2 == 0 else 1.0
@@ -901,13 +935,137 @@ func _command_last_stand_at(home: Vector3) -> void:
 					+ right * (side * STAND_FLANK_SIDE + centered * 2.0)
 			_:
 				# КОПЕЙЩИКИ — СТЕНА ЩИТОВ И ФАЛАНГА поперёк направления удара
-				spot = home + course * STAND_LINE_DIST \
-					+ right * (centered * (STAND_LINE_WIDTH / float(n)))
-		_set_role(sq, ROLE_LINE, GameManager.land_target(spot))
+				spot = home + course * STAND_LINE_DIST + right * (centered * stand_step)
+		_set_role(sq, ROLE_LINE, GameManager.land_target(spot), course)
+	_apply_orders()
+
+# ═════════════════════════════════════════════════════════════════════════════
+# МАКРО-СОСТОЯНИЕ: ОТВОЕВАТЬ ЦЕНТР КАРТЫ
+# ═════════════════════════════════════════════════════════════════════════════
+# Жалоба владельца: игрок захватывает центр, ИИ садится в глухую оборону у базы
+# и не выходит из неё, даже восстановив армию до лимита.
+#
+# Так и было устроено. DEFENSIVE_MODE знал два состояния, и оба оборонительные:
+# «держать рубеж» (_command_squads_defensive) и «последний рубеж у замка»
+# (_command_last_stand). Хуже того, переход между ними ОДНОСТОРОННИЙ по смыслу:
+# _should_last_stand выходит из последнего рубежа, только когда противника у
+# рубежа не осталось вовсе, — а он и не уйдёт, если центр его. Армия при этом
+# исправно набиралась до полного лимита и стояла.
+#
+# ТРЕТЬЕ СОСТОЯНИЕ. Два условия, оба обязательны:
+#   • центр карты контролирует игрок (его бойцы там есть, наших меньше);
+#   • армия ИИ набрана от RECAP_ARMY_FRACTION лимита (по БОЙЦАМ, не по отрядам).
+# Тогда дома остаётся RECAP_HOME_GUARD отрядов на род, а всё остальное идёт
+# ЕДИНЫМ ФРОНТОМ на центр.
+#
+# ГИСТЕРЕЗИС ОБЯЗАТЕЛЕН и он ДВУСТОРОННИЙ: выйти из наступления можно либо
+# отвоевав центр, либо растеряв армию ниже RECAP_ABORT_FRACTION. Без второго
+# выхода разбитая волна продолжала бы ползти на центр по одному; без зазора
+# между порогами ИИ менял бы решение на каждом такте, теряя по бойцу.
+# ═════════════════════════════════════════════════════════════════════════════
+
+## Идёт ли наступление на центр прямо сейчас (для отчёта стенда)
+var recap_center: bool = false
+
+## Доля набранной армии от полного лимита, 0..1. Считается ПО БОЙЦАМ: отряды у
+## разных родов разного размера, и счёт по отрядам врал бы вдвое
+func _army_fill() -> float:
+	var cap: int = _AICfg.total_army_cap()
+	if cap <= 0:
+		return 0.0
+	return float(army_size()) / float(cap)
+
+## Держит ли центр карты игрок. «Держит» — это не «зашёл разведчик»: его бойцы
+## там есть, и их не меньше наших
+func _center_lost(center: Vector3) -> bool:
+	var theirs: int = _player_combat_near(center)
+	if theirs <= 0:
+		return false
+	return _own_near(center) < theirs
+
+## Обновить решение о наступлении. Единственная точка, где меняется recap_center
+func _update_recap() -> void:
+	if not _AICfg.AI_RECAP_CENTER:
+		recap_center = false
+		return
+	var center := _rally_point()
+	var fill: float = _army_fill()
+	if recap_center:
+		if fill < _AICfg.RECAP_ABORT_FRACTION:
+			recap_center = false
+			last_action += "|наступление свёрнуто: армия выбита (%d%%)" % int(fill * 100.0)
+		elif _player_combat_near(center) == 0 and _own_near(center) > 0:
+			recap_center = false
+			last_action += "|ЦЕНТР ОТВОЁВАН"
+		return
+	if fill < _AICfg.RECAP_ARMY_FRACTION:
+		return
+	if not _center_lost(center):
+		return
+	recap_center = true
+	last_action += "|ЦЕНТР У ИГРОКА, армия %d%% — ОБЩЕЕ НАСТУПЛЕНИЕ" % int(fill * 100.0)
+
+## Вся накопленная армия идёт единым фронтом на центр карты.
+## Раскладка та же, что и у боевой волны (_command_squads): роды разведены по
+## глубине тактикой, отряды одного рода — по фронту, с шагом не уже отряда
+func _command_recap_center(castle: Castle) -> void:
+	var center := _rally_point()
+	var home_pt: Vector3 = castle.global_position if castle != null else _home_pos
+	var course := center - home_pt
+	course.y = 0.0
+	course = Vector3.FORWARD if course.length() < 0.01 else course.normalized()
+	var right := Vector3(-course.z, 0.0, course.x)
+
+	# Дома — только RECAP_HOME_GUARD отрядов на род войск. Именно это и значит
+	# «не оставлять лишних юнитов в бесконечной обороне у замка»
+	var per_type: Dictionary = {}
+	var home: Array = []
+	var wave: Array = []
+	for s in squads:
+		var sq: Dictionary = s
+		var uid: String = String(sq["type"])
+		var seen: int = int(per_type.get(uid, 0))
+		per_type[uid] = seen + 1
+		if seen < _AICfg.RECAP_HOME_GUARD:
+			home.append(sq)
+		else:
+			wave.append(sq)
+	_assign_home_posts(castle, home)
+
+	var per_total: Dictionary = {}
+	for s in wave:
+		var uid2: String = String((s as Dictionary)["type"])
+		per_total[uid2] = int(per_total.get(uid2, 0)) + 1
+	var per_idx: Dictionary = {}
+	for s in wave:
+		var sq2: Dictionary = s
+		var uid3: String = String(sq2["type"])
+		var i: int = int(per_idx.get(uid3, 0))
+		per_idx[uid3] = i + 1
+		var n: int = maxi(int(per_total.get(uid3, 1)), 1)
+		var side: float = -1.0 if i % 2 == 0 else 1.0
+		var off := _AICfg.tactic_offset(_tactic, uid3, course, side)
+		var centered: float = float(i) - float(n - 1) * 0.5
+		off += right * (centered * maxf(SQUAD_LATERAL_STEP, _screen_step_for(uid3)))
+		# Курс наступления задан планом и держится: волна идёт СТРОЕМ, а не
+		# разворачивается вслед за каждым шевелением чужого облака
+		_set_role(sq2, ROLE_RECAP, GameManager.land_target(center + off), course)
+	last_action += "|наступление на центр: в поле %d отрядов, дома %d" % [
+		wave.size(), home.size()]
 	_apply_orders()
 
 func _command_squads_defensive(castle: Castle) -> void:
-	# СНАЧАЛА ПРОВЕРЯЕМ, НЕ ПОРА ЛИ ОТСТУПАТЬ. Потерянный центр и перевес
+	# ── СНАЧАЛА МАКРО-РЕШЕНИЕ: НЕ ПОРА ЛИ ОТВОЁВЫВАТЬ ЦЕНТР ─────────────────
+	# Проверяется ДО последнего рубежа и это принципиально: оба состояния
+	# срабатывают на одну и ту же обстановку («центр потерян»), и порядок
+	# проверок и есть приоритет. Полная армия обязана идти вперёд, а не
+	# садиться в осаду — ровно на обратное и жаловался владелец
+	_update_recap()
+	if recap_center:
+		last_stand = false
+		_command_recap_center(castle)
+		return
+	# СЛЕДОМ — НЕ ПОРА ЛИ ОТСТУПАТЬ. Потерянный центр и перевес
 	# противника отменяют обычную раскладку по рубежу целиком
 	last_stand = _should_last_stand(castle)
 	if last_stand:
@@ -939,16 +1097,22 @@ func _command_squads_defensive(castle: Castle) -> void:
 	var patrols: int = mini(_AICfg.PATROL_SQUADS, rest.size() / 2)
 	# Заслон строится по ширине рубежа, патрули ходят по кругу вокруг него
 	var line_count: int = rest.size() - patrols
+	# ── ШАГ РУБЕЖА ТОЖЕ НЕ МОЖЕТ БЫТЬ УЖЕ ОТРЯДА ────────────────────────────
+	# DEFENSE_LINE_WIDTH делилась на число отрядов, и при десятке отрядов шаг
+	# выходил 4.4 м — вдвое уже отряда копейщиков. Та же куча, что и у заслона
+	# у базы, только посреди поля. Ширина рубежа — пожелание, ширина отряда —
+	# факт: побеждает факт, рубеж просто растягивается
+	var line_step: float = maxf(
+		_AICfg.DEFENSE_LINE_WIDTH / float(maxi(line_count, 1)), _widest_step())
 	for i in range(rest.size()):
 		var sq: Dictionary = rest[i]
 		if i < line_count:
 			# ЗАСЛОН: отряды растянуты поперёк курса, с шагом по ширине рубежа
 			var centered: float = float(i) - float(maxi(line_count - 1, 1)) * 0.5
-			var step: float = _AICfg.DEFENSE_LINE_WIDTH / float(maxi(line_count, 1))
-			var off := right * (centered * step)
+			var off := right * (centered * line_step)
 			# Глубина по типу войск — та же раскладка, что и у тактик атаки
 			off += _AICfg.tactic_offset(_tactic, String(sq["type"]), course, 0.0)
-			_set_role(sq, ROLE_LINE, GameManager.land_target(center + off))
+			_set_role(sq, ROLE_LINE, GameManager.land_target(center + off), course)
 		else:
 			# ПАТРУЛЬ: точка на дуге ПЕРЕД рубежом, смена по таймеру
 			var pi: int = i - line_count
@@ -1031,10 +1195,13 @@ func _intruder_near(center: Vector3) -> bool:
 func _assign_home_posts(castle: Castle, home: Array) -> void:
 	if castle == null:
 		return
+	# Курс заслона — ОДИН на весь гарнизон и постоянный: он выведен из мест
+	# замка и базы игрока, а они не двигаются вовсе
+	var face := _defense_course(castle)
 	if not _AICfg.AI_BASE_SCREEN:
 		for i in range(home.size()):
 			_set_role(home[i] as Dictionary, ROLE_GUARD,
-				_guard_post(castle, i, home.size()))
+				_guard_post(castle, i, home.size()), face)
 		return
 	var total: Dictionary = {}
 	for s in home:
@@ -1047,7 +1214,7 @@ func _assign_home_posts(castle: Castle, home: Array) -> void:
 		var i2: int = int(idx.get(uid2, 0))
 		idx[uid2] = i2 + 1
 		_set_role(sq, ROLE_GUARD,
-			_screen_post(castle, uid2, i2, int(total.get(uid2, 1))))
+			_screen_post(castle, uid2, i2, int(total.get(uid2, 1))), face)
 
 ## Точка заслона для отряда рода `uid`, номер `idx` из `count` отрядов этого рода.
 ##
@@ -1062,25 +1229,129 @@ func _assign_home_posts(castle: Castle, home: Array) -> void:
 ## Теперь места размечены на ПОЛНЫЙ гарнизон (HOME_GUARD_PER_TYPE): пришедший
 ## отряд занимает своё место и никого не двигает, а недобранный заслон стоит
 ## пореже — что честно и показывает игроку, что оборона ещё не собрана
+## ── ШАГ МЕЖДУ СОСЕДНИМИ ОТРЯДАМИ ЗАСЛОНА ──────────────────────────────────
+## Не может быть меньше ширины самого отряда: иначе места перекрываются, отряды
+## лезут друг в друга, и расталкивание разбрасывает их в стороны (разбор — в
+## ai_start_army_limit.SCREEN_SQUAD_GAP).
+##
+## Ширина считается по ТОМУ ЖЕ построению, каким ИИ и разворачивает отряд:
+## SQUAD_COLS колонок с интервалом SQUAD_SPACING (см. _issue_plan)
+## Ближе этого к замку заслон не встаёт ни при каком числе эшелонов: пост в
+## тылу не заслоняет ничего (см. qa_ai, «ни один пост не смотрит в тыл»)
+const SCREEN_MIN_DEPTH := 4.0
+
+## ── ШИРИНА ОТРЯДА СЧИТАЕТСЯ ПО ЕГО СОБСТВЕННОМУ ПОСТРОЕНИЮ ────────────────
+## ЗДЕСЬ И ОСТАВАЛСЯ ИСТОЧНИК «КУЧИ», хотя шаг заслона уже выводился, а не
+## стоял числом. Выводился он из ОБЩЕЙ шестёрки колонок (SQUAD_COLS), а
+## разворачивает отряд _issue_plan СОВСЕМ ДРУГОЙ раскладкой: у копейщиков
+## колонки считаются от числа шеренг (PHALANX_RANKS), и отряд в шестьдесят
+## человек ложится в 15 колонок, то есть 8.7 м по фронту. Планировщик же
+## разводил такие отряды на 5.68 м — места перекрывались на три метра с
+## лишним, семь отрядов сходились в одно пятно, расталкивание их разбрасывало,
+## следующий такт гнал обратно. Ровно тот же цикл «сжатие → выталкивание →
+## сжатие», только этажом выше.
+##
+## Теперь ширина считается ТЕМ ЖЕ способом, каким отряд и строится, и считается
+## по ПОЛНОМУ штату: доучившийся отряд занимает своё место и никого не двигает
+func _squad_cols(uid: String, size: int) -> int:
+	if uid == "spearman" and _AICfg.PHALANX_RANKS > 0:
+		return maxi(1, int(ceil(float(size) / float(_AICfg.PHALANX_RANKS))))
+	return SQUAD_COLS
+
+## Ширина отряда рода `uid` по фронту, метры (по полному штату)
+func _squad_width(uid: String) -> float:
+	return float(_squad_cols(uid, _UCfg.squad_size(uid))) * SQUAD_SPACING
+
+## Шаг между соседними отрядами ЭТОГО рода: ширина отряда плюс просвет
+func _screen_step_for(uid: String) -> float:
+	return _squad_width(uid) + _AICfg.SCREEN_SQUAD_GAP
+
+## Шаг для смешанной линии: по САМОМУ ШИРОКОМУ роду из присутствующих. Один шаг
+## на всю линию, иначе места родов разъезжаются и снова начинают перекрываться
+func _widest_step() -> float:
+	var w: float = float(SQUAD_COLS) * SQUAD_SPACING
+	for t in _AICfg.combat_types():
+		w = maxf(w, _squad_width(String(t)))
+	return w + _AICfg.SCREEN_SQUAD_GAP
+
+## Шаг заслона «вообще» — по самому широкому роду войск. Стенды спрашивают
+## именно его: свойство «шаг не меньше ширины отряда» обязано держаться на
+## худшем случае, а не на среднем
+func _screen_step() -> float:
+	return _widest_step()
+
+## Сколько отрядов ЭТОГО рода помещается в одну линию заслона
+func _screen_per_row_for(uid: String) -> int:
+	return maxi(int(floor(_AICfg.SCREEN_MAX_WIDTH / maxf(_screen_step_for(uid), 0.1))), 1)
+
+## Сколько отрядов помещается в ОДНУ линию заслона (по худшему случаю)
+func _screen_per_row() -> int:
+	return maxi(int(floor(_AICfg.SCREEN_MAX_WIDTH / maxf(_screen_step(), 0.1))), 1)
+
+## ── МЕСТО ОТРЯДА В ЗАСЛОНЕ ────────────────────────────────────────────────
+## Отряды раскладываются ЛИНИЕЙ поперёк курса обороны, а не долями фиксированной
+## ширины. Не поместившиеся в линию уходят во ВТОРОЙ ЭШЕЛОН — на SCREEN_ROW_DEPTH
+## позади, со сдвигом на полшага, чтобы стоять в промежутках первой шеренги, а
+## не в затылок ей.
+##
+## Порядок родов войск при этом прежний и заказанный: копейщики впереди,
+## лучники за их спинами, мечники по флангам
 func _screen_post(castle: Castle, uid: String, idx: int, count: int) -> Vector3:
 	var course := _defense_course(castle)
 	var right := Vector3(-course.z, 0.0, course.x)
 	var home := castle.global_position
 	var n: int = maxi(maxi(count, _AICfg.HOME_GUARD_PER_TYPE), 1)
-	var centered: float = float(idx) - float(n - 1) * 0.5
 	var spot: Vector3
-	match uid:
-		"archer":
-			spot = home + course * _AICfg.SCREEN_BOW_DIST \
-				+ right * (centered * (_AICfg.SCREEN_WIDTH / float(n + 1)))
-		"warrior":
-			var side: float = -1.0 if idx % 2 == 0 else 1.0
-			spot = home + course * _AICfg.SCREEN_FLANK_DIST \
-				+ right * (side * _AICfg.SCREEN_FLANK_SIDE + centered * 2.0)
-		_:
-			# Копейщики и всё прочее ближнего боя — стена перед зданиями
-			spot = home + course * _AICfg.SCREEN_SPEAR_DIST \
-				+ right * (centered * (_AICfg.SCREEN_WIDTH / float(n)))
+	if uid == "warrior":
+		# ── ФЛАНГИ РАСХОДЯТСЯ ВШИРЬ, А НЕ ВГЛУБЬ ───────────────────────────
+		# Первая версия разносила мечников по ГЛУБИНЕ (каждая пара на
+		# SCREEN_ROW_DEPTH назад), и на шести отрядах третья пара уходила ЗА
+		# ЗАМОК: глубина по курсу на врага выходила −4 м. Это прямое нарушение
+		# смысла заслона — он стоит МЕЖДУ замком и противником, — и стенд
+		# qa_ai поймал это той самой проверкой «ни один пост не смотрит в тыл».
+		#
+		# Разносим по фронту: каждая следующая пара встаёт дальше от центра на
+		# шаг отряда. Глубина у всех одна, фланг просто шире
+		var side: float = -1.0 if idx % 2 == 0 else 1.0
+		var out: float = _AICfg.SCREEN_FLANK_SIDE \
+			+ float(idx / 2) * _screen_step_for(uid)
+		spot = home + course * _AICfg.SCREEN_FLANK_DIST + right * (side * out)
+		return GameManager.land_target(spot)
+	var step: float = _screen_step_for(uid)
+	var per_row: int = _screen_per_row_for(uid)
+	# Ширину линии считаем по ПОЛНОМУ гарнизону, а не по наличному: иначе каждый
+	# доучившийся отряд переставлял бы всех своих собратьев (та же оговорка, что
+	# была и раньше — она остаётся в силе)
+	var in_row: int = mini(n, per_row)
+	var row: int = idx / per_row
+	var col: int = idx % per_row
+	var centered: float = float(col) - float(in_row - 1) * 0.5
+	# Второй эшелон — в промежутках первого
+	if row % 2 == 1:
+		centered += 0.5
+	var lateral: float = centered * step
+	# ── КУДА УХОДИТ ЛИШНИЙ ЭШЕЛОН: ЗАВИСИТ ОТ РОДА ВОЙСК ───────────────────
+	# Прежде эшелоны у всех уходили НАЗАД, к замку, и это было верно ровно до
+	# тех пор, пока отряд копейщиков считался узким. Как только ширина стала
+	# считаться честно (15 колонок вместо шести), в одну линию перестали
+	# помещаться семь отрядов копейщиков — и второй эшелон уехал назад РОВНО НА
+	# ЛИНИЮ ЛУЧНИКОВ: 13 − 7 = 6 м при лучниках на 7 м. Стенд поймал это сразу
+	# двумя проверками, «копейщики впереди лучников» и «посты разнесены»
+	# (зазор вышел 1.0 м), и обе — по делу: копейщики физически встали своим
+	# стрелкам в затылок.
+	#
+	# Позади копейщиков МЕСТА НЕТ И БЫТЬ НЕ МОЖЕТ: там по замыслу стоят
+	# лучники, а за ними замок. Поэтому лишние отряды ПЕРВОЙ ЛИНИИ уходят
+	# ВПЕРЁД, наращивая глубину строя от противника, а не в тыл. Назад
+	# эшелонируются только лучники — за их спиной действительно пусто, и там
+	# глубину зажимает пол SCREEN_MIN_DEPTH, чтобы пост не оказался за замком
+	var back: float
+	if uid == "archer":
+		back = maxf(_AICfg.SCREEN_BOW_DIST - float(row) * _AICfg.SCREEN_ROW_DEPTH,
+			SCREEN_MIN_DEPTH)
+	else:
+		back = _AICfg.SCREEN_SPEAR_DIST + float(row) * _AICfg.SCREEN_ROW_DEPTH
+	spot = home + course * back + right * lateral
 	return GameManager.land_target(spot)
 
 func _guard_post(castle: Castle, idx: int, guard_count: int = 0) -> Vector3:
@@ -1096,9 +1367,42 @@ func _guard_post(castle: Castle, idx: int, guard_count: int = 0) -> Vector3:
 
 ## Смена роли/цели помечает отряд как «надо переиздать приказ».
 ## Без этого приказ уходил бы каждый такт и сбивал бойцов с пути.
-func _set_role(sq: Dictionary, role: String, target: Vector3) -> void:
+## ── ОТСТУПАЮЩЕМУ ДРУГОЙ РОЛИ НЕ ДАЮТ ──────────────────────────────────────
+## Пока отметка жива и отряд не втянут в ближний бой, любая попытка переназначить
+## ему роль отбивается. Это ЕДИНСТВЕННОЕ место, через которое роли вообще
+## меняются, поэтому одной проверки здесь хватает на все пути: и на раздачу
+## постов гарнизона, и на боевой порядок, и на тактические переопределения
+func _retreat_locked(sq: Dictionary) -> bool:
+	if String(sq.get("role", "")) != ROLE_RETREAT:
+		return false
+	if Time.get_ticks_msec() >= int(sq.get("retreat_until", 0)):
+		return false
+	# Догнали и навязали контакт — разворачиваться можно и нужно: отряд спиной
+	# к врагу не отступает, а гибнет (та же оговорка, что у _try_retreat)
+	return not _in_melee(sq)
+
+## ── КУРС СТРОЯ ЗАДАЁТ ПЛАНИРОВЩИК, А НЕ ОБСТАНОВКА ────────────────────────
+## `face` — куда обязан смотреть строй отряда. Задаётся ВМЕСТЕ с постом и вместе
+## с ним замерзает. Без него курс считался в момент выдачи через
+## `_order_course` → `_enemy_front_normal`, то есть по ОБЛАКУ ЖИВЫХ БОЙЦОВ
+## ИГРОКА: те шевелятся, главная ось их облака гуляет, и каждые две секунды
+## заслон получал новый угол разметки. Стоящий гарнизон при этом честно
+## переставлялся всем составом — это и есть «пульсация раз в секунду».
+##
+## Vector3.ZERO означает «курс не задан, считай по обстановке» — так ходят
+## полевые отряды, которым разворот вдоль чужой шеренги как раз нужен.
+func _set_role(sq: Dictionary, role: String, target: Vector3,
+		face: Vector3 = Vector3.ZERO) -> void:
+	if role != ROLE_RETREAT and _retreat_locked(sq):
+		return
 	var moved: bool = (sq["target"] as Vector3).distance_to(target) > 2.0
-	if String(sq["role"]) != role or moved:
+	# Смена курса — такая же причина переиздать приказ, как и смена точки:
+	# порог в четверть радиана (≈14°) отсекает дрожание, но пропускает разворот
+	var old_face: Vector3 = sq.get("face", Vector3.ZERO)
+	var turned: bool = old_face.length_squared() > 1e-6 \
+		and face.length_squared() > 1e-6 and old_face.dot(face) < 0.97
+	sq["face"] = face
+	if String(sq["role"]) != role or moved or turned:
 		sq["role"]   = role
 		sq["target"] = target
 		sq["issued"] = false
@@ -1254,6 +1558,12 @@ func _try_retreat(sq: Dictionary, castle: Castle) -> bool:
 	if not sent:
 		return false          # гарнизон полон — деремся там, где стоим
 	_set_role(sq, ROLE_RETREAT, castle.global_position)
+	# ── РЕШЕНИЕ ЗАФИКСИРОВАНО (см. AICfg.RETREAT_MIN_SEC) ──────────────────
+	# До этой отметки отряду не выдадут никакой другой роли, сколько бы раз
+	# такт размышления ни пересчитал цели. Именно пересчёт и разворачивал его
+	# на полпути обратно в бой
+	sq["retreat_until"] = Time.get_ticks_msec() \
+		+ int(_AICfg.RETREAT_MIN_SEC * 1000.0)
 	sq["issued"] = true       # приказ уже отдан замком, свой поверх не нужен
 	last_action += "|отход отряда %s в замок" % String(sq["type"])
 	return true
@@ -1499,7 +1809,33 @@ func _apply_orders() -> void:
 		# им стойка АТАКА нужна, чтобы по прибытии сразу вступить в бой
 		if role == ROLE_FLANK:
 			stance = _UCfg.STANCE_ATTACK
+		var center: Vector3 = sq["target"]
+		# ── КУРС БЕРЁТСЯ ИЗ ПЛАНА, ЕСЛИ ОН ТАМ ЕСТЬ ─────────────────────────
+		# Гарнизону, заслону и последнему рубежу курс задаёт планировщик и
+		# держит неизменным (см. _set_role). Пересчитывать его здесь нельзя:
+		# _order_course зовёт _enemy_front_normal, а тот обходит ВСЮ группу
+		# бойцов игрока — на каждый отряд. Двадцать отрядов ИИ при двух тысячах
+		# бойцов игрока это сорок тысяч проверок расстояния в один кадр, и
+		# они же гуляющим углом переставляли весь неподвижный строй
+		var course: Vector3 = sq.get("face", Vector3.ZERO)
+		var course_frozen: bool = course.length_squared() > 1e-6
+		var cols: int = _squad_cols(uid, members.size())
 		var need_issue: bool = not bool(sq["issued"])
+		# ── ЗАМОРОЖЕННАЯ ЦЕЛЬ (STAGNANT TARGET) ─────────────────────────────
+		# Цель отряда не менялась, курс задан планом, противника в зоне нет —
+		# значит и раскладка мест не изменилась ни на сантиметр. Переиздавать
+		# приказ такому отряду не просто бесполезно, а ВРЕДНО: _issue_plan
+		# выдаёт каждому бойцу set_stance и command_move, будит его, метит позу
+		# грязной и переводит в MOVING на один шаг. Раз в две секунды, всем
+		# гарнизоном сразу — это и есть «пульсирующая мышца».
+		#
+		# Проверяем СВОЙСТВО, а не время: стоит ли строй по своим местам. Если
+		# стоит — не трогаем вовсе; развалили (расталкивание, толчок конницы,
+		# проход своих) — переиздаём. Проверка это арифметика по уже собранным
+		# числам, без единого обращения к дереву сцены
+		if not need_issue and holds and threat == null and course_frozen:
+			if _posts_intact(members, center, course, cols):
+				continue
 		if not need_issue:
 			# Приказ уже отдан: подтолкнуть только тех, кто встал без дела.
 			#
@@ -1524,18 +1860,17 @@ func _apply_orders() -> void:
 			if idle * 2 < members.size():
 				continue
 		sq["issued"] = true
-		var center: Vector3 = sq["target"]
-		var course := _order_course(members, center)
 		# ── РОВНЫЕ ШЕРЕНГИ: КОЛОНКИ ВЫВОДЯТСЯ ИЗ ЧИСЛА ШЕРЕНГ ───────────────
 		# Здесь была жёсткая шестёрка колонок на всех. Отряд копейщиков в 20
 		# человек ложился в неё как 6+6+6+2 — три полных ряда и огрызок, то есть
 		# ни «ровных шеренг», ни предсказуемой глубины фаланги. Теперь у
 		# копейщиков задано ЧИСЛО ШЕРЕНГ (PHALANX_RANKS), а колонки считаются от
 		# него: 20 человек на 4 шеренги — ровно 5×4, при любых потерях ряды
-		# остаются одинаковой длины. Остальным родам шестёрка и подходит
-		var cols: int = SQUAD_COLS
-		if uid == "spearman" and _AICfg.PHALANX_RANKS > 0:
-			cols = maxi(1, int(ceil(float(members.size()) / float(_AICfg.PHALANX_RANKS))))
+		# остаются одинаковой длины. Остальным родам шестёрка и подходит.
+		# Считает это _squad_cols — тот же метод, каким планировщик меряет
+		# ширину отряда, чтобы развести соседей (см. _screen_step_for)
+		if not course_frozen:
+			course = _order_course(members, center)
 		var flank_close: bool = bool(sq.get("flank_close", false))
 		# ── ЦЕЛЬ ИЩЕТСЯ РАЗ НА ОТРЯД, А НЕ НА БОЙЦА ─────────────────────────
 		# Здесь стояли три вызова _nearest_player_target/_ranged ВНУТРИ цикла по
@@ -1666,6 +2001,50 @@ func _issue_plan(plan: Dictionary) -> int:
 ## или сбитый с места получает его как прежде, иначе отряд перестал бы
 ## возвращаться на пост после стычки
 const HOLD_EPS := 0.35
+
+## ── СТОИТ ЛИ ОТРЯД ПО СВОИМ МЕСТАМ ────────────────────────────────────────
+## Ответ на единственный вопрос заморозки: изменилось ли хоть что-нибудь с
+## прошлого такта. Раскладка мест здесь та же, что и в _issue_plan, и считается
+## тем же кодом — иначе проверка судила бы об одном строе, а приказ выдавал бы
+## другой.
+##
+## Порог заметно шире допуска прибытия: боец, притёртый расталкиванием на
+## полметра, стоит в строю, а не выпал из него. Спорить с расталкиванием
+## приказами нельзя — оно всё равно победит, а отряд будет топтаться вечно.
+const POST_DRIFT := 1.6
+## Какой доле отряда надо съехать, чтобы строй считался развалившимся.
+## Один оттеснённый боец — теснота, а не дыра в шеренге
+const POST_DRIFT_FRACTION := 0.2
+
+func _posts_intact(members: Array, center: Vector3, course: Vector3,
+		cols: int) -> bool:
+	var right := Vector3(-course.z, 0.0, course.x)
+	var live := 0
+	var drift := 0
+	var lim: float = POST_DRIFT * POST_DRIFT
+	for i in range(members.size()):
+		if not is_instance_valid(members[i]):
+			continue
+		var u := members[i] as Unit
+		if u == null or u.is_dead():
+			continue
+		# Идущий отряд не «стоит по местам» — он ещё в пути, и переиздавать ему
+		# приказ незачем: он и так исполняет прошлый
+		if u.state != Unit.State.IDLE:
+			return true
+		live += 1
+		var col: int = i % cols
+		var row: int = i / cols
+		var off_x: float = (float(col) - float(cols - 1) * 0.5) * SQUAD_SPACING
+		var off_z: float = float(row) * SQUAD_SPACING
+		var slot: Vector3 = center + right * off_x - course * off_z
+		var dx: float = u.global_position.x - slot.x
+		var dz: float = u.global_position.z - slot.z
+		if dx * dx + dz * dz > lim:
+			drift += 1
+	if live == 0:
+		return true
+	return float(drift) < float(live) * POST_DRIFT_FRACTION
 
 func _hold_at(u: Unit, slot: Vector3, course: Vector3) -> void:
 	if u.state == Unit.State.IDLE:
@@ -1933,7 +2312,8 @@ func report() -> String:
 	for s in squads:
 		var r: String = String((s as Dictionary)["role"])
 		roles[r] = int(roles.get(r, 0)) + 1
-	return "режим=%s | отряды: %s | бойцов=%d | роли=%s | лимит набран=%s | тактика=%s | озеро взято=%s | последний рубеж=%s" % [
+	return "режим=%s | отряды: %s | бойцов=%d | роли=%s | лимит набран=%s | тактика=%s | озеро взято=%s | последний рубеж=%s | отвоевание центра=%s (армия %d%% лимита)" % [
 		"оборона" if _AICfg.DEFENSIVE_MODE else "атака",
 		", ".join(parts), army_size(), str(roles), str(army_ready()),
-		String(_tactic.get("id", "-")), str(_lake_taken), str(last_stand)]
+		String(_tactic.get("id", "-")), str(_lake_taken), str(last_stand),
+		str(recap_center), int(_army_fill() * 100.0)]

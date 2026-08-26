@@ -88,6 +88,48 @@ static func hover_ring_mesh() -> TorusMesh:
 	_hover_ring_mesh = torus
 	return _hover_ring_mesh
 
+# ── КРАСНЫЙ КОНТУР ПОД ЗДАНИЕМ ───────────────────────────────────────────────
+## ЗДАНИЮ НУЖЕН СВОЙ МЕШ, А НЕ УВЕЛИЧЕННОЕ КОЛЬЦО БОЙЦА, и вот почему.
+##
+## Кольцо прицела нарисовано под фигуру в 35 см: тор радиуса 0.35 с трубкой в
+## 4 см и ДВЕНАДЦАТЬЮ сегментами по окружности. На бойце двенадцати сегментов
+## хватает с запасом — круг размером с ладонь, углов не видно. Но замок в
+## восемь метров требует масштаба ×11, и масштаб тянет ВСЁ: и трубку (4 см →
+## 46 см), и грубость обвода. На экране это давало ровно то, на что пожаловался
+## владелец: «толстый угловатый красный многоугольник».
+##
+## Здесь тор построен ЕДИНИЧНОГО радиуса и заведомо тонкий: при масштабе по
+## габариту постройки трубка выходит 2-5 см на любом здании, а 64 сегмента
+## держат обвод гладким и на замке. Тонкая аккуратная линия по основанию —
+## ровно то, что заказано.
+##
+## Масштабируются ТОЛЬКО оси X и Z (см. SelectionDecalRenderer): тор лежит
+## горизонтально, и общий масштаб поднял бы его над землёй колесом
+const BUILD_RING_INNER := 0.985
+const BUILD_RING_OUTER := 1.0
+
+static var _build_ring_mesh: TorusMesh = null
+
+static func building_ring_mesh() -> TorusMesh:
+	if _build_ring_mesh != null:
+		return _build_ring_mesh
+	var torus := TorusMesh.new()
+	torus.inner_radius = BUILD_RING_INNER
+	torus.outer_radius = BUILD_RING_OUTER
+	# Сегментов по окружности МНОГО (в отличие от кольца бойца): этот обвод
+	# растягивается на метры, и двенадцать углов на нём видно сразу
+	torus.rings = 64
+	torus.ring_segments = 4
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color    = Color(1.0, 0.16, 0.14, 0.85)
+	mat.shading_mode    = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency    = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.cull_mode       = BaseMaterial3D.CULL_DISABLED
+	mat.render_priority = 2
+	torus.material = mat
+	_build_ring_mesh = torus
+	return _build_ring_mesh
+
 # ── МЕТКА ТОЧКИ НАЗНАЧЕНИЯ ───────────────────────────────────────────────────
 ## Отдельный меш, а не кольцо выделения в увеличенном масштабе, и вот почему.
 ## Метка ставится масштабом трансформа, а масштаб тянет ВСЁ кольцо разом —

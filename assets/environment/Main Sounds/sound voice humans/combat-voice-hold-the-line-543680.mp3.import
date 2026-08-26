@@ -1,0 +1,19 @@
+[remap]
+
+importer="mp3"
+type="AudioStreamMP3"
+uid="uid://b5fggm08dqaul"
+path="res://.godot/imported/combat-voice-hold-the-line-543680.mp3-c3a214273b7587476e968a3fa7377f30.mp3str"
+
+[deps]
+
+source_file="res://assets/environment/Main Sounds/sound voice humans/combat-voice-hold-the-line-543680.mp3"
+dest_files=["res://.godot/imported/combat-voice-hold-the-line-543680.mp3-c3a214273b7587476e968a3fa7377f30.mp3str"]
+
+[params]
+
+loop=false
+loop_offset=0
+bpm=0
+beat_count=0
+bar_beats=4

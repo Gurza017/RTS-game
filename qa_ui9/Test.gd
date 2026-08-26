@@ -52,7 +52,7 @@ func _run() -> void:
 	await frames(2)
 
 	_test_constants()
-	_test_gold()
+	await _test_gold()
 	await _test_income()
 	for res in [Vector2i(1280, 720), Vector2i(3428, 1386)]:
 		await _test_layout(res)
@@ -116,7 +116,54 @@ func _test_gold() -> void:
 	# «размытое жёлтое пятно под ресурсом», а на кучах внахлёст её яркости
 	# складывались. Сторожим теперь ОТСУТСТВИЕ подложки: ни у одного куска — ни
 	# золота, ни камня — не должно быть узла GoldShimmer
-	verdict("5 аддитивная аура золота выключена", not _RN.GOLD_SHIMMER)
+	#
+	# ── ЗДЕСЬ СТОЯЛО `not _RN.GOLD_SHIMMER`, И ЭТО ЛОМАЛО ВЕСЬ ФАЙЛ ─────────
+	# Ручка была ВЫКЛЮЧАТЕЛЕМ аддитивного блика, а вместе с самим бликом её из
+	# ResourceNode удалили — второго квада с `gold_shimmer.gdshader` в игре нет
+	# вовсе. Ссылка на несуществующую константу — не «красный вердикт», а
+	# ОШИБКА ПАРСИНГА: стенд переставал компилироваться целиком, то есть не
+	# проверял и остальные восемь пунктов.
+	#
+	# Проверять надо СВОЙСТВО, а не снятую ручку (правило 10 проекта). Свойств
+	# два, и вместе они и есть «аура выключена, а золото по-прежнему
+	# переливается»:
+	#   • ни один кусок не носит узла GoldShimmer — это следующий вердикт;
+	#   • перелив идёт ШТАТНЫМ КАДРОВЫМ ПУТЁМ, то есть у золота лента из
+	#     нескольких кадров (ResourceNode.sprite_frames_drawn), а не один
+	#     статичный кадр с бликом поверх.
+	# Число кадров у ленты не хардкодим: важно «больше одного»
+	# ── ЖДЁМ, ПОКА ЖИЛЫ ДОСТРОЯТ КАРТИНКУ ──────────────────────────────────
+	# sprite_frames_drawn выставляется в ResourceNode при сборке визуала, а мир
+	# раскладывает ресурсы не в один кадр. Замер сразу после старта сцены давал
+	# «лента из одного кадра» на ровном месте — то есть мерил бы не механику,
+	# а собственную спешку (правило 11 проекта, только про картинку)
+	for _w in range(120):
+		var ready_n := 0
+		for n1 in get_tree().get_nodes_in_group("resource_nodes"):
+			var rn1 := n1 as ResourceNode
+			if rn1 == null or not is_instance_valid(rn1):
+				continue
+			if rn1.resource_type == Constants.RESOURCE_GOLD \
+					and rn1.sprite_frames_drawn > 1:
+				ready_n += 1
+		if ready_n > 0:
+			break
+		await get_tree().process_frame
+	var gold_frames := 0
+	var gold_animated := 0
+	for n0 in get_tree().get_nodes_in_group("resource_nodes"):
+		var rn0 := n0 as ResourceNode
+		if rn0 == null or not is_instance_valid(rn0):
+			continue
+		if rn0.resource_type != Constants.RESOURCE_GOLD:
+			continue
+		gold_frames += 1
+		if rn0.sprite_frames_drawn > 1:
+			gold_animated += 1
+	verdict("5 золото переливается кадрами ленты, а не аддитивной аурой",
+		gold_frames > 0 and gold_animated == gold_frames,
+		"жил золота %d, из них с многокадровой лентой %d" % [
+			gold_frames, gold_animated])
 
 	var shimmer := 0
 	var gold_n := 0

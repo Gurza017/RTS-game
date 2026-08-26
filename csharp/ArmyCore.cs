@@ -1438,15 +1438,43 @@ public partial class ArmyCore : RefCounted
         return _sepR[row];
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // РАЗБОР НАЛОЖЕНИЯ. crossSquad — ВО СКОЛЬКО РАЗ ШИРЕ ДЕРЖАТСЯ ЧУЖИЕ ОТРЯДЫ
+    // ═══════════════════════════════════════════════════════════════════════
+    // Жалоба владельца: десять отрядов, посланных в одну точку, спрессовываются
+    // в комок размером в два. Так и было, и причина ровно одна: расталкивание
+    // не различало «сосед по шеренге» и «боец чужого отряда, влезший в мой
+    // строй». Норма у них была общая — самый плотный строевой интервал, — и
+    // десять отрядов честно укладывались в него, как один.
+    //
+    // ПОЧЕМУ ЭТО РЕШАЕТСЯ ЗДЕСЬ, А НЕ ОТТАЛКИВАНИЕМ ЦЕНТРОВ ОТРЯДОВ. Центр
+    // отряда — величина производная (медиана по осям, GameManager._centroid_of),
+    // и двигать по ней людей означало бы завести вторую, параллельную механику
+    // перемещения: с силами, с затуханием, с борьбой против разметки строя.
+    // Ровно от этого в проекте уже отказались однажды («союзники друг друга не
+    // толкают», см. Unit.SEP_MIN_DIST). Здесь же ничего нового не появляется
+    // вовсе: та же монотонная поправка, тот же такт, та же мёртвая зона —
+    // меняется ОДНО ЧИСЛО в зависимости от того, свой это сосед по отряду или
+    // чужой. Строй внутри отряда остаётся ровно таким же плотным, каким был.
+    //
+    // ОТРЯД 0 — ЭТО «БЕЗ ОТРЯДА» (рабочие, одиночки, гарнизон), и для него
+    // расширение не действует ни в какую сторону: иначе артель рабочих у одной
+    // жилы разъезжалась бы вдвое шире положенного, а причин у неё держать
+    // строевую дистанцию нет никаких.
+    //
+    // ЦЕНА. Радиус скана берётся по БОЛЬШЕЙ из двух норм, то есть на ячейку-две
+    // шире прежнего; сравнение внутри — один int против int на соседа.
     public int BatchSeparation(float delta, float minDist, float maxStep, float interval,
         float limX, float limZ, int movingState, int attackingState, bool waterOn,
-        GodotObject gm, float deadzone, float reliefAmp)
+        GodotObject gm, float deadzone, float reliefAmp, float crossSquad = 1.0f,
+        float passRelief = 1.0f)
     {
         if (_gw == 0) return 0;
         int dead = DeadState;
         float maxSq = maxStep * maxStep;
         float nearD = Mathf.Max(minDist - deadzone, 0.0f);
         float nearSq = nearD * nearD;
+        if (crossSquad < 1.0f) crossSquad = 1.0f;
         int moved = 0;
         for (int i = 0; i < _capacity; i++)
         {
@@ -1472,14 +1500,30 @@ public partial class ArmyCore : RefCounted
                 float wNear = Mathf.Max(w - deadzone, 0.0f);
                 myMin = w; myNearSq = wNear * wNear;
             }
+            // ── НОРМА ДЛЯ ЧУЖОГО ОТРЯДА ────────────────────────────────────
+            // Считается ОТ УЖЕ ГОТОВОЙ личной нормы, поэтому и крупный габарит
+            // (_sepR), и поблажка работающему (WorkOverlap) переносятся на неё
+            // сами собой, без второй копии тех же развилок
+            int mySq = _sq[i];
+            float crossMin = myMin;
+            float crossNearSq = myNearSq;
+            if (crossSquad > 1.0f && mySq != 0)
+            {
+                crossMin = myMin * crossSquad;
+                float cNear = Mathf.Max(crossMin - deadzone, 0.0f);
+                crossNearSq = cNear * cNear;
+            }
             float t = _sepT[i] - delta;
             if (t > 0.0f) { _sepT[i] = t; continue; }
             _sepT[i] = interval;
             float x = _px[i], z = _pz[i];
-            int cx0 = (int)((x - myMin - _gx0) * _ginv);
-            int cz0 = (int)((z - myMin - _gz0) * _ginv);
-            int cx1 = (int)((x + myMin - _gx0) * _ginv);
-            int cz1 = (int)((z + myMin - _gz0) * _ginv);
+            // Скан по БОЛЬШЕЙ из норм: сосед из чужого отряда обязан попасть в
+            // просмотр, даже если по своей норме он уже достаточно далеко
+            float scanR = crossMin;
+            int cx0 = (int)((x - scanR - _gx0) * _ginv);
+            int cz0 = (int)((z - scanR - _gz0) * _ginv);
+            int cx1 = (int)((x + scanR - _gx0) * _ginv);
+            int cz1 = (int)((z + scanR - _gz0) * _ginv);
             if (cx0 < 0) cx0 = 0;
             if (cz0 < 0) cz0 = 0;
             if (cx1 >= _gw) cx1 = _gw - 1;
@@ -1495,12 +1539,51 @@ public partial class ArmyCore : RefCounted
                     while (j != -1)
                     {
                         if (j == i || _st[j] == dead) { j = _next[j]; continue; }
+                        // Своя шеренга держится вплотную, чужой отряд — шире
+                        // (см. шапку). Ноль в любой из сторон означает «вне
+                        // отрядов» и расширения не даёт
+                        int oSq = _sq[j];
+                        float lim = myMin;
+                        float limNearSq = myNearSq;
+                        bool otherSquad = oSq != mySq && oSq != 0 && mySq != 0;
+                        if (otherSquad)
+                        {
+                            lim = crossMin;
+                            limNearSq = crossNearSq;
+                        }
+                        // ── ПРОХОД СКВОЗЬ СОЮЗНЫЙ СТРОЙ ───────────────────
+                        // Жалоба владельца: «отряды при прохождении друг через
+                        // друга застревают, дёргаются и блокируют движение».
+                        //
+                        // Масок коллизий в игре нет вовсе — союзники и так
+                        // проходят друг сквозь друга геометрически. Заклинивал
+                        // их ИМЕННО ЭТОТ разбор, и вдвойне: для ЧУЖОГО отряда
+                        // норма расстояния здесь ещё и УМНОЖАЕТСЯ (crossSquad =
+                        // 1.6), то есть союзные отряды расталкиваются СИЛЬНЕЕ,
+                        // чем свои по шеренге. Идущий упирался в стоящих, те
+                        // упирались в него — и оба топтались.
+                        //
+                        // Правило: если ОДИН из пары идёт, а ДРУГОЙ стоит, и
+                        // они из разных отрядов — расширение снимается, а сама
+                        // норма ослабляется до passRelief. Тела при этом не
+                        // слипаются: личная норма остаётся, просто мягкая.
+                        if (otherSquad && passRelief < 1.0f)
+                        {
+                            bool iMove = _st[i] == movingState;
+                            bool oMove = _st[j] == movingState;
+                            if (iMove != oMove)
+                            {
+                                lim = myMin * passRelief;
+                                float pNear = Mathf.Max(lim - deadzone, 0.0f);
+                                limNearSq = pNear * pNear;
+                            }
+                        }
                         float dx = x - _px[j];
                         float dz = z - _pz[j];
                         float dd = dx * dx + dz * dz;
                         // МЁРТВАЯ ЗОНА: сосед, стоящий чуть теснее нормы, в
                         // расчёт не идёт — иначе строй перетаптывается вечно
-                        if (dd >= myNearSq) { j = _next[j]; continue; }
+                        if (dd >= limNearSq) { j = _next[j]; continue; }
                         if (dd < 1e-8f)
                         {
                             float ang = (i % 251) * (Mathf.Tau / 251.0f);
@@ -1509,7 +1592,7 @@ public partial class ArmyCore : RefCounted
                             dd = dx * dx + dz * dz;
                         }
                         float d = Mathf.Sqrt(dd);
-                        float need = (myMin - d) / d;
+                        float need = (lim - d) / d;
                         pxa += dx * need;
                         pza += dz * need;
                         j = _next[j];

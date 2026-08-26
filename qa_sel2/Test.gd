@@ -15,6 +15,7 @@ extends Node
 ## Числа берём из конфига и из констант HUD, а не хардкодим: балансную таблицу
 ## правит владелец, и стенд обязан следовать за ней (см. CLAUDE.md).
 
+const _Banner  := preload("res://scripts/SquadBanner.gd")
 const _UCfg    := preload("res://scripts/unit_stats_config.gd")
 const _Forge   := preload("res://scripts/forge_config.gd")
 const _VetStar := preload("res://scripts/VeterancyStar.gd")
@@ -137,7 +138,7 @@ func _test_group_levels() -> void:
 	# Дадим одному отряду лучников звание — карточка обязана показать звезду
 	var star_sid: int = int(archer_sids[1])
 	GameManager.squads[star_sid]["level"] = 2
-	GameManager.refresh_star(star_sid)
+	GameManager.refresh_squad_banner(star_sid)
 
 	sm._clear_selection()
 	for u in all_men:
@@ -193,7 +194,15 @@ func _test_group_levels() -> void:
 			hud._portrait_count_lbl.text if hud._portrait_count_lbl != null else "—",
 			hud.info_label.text])
 
-	# ── A5: у каждой карточки есть состав, шкала HP и (где есть звание) звезда
+	# ── A5: у каждой карточки есть состав, шкала HP и (где есть звание) значок
+	# ЗВЁЗДЫ ЗАМЕНЕНЫ ЗНАМЁНАМИ (заказ владельца, авг. 2026), и значок ранга в
+	# панели стал лычкой, а не «★». Набор возможных значков берём ИЗ КОНФИГА,
+	# а не перечисляем здесь: своя копия шкалы в стенде разъедется с игрой
+	var rank_glyphs: Dictionary = {}
+	for i in range(_UCfg.VET_BANNER_TIERS.size()):
+		var g: String = _UCfg.veteran_badge_text(i + 1)
+		if g != "":
+			rank_glyphs[g] = true
 	var with_count := 0
 	var with_bar := 0
 	var with_star := 0
@@ -204,7 +213,7 @@ func _test_group_levels() -> void:
 			var t: String = (l as Label).text
 			if t.is_valid_int() and int(t) > 0:
 				with_count += 1
-			elif t.contains("★"):
+			elif rank_glyphs.has(t):
 				with_star += 1
 		# Шкала — ColorRect ненулевой ширины внутри карточки
 		for ch in c.get_children():
@@ -596,22 +605,29 @@ func _test_smithy() -> void:
 # E2. ЗВЁЗДЫ ВЕТЕРАНСТВА
 # ═════════════════════════════════════════════════════════════════════════════
 func _test_stars() -> void:
-	print("\n═════ E. ЗВЁЗДЫ ВЕТЕРАНСТВА ═════")
+	print("\n═════ E. ЗНАМЁНА ВЕТЕРАНСТВА ═════")
+	# ── БЛОК ПЕРЕПИСАН: ЗВЁЗДЫ ЗАМЕНЕНЫ ЗНАМЁНАМИ (заказ владельца, авг. 2026)
+	# Прежние проверки утверждали, что метка стоит по ЦЕНТРУ МАСС отряда и что
+	# у звезды такой-то радиус. Требование развёрнуто: знамя — не метка над
+	# отрядом, а предмет в руках знаменосца, и стоять оно обязано НА НЁМ.
+	# Проверяем новое требование, а не подгоняем старое.
 	var r: Array = _make_squad("spearman", 5, Vector3(60.0, 0.0, 60.0))
 	var sid: int = int(r[0])
 	var men: Array = r[1]
 	await frames(3)
 	GameManager.squads[sid]["level"] = 1
-	GameManager.refresh_star(sid)
+	GameManager.refresh_squad_banner(sid)
 	await frames(2)
-	var star = GameManager.squads[sid]["star"]
-	verdict("E5 звезда отряда создана и живёт в мире, а не на бойце",
-		star != null and is_instance_valid(star) and not (star.get_parent() is Unit),
-		"родитель=%s" % (star.get_parent().name if star != null else "нет"))
-	if star == null:
+	var banner = (GameManager.squads[sid] as Dictionary).get("banner")
+	verdict("E5 знамя отряда создано и живёт в мире, а не на бойце",
+		banner != null and is_instance_valid(banner)
+			and not (banner.get_parent() is Unit),
+		"родитель=%s" % (banner.get_parent().name if banner != null else "нет"))
+	if banner == null:
 		return
 
-	# ── Центр масс: расставим бойцов заведомо несимметрично
+	# Расставим бойцов заведомо несимметрично: знамя обязано остаться на
+	# знаменосце, а не уехать в середину облака
 	var pts: Array = [Vector3(60.0, 0.0, 60.0), Vector3(70.0, 0.0, 60.0),
 		Vector3(60.0, 0.0, 74.0), Vector3(80.0, 0.0, 66.0), Vector3(64.0, 0.0, 62.0)]
 	for i in range(men.size()):
@@ -619,51 +635,55 @@ func _test_stars() -> void:
 		(men[i] as Node3D).global_position = Vector3(
 			p.x, GameManager.get_terrain_height(p.x, p.z), p.z)
 		(men[i] as Unit).sync_row()
-	# ── ЦЕНТР ОТРЯДА — МЕДИАНА, А НЕ СРЕДНЕЕ (заказ владельца, авг. 2026) ────
-	# Стенд считал среднее арифметическое сам и сравнивал с ним звезду. Число
-	# сменилось — и проверка честно покраснела, хотя код делает ровно то, что
-	# просили: у растянутого отряда среднее уезжает в пустое поле между
-	# группами, медиана садится на бо́льшую из них. Спрашиваем ИСТОЧНИК ИСТИНЫ
-	# (GameManager.squad_centroid), а не переписываем формулу второй раз
-	var want: Vector3 = GameManager.squad_centroid(sid)
-	# Обновление идёт раз в STAR_UPDATE_FRAMES кадров — дадим ему сработать
-	# ЗВЕЗДА ТЕПЕРЬ ДОГОНЯЕТ ЦЕНТР, А НЕ ПРЫГАЕТ В НЕГО (заказ владельца:
-	# «должна плавно перемещаться, а не дёргаться» — см.
-	# GameManager.STAR_FOLLOW). Значит ждать надо не один такт пересчёта, а
-	# схождение сглаживания: 60 кадров при коэффициенте 0.18 — это больше
-	# 99.99% пути
-	await frames(60)
-	var got: Vector3 = (star as Node3D).global_position
-	var dxz: float = Vector2(got.x - want.x, got.z - want.z).length()
-	verdict("E6 звезда стоит строго в центре отряда (медиана)",
-		dxz <= 0.05,
-		"центр=(%.2f, %.2f) звезда=(%.2f, %.2f), расхождение %.3f м" % [
-			want.x, want.z, got.x, got.z, dxz])
+	await frames(20)
+	var bearer = GameManager.squad_bearer(sid)
+	var bp: Vector3 = (bearer as Unit).draw_position() if bearer != null else Vector3.ZERO
+	var got: Vector3 = (banner as Node3D).global_position
+	var dxz: float = Vector2(got.x - bp.x - _Banner.POLE_OFFSET_X, got.z - bp.z).length()
+	verdict("E6 знамя стоит на знаменосце, а не по центру отряда",
+		bearer != null and dxz <= 0.10,
+		"боец=(%.2f, %.2f) знамя=(%.2f, %.2f), расхождение %.3f м" % [
+			bp.x, bp.z, got.x, got.z, dxz])
+	# И проверим, что это НЕ совпало случайно с центром: у растянутого облака
+	# центр и знаменосец обязаны быть разными точками
+	var mid: Vector3 = GameManager.squad_centroid(sid)
+	verdict("E6б знамя и центр отряда — разные точки",
+		Vector2(bp.x - mid.x, bp.z - mid.z).length() > 0.5,
+		"знаменосец=(%.2f, %.2f) центр=(%.2f, %.2f)" % [bp.x, bp.z, mid.x, mid.z])
 
-	# ── Гибель бойца сдвигает центр, а не «перевешивает» звезду на соседа
-	var dead: Unit = men[3]
-	dead.take_damage(dead.max_health * 3.0, null)
-	await frames(60)
-	var want2: Vector3 = GameManager.squad_centroid(sid)
-	var got2: Vector3 = (star as Node3D).global_position
-	var dxz2: float = Vector2(got2.x - want2.x, got2.z - want2.z).length()
-	verdict("E7 после потери бойца центр отряда пересчитан",
-		dxz2 <= 0.05 and is_instance_valid(star),
-		"новый центр=(%.2f, %.2f) звезда=(%.2f, %.2f), расхождение %.3f м" % [
-			want2.x, want2.z, got2.x, got2.z, dxz2])
+	# ── Гибель знаменосца ПЕРЕВЕШИВАЕТ знамя, а не гасит его
+	var old_bearer = bearer
+	(old_bearer as Unit).take_damage((old_bearer as Unit).max_health * 3.0, null)
+	await frames(6)
+	var bearer2 = GameManager.squad_bearer(sid)
+	verdict("E7 после гибели знаменосца знамя подхватил живой боец отряда",
+		bearer2 != null and bearer2 != old_bearer
+			and (bearer2 as Unit).squad_id == sid
+			and is_instance_valid(banner),
+		"новый знаменосец=%s" % str(bearer2 != null))
 
-	# ── Размер вдвое и бронза на 1-3
-	verdict("E8 звезда вдвое крупнее прежней",
-		absf(_VetStar.STAR_RADIUS / 0.098 - 2.0) <= 0.02,
-		"радиус %.3f м (было 0.098)" % _VetStar.STAR_RADIUS)
-	var bronze_ok := true
+	# ── Один квад на отряд: знамя не имеет права стоить поверхности на бойца
+	var mi := banner as MeshInstance3D
+	var surf: int = mi.mesh.get_surface_count() if mi != null and mi.mesh != null else 0
+	verdict("E8 знамя — один квад, а не поверхность на каждую фигуру",
+		surf == 1, "поверхностей=%d" % surf)
+
+	# ── Форма и цвет грейдов: красный вымпел 1-3, синий гвидон 4-6, штандарт 7
+	var shape_ok := true
 	var grades: Array = []
-	for lvl in [1, 2, 3]:
-		var t: Dictionary = _UCfg.veteran_star_tier(lvl)
-		grades.append("%d:%s×%d" % [lvl, String(t.get("tier", "?")), int(t.get("count", 0))])
-		if String(t.get("tier", "")) != "bronze":
-			bronze_ok = false
-	verdict("E9 ранги 1-3 — бронзовые звёзды", bronze_ok, ", ".join(grades))
+	for lvl in range(1, _UCfg.VET_BANNER_TIERS.size() + 1):
+		var t: Dictionary = _UCfg.veteran_banner_tier(lvl)
+		var sh: int = int(t.get("shape", -1))
+		grades.append("%d:%d" % [lvl, sh])
+		var want_shape: int = _UCfg.BANNER_PENNANT
+		if lvl >= 7:
+			want_shape = _UCfg.BANNER_STANDARD
+		elif lvl >= 4:
+			want_shape = _UCfg.BANNER_GUIDON
+		if sh != want_shape:
+			shape_ok = false
+	verdict("E9 формы грейдов: вымпел 1-3, «ласточкин хвост» 4-6, штандарт 7",
+		shape_ok, ", ".join(grades))
 
 	for m in men:
 		if is_instance_valid(m):

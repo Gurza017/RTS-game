@@ -312,9 +312,14 @@ func _c_grades() -> void:
 	sm._handle_single_click(_screen_of(foes[0]), false)
 	await frames(3)
 	var head := _head_text()
-	verdict("C2 звёзды ветеранства противника показаны",
-		lvl > 0 and head.contains("★"),
-		"уровень %d при пороге %d, заголовок «%s»" % [lvl, need, head])
+	# ЗВЁЗД В ПРОЕКТЕ БОЛЬШЕ НЕТ — их заменили знамёна (заказ владельца),
+	# а в заголовке панели ранг читается НАЗВАНИЕМ отряда («Отряд
+	# опытных копейщиков»). Проверка искала глиф звезды и краснела на
+	# развёрнутом требовании, а не на поломке. Ждём ранг ИЗ КОНФИГА
+	var rank: String = _UCfg.veteran_rank_name("spearman", lvl)
+	verdict("C2 ветеранство противника показано в заголовке",
+		lvl > 0 and rank != "" and head.contains(rank),
+		"уровень %d при пороге %d, ждали «%s», заголовок «%s»" % [lvl, need, rank, head])
 
 	_kill_all([foes])
 	sm.clear_recon()

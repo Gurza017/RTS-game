@@ -155,6 +155,10 @@ func _process(delta: float) -> void:
 	if edge.length() > 0.0:
 		_pan_by(edge.normalized() * pan_speed * edge_pan_boost * delta)
 
+	# Плавный перевод камеры к отряду (см. glide_to). Стоит ДО зажима границ:
+	# _clamp_focus внутри глиссады и так зовётся, а порядок «сначала подвинуть,
+	# потом зажать» здесь тот же, что у ручного пана
+	_tick_glide(delta)
 	_height = lerp(_height, _target_height, delta * 6.0)
 	# Зум сам по себе (без пана) должен подтягивать границы: отдаляясь у самого
 	# края карты, игрок иначе видел бы черноту, пока не шевельнёт мышью/WASD
@@ -188,6 +192,8 @@ func _pan_by(step: Vector2) -> void:
 	var dp := cam_right * step.x + cam_fwd * (-step.y)
 	_focus.x += dp.x
 	_focus.z += dp.z
+	# Игрок взялся за камеру сам — глиссада к отряду отменяется (см. glide_to)
+	_glide = Vector3.INF
 	_clamp_focus()
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -225,6 +231,42 @@ func _unhandled_input(event: InputEvent) -> void:
 func pan_to(world_pos: Vector3) -> void:
 	_focus.x = world_pos.x
 	_focus.z = world_pos.z
+	_clamp_focus()
+	_glide = Vector3.INF        # ручной перенос отменяет глиссаду
+
+## ── ПЛАВНЫЙ ПЕРЕВОД КАМЕРЫ (ГЛИССАДА) ──────────────────────────────────────
+## Заказ владельца: клик по значку заслуженного ранга обязан ПЕРЕВОДИТЬ камеру
+## на отряд, а не швырять её туда одним кадром, — и делать это ДАЖЕ НА ПАУЗЕ:
+## награду выбирают именно на паузе.
+##
+## Считается там же, где и зум (_process): камера стоит в PROCESS_MODE_ALWAYS,
+## то есть тикает на паузе, и отдельного таймера ей не нужно. Догон
+## экспоненциальный — тот же приём и тот же порядок скорости, что у высоты, так
+## что движение камеры выглядит одинаково, чем бы ни было вызвано.
+##
+## ЛЮБОЕ РУЧНОЕ ДВИЖЕНИЕ ГЛИССАДУ ОТМЕНЯЕТ (см. _pan_by и pan_to). Иначе камера
+## продолжала бы уползать к цели из-под пальцев игрока — самое раздражающее, что
+## может делать камера в RTS
+var _glide: Vector3 = Vector3.INF
+const GLIDE_SPEED := 5.0
+## Ближе этого считаем, что доехали: остаток экспоненты гасить незачем
+const GLIDE_DONE  := 0.15
+
+func glide_to(world_pos: Vector3) -> void:
+	_glide = Vector3(world_pos.x, 0.0, world_pos.z)
+
+func _tick_glide(delta: float) -> void:
+	if _glide.x == INF:
+		return
+	var k: float = clampf(delta * GLIDE_SPEED, 0.0, 1.0)
+	_focus.x = lerpf(_focus.x, _glide.x, k)
+	_focus.z = lerpf(_focus.z, _glide.z, k)
+	var dx: float = _glide.x - _focus.x
+	var dz: float = _glide.z - _focus.z
+	if dx * dx + dz * dz <= GLIDE_DONE * GLIDE_DONE:
+		_focus.x = _glide.x
+		_focus.z = _glide.z
+		_glide = Vector3.INF
 	_clamp_focus()
 
 ## Мгновенная постановка камеры (без плавного lerp): фокус + зум сразу же,

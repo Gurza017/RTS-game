@@ -70,12 +70,20 @@ static func close_ranks(members: Array, slots: Array,
 		# Ряд пересчитывается вместе с местом: перешедший вперёд боец обязан
 		# опустить копьё, а ушедший назад — поднять (см. Spearman._spear_leveled)
 		u.formation_row = si / maxi(_per_row(slots, course), 1)
+		# ── РАЗРЕШЕНИЕ ЗАЛОЧЕННОМУ СТОЙКОЙ ────────────────────────────────
+		# Фаланга стоит намертво (STANCES.defense.lock_position) и обычные
+		# приказы на движение не исполняет вовсе. Смыкание рядов —
+		# ЕДИНСТВЕННОЕ исключение, и оно обязательно: без него потери и проход
+		# союзников сквозь строй оставляли бы в нём вечные дыры, а заказ на
+		# смыкание стоит рядом с заказом на замок позиции
+		u.allow_reform_move()
 		u.command_move(slot, slow, course)
 		moved += 1
 	# Бойцы, которым места не хватило (пополнение из замка встало в хвост),
 	# просто идут за строем — отдельного места для них в разметке нет
 	for extra in free_men:
 		if slots.size() > 0:
+			extra.allow_reform_move()
 			extra.command_move(slots[slots.size() - 1] - course * 1.2, slow, course)
 	return moved
 

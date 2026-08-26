@@ -17,6 +17,14 @@ const _Formations := preload("res://scripts/Formations.gd")
 ## соседний ряд
 const RANK_GAP              := 2.2
 
+## ── ЗАПАС К РАСЧЁТНОМУ ГАБАРИТУ ОТРЯДА ─────────────────────────────────────
+## Круг «той же площади, что и блок из n бойцов» — оценка снизу: реальный строй
+## не идеальный круг, у него есть углы и неровный последний ряд. Полуторный
+## запас оставляет форму узнаваемой и режет только настоящие выбросы.
+## Меньше — и обычный прямоугольный строй начнёт сминаться в круг при каждом
+## приказе; больше — и «колбаса» пролезет обратно (см. _issue_march_keeping_shape)
+const SHAPE_CLAMP_SLACK := 1.5
+
 var camera: Camera3D
 var selected_units: Array  = []
 ## ── ЧЛЕНСТВО В ВЫДЕЛЕНИИ — СЛОВАРЁМ, А НЕ ПОИСКОМ ПО МАССИВУ ────────────────
@@ -129,6 +137,16 @@ var _rmb_press_over_ui: bool = false
 
 func _unhandled_input(event: InputEvent) -> void:
 	if camera == null:
+		return
+
+	# ── РАСФОРМИРОВАТЬ ВЫДЕЛЕННОЕ (Delete) ───────────────────────────────────
+	# Заказ владельца: побитый отряд должен убираться с поля одним нажатием, а
+	# не доживать свой век обузой. Стоит ПЕРЕД горячими группами — там разбор
+	# идёт по цифрам, и пересечься они не могут, но порядок здесь читается как
+	# приоритет: клавиша уничтожения не должна проваливаться никуда дальше
+	if event is InputEventKey and event.pressed and not event.echo 			and (event.keycode == KEY_DELETE or event.physical_keycode == KEY_DELETE):
+		disband_selected()
+		get_viewport().set_input_as_handled()
 		return
 
 	# ── Горячие группы ────────────────────────────────────────────────────────
@@ -656,6 +674,18 @@ func _execute_line_formation(line_start: Vector3, line_end: Vector3) -> void:
 		_issue_formation_move(line_start)   # клич подаст она сама
 		return
 	_order_battle_cry(movable)   # марш по линии — такой же приказ, те же правила
+	# ── «ДЕРЖАТЬ СТРОЙ» — ТОЛЬКО НА БОЛЬШОМ ВЫДЕЛЕНИИ ───────────────────────
+	# Растягивание ПКМ — единственный жест, которым игрок задаёт линию и
+	# направление фронта, и звучит он в момент ОТПУСКАНИЯ кнопки: именно сюда
+	# приходит завершённый жест (см. _unhandled_input).
+	#
+	# УСЛОВИЕ СУЖЕНО ПО ЗАКАЗУ ВЛАДЕЛЬЦА. Было «копейщики любой численностью
+	# ЛИБО пять отрядов», и первая половина оказалась спамом: строй по линии —
+	# это обычный микро-контроль, игрок растягивает им два-три отряда десятки
+	# раз за бой, и на каждый растяг кричали. Осталось одно требование, то же,
+	# что у прочих массовых реплик: пять отрядов и больше
+	if _mass_selection():
+		AudioManager.play_voice("hold_line")
 	var line_vec := line_end - line_start
 	var flat: Array
 	var slots: Array
@@ -963,6 +993,59 @@ func clear_selection() -> void:
 	_clear_selection()
 	GameManager.on_selection_changed(selected_units)
 
+# ═════════════════════════════════════════════════════════════════════════════
+# РАСФОРМИРОВАНИЕ ВЫДЕЛЕННЫХ ОТРЯДОВ (клавиша Delete)
+# ═════════════════════════════════════════════════════════════════════════════
+# Заказ владельца: выделил ослабленные отряды, нажал Delete — их нет.
+#
+# ЧТО ИМЕННО ДЕЛАЕМ. Боец получает СМЕРТЬ, а не queue_free: смерть — это
+# единственный путь, на котором он снимает с себя строку в ядре армии, место в
+# сетке, счётчик атакующих у своей цели и место в отряде, а на поле оставляет
+# ТЕЛО (Unit._die → _leave_corpse). Прямое удаление узла обошло бы всё это:
+# тела не осталось бы вовсе, а _exit_tree разбирал бы то же самое молча и позже.
+# Урон берётся заведомо смертельный и идёт через take_damage — там же живёт
+# порог пробития, из-за которого «просто обнулить current_health» ненадёжно.
+#
+# УБИЙЦЫ НЕТ (attacker = null). Расформирование — не бой: ни фрага, ни опыта
+# отряду противника, ни ответного навала. credit_kill(null) это выдерживает.
+#
+# ТОЛЬКО СВОИ И ТОЛЬКО БОЙЦЫ. Здания в selected_units попадают (панель замка
+# работает через то же выделение), и снос собственного замка по случайному
+# нажатию Delete — не та цена, которую игрок готов платить за удобство.
+# Чужие сюда попасть не могут по построению: разведанный вражеский отряд живёт
+# в отдельном поле (см. _set_recon) и в selected_units не заходит.
+#
+# СПИСОК КОПИРУЕТСЯ ДО ПЕРВОЙ СМЕРТИ. Гибель бойца дёргает remove_from_squad,
+# _disband_squad и on_selection_changed — то есть правит ровно тот массив, по
+# которому шёл бы обход.
+## Возвращает, сколько бойцов расформировано (нужно стенду)
+func disband_selected() -> int:
+	_purge_invalid()
+	if selected_units.is_empty():
+		return 0
+	var doomed: Array = []
+	for u in selected_units:
+		if not is_instance_valid(u):
+			continue
+		var un := u as Unit
+		if un == null or un.is_dead():
+			continue
+		if un.faction != Constants.FACTION_PLAYER:
+			continue
+		doomed.append(un)
+	if doomed.is_empty():
+		return 0
+	# Выделение снимается ПЕРЕД казнью: кольца выделения гасятся штатным путём,
+	# а панель получает пустой набор один раз, а не по разу на каждого павшего
+	_clear_selection()
+	for u in doomed:
+		var un := u as Unit
+		if not is_instance_valid(un) or un.is_dead():
+			continue
+		un.take_damage(un.max_health * 1000.0 + 1e6, null)
+	GameManager.on_selection_changed(selected_units)
+	return doomed.size()
+
 func _handle_single_click(screen_pos: Vector2, additive: bool) -> void:
 	if _over_ui(screen_pos):
 		return
@@ -1191,7 +1274,43 @@ func enemy_unit_under_cursor(screen_pos: Vector2, use_zone: bool = true) -> Unit
 ## открывается в карточке разведки. Отряд, а не боец: игра оперирует отрядами,
 ## и подсветить одного человека из двадцати было бы враньём о том, что будет
 ## атаковано
+## ── ЧУЖОЕ ЗДАНИЕ ПОД КУРСОРОМ ──────────────────────────────────────────────
+## Отдельной функцией, а не веткой в enemy_unit_under_cursor: у той типизованный
+## возврат Unit, и постройка в него не помещается по определению. Разбор луча
+## общий — то есть подсветка и приказ по-прежнему смотрят на ОДИН И ТОТ ЖЕ
+## разобранный клик, а не на два похожих
+##
+## ЗАЧЕМ ЭТО ВООБЩЕ. Здание и раньше было законной целью приказа: маска клика
+## включает LAYER_BUILDINGS, ПКМ по чужой постройке доходит до command_attack,
+## лучник по ней стреляет. Не было ровно ОБРАТНОЙ СВЯЗИ: наведясь на вражеский
+## барак, игрок не видел ни красного кольца, ни какого-либо иного признака, что
+## клик вообще что-то сделает, — потому что весь путь подсветки был написан под
+## `pick["target"] as Unit` и на постройке молча отдавал null. С точки зрения
+## игрока это и есть «здание нельзя выбрать целью»: единственный способ узнать,
+## сработало ли, — кликнуть и смотреть, полетят ли стрелы
+func enemy_building_under_cursor(screen_pos: Vector2) -> Building:
+	if camera == null or _over_ui(screen_pos):
+		return null
+	var pick := _pick_at(screen_pos, Constants.LAYER_UNITS | Constants.LAYER_BUILDINGS
+		| Constants.LAYER_GROUND)
+	var b := pick["target"] as Building
+	if b == null or b.faction == Constants.FACTION_PLAYER or b.is_dead():
+		return null
+	# Неразведанная постройка снимает с себя слой столкновений (см.
+	# Building.set_fog_hidden), поэтому в pick она не попадает вовсе. Проверка
+	# по видимости всё равно стоит: слой снимается отложенно, и один кадр
+	# между появлением здания и первым пересчётом тумана существует
+	if not b.visible:
+		return null
+	return b
+
 func enemy_squad_under_cursor(screen_pos: Vector2, use_zone: bool = true) -> Array:
+	# ЗДАНИЕ РАЗБИРАЕТСЯ ПЕРВЫМ: на постройке enemy_unit_under_cursor отдаёт
+	# null и уходит искать «кого-нибудь рядом» по сетке бойцов — то есть клик
+	# по бараку подсветил бы случайного гоблина в трёх метрах от него
+	var bld := enemy_building_under_cursor(screen_pos)
+	if bld != null:
+		return [bld]
 	var u := enemy_unit_under_cursor(screen_pos, use_zone)
 	if u == null:
 		return []
@@ -1305,6 +1424,134 @@ func _enemy_in_squad_zone(ground: Vector3) -> Node3D:
 			best_d = d2
 			best   = u
 	return best
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ЛИНИЯ ФРОНТА: НЕСКОЛЬКО ОТРЯДОВ БЬЮТ ПО ШИРИНЕ, А НЕ В ОДНУ ТОЧКУ
+# ═════════════════════════════════════════════════════════════════════════════
+# Жалоба владельца: выделяешь десять отрядов, кликаешь по врагу — и все десять
+# лезут в одно место, спрессовываясь в комок размером в два отряда.
+#
+# ПОЧЕМУ ТАК БЫЛО. Приказ атаки намеренно сделан ОДНОЙ целью на всё выделение
+# (см. разбор в _handle_right_click): раньше каждый боец получал СВОЮ ближайшую
+# цель из полного списка врагов, и отряд разбегался. Лечение было правильным по
+# духу и слишком буквальным по исполнению — «одна цель» превратилась в «одна
+# точка на карте», к которой сходятся все.
+#
+# ЧТО ДЕЛАЕМ. Ровно то же самое, но с шагом посередине: цель по-прежнему одна
+# НА ОТРЯД (внутри отряда её разбирает squad_pick_member, как и раньше), но
+# разным отрядам достаются разные участки чужой линии. Левый наш отряд идёт на
+# левый фланг противника, правый — на правый, средние — в центр.
+#
+# КАК СЧИТАЕТСЯ ЛИНИЯ. Тем же способом, которым его считает ИИ, когда
+# разворачивает свой строй параллельно нашему (EnemyAI._enemy_front_normal):
+# главная ось облака противника через два элемента ковариации по XZ и atan2.
+# Ни матриц, ни итераций. Дальше и враги, и наши отряды проецируются на эту ось
+# и раскладываются по порядку — фланги напротив флангов.
+#
+# ЦЕНА. Один скан сетки и одна сортировка НА КЛИК. Это не покадровый путь.
+#
+# КОГДА НЕ ДЕЛАЕМ ВОВСЕ: один отряд в выделении (делить нечего), меньше трёх
+# врагов рядом (это не линия, а одиночки — угол по ним был бы шумом), цель не
+# боец (по зданию распределять нечего). Во всех этих случаях возвращается
+# пустой словарь, и приказ идёт прежним путём, слово в слово.
+
+## В каком радиусе от указанной цели искать чужую линию. Заметно меньше, чем у
+## ИИ (45 м): тот ищет фронт на подходе за полкарты, а здесь игрок ткнул в
+## конкретный строй, и затягивать в замер соседний бой в тридцати метрах — это
+## растащить приказ вместо того, чтобы его собрать
+const FRONT_SCAN_R := 24.0
+## Потолок числа точек в замере — главную ось задают первые же десятки
+const FRONT_SCAN_MAX := 160
+
+## Номера ВЫДЕЛЕННЫХ отрядов, каждый по одному разу
+func _selected_squad_ids() -> Array:
+	var out: Array = []
+	var seen: Dictionary = {}
+	for u in selected_units:
+		if not is_instance_valid(u):
+			continue
+		var uu := u as Unit
+		if uu == null or uu.squad_id <= 0:
+			continue
+		if seen.has(uu.squad_id):
+			continue
+		seen[uu.squad_id] = true
+		out.append(uu.squad_id)
+	return out
+
+## Раздать выделенным отрядам участки чужой линии. Ответ: sid -> боец
+## противника, с которого этому отряду начинать. Пустой словарь — распределять
+## нечего, приказ идёт как обычно
+func frontline_targets(focus: Node3D) -> Dictionary:
+	var out: Dictionary = {}
+	var fu := focus as Unit
+	if fu == null or not is_instance_valid(fu) or fu.is_dead():
+		return out
+	var mine: Array = _selected_squad_ids()
+	if mine.size() < 2:
+		return out
+	# ── ЧУЖАЯ ЛИНИЯ ─────────────────────────────────────────────────────────
+	var at: Vector3 = fu.global_position
+	var foes: Array = []
+	var sx := 0.0
+	var sz := 0.0
+	for n in GameManager.unit_grid.query_radius(at, FRONT_SCAN_R):
+		var e := n as Unit
+		if e == null or not is_instance_valid(e) or e.is_dead():
+			continue
+		if e.faction == Constants.FACTION_PLAYER:
+			continue
+		if not _visible_to_player(e):
+			continue
+		foes.append(e)
+		sx += e.global_position.x
+		sz += e.global_position.z
+		if foes.size() >= FRONT_SCAN_MAX:
+			break
+	# Меньше трёх — это не линия, а случайные одиночки (та же оговорка и та же
+	# граница, что у EnemyAI._enemy_front_normal)
+	if foes.size() < 3:
+		return out
+	var cnt: float = float(foes.size())
+	var mx: float = sx / cnt
+	var mz: float = sz / cnt
+	var cxx := 0.0
+	var czz := 0.0
+	var cxz := 0.0
+	for e in foes:
+		var p: Vector3 = (e as Unit).global_position
+		var ax: float = p.x - mx
+		var az: float = p.z - mz
+		cxx += ax * ax
+		czz += az * az
+		cxz += ax * az
+	# Облако круглое — направления у него нет, делить не по чему
+	if absf(cxx - czz) < 0.01 and absf(cxz) < 0.01:
+		return out
+	var ang: float = 0.5 * atan2(2.0 * cxz, cxx - czz)
+	# ГЛАВНАЯ ось (вдоль линии), а не нормаль: раскладываем по ШИРИНЕ фронта
+	var axis := Vector2(cos(ang), sin(ang))
+	# ── РАСКЛАДКА ───────────────────────────────────────────────────────────
+	var foe_key: Array = []
+	for e in foes:
+		var p: Vector3 = (e as Unit).global_position
+		foe_key.append([p.x * axis.x + p.z * axis.y, e])
+	foe_key.sort_custom(func(a, b): return float(a[0]) < float(b[0]))
+	var my_key: Array = []
+	for sid in mine:
+		var c: Vector3 = GameManager.squad_centroid(int(sid))
+		my_key.append([c.x * axis.x + c.z * axis.y, sid])
+	my_key.sort_custom(func(a, b): return float(a[0]) < float(b[0]))
+	# Каждому нашему отряду — СЕРЕДИНА своего участка чужой линии. Именно
+	# середина, а не край: боец с краю участка стоит вплотную к соседнему
+	# участку, и два наших отряда снова сошлись бы в одну точку
+	var nf: int = foe_key.size()
+	var nm: int = my_key.size()
+	for k in range(nm):
+		var idx: int = int((float(k) + 0.5) * float(nf) / float(nm))
+		idx = clampi(idx, 0, nf - 1)
+		out[int(my_key[k][1])] = foe_key[idx][1]
+	return out
 
 ## Есть ли в выделении хоть кто-то, кому приказ атаки вообще осмыслен.
 ## Артель рабочих не должна превращать клик у вражеского строя в самоубийство:
@@ -1492,17 +1739,41 @@ func _handle_right_click(screen_pos: Vector2, run: bool = false) -> void:
 		# Unit.command_attack через GameManager.squad_pick_member — то есть отряд
 		# бьёт назначенный отряд сообща, но не сваливается всей толпой на одну модель
 		# ═══════════════════════════════════════════════════════════════════════
+		# ── УЧАСТКИ ЧУЖОЙ ЛИНИИ ПО ОТРЯДАМ (см. frontline_targets) ─────────
+		# Считается ОДИН РАЗ на клик, до раздачи приказов: внутри цикла это был
+		# бы скан сетки на каждого выделенного бойца
+		var front: Dictionary = {}
+		if is_attack_cmd:
+			front = frontline_targets(target as Node3D)
+			# ── ЗДАНИЕ ОБЛЕПЛЯЕТСЯ СЕКТОРАМИ, А НЕ ТАРАНИТСЯ В ОДНУ ТОЧКУ ──
+			# Раскладка по фронту (frontline_targets) делит ЧУЖИЕ ОТРЯДЫ, а у
+			# постройки отряда нет — она не срабатывала вовсе, и все отряды шли
+			# в одну и ту же точку: замер qa_mass_siege давал 1.6 м между
+			# центрами пяти отрядов, то есть они стояли друг в друге.
+			# Здесь каждый отряд получает СВОЙ сектор кольца вокруг здания
+			if target is Building:
+				_ring_squads_around(target as Building)
+		# Кому что досталось — нужно ещё раз ниже, для указателей приказа
+		var atk_target: Dictionary = {}
 		var atk_squads: Array = []
 		for u in selected_units:
 			if not is_instance_valid(u): continue
 			if is_gather_cmd and u is Worker:
 				u.command_gather(target)
 			elif is_attack_cmd and u.has_method("command_attack"):
-				# lock = true — приказ игрока, держится до истребления цели
-				u.command_attack(target, true, true, true)
 				var sid: int = (u as Unit).squad_id if u is Unit else 0
+				# Свой участок фронта, если он есть; иначе — общая цель, как и
+				# было. Замок при этом навешивается на ОТРЯД этого бойца
+				# (см. Unit._arm_target_lock), то есть отряд по-прежнему бьёт
+				# отряд, а не гонится за одной моделью
+				var mine_t = target
+				if sid > 0 and front.has(sid):
+					mine_t = front[sid]
+				# lock = true — приказ игрока, держится до истребления цели
+				u.command_attack(mine_t, true, true, true)
 				if sid > 0 and not (sid in atk_squads):
 					atk_squads.append(sid)
+					atk_target[sid] = mine_t
 			elif is_gather_cmd and u.has_method("command_move"):
 				# СОЛДАТ В СМЕШАННОМ ВЫДЕЛЕНИИ (рабочие + войска) по клику в лес
 				# не остаётся без приказа: рубить он не умеет, значит идёт туда,
@@ -1512,14 +1783,34 @@ func _handle_right_click(screen_pos: Vector2, run: bool = false) -> void:
 		# (см. _order_battle_cry). Сбор ресурсов поводом не является
 		if is_attack_cmd:
 			_order_battle_cry(selected_units)
+			# РОГ К АТАКЕ: пять и больше отрядов брошены на противника.
+			# Только на атаку — приказ собирать ресурсы поводом трубить не
+			# является, поэтому проверка стоит внутри is_attack_cmd
+			if _mass_selection():
+				# ── ТОЛЬКО РОГ, БЕЗ КЛИЧА ──────────────────────────────────
+				# Была цепочка «рог, затем forward march», и владелец её
+				# отменил: «вперёд, марш» — реплика МАРША, и поверх приказа
+				# атаки она читается как чужая. Своя озвучка атаки появится
+				# позже и встанет сюда же; до тех пор атака — это чистый сигнал
+				# рогом.
+				# Механизм цепочки (play_voice_chain) при этом остаётся на
+				# месте и проверяется стендом: он понадобится, как только
+				# реплика атаки приедет
+				AudioManager.play_voice("horn_attack")
 			# ── ЧТО ПРИКАЗАНО, ИГРОК ОБЯЗАН ВИДЕТЬ ──────────────────────────
 			# Приказ запоминается за отрядом и подсвечивает цель красным
 			# кольцом — в том числе ПОЗЖЕ, когда игрок вернётся к этому отряду
 			# (см. GameManager._refresh_order_marks). Снимется сам, когда цель
 			# истребят
 			for sid2 in atk_squads:
+				# Указатель показывает ТО, ЧТО ПРИКАЗАНО ЭТОМУ отряду, а не то,
+				# куда ткнул курсор: при раскладке по фронту это разные цели, и
+				# общая метка врала бы всем, кроме одного отряда
+				var shown = atk_target.get(int(sid2), target)
+				if not is_instance_valid(shown):
+					shown = target
 				GameManager.squad_note_order(int(sid2), GameManager.ORDER_ATTACK,
-					(target as Node3D).global_position, target)
+					(shown as Node3D).global_position, shown)
 		# РАЗМЕТКУ СТРОЯ НА ВРЕМЯ АТАКИ НЕ СТИРАЕМ — ОНА ПРОСТО НЕ ДЕЙСТВУЕТ.
 		# Смыкание рядов зовёт command_move каждому бойцу и сняло бы замок цели
 		# посреди исполнения приказа, поэтому оно заблокировано, пока замок жив
@@ -1547,6 +1838,13 @@ func _issue_formation_move(center: Vector3, run: bool = false) -> void:
 	if movable.is_empty():
 		return
 	_order_battle_cry(movable)
+	# МАССОВЫЙ МАРШ: пять и больше отрядов получили приказ идти.
+	# Здесь, а не в _handle_right_click, и это важно: сюда сходятся ВСЕ ветки
+	# приказа на движение (сетка блоков, марш строем, россыпь), и любая из них
+	# — законный повод скомандовать. Двойной ПКМ (run) отсюда же: бег — это
+	# тот же приказ идти, только быстрее
+	if _mass_selection():
+		AudioManager.play_voice("mass_march")
 	var count := movable.size()
 	# ОТРЯД (Ctrl+1..9) ИДЁТ МАРШЕМ, СОХРАНЯЯ СВОЙ СТРОЙ.
 	# Раньше здесь всегда строилась заново квадратная сетка ceil(√N), и
@@ -1756,6 +2054,16 @@ func _issue_group_grid_move(movable: Array, center: Vector3, run: bool) -> bool:
 		sorted_squads.append(squads[int(i1)])
 	squads = sorted_squads
 
+	# ── СВОИ ДРУГ ДРУГУ НЕ ПОМЕХА ──────────────────────────────────────────
+	# Отряды, которым раздают приказ ЭТИМ ЖЕ кликом, уже разведены сеткой
+	# ячеек. Считать их занятыми местами значило бы развести их дважды: сетка
+	# поставила рядом, а разведение растолкало бы ещё дальше — и группа
+	# расползлась бы вместо блока (см. GameManager.free_squad_spot)
+	var same_order: Dictionary = {}
+	for b3 in squads:
+		var arr3: Array = b3
+		if not arr3.is_empty() and arr3[0] is Unit:
+			same_order[(arr3[0] as Unit).squad_id] = true
 	for i in range(n):
 		var row: int = i / cols
 		var col: int = i % cols
@@ -1769,12 +2077,13 @@ func _issue_group_grid_move(movable: Array, center: Vector3, run: bool) -> bool:
 		var cell_centre: Vector3 = center + across * off_a - course * (float(row) * cell_d)
 		# Внутренний строй отряда переносится как есть; курс — общий на группу,
 		# иначе фланговые блоки пришли бы веером (см. course_override)
-		_issue_march_keeping_shape(squads[i] as Array, cell_centre, false, run, course)
+		_issue_march_keeping_shape(squads[i] as Array, cell_centre, false, run,
+			course, same_order)
 	# Одиночки — своей ячейкой позади сетки: строя у них нет, но приказ есть
 	if not loose.is_empty():
 		var rows_n: int = int(ceil(float(n) / float(maxi(cols, 1))))
 		_issue_march_keeping_shape(loose,
-			center - course * (float(rows_n) * cell_d), false, run, course)
+			center - course * (float(rows_n) * cell_d), false, run, course, same_order)
 	return true
 
 ## ЗАПОМНИТЬ РАЗМЕТКУ ЗА КАЖДЫМ ОТРЯДОМ ВЫДЕЛЕНИЯ.
@@ -1832,11 +2141,27 @@ func _group_course(movable: Array, center: Vector3) -> Vector3:
 ## Пустой вектор = прежнее поведение (курс считает сам)
 func _issue_march_keeping_shape(movable: Array, center: Vector3,
 		slow: bool = true, run: bool = false,
-		course_override: Vector3 = Vector3.ZERO) -> void:
-	var centroid := Vector3.ZERO
-	for u in movable:
-		centroid += (u as Node3D).global_position
-	centroid /= float(movable.size())
+		course_override: Vector3 = Vector3.ZERO,
+		ignore: Dictionary = {}) -> void:
+	# ── НЕ ВСТАЁМ НА ЧУЖОЕ МЕСТО ───────────────────────────────────────────
+	# Точка приказа проверяется на занятость ОДИН РАЗ, здесь: занято — отряд
+	# встанет рядом, вплотную, но не внутри чужой массы (см.
+	# GameManager.free_squad_spot). Лечить это расталкиванием нельзя — оно
+	# разводит тела, но не знает про отряды, и две сотни бойцов, которым велено
+	# стоять в одной точке, оно будет разводить вечно
+	var my_sid: int = 0
+	for u0 in movable:
+		if u0 is Unit and (u0 as Unit).squad_id > 0:
+			my_sid = (u0 as Unit).squad_id
+			break
+	if my_sid > 0:
+		center = GameManager.free_squad_spot(my_sid, center, ignore)
+	# ── ЦЕНТР ОТРЯДА — МЕДИАНА, А НЕ СРЕДНЕЕ ───────────────────────────────
+	# Среднее утаскивает один застрявший за полкарты: центр уезжает в пустое
+	# поле, и вместе с ним уезжает вся разметка. Медиана к выбросам устойчива —
+	# тем же способом и по той же причине считается центр отряда для приказов
+	# (см. GameManager._centroid_of)
+	var centroid: Vector3 = GameManager._centroid_of(movable)
 	centroid.y = 0.0
 
 	var course := center - centroid
@@ -1855,10 +2180,35 @@ func _issue_march_keeping_shape(movable: Array, center: Vector3,
 		return (a as Node3D).global_position.dot(course) \
 			> (b as Node3D).global_position.dot(course))
 
+	# ── ЗАЖИМ РАЗМЕТКИ: «КОЛБАСА» РОЖДАЕТСЯ ЗДЕСЬ ──────────────────────────
+	# Отряд переносится «как есть»: слот бойца — это его ТЕКУЩЕЕ смещение от
+	# центра, приложенное к точке приказа. Ограничения не было никакого, и
+	# отсюда весь баг: если в момент приказа кто-то застрял в свалке в сорока
+	# метрах, его слот оказывался в сорока метрах от цели — И СТАНОВИЛСЯ ЕГО
+	# post_pos НАВСЕГДА. Дальше смыкание честно возвращало его в эту растянутую
+	# форму, то есть один кривой приказ фиксировал «колбасу» до конца партии.
+	# Замер qa_mass_siege до правки: разброс 21.9 м, растянутость самой
+	# разметки 19.9 м.
+	#
+	# Радиус выводится из СОСТАВА, а не задан числом, и считать его надо по
+	# ДИАГОНАЛИ БЛОКА, а не по кругу равной площади. Первая версия
+	# брала корень(n) * 0.5 * интервал и вышла ТУЖЕ реального строя:
+	# у шеренги 10x3 полудиагональ около 3.05 м, а круг равной
+	# площади — 2.38 м, и зажим сминал в круг ОБЫЧНЫЙ приказ
+	# (поймал qa_squad, проверка 5: габариты разъехались в 1.3 раза).
+	# корень(n) * интервал — верхняя оценка полудиагонали при любой
+	# раскладке блока; выбросы в десятки метров он всё так же режет.
+	# Кто стоял дальше, получает слот НА ГРАНИЦЕ круга, в том же
+	# направлении: форма сохраняется, отрезается только хвост
+	var shape_r: float = maxf(sqrt(float(movable.size())) * UNIT_SPACING
+		* SHAPE_CLAMP_SLACK, ROW_DEPTH * 2.0)
 	var slots: Array = []
 	for u in ordered:
 		var offset: Vector3 = (u as Node3D).global_position - centroid
 		offset.y = 0.0
+		var off_len: float = offset.length()
+		if off_len > shape_r:
+			offset *= shape_r / off_len
 		# Ряд = глубина юнита вдоль курса: те, кто впереди по ходу марша,
 		# получают ряд 0-1 и несут копья наперевес
 		var depth: float = -offset.dot(course)
@@ -1996,6 +2346,43 @@ func _order_battle_cry(movable: Array) -> int:
 		return 0
 	return GameManager.order_battle_cry(movable)
 
+# ═════════════════════════════════════════════════════════════════════════════
+# РЕПЛИКИ КОМАНД: «ВПЕРЁД, МАРШ», «ДЕРЖАТЬ СТРОЙ», РОГ К АТАКЕ
+# ═════════════════════════════════════════════════════════════════════════════
+# Условие у двух из трёх реплик — «выбрано 5 и более ОТРЯДОВ», и считать надо
+# именно отряды, а не выделенных бойцов: пять отрядов копейщиков это триста
+# человек, а триста человек могут оказаться и одним отрядом гоблинов. Разница
+# не теоретическая — от неё зависит, орёт ли игра на каждый второй приказ.
+
+## Сколько РАЗНЫХ отрядов в текущем выделении. Одиночки вне реестра
+## (squad_id = 0: рабочие, гарнизонные) не считаются вовсе
+func selected_squad_count() -> int:
+	var seen: Dictionary = {}
+	for u in selected_units:
+		if not is_instance_valid(u) or not (u is Unit):
+			continue
+		var sid: int = (u as Unit).squad_id
+		if sid > 0:
+			seen[sid] = true
+	return seen.size()
+
+## С этого числа отрядов приказ считается МАССОВЫМ и озвучивается репликой.
+## Заказ владельца: пять
+const MASS_ORDER_SQUADS := 5
+
+func _mass_selection() -> bool:
+	return selected_squad_count() >= MASS_ORDER_SQUADS
+
+## Есть ли в выделении копейщики. Нужно ровно одному правилу — «держать строй»
+## кричат копейщикам ЛЮБОЙ численностью, потому что строй это про них
+func _selection_has_spearmen() -> bool:
+	for u in selected_units:
+		if not is_instance_valid(u) or not (u is Unit):
+			continue
+		if (u as Unit).stat_id == "spearman":
+			return true
+	return false
+
 ## Выделен ли настоящий отряд (а не одиночка вне реестра). Боевые отряды
 ## всегда состоят больше чем из одного бойца, рабочий — отряд из одного,
 ## поэтому марш строем осмыслен от двух человек
@@ -2042,3 +2429,92 @@ func selection_stance() -> String:
 		elif result != s:
 			return ""
 	return result
+
+# ═════════════════════════════════════════════════════════════════════════════
+# СЕКТОРНОЕ КОЛЬЦО ВОКРУГ ЗДАНИЯ
+# ═════════════════════════════════════════════════════════════════════════════
+# Жалоба владельца: «пять отрядов при атаке здания спрессовываются в одну
+# точечную массу, теряя визуальные границы отрядов».
+#
+# ПРИЧИНА. Приказ атаки раскладывается по фронту только для ОТРЯДОВ противника
+# (frontline_targets делит их по squad_id). У постройки squad_id нет, раскладка
+# не срабатывала вовсе — и каждый боец каждого отряда шёл к одной и той же точке,
+# к центру здания. Пять отрядов приходили в одну точку.
+#
+# РЕШЕНИЕ — НЕ СИЛЫ, А ГЕОМЕТРИЯ. Межотрядного отталкивания в проекте нет и не
+# будет: центр отряда — величина производная, и двигать по ней людей означало бы
+# завести вторую систему перемещения с силами и затуханием. Вместо этого здание
+# делится на СЕКТОРЫ по азимуту, и каждому отряду достаётся свой — тот, что
+# ближе к его текущему месту, чтобы отряды не перекрещивались на подходе.
+#
+# Приказ на сектор отдаётся ПЕРЕД приказом атаки: он расставляет разметку и
+# посты в своём секторе, а следом идущий command_attack ведёт бойцов в бой уже
+# оттуда. Считается один раз на клик — покадрового пути здесь нет.
+
+## Зазор от стены до кольца, метры: отряду надо где-то встать, не влезая в дом
+const RING_STANDOFF := 4.5
+# Ширина дуги, по которой раскладываются сектора у постройки. Полный круг
+# не годится: сектор за зданием недостижим (поиска пути нет), см. разбор в
+# _ring_squads_around. 150 градусов — это «полукруг с запасом»: при пяти
+# отрядах и радиусе 7 м соседние центры расходятся на 4.5 м
+const RING_ARC := 2.6180
+
+func _ring_squads_around(b: Building) -> void:
+	# Собираем выделенные отряды: сектор даётся ОТРЯДУ, а не бойцу
+	var by_squad: Dictionary = {}
+	var sum_x := 0.0
+	var sum_z := 0.0
+	var cnt := 0
+	for u in selected_units:
+		if not is_instance_valid(u) or not (u is Unit):
+			continue
+		var sid: int = (u as Unit).squad_id
+		if sid <= 0:
+			continue
+		if not by_squad.has(sid):
+			by_squad[sid] = []
+		(by_squad[sid] as Array).append(u)
+		var gp: Vector3 = (u as Node3D).global_position
+		sum_x += gp.x
+		sum_z += gp.z
+		cnt += 1
+	var n: int = by_squad.size()
+	# Один отряд облеплять нечего — он и так подойдёт с той стороны, где стоит
+	if n < 2 or cnt == 0:
+		return
+	var c: Vector3 = b.global_position
+	var half: float = maxf(b.build_size.x, b.build_size.z) * 0.5
+	var radius: float = half + RING_STANDOFF
+	# ── СЕКТОРА ТОЛЬКО НА ДУГЕ ПОДХОДА, А НЕ ПО ВСЕЙ ОКРУЖНОСТИ ────────────
+	# Первая версия раздавала ровные доли ПОЛНОГО круга, и при пяти отрядах
+	# двое получали точку ЗА постройкой. Поиска пути в игре нет вовсе: боец
+	# идёт к своему сектору по прямой, упирается в стену, дальность удара
+	# сходится — и он остаётся с ближней стороны, а его отряд при этом рвётся
+	# надвое (замер qa_mass_siege: отставание 12.4 м у двух отрядов из пяти,
+	# разброс отряда 41.6 м). Обходить постройку было бы нечем.
+	# Поэтому дуга РАЗВЁРНУТА К ТЕМ, КТО ПРИШЁЛ: полукруг с той стороны, с
+	# которой отряды подходят. Это и есть «облепить со всех ДОСТУПНЫХ сторон»
+	var app_x: float = sum_x / float(cnt) - c.x
+	var app_z: float = sum_z / float(cnt) - c.z
+	var base_ang: float = atan2(app_z, app_x)
+	# Сектор достаётся ПО ФАКТИЧЕСКОМУ АЗИМУТУ отряда: кто с какой стороны
+	# подошёл, тот с той и бьёт. Иначе отряды менялись бы местами, пересекая
+	# друг друга на подходе, — и это была бы та же куча, только в движении.
+	# Азимут меряется ОТ ОСИ ПОДХОДА и приводится в (-PI, PI]: без этого
+	# порядок рвался там, где угол переходит через PI
+	var order: Array = []
+	for sid2 in by_squad:
+		var sc: Vector3 = GameManager.squad_centroid(int(sid2))
+		var rel: float = wrapf(atan2(sc.z - c.z, sc.x - c.x) - base_ang, -PI, PI)
+		order.append([int(sid2), rel])
+	order.sort_custom(func(p, q): return float((p as Array)[1]) < float((q as Array)[1]))
+	# Ровные доли ДУГИ: середины n равных долек, то есть крайние отряды стоят
+	# внутри дуги, а не на самых её концах
+	for i in range(n):
+		var sid3: int = int((order[i] as Array)[0])
+		var ang: float = base_ang + RING_ARC * ((float(i) + 0.5) / float(n) - 0.5)
+		var spot := Vector3(c.x + cos(ang) * radius, 0.0, c.z + sin(ang) * radius)
+		# Сектор кладём в кэш: его читает ПОДХОД бойца (см. Unit, RING_LEAD).
+		# Одного приказа на движение мало — следующий же command_attack повёл бы
+		# всех в центр здания, и куча вернулась бы
+		GameManager.squad_set_attack_anchor(sid3, GameManager.land_target(spot))

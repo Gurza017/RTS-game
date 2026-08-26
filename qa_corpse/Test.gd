@@ -15,6 +15,11 @@ extends Node
 ##   J ПОТОЛОК    — число торчащих на поле стрел ограничено, без лавины
 ##   K ГАШЕНИЕ    — растворение стрелы не рисует чёрный прямоугольник
 ##   L ОБЪЁМ      — завал не плоский: слои притенены, тела разного калибра
+##   M СРОК ЖИЗНИ — тело лежит целым заказанные пятнадцать минут, потом
+##                  полминуты разлагается; часы у слоя свои
+##   N РАСФОРМИРОВАНИЕ — Delete по выделенным отрядам оставляет тела на поле
+##   O ЗНАМЯ       — упавшее знамя ветеранов ложится тем же слотом, что и тело,
+##                  и живёт по тем же правилам: срок, разложение, потолок
 ##
 ## ЧИСЛА НЕ ХАРДКОДЯТСЯ: лимит, срок растворения и сроки стрел читаются из
 ## самого кода (CorpseRenderer / Arrow) — стенд проверяет СВОЙСТВО, а не
@@ -63,6 +68,9 @@ func _run() -> void:
 	await _test_stuck_arrow_cap()
 	await _test_fade_and_volume()
 	_test_no_blood()
+	await _test_lifetime()
+	await _test_disband()
+	await _test_fallen_banner()
 	_summary()
 	print("\n=== QA_CORPSE DONE ===")
 	get_tree().quit()
@@ -93,6 +101,208 @@ func _spawn(path: String, fac: int, at: Vector3) -> Unit:
 func _kill(u: Unit) -> void:
 	if is_instance_valid(u) and not u.is_dead():
 		u.take_damage(u.max_health * 10.0 + 1000.0, null)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# M. СРОК ЖИЗНИ ТЕЛА И ФАЗА РАЗЛОЖЕНИЯ
+# ═════════════════════════════════════════════════════════════════════════════
+## Заказ владельца: пятнадцать минут при полной видимости, затем тридцать секунд
+## медленного разложения.
+##
+## ЖДАТЬ ПЯТНАДЦАТЬ МИНУТ НЕЛЬЗЯ — и не нужно: у слоя тел СВОИ часы (они же
+## обеспечивают, что на паузе тела не доживают свой срок за спиной у игрока), и
+## стенд подкручивает их вперёд через age_shift. Проверяется при этом ровно то,
+## что и требовалось: до порога тело лежит целым, после — уходит в разложение и
+## растворяется за заказанный срок, а не за срок вытеснения.
+func _test_lifetime() -> void:
+	var lim_life: float = _Corpses.LIFE_SEC
+	var lim_diss: float = _Corpses.DISSOLVE_SEC
+	verdict("M0 сроки заказаны в коде слоя, а не разбросаны по вызовам",
+		lim_life >= 600.0 and lim_diss >= 20.0 and lim_diss <= 60.0,
+		"лежит %.0f c, разлагается %.0f c" % [lim_life, lim_diss])
+	verdict("M0б потолок тел поднят до заказанного",
+		_Corpses.MAX_CORPSES >= 5000,
+		"MAX_CORPSES = %d" % _Corpses.MAX_CORPSES)
+
+	GameManager.corpses.clear()
+	await pframes(2)
+	var u := _spawn("res://scenes/units/Spearman.tscn", Constants.FACTION_PLAYER,
+		Vector3(-1500.0, 0.0, -1500.0))
+	await pframes(3)
+	_kill(u)
+	await pframes(3)
+	var idx: int = GameManager.corpses.count() - 1
+	verdict("M1 свежее тело лежит целым и не растворяется",
+		float(GameManager.corpses.dissolve_of(idx)[0]) < 0.0,
+		"осталось гаснуть %.1f c" % float(GameManager.corpses.dissolve_of(idx)[0]))
+
+	# ── ПОЧТИ ДОЖИЛО, НО ЕЩЁ НЕ ПОРА ────────────────────────────────────────
+	GameManager.corpses.age_shift(lim_life * 0.9)
+	await pframes(3)
+	verdict("M2 до порога тело всё ещё целое",
+		float(GameManager.corpses.dissolve_of(idx)[0]) < 0.0,
+		"возраст %.0f c из %.0f" % [GameManager.corpses.age_of(idx), lim_life])
+
+	# ── ПОРОГ ПРОЙДЕН ───────────────────────────────────────────────────────
+	GameManager.corpses.age_shift(lim_life * 0.2)
+	await pframes(3)
+	var d: Array = GameManager.corpses.dissolve_of(idx)
+	verdict("M3 за порогом тело уходит в разложение", float(d[0]) > 0.0,
+		"осталось %.1f c" % float(d[0]))
+	verdict("M4 разлагается заказанные полминуты, а не срок вытеснения",
+		absf(float(d[1]) - lim_diss) < 0.01,
+		"длительность %.1f c при заказе %.0f c (вытеснение — %.1f c)"
+			% [float(d[1]), lim_diss, _Corpses.FADE_SEC])
+	# Доля, уезжающая в буфер, обязана считаться от СВОЕЙ длительности
+	verdict("M5 доля разложения считается от своего срока",
+		float(GameManager.corpses.lay_of(idx)[2]) > 0.9,
+		"доля %.3f сразу после начала" % float(GameManager.corpses.lay_of(idx)[2]))
+
+	# ── ДОЖИВАЕТ И УХОДИТ С ПОЛЯ ────────────────────────────────────────────
+	var was: int = GameManager.corpses.count()
+	var waited := 0.0
+	while GameManager.corpses.fading_count() > 0 and waited < lim_diss + 5.0:
+		await get_tree().process_frame
+		waited += get_process_delta_time()
+	verdict("M6 разложившееся тело освободило место",
+		GameManager.corpses.count() < was and GameManager.corpses.fading_count() == 0,
+		"было %d, стало %d за %.1f c" % [was, GameManager.corpses.count(), waited])
+	GameManager.corpses.clear()
+	await pframes(2)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# N. РАСФОРМИРОВАНИЕ ВЫДЕЛЕННЫХ ОТРЯДОВ (клавиша Delete)
+# ═════════════════════════════════════════════════════════════════════════════
+## Заказ владельца: «бойцы спавнят трупы в MultiMesh, а узлы отрядов мгновенно
+## удаляются из памяти». Проверяем оба конца: узлов не осталось, тела на поле
+## появились. И отдельно — что чужого расформирование не трогает
+func _test_disband() -> void:
+	var sel = main.selection_manager
+	GameManager.corpses.clear()
+	await pframes(2)
+	var mine: Array = []
+	var sid: int = GameManager.new_squad(Constants.FACTION_PLAYER, "spearman")
+	for i in range(8):
+		var u := _spawn("res://scenes/units/Spearman.tscn",
+			Constants.FACTION_PLAYER,
+			Vector3(-1600.0 + float(i) * 0.8, 0.0, -1600.0))
+		GameManager.add_to_squad(sid, u)
+		mine.append(u)
+	var foe := _spawn("res://scenes/units/Spearman.tscn", Constants.FACTION_ENEMY,
+		Vector3(-1600.0, 0.0, -1590.0))
+	await pframes(4)
+
+	sel._clear_selection()
+	for u in mine:
+		sel._select(u)
+	# Чужого в выделение не пустит сам менеджер, но проверим и на входе метода:
+	# selected_units — это набор СВОИХ по построению (см. recon_units)
+	var before: int = GameManager.corpses.count()
+	var killed: int = sel.disband_selected()
+	await pframes(4)
+	verdict("N1 Delete расформировал ровно выделенных", killed == mine.size(),
+		"расформировано %d из %d" % [killed, mine.size()])
+	var alive := 0
+	for u in mine:
+		if is_instance_valid(u) and not (u as Unit).is_dead():
+			alive += 1
+	verdict("N2 узлов расформированных бойцов не осталось", alive == 0,
+		"живых осталось %d" % alive)
+	verdict("N3 на поле остались их тела",
+		GameManager.corpses.count() - before == mine.size(),
+		"тел прибавилось %d, ожидалось %d"
+			% [GameManager.corpses.count() - before, mine.size()])
+	verdict("N4 чужого расформирование не тронуло",
+		is_instance_valid(foe) and not (foe as Unit).is_dead(),
+		"чужой жив=%s" % str(is_instance_valid(foe) and not (foe as Unit).is_dead()))
+	# И на пустом выделении метод обязан молчать, а не падать
+	sel._clear_selection()
+	verdict("N5 на пустом выделении Delete ничего не делает",
+		sel.disband_selected() == 0)
+	if is_instance_valid(foe):
+		(foe as Node).queue_free()
+	GameManager.corpses.clear()
+	await pframes(2)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# O. УПАВШЕЕ ЗНАМЯ ВЕТЕРАНОВ
+# ═════════════════════════════════════════════════════════════════════════════
+## Заказ владельца: когда гибнет последний боец отряда, упавшее копьё со
+## знаменем «запекается в единый статичный MultiMesh трупов» и наследует ВСЕ их
+## параметры — пятнадцать минут целым, тридцать секунд разложения, без
+## добавочных вызовов отрисовки.
+##
+## ПОЧЕМУ ЭТА ПРОВЕРКА ЖИВЁТ ЗДЕСЬ, А НЕ В qa_vet. В qa_vet проверяется ЛОГИКА
+## знаменосца (кто подхватил, когда упало). Здесь — что упавшее стало ОБЫЧНЫМ
+## ЖИЛЬЦОМ СЛОЯ ТЕЛ: у него та же очередь, тот же счётчик, тот же срок и то же
+## разложение. Если завтра знамя заведёт себе отдельный слой со своим таймером,
+## красным станет именно этот блок.
+func _test_fallen_banner() -> void:
+	GameManager.corpses.clear()
+	await pframes(2)
+	var sid: int = GameManager.new_squad(Constants.FACTION_PLAYER, "spearman")
+	var men: Array = []
+	for i in range(6):
+		var u := _spawn("res://scenes/units/Spearman.tscn",
+			Constants.FACTION_PLAYER,
+			Vector3(-1700.0 + float(i) * 0.9, 0.0, -1700.0))
+		GameManager.add_to_squad(sid, u)
+		men.append(u)
+	# Отряд-ветеран: без звания знамени нет вовсе, и падать нечему
+	(GameManager.squads[sid] as Dictionary)["level"] = 5
+	GameManager.refresh_squad_banner(sid)
+	await pframes(4)
+	verdict("O0 у ветеранского отряда есть знамя",
+		(GameManager.squads[sid] as Dictionary).get("banner") != null)
+	# ── БАКЕТ ЛЕНТЫ КОПЕЙЩИКА ЗАВОДИМ ЗАРАНЕЕ ──────────────────────────────
+	# Считать бакеты сразу после clear() нельзя: их ноль, и гибель отряда
+	# добавит СРАЗУ ДВА — свой лист копейщика и лист знамени. Проверять надо
+	# прибавку ОТ ЗНАМЕНИ, поэтому одиночное тело кладётся первым, и к моменту
+	# замера лист копейщика уже свой бакет имеет
+	var lone := _spawn("res://scenes/units/Spearman.tscn",
+		Constants.FACTION_PLAYER, Vector3(-1720.0, 0.0, -1720.0))
+	await pframes(2)
+	_kill(lone)
+	await pframes(3)
+	var buckets0: int = GameManager.corpses.bucket_count()
+	var corpses0: int = GameManager.corpses.count()
+
+	for u in men:
+		if is_instance_valid(u):
+			(u as Unit).take_damage((u as Unit).max_health * 10.0 + 1000.0, null)
+	# Укладка отложена на кадр (см. GameManager._drop_squad_banner)
+	await pframes(6)
+	var total: int = GameManager.corpses.count() - corpses0
+	print("  павших %d, прибавилось %d (тела + знамя), бакетов %d → %d"
+		% [men.size(), total, buckets0, GameManager.corpses.bucket_count()])
+	verdict("O1 знамя легло тем же слотом, что и тела",
+		total == men.size() + 1,
+		"прибавилось %d, ждали %d" % [total, men.size() + 1])
+	# Лента знамени — свой бакет, и это ОДИН вызов отрисовки на все упавшие
+	# знамёна поля, а не по одному на каждое
+	verdict("O2 знамя стоит одного бакета, а не узла на штуку",
+		GameManager.corpses.bucket_count() == buckets0 + 1,
+		"бакетов %d → %d" % [buckets0, GameManager.corpses.bucket_count()])
+
+	# Знамя — последнее, что легло. Срок и разложение у него общие с телами
+	var idx: int = GameManager.corpses.count() - 1
+	verdict("O3 знамя лежит целым, а не гаснет сразу",
+		float(GameManager.corpses.dissolve_of(idx)[0]) < 0.0,
+		"осталось гаснуть %.1f c" % float(GameManager.corpses.dissolve_of(idx)[0]))
+	# Переводим часы слоя за порог — знамя обязано пойти в разложение вместе
+	# с телами, тем же сроком
+	GameManager.corpses.age_shift(_Corpses.LIFE_SEC + 1.0)
+	await pframes(3)
+	var d: Array = GameManager.corpses.dissolve_of(idx)
+	verdict("O4 у знамени тот же срок жизни, что у тел",
+		float(d[0]) > 0.0, "осталось %.1f c" % float(d[0]))
+	verdict("O5 и та же длительность разложения",
+		absf(float(d[1]) - _Corpses.DISSOLVE_SEC) < 0.01,
+		"%.1f c при заказе %.0f c" % [float(d[1]), _Corpses.DISSOLVE_SEC])
+	# Своё пятно тени у знамени тоже есть — оно лежит на земле, как и тела
+	verdict("O6 под упавшим знаменем есть тень",
+		GameManager.corpses.has_shadow(idx))
+	GameManager.corpses.clear()
+	await pframes(2)
 
 # ═════════════════════════════════════════════════════════════════════════════
 # A. ТЕЛО ЛОЖИТСЯ ПРИ ГИБЕЛИ — И У ЛЮБОГО РОДА ВОЙСК

@@ -311,12 +311,16 @@ func batch_move_queued(rows: PackedInt32Array, xs: PackedFloat32Array,
 	return _c.BatchMoveQueued(rows, xs, zs, fls, lim_x, lim_z, bounds_on,
 		water_on, block_r, trunk_clear, relief_amp, gm)
 
+## cross_squad — во сколько раз шире держатся бойцы РАЗНЫХ отрядов
+## (см. Unit.SEP_CROSS_SQUAD и разбор в ArmyCore.BatchSeparation)
 func batch_separation(delta: float, min_dist: float, max_step: float,
 		interval: float, lim_x: float, lim_z: float, moving_state: int,
 		attacking_state: int, water_on: bool, gm, deadzone: float = 0.0,
-		relief_amp: float = 0.0) -> int:
+		relief_amp: float = 0.0, cross_squad: float = 1.0,
+		pass_relief: float = 1.0) -> int:
 	return _c.BatchSeparation(delta, min_dist, max_step, interval, lim_x, lim_z,
-		moving_state, attacking_state, water_on, gm, deadzone, relief_amp)
+		moving_state, attacking_state, water_on, gm, deadzone, relief_amp,
+		cross_squad, pass_relief)
 
 func advance_matrix(rows: PackedInt32Array, ax: float, az: float, ny: float,
 		cx: float, cz: float, amp: float = 0.0) -> int:

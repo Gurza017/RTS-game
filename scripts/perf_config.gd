@@ -446,4 +446,3 @@ static func prof_report() -> Array:
 		rows.append([bucket, total, calls, float(total) / float(maxi(calls, 1))])
 	rows.sort_custom(func(a, b): return int(a[1]) > int(b[1]))
 	return rows
-

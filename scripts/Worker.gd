@@ -272,6 +272,13 @@ func command_build(site: Node3D) -> void:
 	build_target = site
 	move_target  = site.work_position(global_position)
 	state        = State.BUILDING
+	# ── СТАРАЯ МЕТКА ПРИКАЗА СНИМАЕТСЯ ВМЕСТЕ С ПРИКАЗОМ ───────────────────
+	# Метка точки движения гаснет по ПРИБЫТИЮ отряда (см.
+	# GameManager._refresh_order_marks). Рабочий, которого послали в точку, а
+	# потом отправили строить, до неё не дойдёт НИКОГДА — и кольцо остаётся
+	# висеть в чистом поле. Ровно это владелец и видит как «фантомные круги,
+	# которых игрок не задавал». Новая работа отменяет прежний приказ
+	GameManager.squad_clear_order(squad_id)
 	_wake_process()
 
 func command_gather(node: ResourceNode) -> void:
@@ -304,6 +311,9 @@ func command_gather(node: ResourceNode) -> void:
 	move_target      = node.claim_slot(self)
 	_gather_slot_valid = true
 	state            = State.MOVING
+	# Новая работа отменяет прежний приказ вместе с его меткой (тот же разбор,
+	# что и у command_build выше)
+	GameManager.squad_clear_order(squad_id)
 	_wake_process()
 
 # Сняться со стройки: площадка перестаёт считать нас строителем

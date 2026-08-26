@@ -11,12 +11,34 @@ extends RefCounted
 ##   attack_1        — урон обычной (слабой) атаки
 ##   attack_2        — урон мощной атаки (Warrior бьёт: 3 раза attack_1, затем 1 раз attack_2)
 ##   attack_range    — дальность атаки, м (ближний бой ~1.6-1.8, лучник 18)
+##   attack_range_cap— ЖЁСТКИЙ потолок дальности с учётом всех прибавок кузницы.
+##                     Нет ключа — потолка нет (у ближнего боя он не нужен)
 ##   attack_cooldown — пауза между ударами, сек
 ##   defense         — защита: вычитается из входящего урона (растёт апгрейдами кузницы)
 ##   armor           — броня: дополнительное плоское снижение урона (базовое, от экипировки)
 ##   morale          — мораль 0..100: участвует в силе толкания (morale/100 добавляется к push_force)
 ##   push_force      — сила толкания: при ударе в ближнем бою юнит с большей суммой
 ##                     (push_force + morale/100) слегка отталкивает противника назад
+##
+## Только для ударной конницы (все поля необязательные, отсутствие = «не конница»):
+##   charge_range       — за сколько метров до цели начинается разгон, м. 0 = разгона нет
+##   charge_min_runup   — сколько метров надо РЕАЛЬНО проехать в разгоне, чтобы
+##                        удар засчитался. Без этого натиск срабатывал бы и в
+##                        плотном бою, где никто никуда не разгонялся
+##   charge_speed_mult  — во сколько раз конница ускоряется на разгоне
+##   charge_impact_frac — доля МАКСИМАЛЬНОГО запаса жизни цели, снимаемая ударом
+##                        с разгона (0.5 = половина). Считается от max_health
+##                        ЖЕРТВЫ, а не от урона всадника: это вес и скорость
+##                        кабана, а не сила руки седока
+##   charge_splash      — радиус первого ряда контакта, м: кого накрывает удар
+##   charge_knockback   — на сколько метров разлетаются накрытые, м
+##   charge_breakthrough — на сколько метров всадник вклинивается сквозь строй
+##                         сразу после удара (0 — «ударил и встал»)
+##   charge_counter_frac— доля СВОЕГО запаса жизни, которую конница теряет,
+##                        налетев в лоб на стенку копий (см. Unit.repels_charge)
+##   charge_push_mult   — множитель ПОСТОЯННОГО толчка в свалке (см. Unit._apply_push).
+##                        К разгону отношения не имеет: это продавливание строя,
+##                        которое идёт всё время, пока конница жива и бьётся
 ##
 ## Только для рабочего:
 ##   walk_speed_empty  — скорость ходьбы БЕЗ груза
@@ -38,29 +60,35 @@ const STATS := {
 	# ── МЕЧНИК (Warrior) — тяжёлый боец, сильно толкается ────────────────────
 	"warrior": {
 		"health": 100.0,
+		# Родительный падеж множественного числа — для названия отряда
+		# по рангу («Отряд ветеранов КОПЕЙЩИКОВ», см. veteran_rank_name)
+		"name_genitive_plural": "мечников",
 		"movement_speed": 2.0,
-		"attack_1": 25.0,          # три обычных удара...
-		"attack_2": 35.0,          # ...затем один мощный (ротация 3+1)
+		"attack_1": 20.0,          # три обычных удара...
+		"attack_2": 25.0,          # ...затем один мощный (ротация 3+1)
 		"attack_range": 1.6,
-		"attack_cooldown": 0.55,
+		"attack_cooldown": 1.5,
 		"defense": 0.0,
-		"armor": 3.0,
-		"morale": 150.0,
+		"armor": 2.0,
+		"morale": 100.0,
 		"push_force": 1.5,         # рыцарь продавливает строй
 		"description": "Heavy melee fighter. Hits hardest in a straight duel and shoves enemy ranks back on contact.",
 	},
 
 	# ── КОПЕЙЩИК (Spearman) — основная пехота ────────────────────────────────
 	"spearman": {
-		"health": 100.0,
+		"health": 70.0,
+		# Родительный падеж множественного числа — для названия отряда
+		# по рангу («Отряд ветеранов КОПЕЙЩИКОВ», см. veteran_rank_name)
+		"name_genitive_plural": "копейщиков",
 		"movement_speed": 2.0,
 		"attack_1": 15.0,
 		"attack_2": 18.0,           # у копейщика оба удара одинаковые (тычок копьём)
-		"attack_range": 2.5,
+		"attack_range": 2.0,
 		"attack_cooldown": 2.0,
 		"defense": 0.0,
 		"armor": 0.0,
-		"morale": 100.0,
+		"morale": 50.0,
 		"push_force": 1.0,
 		"description": "Backbone infantry. Holds the line shoulder to shoulder — spears level automatically when the enemy closes in.",
 	},
@@ -68,10 +96,24 @@ const STATS := {
 	# ── ЛУЧНИК (Archer) — стрелок, слаб в ближнем бою ────────────────────────
 	"archer": {
 		"health": 50.0,
+		# Родительный падеж множественного числа — для названия отряда
+		# по рангу («Отряд ветеранов КОПЕЙЩИКОВ», см. veteran_rank_name)
+		"name_genitive_plural": "лучников",
 		"movement_speed": 2.0,
 		"attack_1": 15,
 		"attack_2": 20.0,
 		"attack_range": 20.0,
+		# ── ЖЁСТКИЙ ПОТОЛОК ДАЛЬНОСТИ (заказ владельца, авг. 2026) ─────────
+		# Дальность растёт от кузницы (bonus_range) и вписывается прямо в поле
+		# бойца при рождении. Потолка у неё не было вовсе, и на прокачанной
+		# кузнице лучник доставал через пол-экрана: «случайные сверхдальние
+		# выстрелы через всю карту».
+		#
+		# Потолок ЖЁСТКИЙ и общий: он ограничивает СУММУ, а не прибавку, —
+		# иначе каждое новое исследование пришлось бы согласовывать с ним
+		# отдельно. 24 м это +20% к базовым двадцати: прокачка ощутима и при
+		# этом не превращает стрелка в осадную машину
+		"attack_range_cap": 24.0,
 		"attack_cooldown": 4.0,
 		"defense": 0.0,
 		"armor": 0.0,
@@ -85,6 +127,9 @@ const STATS := {
 	# ── МОНАХ (Monk) — вспомогательный юнит, слаб в бою ──────────────────────
 	"monk": {
 		"health": 60.0,
+		# Родительный падеж множественного числа — для названия отряда
+		# по рангу («Отряд ветеранов КОПЕЙЩИКОВ», см. veteran_rank_name)
+		"name_genitive_plural": "монахов",
 		"movement_speed": 2.0,
 		"attack_1": 6.0,
 		"attack_2": 6.0,
@@ -109,11 +154,14 @@ const STATS := {
 	# 20), наездник на кабане — быстрый и бьющий больно, но хрупкий.
 	"goblin_spearman": {
 		"health": 75.0,
+		# Родительный падеж множественного числа — для названия отряда
+		# по рангу («Отряд ветеранов КОПЕЙЩИКОВ», см. veteran_rank_name)
+		"name_genitive_plural": "гоблинов",
 		"movement_speed": 2.2,
 		"attack_1": 9.0,            # «Attack Fast» — три быстрых тычка...
 		"attack_2": 15.0,           # ...затем один «Attack Strong» (ротация 3+1)
-		"attack_range": 1.6,
-		"attack_cooldown": 1.4,
+		"attack_range": 2.2,
+		"attack_cooldown": 2.0,
 		"defense": 0.0,
 		"armor": 0.0,
 		"morale": 70.0,
@@ -122,6 +170,9 @@ const STATS := {
 	},
 	"goblin_rider": {
 		"health": 150.0,
+		# Родительный падеж множественного числа — для названия отряда
+		# по рангу («Отряд ветеранов КОПЕЙЩИКОВ», см. veteran_rank_name)
+		"name_genitive_plural": "наездников",
 		# ── СКОРОСТЬ КАБАНА: ЗАКАЗ ВЛАДЕЛЬЦА «РАССЕКАТЬ ПОЛЕ» ─────────────
 		# Было 3.4 — это 1.55 от пешего гоблина (2.2) и 1.7 от людской пехоты
 		# (2.0). Замер (qa_cavalry, блок A) показал, что и в чистом поле, и в
@@ -133,14 +184,14 @@ const STATS := {
 		# обгоняет строй вдвое, то есть успевает обойти его с фланга за то
 		# время, пока фаланга разворачивается
 		"movement_speed": 4.6,
-		"attack_1": 22.0,
+		"attack_1": 20.0,
 		"attack_2": 22.0,
-		"attack_range": 1.8,
+		"attack_range": 2.2,
 		"attack_cooldown": 1.0,
 		"defense": 0.0,
 		"armor": 2.0,
 		"morale": 110.0,
-		"push_force": 15.0,          # кабан продавливает строй сильнее рыцаря
+		"push_force": 25.0,          # кабан продавливает строй сильнее рыцаря
 		# ── УДАРНАЯ КОННИЦА: ТОЛЧОК ВДВОЕ И ПОЧТИ НА КАЖДЫЙ УДАР ───────────
 		# Одного push_force для этого мало, и вот почему. Смещение считается
 		# как clampf(разница напора × 0.15, 0.04, 0.4) — то есть ПОТОЛОК 0.4 м
@@ -157,23 +208,68 @@ const STATS := {
 		# ВХОДИТ, но насквозь не проходит — центр массы застревал в двух метрах
 		# перед исходной линией. Заказ владельца прямой: «прорывая центр фаланги
 		# насквозь», и мерится он именно этим числом
-		"charge_push_mult": 3.5,
+		"charge_push_mult": 5.5,
 		# Толчок на КАЖДЫЙ удар. При «через один» кабан с кулдауном 1.0 с давил
 		# раз в две секунды — на экране это не напор, а переминание
 		"push_every": 1,
+		# ── НАТИСК С РАЗГОНА (заказ владельца, авг. 2026) ──────────────────
+		# До этого «ударная конница» была только продавливанием: кабан подъезжал
+		# обычным шагом и начинал теснить. Самого УДАРА не было вовсе — то есть
+		# не было того единственного мгновения, ради которого конницу и держат.
+		#
+		# Разгон начинается за десять метров: этого хватает, чтобы игрок успел
+		# увидеть рывок, и мало, чтобы стадо разгонялось через полкарты.
+		# Ускорение 1.8 поверх и без того вдвое большей скорости — на экране
+		# это бросок, а не «пошёл побыстрее».
+		#
+		# УРОН СЧИТАЕТСЯ ОТ ЗАПАСА ЖЕРТВЫ, а не от силы удара седока: сминает
+		# не топор, а полтонны кабана на скорости. Половина — заказ владельца.
+		"charge_range": 10.0,
+		# ── БЕЗ РАЗГОНА НЕТ И ТАРАНА ───────────────────────────────────────
+		# Жалоба владельца: «эффект разлёта срабатывает дважды за одно
+		# соприкосновение, в том числе когда юниты уже сошлись в плотном бою
+		# без разгона». Так и было: натиск взводился по одной лишь ДИСТАНЦИИ
+		# до цели, а в свалке цель меняется каждые пару секунд, и новая нередко
+		# оказывается за десять метров — то есть условие взвода выполнялось
+		# снова, стоя на месте.
+		#
+		# Теперь мало оказаться далеко: надо ПРОЙТИ это расстояние. Всадник
+		# запоминает точку, где начал разгон, и удар засчитывается, только если
+		# он реально проехал charge_min_runup метров. В плотном бою столько не
+		# проехать — и повторный разлёт не случается вовсе.
+		# 5 м из заказанного диапазона «5-10», а не верхняя его граница: разгон
+		# начинается за charge_range (10 м), а касание происходит примерно за
+		# 2.5 м — то есть на полный проезд остаётся около семи с половиной
+		# метров. Порог в шесть метров оставлял полтора метра запаса и на
+		# стенде срабатывал через раз: цель успевала подойти сама, всадник
+		# взводил разгон позже десяти метров и не добирал своего
+		"charge_min_runup": 5.0,
+		"charge_speed_mult": 1.8,
+		"charge_impact_frac": 0.5,
+		"charge_splash": 2.0,
+		"charge_knockback": 3.2,
+		# Сколько метров кабан проезжает СКВОЗЬ строй сразу после удара.
+		# Ноль вернул бы прежнее «ударил и встал в первой шеренге»
+		"charge_breakthrough": 1.8,
+		# ── ЦЕНА ЛОБОВОГО НАВАЛА НА КОПЬЯ ──────────────────────────────────
+		# Треть своего запаса за попытку смять фалангу в лоб. Числом это ровно
+		# то же требование, что и «отбрасывания нет»: фронт копейщиков должен
+		# быть местом, куда конницу гнать НЕЛЬЗЯ, а не местом, где она теряет
+		# часть эффективности
+		"charge_counter_frac": 0.35,
 		"description": "Pig rider. Fast shock cavalry — hits hard, dies fast.",
 	},
 
 	# ── РАБОЧИЙ (Worker / Pawn) — не боец ────────────────────────────────────
 	"worker": {
-		"health": 40.0,
+		"health": 30.0,
 		"walk_speed_empty": 3.0,   # налегке бегает быстро
-		"walk_speed_loaded": 2.3,  # с грузом заметно медленнее
+		"walk_speed_loaded": 2.1,  # с грузом заметно медленнее
 		"defense": 0.0,
 		"armor": 0.0,
-		"morale": 80.0,
+		"morale": 40.0,
 		"push_force": 0.5,
-		"gather_time": 3.45,       # +15% к 3.0 — рубка стала ощутимо неторопливее
+		"gather_time": 4.5,       # +15% к 3.0 — рубка стала ощутимо неторопливее
 		"gather_amount": 10.0,
 		"description": "Gathers resources and builds structures. Unarmed — keep away from the fighting.",
 	},
@@ -201,6 +297,13 @@ const _GobCfg := preload("res://scripts/goblin/goblin_config.gd")
 ##   defense_bonus     — плоская добавка к защите
 ##   holds_ground      — true: юнит не преследует цель и не подаётся вперёд
 ##                       при толкании (стоит намертво на своём месте)
+##   lock_position     — true: ПОЗИЦИЯ ЗАЛОЧЕНА НАГЛУХО. Ни приказ на движение,
+##                       ни приказ атаки, ни смыкание дыр в своём строю не
+##                       сдвигают бойца ни на сантиметр; разрешён только разворот
+##                       (facing) и удар по тому, кто сам вошёл в дальность.
+##                       Единственное исключение — СМЫКАНИЕ РЯДОВ отряда
+##                       (Unit.allow_reform_move): без него потери и проход
+##                       союзников оставляли бы в строю вечные дыры
 const STANCE_ATTACK  := "attack"
 const STANCE_DEFENSE := "defense"
 
@@ -219,6 +322,7 @@ const STANCES := {
 		"morale_mult":       1.0,
 		"defense_bonus":     0.0,
 		"holds_ground":      false,
+		"lock_position":     false,
 	},
 	"defense": {
 		"name":              "Defend",
@@ -229,6 +333,24 @@ const STANCES := {
 		"morale_mult":       1.30,   # +30% морали
 		"defense_bonus":     5.0,    # +5 защиты
 		"holds_ground":      true,   # с места не сходят (кроме смыкания рядов)
+		# ── ЗАМОК ПОЗИЦИИ СНЯТ ОБРАТНО (заказ владельца, авг. 2026) ────────
+		# Короткая история этой ручки, чтобы её не завели в третий раз.
+		#
+		# Жалоба была: «в обороне крайние копейщики срываются с места и идут
+		# вперёд на врага». Первым решением стал ГЛУХОЙ ЗАМОК (true) — не
+		# двигаться вообще. Он закрыл жалобу и тут же создал другую: фаланга
+		# перестала ходить строем ПО ПРИКАЗУ ИГРОКА, а это её штатная работа.
+		#
+		# Настоящая причина выбега оказалась не в том, что фаланге вообще
+		# разрешено двигаться, а в ТОЧКЕ, куда её посылали: приказ атаки давал
+		# КАЖДОМУ бойцу одну и ту же цель — координату врага. Строй честно
+		# сходился в неё, то есть схлопывался, и первыми это видно на флангах
+		# (им идти дальше всех). Лечится это точкой, а не запретом движения
+		# (см. Unit.command_attack и _phalanx_march).
+		#
+		# Ручка оставлена: поставьте true, если понадобится «стоять намертво».
+		# Стенды читают её из конфига и поедут за ней сами
+		"lock_position":     false,
 	},
 }
 
@@ -296,8 +418,8 @@ const SMITH_ICONS_DIR := "res://assets/factions/humans/icons/buildings/icons_for
 ## Числа общие на все кучи своего типа: разброс по величине месторождений — это
 ## отдельное решение, и делать его случайным побочным эффектом того, сколько
 ## кусков влезло мимо воды и пятачка базы, точно не стоит
-const DEFAULT_CLUSTER_GOLD  := 50000.0
-const DEFAULT_CLUSTER_STONE := 50000.0
+const DEFAULT_CLUSTER_GOLD  := 10000.0
+const DEFAULT_CLUSTER_STONE := 10000.0
 
 ## Ёмкость кучи по виду ресурса ("gold"/"stone"). Строкой, а не числом
 ## Constants.RESOURCE_*: конфиг — самостоятельная таблица и про перечисления
@@ -357,17 +479,17 @@ static func smith_icon(icon_name: String) -> Texture2D:
 # (см. starting_resources), поэтому убрать позицию можно просто удалив строку
 # ═════════════════════════════════════════════════════════════════════════════
 const PLAYER_STARTING_RESOURCES := {
-	Constants.RESOURCE_WOOD:  4500.0,   # хватает на Замок (300) и запас на первую постройку
-	Constants.RESOURCE_GOLD:  2500.0,
-	Constants.RESOURCE_STONE: 1000.0,
-	Constants.RESOURCE_FOOD:  1000.0,
+	Constants.RESOURCE_WOOD:  24500.0,   # хватает на Замок (300) и запас на первую постройку
+	Constants.RESOURCE_GOLD:  22500.0,
+	Constants.RESOURCE_STONE: 21000.0,
+	Constants.RESOURCE_FOOD:  11000.0,
 }
 
 const AI_STARTING_RESOURCES := {
 	Constants.RESOURCE_WOOD:  450.0,
-	Constants.RESOURCE_GOLD:  250.0,
-	Constants.RESOURCE_STONE: 100.0,
-	Constants.RESOURCE_FOOD:  100.0,
+	Constants.RESOURCE_GOLD:  350.0,
+	Constants.RESOURCE_STONE: 300.0,
+	Constants.RESOURCE_FOOD:  300.0,
 }
 
 ## Стартовый запас фракции. ВСЕГДА возвращает полный набор из четырёх ресурсов:
@@ -386,33 +508,33 @@ static func starting_resources(faction: int) -> Dictionary:
 
 const BUILDINGS := {
 	"castle": {
-		"name": "Замок", "max_hp": 3800.0,
-		"build_time": 10.0,                       # ставится готовым с первого клика
+		"name": "Замок", "max_hp": 5000.0,
+		"build_time": 15.0,                       # ставится готовым с первого клика
 		"size": Vector3(8.0, 6.0, 8.0),
-		"cost_wood": 300.0, "cost_gold": .0, "cost_stone": 0.0,
+		"cost_wood": 300.0, "cost_gold": 300.0, "cost_stone": 300.0,
 		"worker_buildable": false,
 		"icon": "res://assets/factions/humans/icons/buildings/Castle.png",
 	},
 	# ХИЖИНА ГОБЛИНОВ. Игроку не строится (worker_buildable = false): это
 	# здание третьей стороны, оно расставляется генератором деревни
 	"goblin_hut": {
-		"name": "Хижина гоблинов", "max_hp": 600.0, "build_time": 10.0,
+		"name": "Хижина гоблинов", "max_hp": 1000.0, "build_time": 10.0,
 		"size": Vector3(4.0, 3.5, 4.0),
 		"cost_wood": 0.0, "cost_gold": 0.0, "cost_stone": 0.0,
 		"worker_buildable": false,
 		"icon": "",
 	},
 	"barracks": {
-		"name": "Бараки", "max_hp": 1000.0, "build_time": 10.0,
+		"name": "Бараки", "max_hp": 2000.0, "build_time": 20.0,
 		"size": Vector3(3.5, 2.2, 3.5),
-		"cost_wood": 0.0, "cost_gold": 0.0, "cost_stone": 0.0,
+		"cost_wood": 1000.0, "cost_gold": 500.0, "cost_stone": 1000.0,
 		"worker_buildable": true,
 		"icon": "res://assets/factions/humans/icons/buildings/Barracks.png",
 	},
 	"smithy": {
-		"name": "Кузница", "max_hp": 1000.0, "build_time": 10.0,
+		"name": "Кузница", "max_hp": 2000.0, "build_time": 20.0,
 		"size": Vector3(4.0, 3.0, 4.0),
-		"cost_wood": 0.0, "cost_gold": 2.0, "cost_stone": .0,
+		"cost_wood": 1500.0, "cost_gold": 1000.0, "cost_stone": 500.0,
 		"worker_buildable": true,
 		"icon": "res://assets/factions/humans/icons/buildings/Monastery.png",
 	},
@@ -492,11 +614,11 @@ const SQUAD_SIZE_HARD_CAP := 100
 ## Убрать уровень = убрать число из "thresholds" И соответствующий блок из
 ## "bonuses" (длины должны совпадать).
 ##
-## СЕМЬ ГРЕЙДОВ (как они выглядят над отрядом — см. VeterancyStar.gd, общие
-## для всех типов, см. VET_STAR_TIERS ниже):
-##   1-3 — одна/две/три БРОНЗОВЫЕ звезды;
-##   4-6 — одна/две/три СЕРЕБРЯНЫЕ;
-##   7   — одна КРАСНАЯ (чуть крупнее остальных).
+## СЕМЬ ГРЕЙДОВ (как они выглядят над отрядом — см. VET_BANNER_TIERS ниже,
+## общие для всех типов). Звёздочки ЗАМЕНЕНЫ ЗНАМЁНАМИ на копьях:
+##   1-3 — красный вымпел: одна лычка, две, две с белым наконечником;
+##   4-6 — синий «ласточкин хвост»: одна лычка, две, две с белым наконечником;
+##   7   — прямоугольный штандарт с золотой бахромой и гербом.
 ##
 ## Поля бонуса:
 ##   id    — ключ выбора (латиницей)
@@ -521,154 +643,121 @@ const SQUAD_SIZE_HARD_CAP := 100
 const _VET_BONUS_TEMPLATE := [
 	# ── УРОВЕНЬ 1 ──────────────────────────────────────────────────────
 	[
-		{"id": "attack", "name": "+ Урон к Атаке", "icon": "icon_sword.png",
-			"bonus_attack": 2.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
+		{"id": "attack", "name": "+3 урона к Атаке", "icon": "icon_sword.png",
+			"bonus_attack": 3.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
 			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_cooldown": 0.2, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_morale": 10.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		{"id": "armor", "name": "+3 к Броне", "icon": "icon_shield.png",
+			"bonus_attack": 0.3, "bonus_armor": 1.5, "bonus_defense": 0.0,
+			"bonus_health": 0.0, "bonus_speed": -0.1, "bonus_range": 0.0,
 			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-		{"id": "armor", "name": "+ к Броне", "icon": "icon_shield.png",
-			"bonus_attack": 0.0, "bonus_armor": 2.0, "bonus_defense": 0.0,
-			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-		{"id": "defense", "name": "+ к Защите", "icon": "icon_might.png",
-			"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 2.0,
-			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-		{"id": "speed", "name": "+ к Скорости", "icon": "icon_hand.png",
-			"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-			"bonus_health": 0.0, "bonus_speed": 0.5, "bonus_range": 0.0,
-			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-		{"id": "health", "name": "+ HP", "icon": "icon_heart.png",
-			"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-			"bonus_health": 30.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_morale": 5.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		{"id": "health", "name": "+15 HP", "icon": "icon_heart.png",
+			"bonus_attack": 1.0, "bonus_armor": 0.0, "bonus_defense": 2.0,
+			"bonus_health": 15.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 1.0,
 			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	],
 	# ── УРОВЕНЬ 2 ──────────────────────────────────────────────────────
 	[
-		{"id": "attack", "name": "+ Урон к Атаке", "icon": "icon_sword.png",
+		{"id": "attack", "name": "+3 урона к Атаке", "icon": "icon_sword.png",
 			"bonus_attack": 3.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
 			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_cooldown": 0.2, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_morale": 10.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		{"id": "armor", "name": "+3 к Броне", "icon": "icon_shield.png",
+			"bonus_attack": 0.3, "bonus_armor": 1.5, "bonus_defense": 0.0,
+			"bonus_health": 0.0, "bonus_speed": -0.1, "bonus_range": 0.0,
 			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-		{"id": "armor", "name": "+ к Броне", "icon": "icon_shield.png",
-			"bonus_attack": 0.0, "bonus_armor": 3.0, "bonus_defense": 0.0,
-			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+			"bonus_morale": 5.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 		{"id": "defense", "name": "+ к Защите", "icon": "icon_might.png",
 			"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 3.0,
-			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_health": 0.0, "bonus_speed": 0.3, "bonus_range": 0.0,
+			"bonus_cooldown": 0.3, "bonus_spread": 0.0, "bonus_push": 0.0,
 			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-		{"id": "speed", "name": "+ к Скорости", "icon": "icon_hand.png",
+		{"id": "health", "name": "+15 HP", "icon": "icon_heart.png",
 			"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-			"bonus_health": 0.0, "bonus_speed": 0.5, "bonus_range": 0.0,
-			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-		{"id": "health", "name": "+ HP", "icon": "icon_heart.png",
-			"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-			"bonus_health": 30.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_health": 15.0, "bonus_speed": 0.1, "bonus_range": 0.0,
+			"bonus_cooldown": 0.2, "bonus_spread": 0.0, "bonus_push": 0.5,
 			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	],
 	# ── УРОВЕНЬ 3 ──────────────────────────────────────────────────────
 	[
-		{"id": "attack", "name": "+ Урон к Атаке", "icon": "icon_sword.png",
-			"bonus_attack": 5.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
+		{"id": "attack", "name": "+3 урона к Атаке", "icon": "icon_sword.png",
+			"bonus_attack": 3.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
 			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_cooldown": 0.2, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_morale": 10.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		{"id": "armor", "name": "+3 к Броне", "icon": "icon_shield.png",
+			"bonus_attack": 0.3, "bonus_armor": 3.0, "bonus_defense": 0.0,
+			"bonus_health": 0.0, "bonus_speed": -0.1, "bonus_range": 0.0,
 			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-		{"id": "armor", "name": "+ к Броне", "icon": "icon_shield.png",
-			"bonus_attack": 0.0, "bonus_armor": 5.0, "bonus_defense": 0.0,
-			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-		{"id": "defense", "name": "+ к Защите", "icon": "icon_might.png",
-			"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 5.0,
-			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-		{"id": "speed", "name": "+ к Скорости", "icon": "icon_hand.png",
+			"bonus_morale": 5.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		{"id": "morale", "name": "+20 к Морале", "icon": "icon_hand.png",
+			"bonus_attack": 1.0, "bonus_armor": 1.0, "bonus_defense": 1.0,
+			"bonus_health": 5.0, "bonus_speed": 0.3, "bonus_range": 0.0,
+			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.5,
+			"bonus_morale": 20.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		{"id": "health", "name": "+15 HP", "icon": "icon_heart.png",
 			"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-			"bonus_health": 0.0, "bonus_speed": 0.3, "bonus_range": 0.0,
-			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-		{"id": "health", "name": "+ HP", "icon": "icon_heart.png",
-			"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-			"bonus_health": 30.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_health": 15.0, "bonus_speed": 0.1, "bonus_range": 0.0,
+			"bonus_cooldown": 0.1, "bonus_spread": 0.0, "bonus_push": 0.5,
 			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	],
 	# ── УРОВЕНЬ 4 ──────────────────────────────────────────────────────
 	[
-		{"id": "attack", "name": "+ Урон к Атаке", "icon": "icon_sword.png",
-			"bonus_attack": 5.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
+		{"id": "attack", "name": "+4 Урон к Атаке", "icon": "icon_sword.png",
+			"bonus_attack": 4.0, "bonus_armor": 0.0, "bonus_defense": 0.3,
 			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_cooldown": 0.2, "bonus_spread": 0.0, "bonus_push": 0.2,
+			"bonus_morale": 10.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		{"id": "armor", "name": "+3 к Броне", "icon": "icon_shield.png",
+			"bonus_attack": 0.5, "bonus_armor": 3.0, "bonus_defense": 0.5,
+			"bonus_health": 0.0, "bonus_speed": -0.1, "bonus_range": 0.0,
 			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-		{"id": "armor", "name": "+ к Броне", "icon": "icon_shield.png",
-			"bonus_attack": 0.0, "bonus_armor": 5.0, "bonus_defense": 0.0,
-			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-		{"id": "defense", "name": "+ к Защите", "icon": "icon_might.png",
-			"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 5.0,
-			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-		{"id": "speed", "name": "+ к Скорости", "icon": "icon_hand.png",
+			"bonus_morale": 5.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+
+		{"id": "health", "name": "+20 HP", "icon": "icon_heart.png",
 			"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-			"bonus_health": 0.0, "bonus_speed": 0.3, "bonus_range": 0.0,
-			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-		{"id": "health", "name": "+ HP", "icon": "icon_heart.png",
-			"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-			"bonus_health": 30.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_health": 20.0, "bonus_speed": 0.1, "bonus_range": 0.0,
+			"bonus_cooldown": 0.1, "bonus_spread": 0.0, "bonus_push": 0.2,
 			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	],
 	# ── УРОВЕНЬ 5 ──────────────────────────────────────────────────────
 	[
-		{"id": "attack", "name": "+ Урон к Атаке", "icon": "icon_sword.png",
-			"bonus_attack": 5.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
+		{"id": "attack", "name": "+5 Урон к Атаке", "icon": "icon_sword.png",
+			"bonus_attack": 5.0, "bonus_armor": 0.0, "bonus_defense": 0.3,
 			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_cooldown": 0.2, "bonus_spread": 0.0, "bonus_push": 0.3,
+			"bonus_morale": 10.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		{"id": "armor", "name": "+3 к Броне", "icon": "icon_shield.png",
+			"bonus_attack": 0.3, "bonus_armor": 3.0, "bonus_defense": 0.5,
+			"bonus_health": 0.0, "bonus_speed": -0.1, "bonus_range": 0.0,
 			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-		{"id": "armor", "name": "+ к Броне", "icon": "icon_shield.png",
-			"bonus_attack": 0.0, "bonus_armor": 5.0, "bonus_defense": 0.0,
-			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-		{"id": "defense", "name": "+ к Защите", "icon": "icon_might.png",
-			"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 5.0,
-			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-		{"id": "speed", "name": "+ к Скорости", "icon": "icon_hand.png",
-			"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
+			"bonus_morale": 5.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		{"id": "defense", "name": "+3 к Защите", "icon": "icon_might.png",
+			"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 3.0,
 			"bonus_health": 0.0, "bonus_speed": 0.3, "bonus_range": 0.0,
-			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_cooldown": 0.3, "bonus_spread": 0.0, "bonus_push": 0.0,
 			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-		{"id": "health", "name": "+ HP", "icon": "icon_heart.png",
+		
+		{"id": "health", "name": "+20 HP", "icon": "icon_heart.png",
 			"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-			"bonus_health": 30.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_health": 20.0, "bonus_speed": 0.1, "bonus_range": 0.0,
+			"bonus_cooldown": 0.2, "bonus_spread": 0.0, "bonus_push": 0.5,
 			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	],
 	# ── УРОВЕНЬ 6 ──────────────────────────────────────────────────────
 	[
-		{"id": "attack", "name": "+ Урон к Атаке", "icon": "icon_sword.png",
-			"bonus_attack": 6.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
+		{"id": "attack", "name": "+5 Урон к Атаке", "icon": "icon_sword.png",
+			"bonus_attack": 5.0, "bonus_armor": 0.0, "bonus_defense": 0.5,
 			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+			"bonus_cooldown": 0.2, "bonus_spread": 0.0, "bonus_push": 0.3,
+			"bonus_morale": 10.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 		{"id": "armor", "name": "+ к Броне", "icon": "icon_shield.png",
-			"bonus_attack": 0.0, "bonus_armor": 6.0, "bonus_defense": 0.0,
-			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_attack": 0.3, "bonus_armor": 3.0, "bonus_defense": 0.0,
+			"bonus_health": 0.0, "bonus_speed": -0.1, "bonus_range": 0.0,
 			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
 			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 		{"id": "defense", "name": "+ к Защите", "icon": "icon_might.png",
@@ -690,14 +779,14 @@ const _VET_BONUS_TEMPLATE := [
 	# ── УРОВЕНЬ 7 ──────────────────────────────────────────────────────
 	[
 		{"id": "attack", "name": "+ Урон к Атаке", "icon": "icon_sword.png",
-			"bonus_attack": 8.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
+			"bonus_attack": 6.0, "bonus_armor": 0.0, "bonus_defense": 0.3,
 			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+			"bonus_cooldown": 0.3, "bonus_spread": 0.0, "bonus_push": 0.5,
+			"bonus_morale": 10.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 		{"id": "armor", "name": "+ к Броне", "icon": "icon_shield.png",
-			"bonus_attack": 0.0, "bonus_armor": 8.0, "bonus_defense": 0.0,
-			"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
+			"bonus_attack": 0.3, "bonus_armor": 5.0, "bonus_defense": 0.5,
+			"bonus_health": 0.0, "bonus_speed": -0.1, "bonus_range": 0.0,
+			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.5,
 			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 		{"id": "defense", "name": "+ к Защите", "icon": "icon_might.png",
 			"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 8.0,
@@ -726,7 +815,7 @@ const _VET_BONUS_TEMPLATE := [
 ## раз при загрузке скрипта, значения дальше можно менять по каждому ключу
 ## порознь, ничего не задевая
 static var VET_CONFIG: Dictionary = {
-	"spearman": {"thresholds": [100, 200, 400, 600, 800, 1000, 1300], "bonuses": _VET_BONUS_TEMPLATE.duplicate(true)},
+	"spearman": {"thresholds": [40, 80, 120, 180, 240, 300, 350], "bonuses": _VET_BONUS_TEMPLATE.duplicate(true)},
 	"warrior":  {"thresholds": [100, 200, 400, 600, 800, 1000, 1300], "bonuses": _VET_BONUS_TEMPLATE.duplicate(true)},
 	"archer":   {"thresholds": [100, 200, 400, 600, 800, 1000, 1300], "bonuses": _VET_BONUS_TEMPLATE.duplicate(true)},
 	"monk":     {"thresholds": [40, 100, 200, 300, 400, 500, 600], "bonuses": _VET_BONUS_TEMPLATE.duplicate(true)},
@@ -747,6 +836,10 @@ static var VET_CONFIG: Dictionary = {
 ## и для строки звёзд на панели (HUD._portrait_stars_lbl). Формат:
 ##   count — сколько звёзд рисовать, tier — "bronze" | "silver" | "gold"
 ## Уровень выше последней записи берёт последнюю (высший грейд не «пропадает»)
+## ── ПРЕЖНЯЯ ЗВЁЗДНАЯ ШКАЛА: НАСЛЕДИЕ ───────────────────────────────────────
+## Звёзды заменены знамёнами (см. VET_BANNER_TIERS). Таблица оставлена в дереве
+## неиспользуемой игрой — по ней ещё меряются стенды прежнего вида, и это
+## единственное, что её держит. Новый код обязан читать VET_BANNER_TIERS
 const VET_STAR_TIERS := [
 	{"count": 1, "tier": "bronze"},
 	{"count": 2, "tier": "bronze"},
@@ -785,6 +878,120 @@ const VET_TIER_SCALE := {
 	"silver": 1.0,
 	"gold":   1.35,
 }
+
+## ═══════════════════════════════════════════════════════════════════════════
+## ЗНАМЁНА ВЕТЕРАНСТВА — СЕМЬ ГРЕЙДОВ (заказ владельца, авг. 2026)
+## ═══════════════════════════════════════════════════════════════════════════
+## Звёздочки над отрядом ЗАМЕНЕНЫ знамёнами на копьях. Таблица ниже — един-
+## ственный источник правды: по ней рисуется картинка (BannerArt), по ней же
+## подписывается ранг в панели отряда (HUD). Картинки в ассетах нет и не будет —
+## она строится кодом, как строилась геометрия звезды.
+##
+## ЧТО ЗНАЧАТ ПОЛЯ:
+##   rank        — ранг отряда в родительном падеже: «Отряд ОПЫТНЫХ копейщиков».
+##                 Второе слово подставляется из STATS.name_genitive_plural того
+##                 рода войск, которому знамя принадлежит (см. veteran_rank_name)
+##   shape       — BANNER_PENNANT / BANNER_GUIDON / BANNER_STANDARD
+##   cloth       — цвет полотнища
+##   chevrons    — сколько лычек
+##   chevron_dir — куда смотрят лычки: +1 в полёт (`>`), -1 к древку (`<`)
+##   white_tip   — белый наконечник у свободного края
+##
+## ПОЧЕМУ ЦВЕТ ЛЫЧЕК И БЕЛОГО НАКОНЕЧНИКА ВЫНЕСЕН ИЗ ТАБЛИЦЫ. Он один на все
+## грейды и меняться порознь не должен: разноцветные лычки превратили бы шкалу
+## званий в набор непохожих значков, по которому нельзя понять, кто старше.
+const BANNER_PENNANT  := 0    ## вымпел: сужается к острию
+const BANNER_GUIDON   := 1    ## «ласточкин хвост»: клин вырезан из свободного края
+const BANNER_STANDARD := 2    ## прямоугольный штандарт с бахромой и гербом
+
+const BANNER_CHEVRON := Color(0.97, 0.97, 0.95)
+const BANNER_TIP_COLOR := Color(0.97, 0.97, 0.95)
+const BANNER_GOLD := Color(0.93, 0.76, 0.24)
+
+const VET_BANNER_TIERS := [
+	{"rank": "опытных",       "shape": BANNER_PENNANT,  "cloth": Color(0.72, 0.11, 0.13),
+		"chevrons": 1, "chevron_dir":  1, "white_tip": false},
+	{"rank": "закалённых",    "shape": BANNER_PENNANT,  "cloth": Color(0.72, 0.11, 0.13),
+		"chevrons": 2, "chevron_dir":  1, "white_tip": false},
+	{"rank": "ветеранов",     "shape": BANNER_PENNANT,  "cloth": Color(0.72, 0.11, 0.13),
+		"chevrons": 2, "chevron_dir":  1, "white_tip": true},
+	{"rank": "элитных",       "shape": BANNER_GUIDON,   "cloth": Color(0.16, 0.34, 0.70),
+		"chevrons": 1, "chevron_dir": -1, "white_tip": false},
+	{"rank": "знаменитых",    "shape": BANNER_GUIDON,   "cloth": Color(0.16, 0.34, 0.70),
+		"chevrons": 2, "chevron_dir": -1, "white_tip": false},
+	{"rank": "прославленных", "shape": BANNER_GUIDON,   "cloth": Color(0.16, 0.34, 0.70),
+		"chevrons": 2, "chevron_dir": -1, "white_tip": true},
+	{"rank": "легендарных",   "shape": BANNER_STANDARD, "cloth": Color(0.55, 0.09, 0.12),
+		"chevrons": 0, "chevron_dir":  1, "white_tip": false},
+]
+
+## Описание грейда знамени: то же, что лежит в таблице, плюс "key" (номер
+## грейда — по нему кэшируется готовая картинка). lvl <= 0 или выше таблицы —
+## зажимается в её границы, потому что «уровень выше седьмого» невозможен по
+## построению (порогов ровно семь), но проверять это в каждом вызывающем месте
+## незачем
+static func veteran_banner_tier(lvl: int) -> Dictionary:
+	if lvl <= 0 or VET_BANNER_TIERS.is_empty():
+		return {}
+	var idx: int = clampi(lvl, 1, VET_BANNER_TIERS.size()) - 1
+	var d: Dictionary = (VET_BANNER_TIERS[idx] as Dictionary).duplicate()
+	d["key"] = idx + 1
+	return d
+
+## ПОЛНОЕ НАЗВАНИЕ ОТРЯДА: «Отряд ветеранов копейщиков».
+##
+## Собирается из ДВУХ конфигов, а не хранится готовой строкой на каждую пару
+## «ранг × род войск»: рангов семь, боевых родов шесть, и таблица из сорока
+## двух строк разъехалась бы при первой же правке одного из двух списков.
+## Неизвестный род войск (в частности рабочий — он вне ветеранства навсегда)
+## даёт пустую строку, а не ошибку
+static func veteran_rank_name(unit_id: String, lvl: int) -> String:
+	var tier: Dictionary = veteran_banner_tier(lvl)
+	if tier.is_empty():
+		return ""
+	var noun: String = String(stat_str(unit_id, "name_genitive_plural", ""))
+	if noun == "":
+		return "Отряд %s" % String(tier.get("rank", ""))
+	return "Отряд %s %s" % [String(tier.get("rank", "")), noun]
+
+## ── ЗНАЧОК РАНГА В ПАНЕЛИ ──────────────────────────────────────────────────
+## Панель не может показать знамя: значок там высотой в строку текста, и
+## полотнище на нём превратилось бы в цветное пятно. Поэтому в интерфейсе ранг
+## показан ЛЫЧКАМИ — тем единственным, что на знамени и так читается числом.
+##
+## ВЫВОДИТСЯ ИЗ ТОЙ ЖЕ ТАБЛИЦЫ, что и само знамя, и это главное: иначе значок и
+## знамя разъехались бы при первой правке одного из них (ровно эта беда уже
+## случалась со звездой, когда число звёзд в панели считали отдельно от числа
+## звёзд над отрядом).
+##
+## Белый наконечник получает свою черту, а не пропадает: без неё второй и
+## третий грейды выглядели бы в панели одинаково, хотя это разные звания
+static func veteran_badge_text(lvl: int) -> String:
+	var t: Dictionary = veteran_banner_tier(lvl)
+	if t.is_empty():
+		return ""
+	if int(t.get("shape", BANNER_PENNANT)) == BANNER_STANDARD:
+		return "✪"
+	var g: String = "❯" if int(t.get("chevron_dir", 1)) > 0 else "❮"
+	var out: String = g.repeat(maxi(int(t.get("chevrons", 1)), 1))
+	if bool(t.get("white_tip", false)):
+		out += "❙"
+	return out
+
+## Цвет значка ранга. СВЕТЛЕЕ полотнища на четверть: знамя видно на траве и на
+## небе, а значок лежит на тёмном портрете, и глухой бордовый на нём тонет
+static func veteran_badge_color(lvl: int) -> Color:
+	var t: Dictionary = veteran_banner_tier(lvl)
+	if t.is_empty():
+		return Color.WHITE
+	if int(t.get("shape", BANNER_PENNANT)) == BANNER_STANDARD:
+		return BANNER_GOLD
+	return (t.get("cloth", Color.WHITE) as Color).lightened(0.25)
+
+## Строковое поле характеристик с дефолтом (числовой брат — stat() выше)
+static func stat_str(unit_id: String, key: String, default: String = "") -> String:
+	var d: Dictionary = STATS.get(unit_id, {})
+	return String(d.get(key, default))
 
 ## Описание грейда уровня lvl: {"count": int, "tier": String,
 ## "color": Color, "scale": float}. lvl <= 0 — пусто (не ветеран)

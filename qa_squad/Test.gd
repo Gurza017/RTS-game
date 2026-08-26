@@ -60,6 +60,8 @@ func _run() -> void:
 	await _test_march_shape()
 	await _test_ui()
 	await _test_attrition()
+	await _test_reform_after_pass()
+	await _test_reform_defense_line()
 	await _test_mass_and_reset()
 	_summary()
 	print("\n=== SQUAD TEST DONE ===")
@@ -697,16 +699,19 @@ func _test_march_shape() -> void:
 
 	# Смещения каждого бойца сохранены в точности
 	var max_err := 0.0
-	var centroid := Vector3.ZERO
-	for p in pos_before:
-		centroid += (p as Vector3)
-	centroid /= float(pos_before.size())
-	centroid.y = 0.0
+	# ОПОРА БЕРЁТСЯ СВОЯ У КАЖДОГО НАБОРА, а не «среднее до» против
+	# «точки приказа»: проверяется ВЗАИМНОЕ расположение бойцов, а то,
+	# какой точкой строй привязан к курсору, — отдельное решение кода
+	# (там МЕДИАНА, см. GameManager._centroid_of). Со средним слева
+	# и точкой приказа справа стенд мерял разницу среднего и медианы
+	# (0.1-0.2 м), а не искажение строя
+	var centroid: Vector3 = _median_xz(pos_before)
+	var centroid_after: Vector3 = _median_xz(dest)
 	for i in range(members.size()):
 		var p0: Vector3 = pos_before[i]
 		var d0: Vector3 = dest[i]
 		var off_before := Vector3(p0.x - centroid.x, 0.0, p0.z - centroid.z)
-		var off_after  := Vector3(d0.x - target.x, 0.0, d0.z - target.z)
+		var off_after  := Vector3(d0.x - centroid_after.x, 0.0, d0.z - centroid_after.z)
 		max_err = maxf(max_err, off_before.distance_to(off_after))
 	print("  максимальная ошибка переноса смещения бойца: %.5f м" % max_err)
 	verdict("5 смещения бойцов перенесены без искажений", max_err < 0.001,
@@ -863,6 +868,193 @@ func _test_attrition() -> void:
 # ═════════════════════════════════════════════════════════════════════════════
 # 8. НАГРУЗКА, ПОВТОРНАЯ ПАРТИЯ И РЕЕСТР
 # ═════════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════════════
+# СТРОЙ СМЫКАЕТСЯ ПОСЛЕ ПРОХОДА СОЮЗНИКОВ
+# ═════════════════════════════════════════════════════════════════════════════
+## Жалоба владельца: рыцари проходят сквозь шеренгу пехоты, после чего пехота
+## остаётся с разломанным строем и дырами.
+##
+## ПОЧЕМУ ПРЕЖНЕЕ СМЫКАНИЕ ЭТОГО НЕ ЛОВИЛО. Оно взводится ТОЛЬКО боем
+## (squad_mark_hit): «отряд задели — значит после боя надо сомкнуться». Проход
+## СВОИХ боем не является, отметка не ставилась, и дыры оставались до первой
+## стычки.
+##
+## Стенд не изображает сам проход рыцарей — он воспроизводит его РЕЗУЛЬТАТ:
+## бойцов растаскивает со своих мест. Причина отъезда для механики не важна
+## вовсе, и это её главное достоинство (см. GameManager._sweep_reform)
+func _test_reform_after_pass() -> void:
+	print("\n═════ СМЫКАНИЕ ПОСЛЕ ПРОХОДА СОЮЗНИКОВ ═════")
+	# СВОЙ ОТРЯД, А НЕ squad_a: к этому блоку прежние отряды стенда уже выбиты
+	# и расформированы (см. _test_attrition / _test_mass_and_reset)
+	var center := Vector3(-700.0, 0.0, -700.0)
+	var sid: int = GameManager.new_squad(Constants.FACTION_PLAYER, "spearman")
+	var men: Array = []
+	for i in range(12):
+		var u: Unit = load("res://scenes/units/Spearman.tscn").instantiate()
+		u.faction = Constants.FACTION_PLAYER
+		main.world_add(u)
+		var sp := center + Vector3(float(i % 6) * 0.8 - 2.0, 0.0, float(i / 6) * 0.8)
+		u.global_position = Vector3(sp.x, GameManager.get_terrain_height(sp.x, sp.z), sp.z)
+		u.sync_row()
+		GameManager.add_to_squad(sid, u)
+		men.append(u)
+	await frames(4)
+	# Ставим отряду разметку — без неё смыкать не во что
+	var slots: Array = []
+	for i in range(men.size()):
+		slots.append(center + Vector3(float(i % 6) * 0.8 - 2.0, 0.0,
+			float(i / 6) * 0.8))
+	GameManager.squad_set_formation(sid, slots, Vector3(0, 0, -1), false)
+	# Разметка сама приказов не раздаёт — она их только ХРАНИТ. Ставим отряд на
+	# места штатным смыканием: именно оно пишет бойцам post_pos, по которому
+	# потом и считается «съехал ли он со своего места»
+	GameManager.squad_close_ranks(sid, true)
+	# ФИЗИЧЕСКИЕ кадры: ждём, пока дойдут (правило проекта — движение живёт в них)
+	for _i in range(240):
+		await get_tree().physics_frame
+	var settled := 0
+	for m in men:
+		var u := m as Unit
+		if u != null and not u.is_dead() and u._post_valid \
+				and u.global_position.distance_to(u.post_pos) < 1.0:
+			settled += 1
+	verdict("R0 отряд встал по разметке", settled >= men.size() / 2,
+		"на местах %d из %d" % [settled, men.size()])
+
+	# ── ПРОХОД СОЮЗНИКОВ: РАСТАСКИВАЕМ СТРОЙ ──────────────────────────────
+	# Пять метров вбок — это ровно та дыра, которую пробивает прошедший сквозь
+	# строй отряд рыцарей
+	var shoved := 0
+	for i in range(men.size()):
+		var u := men[i] as Unit
+		if u == null or u.is_dead():
+			continue
+		if i % 2 != 0:
+			continue
+		var p: Vector3 = u.global_position + Vector3(5.0, 0.0, 0.0)
+		u.global_position = Vector3(p.x, GameManager.get_terrain_height(p.x, p.z), p.z)
+		u.sync_row()
+		u.state = Unit.State.IDLE
+		shoved += 1
+	await frames(3)
+	var broken := 0
+	for m in men:
+		var u2 := m as Unit
+		if u2 != null and not u2.is_dead() and u2._post_valid \
+				and u2.global_position.distance_to(u2.post_pos) > GameManager.REFORM_DRIFT:
+			broken += 1
+	verdict("R1 строй действительно разломан", broken >= shoved / 2,
+		"съехало %d из %d (растащено %d)" % [broken, men.size(), shoved])
+
+	# ── СМЫКАНИЕ ОБЯЗАНО СЛУЧИТЬСЯ САМО ───────────────────────────────────
+	# Никаких боёв и никаких приказов: только время. Обход идёт раз в
+	# GameManager.REFORM_SWEEP_SEC, потом бойцам надо дойти
+	for _i in range(600):
+		await get_tree().physics_frame
+	var back := 0
+	for m in men:
+		var u3 := m as Unit
+		if u3 != null and not u3.is_dead() and u3._post_valid \
+				and u3.global_position.distance_to(u3.post_pos) < GameManager.REFORM_DRIFT:
+			back += 1
+	var live := 0
+	for m in men:
+		if (m as Unit) != null and not (m as Unit).is_dead():
+			live += 1
+	print("  вернулось на места %d из %d живых" % [back, live])
+	verdict("R2 строй сомкнулся сам, без боя и без приказа",
+		live > 0 and back >= live - 1,
+		"на местах %d из %d" % [back, live])
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ТО ЖЕ САМОЕ, НО В ОБОРОНЕ И ПО ЛИНИИ ИЗ ПКМ-РАСТЯЖКИ
+# ═════════════════════════════════════════════════════════════════════════════
+## Заявленный владельцем случай дословно: «копейщики, расставившись по ПКМ
+## (растягиванием линии), пропускают сквозь себя проходящих лучников, строй
+## ломается и больше НЕ восстанавливается».
+##
+## Отличий от блока выше два, и оба существенные:
+##   • разметка ОДНОШЕРЕНОЖНАЯ (линия), а не блок — по ней и считается «своё
+##     место», и если смыкание её не читает, дыры остаются;
+##   • стойка ОБОРОНА. Она запрещает бойцу двигаться по собственной
+##     инициативе, и надо убедиться, что смыкание рядов из-под этого запрета
+##     всё же работает (Unit.allow_reform_move) — иначе фаланга чинить свой
+##     строй не может вовсе.
+func _test_reform_defense_line() -> void:
+	print("\n═════ СМЫКАНИЕ ЛИНИИ В ОБОРОНЕ ═════")
+	var center := Vector3(-760.0, 0.0, -760.0)
+	var sid: int = GameManager.new_squad(Constants.FACTION_PLAYER, "spearman")
+	var men: Array = []
+	var slots: Array = []
+	for i in range(10):
+		var u: Unit = load("res://scenes/units/Spearman.tscn").instantiate()
+		u.faction = Constants.FACTION_PLAYER
+		main.world_add(u)
+		# ЛИНИЯ: одна шеренга поперёк курса, как её раскладывает растяжка ПКМ
+		var sp := center + Vector3(float(i) * 0.9 - 4.0, 0.0, 0.0)
+		u.global_position = Vector3(sp.x, GameManager.get_terrain_height(sp.x, sp.z), sp.z)
+		u.sync_row()
+		GameManager.add_to_squad(sid, u)
+		u.set_stance(_UCfg.STANCE_DEFENSE)
+		men.append(u)
+		slots.append(sp)
+	GameManager.squad_set_formation(sid, slots, Vector3(0, 0, -1), false)
+	GameManager.squad_close_ranks(sid, true)
+	for _i in range(240):
+		await get_tree().physics_frame
+	var on_spot := 0
+	for m in men:
+		var u0 := m as Unit
+		if u0 != null and u0._post_valid \
+				and u0.global_position.distance_to(u0.post_pos) < 1.0:
+			on_spot += 1
+	verdict("R3 линия в обороне встала по разметке", on_spot >= men.size() - 1,
+		"на местах %d из %d" % [on_spot, men.size()])
+
+	# ── ЛУЧНИКИ ПРОШЛИ НАСКВОЗЬ: РАСТАСКИВАЕМ ЛИНИЮ ───────────────────────
+	var shoved := 0
+	for i in range(men.size()):
+		if i % 2 != 0:
+			continue
+		var u1 := men[i] as Unit
+		if u1 == null or u1.is_dead():
+			continue
+		var p: Vector3 = u1.global_position + Vector3(0.0, 0.0, 4.0)
+		u1.global_position = Vector3(p.x, GameManager.get_terrain_height(p.x, p.z), p.z)
+		u1.sync_row()
+		u1.state = Unit.State.IDLE
+		shoved += 1
+	await frames(3)
+	var broken := 0
+	for m in men:
+		var u2 := m as Unit
+		if u2 != null and u2._post_valid \
+				and u2.global_position.distance_to(u2.post_pos) > GameManager.REFORM_DRIFT:
+			broken += 1
+	verdict("R3б линия действительно разломана", broken >= shoved / 2,
+		"съехало %d (растащено %d)" % [broken, shoved])
+
+	# ── И ОБЯЗАНА СОМКНУТЬСЯ САМА, НЕСМОТРЯ НА ОБОРОНУ ────────────────────
+	for _i in range(600):
+		await get_tree().physics_frame
+	var back := 0
+	var live := 0
+	for m in men:
+		var u3 := m as Unit
+		if u3 == null or u3.is_dead():
+			continue
+		live += 1
+		if u3._post_valid \
+				and u3.global_position.distance_to(u3.post_pos) < GameManager.REFORM_DRIFT:
+			back += 1
+	print("  вернулось на места %d из %d живых" % [back, live])
+	verdict("R4 линия в обороне сомкнулась сама", live > 0 and back >= live - 1,
+		"на местах %d из %d" % [back, live])
+	for m in men:
+		if is_instance_valid(m):
+			(m as Node).queue_free()
+	await frames(3)
+
 func _median(a: Array) -> float:
 	if a.is_empty():
 		return 0.0
@@ -1051,3 +1243,18 @@ func _test_mass_and_reset() -> void:
 	print("  финал: отрядов в реестре %d, осиротевших узлов %d" % [
 		GameManager.squads.size(), orphan])
 	verdict("8 нет утечки узлов после трёх партий", orphan == 0, "orphan=%d" % orphan)
+
+
+
+# Медиана по осям — та же опора, что у GameManager._centroid_of
+func _median_xz(pts: Array) -> Vector3:
+	var xs: Array = []
+	var zs: Array = []
+	for p in pts:
+		var v: Vector3 = p
+		xs.append(v.x)
+		zs.append(v.z)
+	xs.sort()
+	zs.sort()
+	var h: int = xs.size() / 2
+	return Vector3(xs[h], 0.0, zs[h])

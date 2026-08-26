@@ -1,0 +1,19 @@
+[remap]
+
+importer="mp3"
+type="AudioStreamMP3"
+uid="uid://dkchno30uoj24"
+path="res://.godot/imported/community-marching-loop-32908.mp3-5e77bd93432c5361743b68e35ffe98ec.mp3str"
+
+[deps]
+
+source_file="res://assets/environment/Main Sounds/sound voice humans/community-marching-loop-32908.mp3"
+dest_files=["res://.godot/imported/community-marching-loop-32908.mp3-5e77bd93432c5361743b68e35ffe98ec.mp3str"]
+
+[params]
+
+loop=false
+loop_offset=0
+bpm=0
+beat_count=0
+bar_beats=4

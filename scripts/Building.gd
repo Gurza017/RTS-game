@@ -817,6 +817,10 @@ var _rally_marker: Node3D = null
 const RALLY_POLE_H    := 1.30
 const RALLY_POLE_R    := 0.0275
 const RALLY_FLAG_W    := 0.55
+## Шаг россыпи одиночных агентов (рабочих) при выходе из здания, метры.
+## Выведен из строевого интервала: плотнее — слипнутся, шире — расползутся
+const SINGLE_AGENT_SPREAD := 0.9
+
 const RALLY_FLAG_H    := 0.35
 ## Глубина выреза «ласточкина хвоста» в долях ширины полотнища
 const RALLY_FLAG_NOTCH := 0.38
@@ -991,11 +995,29 @@ func _spawn_one(unit_name: String, idx: int, cols: int = -1, spacing: float = -1
 	# ведёт себя предсказуемо при смыкании рядов
 	cols = square_cols(total, cols)
 	var gate := _gate_position()
+	# ── ОДИНОЧКИ НЕ СТРОЯТСЯ ШЕРЕНГОЙ ──────────────────────────────────────
+	# Вопрос владельца: «почему рабочие вообще имеют логику отрядного
+	# построения?». Отряд у рабочего — УЧЁТНАЯ единица (иначе его не выделить и
+	# не посчитать в панели), а вот боевая раскладка ему досталась просто
+	# потому, что здесь спрашивали squad_id и никогда — что это за отряд.
+	# Отсюда и «рабочие выстраиваются в боевую шеренгу через полкарты».
+	#
+	# Одиночкам раскладку заменяем россыпью по спирали золотого угла вокруг
+	# точки сбора: плотно, без шеренг и без полос выхода
+	var single: bool = squad_id > 0 and GameManager.squad_is_single_agent(squad_id)
 	var col      := idx % cols
 	var row      := idx / cols
+	if single:
+		col = 0
+		row = 0
 	# Ряд в строю: копейщики первых двух шеренг выходят с копьями наперевес
 	unit.formation_row = row
 	var offset_x := (col - (cols - 1) * 0.5) * spacing
+	if single:
+		# Спираль золотого угла: равномерное заполнение диска при любом числе
+		var ang: float = TAU * 0.381966 * float(idx)
+		var rr: float = SINGLE_AGENT_SPREAD * sqrt(float(idx))
+		offset_x = cos(ang) * rr
 	# ── ГЛУБИНА СЧИТАЕТСЯ ОТ ДАЛЬНЕЙ ШЕРЕНГИ, А НЕ ОТ ВОРОТ ─────────────────
 	# Отряд выходит шеренга за шеренгой (см. _drain_pending_spawns), и раньше
 	# шеренга, вышедшая ПЕРВОЙ, вставала БЛИЖЕ всех к воротам. Каждая следующая
@@ -1010,6 +1032,10 @@ func _spawn_one(unit_name: String, idx: int, cols: int = -1, spacing: float = -1
 	# (formation_row не меняется): первым вышел — первым и стоит
 	var rows_total: int = int(ceil(float(maxi(total, 1)) / float(cols)))
 	var offset_z: float = float(rows_total - 1 - row) * spacing
+	if single:
+		# Вторая координата той же спирали (см. offset_x выше)
+		var ang2: float = TAU * 0.381966 * float(idx)
+		offset_z = sin(ang2) * SINGLE_AGENT_SPREAD * sqrt(float(idx))
 	# Направление выхода задаётся spawn_offset здания (ворота), нормируется
 	var exit_dir := spawn_offset
 	exit_dir.y = 0.0
@@ -1029,6 +1055,10 @@ func _spawn_one(unit_name: String, idx: int, cols: int = -1, spacing: float = -1
 	var lane_dir: float  = 1.0 if lane % 2 == 1 else -1.0
 	var lane_mag: float  = float((lane + 1) / 2)
 	# Точка сбора отряда: ОТ ворот на SQUAD_EXIT_DISTANCE, строй сохраняется
+	# Полосы выхода разводят ОТРЯДЫ, чтобы они не толкались в дверях. Одиночкам
+	# полоса не нужна: они и так расходятся спиралью
+	if single:
+		lane_mag = 0.0
 	var rally: Vector3 = gate + exit_dir * (SQUAD_EXIT_DISTANCE + offset_z) \
 		+ side * (offset_x + lane_dir * lane_mag * lane_step)
 	# НАЗНАЧЕННАЯ ИГРОКОМ ТОЧКА СБОРА перебивает место у дверей. Смещение бойца
@@ -1045,8 +1075,21 @@ func _spawn_one(unit_name: String, idx: int, cols: int = -1, spacing: float = -1
 		# у ворот это нужно. Но игрок указал КОНКРЕТНОЕ место, и сдвигать
 		# отряд от флажка нельзя: счётчик полос только растёт, поэтому второй
 		# заказ приходил в 5.4 м сбоку, третий ещё дальше, и так без предела
-		# (замер qa_rally2, F8). К флажку идут все — строем, но в одну точку
-		rally = r_pos + exit_dir * offset_z + side * offset_x
+		# (замер qa_rally2, F8). К флажку идут все — строем, но в одну точку.
+		#
+		# ── НО НЕ НА ГОЛОВЫ ТЕМ, КТО УЖЕ ТАМ СТОИТ ─────────────────────────
+		# Жалоба владельца: новобранцы идут на точку сбора, где уже стоят
+		# войска, и отряды накладываются. Флажок один, а отрядов к нему приходит
+		# сколько угодно — сдвигать надо не флажок, а МЕСТО отряда возле него
+		# (см. GameManager.free_squad_spot). Габарит передаём заказанный, а не
+		# наличный: отряд ещё выходит по одному, и по наличному составу каждый
+		# следующий боец получал бы своё место
+		var want_c: Vector3 = r_pos
+		if squad_id > 0:
+			var want_r: float = sqrt(float(maxi(total, 1))) * 0.5 \
+				* GameManager.SQUAD_SPOT_SPACING + 0.4
+			want_c = GameManager.free_squad_spot(squad_id, r_pos, {}, want_r)
+		rally = want_c + exit_dir * offset_z + side * offset_x
 	# СТРАХОВКА ОТ ТОЧКИ СБОРА ЗА КРАЕМ МИРА. Полосы теперь ограничены, но барак
 	# может стоять вплотную к краю карты, а игрок — поставить флажок куда угодно.
 	# Приказ за границу боец всё равно не выполнит (шаг упирается в map_lim), и

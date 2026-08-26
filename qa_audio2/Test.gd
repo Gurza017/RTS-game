@@ -447,14 +447,24 @@ func _d_leaks() -> void:
 
 	# Кэш потоков: ключей не больше, чем файлов в банке плюс две музыки,
 	# и повторный запрос отдаёт ТОТ ЖЕ объект, а не новую загрузку
+	# ── СЧИТАЕМ ВСЕ БАНКИ, А НЕ ОДИН ───────────────────────────────────────
+	# Здесь было «файлы SFX плюс две музыки», и проверка краснела задолго до
+	# появления речи: кэш общий на ВЕСЬ звук, в нём лежат ещё и щелчки
+	# интерфейса (UI_BANK), и оба игровых трека, и лес. Сорок семь ключей
+	# против «34 + 2» — это не раздувание кэша, а неполный список того, что в
+	# него кладут. Считаем поимённо, по самим банкам, и без магических добавок
 	var files := 0
 	for key in AudioManager.SFX_BANK.keys():
 		var arr: Array = AudioManager.SFX_BANK[key]
 		files += arr.size()
+	files += AudioManager.UI_BANK.size()          # щелчки интерфейса
+	files += AudioManager.VOICE_BANK.size()       # реплики команд
+	files += AudioManager.MUSIC_PLAYLIST.size()   # игровые треки
+	files += 4                                    # лес, тема меню, два лупа марша
 	var cache_n: int = AudioManager._streams.size()
-	print("  кэш потоков: %d ключей (файлов в банке %d + 2 музыкальных)" % [
+	print("  кэш потоков: %d ключей при %d файлах во всех банках" % [
 		cache_n, files])
-	verdict("D2 кэш потоков не раздувается", cache_n <= files + 2,
+	verdict("D2 кэш потоков не раздувается", cache_n <= files,
 		"%d ключей при %d файлах" % [cache_n, files])
 
 	var path: String = AudioManager.DIR_SFX + String(AudioManager.SFX_BANK["chop"][0])
@@ -476,12 +486,26 @@ func _d_leaks() -> void:
 	for c in AudioManager.get_children():
 		if c is AudioStreamPlayer:
 			streamers += 1
-	print("  детей у AudioManager: 3D-голосов %d (пул %d), 2D-плееров %d" % [
-		players, AudioManager.POOL_SIZE, streamers])
-	verdict("D4 пул не разрастается за время боя",
-		players == AudioManager.POOL_SIZE and AudioManager._pool.size() == AudioManager.POOL_SIZE)
-	verdict("D5 музыкальных плееров ровно два (тема и лес)", streamers == 2,
-		"нашли %d" % streamers)
+	# ── ПЛЕЕРОВ У АУДИОМЕНЕДЖЕРА НЕ ДВА И НЕ ОДИН ПУЛ ──────────────────────
+	# Обе проверки ниже считали ВСЕХ детей и сверяли с одним числом, из-за чего
+	# краснели при любом новом канале:
+	#   • 3D-голоса — это боевой пул (POOL_SIZE) И пул марша (MARCH_VOICES);
+	#   • плоские плееры — это тема, лес, голоса интерфейса (UI_VOICES, их
+	#     четыре) и голоса реплик (VOICE_VOICES). «Ровно два» не выполнялось
+	#     уже с появлением щелчков интерфейса — проверка краснела и до речи.
+	# Смысл у обеих один и он остаётся: за время боя НИ ОДИН пул не растёт.
+	# Поэтому сверяем с суммой ОБЪЯВЛЕННЫХ размеров, а не с числом из головы
+	var want_3d: int = AudioManager.POOL_SIZE + AudioManager.MARCH_VOICES
+	var want_flat: int = 2 + AudioManager.UI_VOICES + AudioManager.VOICE_VOICES
+	print("  детей у AudioManager: 3D-голосов %d (ждём %d = бой %d + марш %d), плоских %d (ждём %d)" % [
+		players, want_3d, AudioManager.POOL_SIZE, AudioManager.MARCH_VOICES,
+		streamers, want_flat])
+	verdict("D4 3D-пулы не разрастаются за время боя",
+		players == want_3d and AudioManager._pool.size() == AudioManager.POOL_SIZE
+			and AudioManager._march_pool.size() == AudioManager.MARCH_VOICES,
+		"нашли %d при ожидаемых %d" % [players, want_3d])
+	verdict("D5 плоских плееров ровно столько, сколько объявлено",
+		streamers == want_flat, "нашли %d, ждали %d" % [streamers, want_flat])
 
 	# Проверяем ЗАЛИПШИЕ голоса, а не доигрывающие хвосты. Предсмертный стон
 	# длится больше секунды и вполне может звучать через кадр после гибели
@@ -579,12 +603,16 @@ func _e_edges() -> void:
 	for c in AudioManager.get_children():
 		if c is AudioStreamPlayer:
 			streamers += 1
-	print("  двойной старт партии: позиция леса %.2f → %.2f с, плееров %d, тема молчит=%s, таймер %.0f с" % [
-		pos1, pos2, streamers, str(not AudioManager._music.playing),
+	# Плоских плееров столько же, сколько объявлено (см. разбор у D5): «два»
+	# здесь означало «тема и лес» и не учитывало ни интерфейс, ни реплики
+	var want_flat2: int = 2 + AudioManager.UI_VOICES + AudioManager.VOICE_VOICES
+	print("  двойной старт партии: позиция леса %.2f → %.2f с, плееров %d (ждём %d), тема молчит=%s, таймер %.0f с" % [
+		pos1, pos2, streamers, want_flat2, str(not AudioManager._music.playing),
 		AudioManager.seconds_to_music()])
 	verdict("E6 повторный старт партии не задваивает лес",
-		streamers == 2 and AudioManager._ambience.playing
-			and is_same(amb_stream_1, AudioManager._ambience.stream))
+		streamers == want_flat2 and AudioManager._ambience.playing
+			and is_same(amb_stream_1, AudioManager._ambience.stream),
+		"плееров %d при ожидаемых %d" % [streamers, want_flat2])
 	verdict("E7 повторный старт партии заново заводит таймер темы",
 		absf(AudioManager.seconds_to_music() - AudioManager.MUSIC_INTERVAL) < 0.5,
 		"таймер %.1f с" % AudioManager.seconds_to_music())

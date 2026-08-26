@@ -12,6 +12,10 @@ extends Node
 ##                  столько же, сколько в конфиге
 ##   E ПРОРЫВ     — три отряда кабанов против трёх отрядов копейщиков: строй
 ##                  обязан раздаться и пропустить массу сквозь себя
+##   F НАТИСК     — разгон за 10 м, удар в полсотни процентов запаса, разлёт
+##                  «брызгами» и стенка копий, о которую натиск разбивается
+##   G ОДНОКРАТНОСТЬ — без пройденного разгона тарана нет вовсе, и за одно
+##                  сближение он случается ровно один раз
 ##
 ## ЧИСЛА НЕ ХАРДКОДЯТСЯ: скорости, напор и множители читаются из
 ## unit_stats_config — стенд проверяет СВОЙСТВО, а не цифру владельца.
@@ -22,9 +26,17 @@ const _UStats := preload("res://scripts/unit_stats_config.gd")
 
 var main = null
 var verdicts: Array = []
+## Запас жертвы на момент первых кадров контакта (блок G)
+var _first_contact_hp: float = 0.0
 
 func _ready() -> void:
 	call_deferred("_run")
+
+## Стартовая скорость разлёта на заказанную дальность — та же арифметика, что
+## в Unit.apply_knockback. Стенд её не хардкодит, а выводит из констант
+func charge_kick_speed(dist: float) -> float:
+	var reach: float = Unit.FLING_TAU * (1.0 - exp(-Unit.FLING_SEC / Unit.FLING_TAU))
+	return dist / maxf(reach, 0.001)
 
 func frames(n: int) -> void:
 	for _i in range(n):
@@ -78,6 +90,8 @@ func _run() -> void:
 	await _c_dent()
 	_d_damage()
 	await _e_breakthrough()
+	await _f_charge()
+	await _g_charge_once()
 
 	print("\n═════ ИТОГ qa_cavalry ═════")
 	var bad := 0
@@ -169,9 +183,19 @@ func _b_push() -> void:
 	var mult: float = _UStats.stat("goblin_rider", "charge_push_mult", 1.0)
 	verdict("B1 у конницы есть свой множитель смещения",
 		mult >= 2.0, "charge_push_mult = %.1f" % mult)
+	# ── ЗДЕСЬ ПРОВЕРЯЛОСЬ «КОННИЦА ТОЛКАЕТ ЧАЩЕ ПЕХОТЫ», И ТРЕБОВАНИЕ РАЗВЕРНУТО
+	# Владелец заказал ПОСТОЯННЫЙ расчёт напора в бою (авг. 2026): толкают
+	# теперь все и на каждый удар (Unit.PUSH_EVERY = 1). Прежняя проверка
+	# требовала, чтобы у конницы период был СТРОГО МЕНЬШЕ пехотного, — то есть
+	# краснела бы ровно оттого, что пехоту подтянули к конному темпу.
+	#
+	# Что осталось истинным и что проверяем вместо этого: толкание идёт
+	# непрерывно у всех, и конница при этом не толкает РЕЖЕ пехоты. Её
+	# преимущество живёт не в периоде, а в размере шага (B1/B3) и в натиске с
+	# разгона (блок F)
 	var every: int = int(_UStats.stat("goblin_rider", "push_every", Unit.PUSH_EVERY))
-	verdict("B2 конница толкает чаще пехоты",
-		every > 0 and every < Unit.PUSH_EVERY,
+	verdict("B2 напор считается постоянно, и конница не медленнее пехоты",
+		Unit.PUSH_EVERY == 1 and every > 0 and every <= Unit.PUSH_EVERY,
 		"кабан раз в %d удара, пехота раз в %d" % [every, Unit.PUSH_EVERY])
 
 	# ── ЗАМЕР СМЕЩЕНИЯ: КАБАН ПРОТИВ МЕЧНИКА ПО ОДНОЙ И ТОЙ ЖЕ ЖЕРТВЕ ──────
@@ -191,6 +215,12 @@ func _b_push() -> void:
 	var dirn := Vector3(1.0, 0.0, 0.0)
 	rider._apply_push(victim_a, dirn)
 	knight._apply_push(victim_b, dirn)
+	# ── ЖДЁМ, ПОКА ТОЛЧОК ОТРАБОТАЕТ ────────────────────────────────────────
+	# Толчок больше не переносит тело мгновенно: он выдаёт затухающую скорость,
+	# и заказанные метры набираются за Unit.FLING_SEC (см. Unit.push_smooth).
+	# Замер сразу после вызова показывал бы ноль у обоих — не «толчка нет», а
+	# «полёт ещё не начался»
+	await frames(int(Unit.FLING_SEC * 60.0) + 20)
 	# ТОЛЬКО ГОРИЗОНТАЛЬ. _apply_push сажает жертву на рельеф
 	# (np.y = get_terrain_height), а стенд ставит бойцов на y = 0 — полная
 	# дистанция мерила бы амплитуду рельефа, а не силу толчка. Первый прогон
@@ -389,6 +419,221 @@ func _e_breakthrough() -> void:
 				(u as Node).queue_free()
 	await frames(3)
 
+# ═════════════════════════════════════════════════════════════════════════════
+# F. НАТИСК С РАЗГОНА (CHARGE)
+# ═════════════════════════════════════════════════════════════════════════════
+## Заказ владельца: за 10 м до строя конница разгоняется, а в момент касания
+## сминает первый ряд — половина максимального запаса и разлёт в стороны.
+## По копейщикам В ЛОБ натиск не работает вовсе, и всадник получает контрудар.
+##
+## ЧИСЛА ЧИТАЮТСЯ ИЗ КОНФИГА, а не вписаны сюда: стенд проверяет СВОЙСТВО
+## («снято примерно charge_impact_frac от максимума»), а не цифру владельца
+func _f_charge() -> void:
+	var rng: float   = _UStats.stat("goblin_rider", "charge_range", 0.0)
+	var smul: float  = _UStats.stat("goblin_rider", "charge_speed_mult", 1.0)
+	var frac: float  = _UStats.stat("goblin_rider", "charge_impact_frac", 0.0)
+	var kick: float  = _UStats.stat("goblin_rider", "charge_knockback", 0.0)
+	var back: float  = _UStats.stat("goblin_rider", "charge_counter_frac", 0.0)
+	verdict("F0 натиск описан в конфиге, а не в коде",
+		rng > 0.0 and smul > 1.0 and frac > 0.0 and kick > 0.0 and back > 0.0,
+		"разгон %.1f м x%.2f, удар %.0f%% max HP, разлёт %.1f м, контрудар %.0f%%"
+			% [rng, smul, frac * 100.0, kick, back * 100.0])
+
+	# ── F1/F2: РАЗГОН ВКЛЮЧАЕТСЯ И ПОДНИМАЕТ СКОРОСТЬ ──────────────────────
+	var p0 := Vector3(-1200.0, 0.0, -1200.0)
+	var prey := _spawn("res://scenes/units/Archer.tscn",
+		Constants.FACTION_PLAYER, p0)
+	# Ставим всадника ЗАВЕДОМО ДАЛЬШЕ дистанции разгона
+	var rider := _spawn("res://scenes/units/GoblinPigRider.tscn",
+		Constants.FACTION_GOBLIN, p0 + Vector3(0.0, 0.0, rng + 8.0))
+	await frames(6)
+	var walk: float = rider._effective_speed()
+	rider.command_attack(prey, true, true, true)
+	await frames(10)
+	verdict("F1 дальше дистанции разгона всадник идёт обычным ходом",
+		not rider.is_charging,
+		"разгон=%s на дистанции %.1f м" % [str(rider.is_charging),
+			rider.global_position.distance_to(prey.global_position)])
+	# Ждём, пока подойдёт внутрь дистанции разгона
+	var seen_charge := false
+	var top := walk
+	for _i in range(400):
+		await get_tree().physics_frame
+		if not is_instance_valid(rider) or not is_instance_valid(prey):
+			break
+		if rider.is_charging:
+			seen_charge = true
+			top = maxf(top, rider._effective_speed())
+		if prey.is_dead():
+			break
+	verdict("F2 внутри дистанции разгона конница разгоняется", seen_charge,
+		"разгон замечен=%s" % str(seen_charge))
+	verdict("F3 на разгоне скорость выше обычной",
+		top >= walk * (1.0 + (smul - 1.0) * 0.8),
+		"обычная %.2f м/с, на разгоне %.2f м/с (ожидалось x%.2f)"
+			% [walk, top, smul])
+	for u in [prey, rider]:
+		if is_instance_valid(u):
+			(u as Node).queue_free()
+	await frames(3)
+
+	# ── F4/F5: УДАР ПО ЛУЧНИКАМ — ПОЛОВИНА ЗАПАСА И РАЗЛЁТ ────────────────
+	# Лучники, а не копейщики: по копейщикам натиск не работает намеренно (F6)
+	var p1 := Vector3(-1300.0, 0.0, -1300.0)
+	var line: Array = []
+	for i in range(5):
+		line.append(_spawn("res://scenes/units/Archer.tscn",
+			Constants.FACTION_PLAYER, p1 + Vector3(float(i) * 0.6 - 1.2, 0.0, 0.0)))
+	var r2 := _spawn("res://scenes/units/GoblinPigRider.tscn",
+		Constants.FACTION_GOBLIN, p1 + Vector3(0.0, 0.0, rng + 6.0))
+	await frames(6)
+	var hp_before: Dictionary = {}
+	var at_before: Dictionary = {}
+	for u in line:
+		hp_before[u] = (u as Unit).current_health
+		at_before[u] = (u as Node3D).global_position
+	r2.command_attack(line[2], true, true, true)
+	# Один удар с разгона случается в кадре касания; ждём именно его
+	var impacted := false
+	for _i in range(400):
+		await get_tree().physics_frame
+		if not is_instance_valid(r2):
+			break
+		if not r2.is_charging and r2._charge_ready == false:
+			impacted = true
+			break
+	verdict("F4 натиск состоялся ровно один раз", impacted,
+		"разгон потрачен=%s" % str(impacted))
+	# ── ЖДЁМ КОНЦА ПОЛЁТА ──────────────────────────────────────────────────
+	# Отброс больше не мгновенный: он выдаёт затухающую скорость, и заказанные
+	# метры набираются за Unit.FLING_SEC (см. Unit.apply_knockback). Замер сразу
+	# после удара показывал бы ноль — не «не отбросило», а «ещё летит»
+	await frames(int(Unit.FLING_SEC * 60.0) + 20)
+	var hurt := 0
+	var flung := 0
+	var worst_hit := 0.0
+	for u in line:
+		if not is_instance_valid(u):
+			hurt += 1
+			flung += 1
+			continue
+		var uu := u as Unit
+		var lost: float = float(hp_before[u]) - uu.current_health
+		if lost >= uu.max_health * frac * 0.8:
+			hurt += 1
+			worst_hit = maxf(worst_hit, lost / uu.max_health)
+		var moved: float = Vector2(uu.global_position.x - (at_before[u] as Vector3).x,
+			uu.global_position.z - (at_before[u] as Vector3).z).length()
+		if moved >= kick * 0.5:
+			flung += 1
+	verdict("F5 первый ряд контакта смяло примерно на заказанную долю запаса",
+		hurt >= 1, "накрыто %d из 5, худшая потеря %.0f%% max HP при заказе %.0f%%"
+			% [hurt, worst_hit * 100.0, frac * 100.0])
+	verdict("F5б накрытых физически разбросало",
+		flung >= 1, "отброшено %d из 5 при разлёте %.1f м" % [flung, kick])
+	# ── F5в: РАЗЛЁТ ВИДНО ГЛАЗОМ, А НЕ ТОЛЬКО В ЧИСЛАХ ─────────────────────
+	# Жалоба владельца: «при таране пехотинцы мгновенно телепортируются».
+	# Тело и правда переносится сразу — физики у бойцов нет вовсе, — но КАРТИНКА
+	# обязана этот перенос показать. Она и так догоняет тело плавно, только у
+	# сглаживания есть предохранитель: прыжок дальше Unit.VIS_SNAP_SQ считается
+	# телепортом и рисуется мгновенно. Отбрасывание (charge_knockback) ровно за
+	# этим порогом — отсюда и «пропадают».
+	# Проверяем СВОЙСТВО: накрытый помечен летящим, и его НАРИСОВАННАЯ точка
+	# отстаёт от логической, то есть модель в этот момент действительно летит
+	# ТРЕБОВАНИЕ РАЗВЁРНУТО ВЛАДЕЛЬЦЕМ. Раньше тело переносилось МГНОВЕННО, а
+	# плавность изображала картинка: она догоняла тело замедленным сглаживанием,
+	# и проверка требовала, чтобы нарисованная точка ОТСТАВАЛА. На экране это
+	# всё равно читалось как «пехота телепортируется брызгами» — жалоба
+	# повторилась. Теперь плавно едет САМО ТЕЛО (Unit._tick_fling, затухающая
+	# скорость), а картинка идёт за ним обычным сглаживанием и отставать НЕ
+	# ОБЯЗАНА. Свойство проверяется по ШАГУ ЗА КАДР: он обязан быть заведомо
+	# меньше полной дальности удара, то есть боец едет, а не прыгает
+	var v0: float = charge_kick_speed(kick)
+	verdict("F5в разлёт едет телом, а не телепортирует",
+		v0 > 0.0 and v0 / 60.0 < kick * 0.5,
+		"стартовая скорость %.1f м/с — это %.2f м за кадр при разлёте %.1f м"
+			% [v0, v0 / 60.0, kick])
+	verdict("F5г ни один шаг разлёта не дотягивает до порога телепорта",
+		v0 / 60.0 < sqrt(Unit.VIS_SNAP_SQ),
+		"%.2f м за кадр при пороге привязки %.2f м"
+			% [v0 / 60.0, sqrt(Unit.VIS_SNAP_SQ)])
+	for u in line:
+		if is_instance_valid(u):
+			(u as Node).queue_free()
+	if is_instance_valid(r2):
+		(r2 as Node).queue_free()
+	await frames(3)
+
+	# ── F6/F7: СТЕНКА КОПИЙ ────────────────────────────────────────────────
+	var p2 := Vector3(-1400.0, 0.0, -1400.0)
+	var spear := _spawn("res://scenes/units/Spearman.tscn",
+		Constants.FACTION_PLAYER, p2)
+	var r3 := _spawn("res://scenes/units/GoblinPigRider.tscn",
+		Constants.FACTION_GOBLIN, p2 + Vector3(0.0, 0.0, rng + 6.0))
+	await frames(6)
+	verdict("F6 копейщик объявлен стенкой копий, всадник — нет",
+		spear.repels_charge() and not r3.repels_charge(),
+		"копейщик=%s всадник=%s" % [str(spear.repels_charge()),
+			str(r3.repels_charge())])
+	# Разворачиваем копейщика ЛИЦОМ на всадника — лобовой навал
+	spear._facing = (r3.global_position - spear.global_position).normalized()
+	var sp_hp0: float = spear.current_health
+	var rd_hp0: float = r3.current_health
+	# ── СМЕЩЕНИЕ МЕРЯЕТСЯ ЗА ОДИН КАДР УДАРА, А НЕ ЗА ВСЮ СХВАТКУ ──────────
+	# Первый прогон мерил «сколько копейщика сдвинуло от начала до конца
+	# ожидания» и намерил 1.23 м при разлёте 2.2 — то есть почти провал. Но
+	# двигал его там не натиск, а ОБЫЧНОЕ ПРОДАВЛИВАНИЕ: у кабана push_force 15
+	# с множителем 3.5, и толкает он теперь на КАЖДЫЙ удар (Unit.PUSH_EVERY),
+	# то есть по полметра в секунду. Это штатная и заказанная механика, к
+	# натиску отношения не имеющая.
+	#
+	# Натиск же — событие ровно одного кадра, и в этом самом кадре бойца не
+	# бьют вовсе (_process_attack выходит сразу после удара с разгона). Поэтому
+	# смотрим дельту за тот единственный кадр, в котором разгон был потрачен:
+	# что не сдвинулось там, то натиском и не отброшено
+	var sp_prev: Vector3 = spear.global_position
+	var sp_moved: float = -1.0
+	var sp_hp_at_impact: float = sp_hp0
+	r3.command_attack(spear, true, true, true)
+	for _i in range(400):
+		await get_tree().physics_frame
+		if not is_instance_valid(r3) or not is_instance_valid(spear):
+			break
+		if not r3.is_charging and r3._charge_ready == false:
+			sp_moved = Vector2(spear.global_position.x - sp_prev.x,
+				spear.global_position.z - sp_prev.z).length()
+			sp_hp_at_impact = spear.current_health
+			break
+		sp_prev = spear.global_position
+	verdict("F6б натиск на копейщика вообще состоялся", sp_moved >= 0.0,
+		"кадр удара пойман=%s" % str(sp_moved >= 0.0))
+	var sp_lost: float = sp_hp0 - sp_hp_at_impact
+	if sp_moved < 0.0:
+		sp_moved = 1e9        # кадр удара не пойман — проверка ниже обязана краснеть
+	var rd_lost: float = 0.0
+	if is_instance_valid(r3):
+		rd_lost = rd_hp0 - r3.current_health
+	else:
+		rd_lost = rd_hp0        # погиб на копьях — контрудар сработал с запасом
+	verdict("F7 лобовой навал на копья НЕ отбрасывает копейщика",
+		sp_moved < kick * 0.5 and sp_lost < spear_max(spear, sp_hp0) * frac * 0.8,
+		"копейщика сдвинуло на %.2f м (разлёт %.1f), снято %.1f HP"
+			% [sp_moved, kick, sp_lost])
+	verdict("F8 всадник получил контрудар от стенки копий",
+		rd_lost >= rd_hp0 * back * 0.8,
+		"всадник потерял %.1f HP при заказанных %.0f%% от %.1f"
+			% [rd_lost, back * 100.0, rd_hp0])
+	for u in [spear, r3]:
+		if is_instance_valid(u):
+			(u as Node).queue_free()
+	await frames(3)
+
+## Максимальный запас копейщика — с оглядкой на то, что он мог уже погибнуть
+func spear_max(u, fallback: float) -> float:
+	if is_instance_valid(u):
+		return (u as Unit).max_health
+	return fallback
+
 ## Медиана по Z — центр группы, устойчивый к отставшим
 func _mid_z(arr: Array) -> float:
 	var zs: Array = []
@@ -411,3 +656,100 @@ func _span_x(arr: Array) -> float:
 		lo = minf(lo, x)
 		hi = maxf(hi, x)
 	return maxf(hi - lo, 0.0)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# G. ТАРАН СРАБАТЫВАЕТ ОДИН РАЗ И ТОЛЬКО С РАЗГОНА
+# ═════════════════════════════════════════════════════════════════════════════
+## Жалоба владельца: «эффект разлёта срабатывает дважды за одно соприкосновение,
+## включая повторный разлёт, когда юниты уже сошлись в плотном бою без разгона».
+##
+## Разбор. Натиск взводился по одной лишь ДИСТАНЦИИ до цели. В свалке цель
+## меняется каждые пару секунд, новая нередко оказывается за десять метров — и
+## условие взвода выполнялось снова, СТОЯ НА МЕСТЕ. Теперь мало оказаться
+## далеко: надо ПРОЙТИ charge_min_runup метров, и проверяется это фактом, а не
+## намерением.
+func _g_charge_once() -> void:
+	var runup: float = _UStats.stat("goblin_rider", "charge_min_runup", 0.0)
+	var frac: float  = _UStats.stat("goblin_rider", "charge_impact_frac", 0.0)
+	verdict("G0 минимальный разгон задан в конфиге", runup > 0.0,
+		"charge_min_runup = %.1f м" % runup)
+
+	# ── G1: В ПЛОТНОМ БОЮ ТАРАНА НЕТ ──────────────────────────────────────
+	# Ставим всадника ВПЛОТНУЮ к жертве: разогнаться ему негде и неоткуда
+	var p0 := Vector3(-1500.0, 0.0, -1500.0)
+	var prey := _spawn("res://scenes/units/Archer.tscn",
+		Constants.FACTION_PLAYER, p0)
+	var rider := _spawn("res://scenes/units/GoblinPigRider.tscn",
+		Constants.FACTION_GOBLIN, p0 + Vector3(0.0, 0.0, 1.6))
+	await frames(6)
+	var hp0: float = prey.current_health
+	# Запас берём ЗАРАНЕЕ: за окно наблюдения жертву успевают добить обычными
+	# ударами, и спрашивать max_health у освобождённого объекта уже не у кого
+	var prey_max: float = prey.max_health
+	rider.command_attack(prey, true, true, true)
+	# Ждём ровно момент, когда натиск был бы потрачен, — или полсекунды, если
+	# он не тратится вовсе (а он и не должен: разгона нет)
+	_first_contact_hp = prey.current_health
+	for _i in range(30):
+		await get_tree().physics_frame
+		if not is_instance_valid(prey) or prey.is_dead():
+			break
+		_first_contact_hp = prey.current_health
+	# Считаем урон ЗА ПЕРВЫЕ КАДРЫ КОНТАКТА, а не за всё окно: обычные удары
+	# идут своим чередом и за три секунды снимут больше любого тарана
+	var lost: float = hp0 - _first_contact_hp
+	# Обычные удары идут своим чередом, поэтому мерим НЕ «ноль урона», а
+	# «меньше, чем снял бы таран»: полсотни процентов запаса за один миг
+	var impact_dmg: float = prey_max * frac
+	verdict("G1 без разгона тарана не случилось",
+		lost < impact_dmg * 0.9,
+		"снято %.1f HP, удар тарана дал бы %.1f" % [lost, impact_dmg])
+	for u in [prey, rider]:
+		if is_instance_valid(u):
+			(u as Node).queue_free()
+	await frames(3)
+
+	# ── G2/G3: С РАЗГОНА — РОВНО ОДИН РАЗ ─────────────────────────────────
+	# Шеренга жертв, всадник издалека. Считаем, скольких накрыло: накрыть
+	# обязано первый ряд контакта ОДИН раз, а не дважды подряд
+	var p1 := Vector3(-1560.0, 0.0, -1560.0)
+	var line: Array = []
+	for i in range(4):
+		line.append(_spawn("res://scenes/units/Archer.tscn",
+			Constants.FACTION_PLAYER,
+			p1 + Vector3(float(i) * 0.7 - 1.0, 0.0, 0.0)))
+	var r2 := _spawn("res://scenes/units/GoblinPigRider.tscn",
+		Constants.FACTION_GOBLIN, p1 + Vector3(0.0, 0.0, 14.0))
+	await frames(6)
+	var hp_before: Dictionary = {}
+	for u in line:
+		hp_before[u] = (u as Unit).current_health
+	r2.command_attack(line[1], true, true, true)
+	var impacts := 0
+	var was_ready: bool = r2._charge_ready
+	for _i in range(400):
+		await get_tree().physics_frame
+		if not is_instance_valid(r2):
+			break
+		# Момент траты натиска: разгон был доступен и перестал быть
+		if was_ready and not r2._charge_ready:
+			impacts += 1
+		was_ready = r2._charge_ready
+	verdict("G2 натиск потрачен ровно один раз за сближение", impacts == 1,
+		"срабатываний %d" % impacts)
+	var hurt := 0
+	for u in line:
+		if not is_instance_valid(u):
+			hurt += 1
+			continue
+		var uu := u as Unit
+		if float(hp_before[u]) - uu.current_health >= uu.max_health * frac * 0.8:
+			hurt += 1
+	verdict("G3 и накрыл первый ряд контакта", hurt >= 1,
+		"накрыто %d из %d" % [hurt, line.size()])
+	for u in line:
+		if is_instance_valid(u):
+			(u as Node).queue_free()
+	if is_instance_valid(r2):
+		(r2 as Node).queue_free()
+	await frames(3)

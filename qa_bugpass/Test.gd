@@ -11,10 +11,22 @@ extends Node
 ##   F ФАЛАНГА    — крайний копейщик не берёт цель СБОКУ, только перед фронтом
 ##   G СЦЕПКА     — упёршийся в чужой строй входит в рубку, а не бегает челноком
 ##   H РАБОЧИЙ    — смена состояния FSM немедленно помечает позу к пересчёту
+##   I КОНЕЦ ПАРТИИ — снесённая крепость без живых юнитов даёт победу, а не
+##                  вечно недостроенный фундамент
+##   J ЗАСЛОН ИИ  — отряды у базы стоят линией и НЕ налезают друг на друга
+##   K ЛУЧНИКИ    — жёсткий потолок дальности; клик по врагу вплотную не гонит
+##                  стрелка в рукопашную; за убегающим он не идёт
+##   L ОБОРОНА    — залоченная стойка не двигается ни по какому приказу, но
+##                  смыкание рядов ей разрешено
+##   M ОТХОД      — решение об отходе держится и не отменяется чужим приказом
+##   N ПОГОНЯ     — поводок общий на отряд, а не личный у каждого бойца
+##   O ЗНАМЯ      — падает только от ГИБЕЛИ отряда, а не от перевода бойцов
+##                  (иначе за ордой тянется след «синих флажков»)
 ##
 ## Каждая проверка утверждает СВОЙСТВО и берёт числа из конфига, а не из себя.
 
 const _UCfg := preload("res://scripts/unit_stats_config.gd")
+const _AICfgB := preload("res://scripts/ai_start_army_limit.gd")
 
 var main = null
 var _pass := 0
@@ -68,6 +80,13 @@ func _run() -> void:
 	await _f_phalanx_front()
 	await _g_melee_grip()
 	await _h_worker_pose()
+	await _k_archers()
+	await _l_defense_lock()
+	await _m_retreat_lock()
+	_n_pursuit_anchor()
+	await _o_banner_trail()
+	await _i_game_over()
+	_j_ai_screen()
 
 	print("\n═════ ИТОГ ═════")
 	for e in _log:
@@ -332,4 +351,356 @@ func _h_worker_pose() -> void:
 		w._anim_name == &"carry_wood" or not w._has_anim(&"carry_wood"),
 		"анимация=%s" % String(w._anim_name))
 	w.queue_free()
+	await pframes(2)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# I. КОНЕЦ ПАРТИИ
+# ═════════════════════════════════════════════════════════════════════════════
+## Жалоба владельца: последняя крепость ИИ снесена, живых у него не осталось —
+## а крепость «уходит в режим повторной постройки», и игра не кончается.
+##
+## Причин было две, и обе проверяются здесь:
+##   • ИИ закладывал новую крепость, проверяя только деньги. Фундамент попадал
+##     в группу зданий фракции, достроить его без единого рабочего было
+##     некому — и условие «у врага не осталось зданий» не выполнялось никогда;
+##   • само условие требовало ПОЛНОГО отсутствия зданий, то есть висело, пока
+##     игрок не обойдёт карту и не снесёт последний домик.
+func _i_game_over() -> void:
+	print("\n═════ I. КОНЕЦ ПАРТИИ ═════")
+	# ── I1: без единого живого юнита ИИ не закладывает крепость ────────────
+	var ai = main.get("enemy_ai")
+	if ai != null and ai.has_method("_has_living_units"):
+		var alive_before: bool = bool(ai.call("_has_living_units"))
+		for n in get_tree().get_nodes_in_group("enemy_units"):
+			if is_instance_valid(n) and n is Unit:
+				(n as Unit).take_damage((n as Unit).max_health * 10.0 + 1000.0, null)
+		await pframes(4)
+		var alive_after: bool = bool(ai.call("_has_living_units"))
+		verdict("I1 ИИ видит, что живых у него не осталось",
+			alive_before and not alive_after,
+			"было живых=%s, стало=%s" % [str(alive_before), str(alive_after)])
+	else:
+		verdict("I1 ИИ видит, что живых у него не осталось", false,
+			"нет доступа к EnemyAI")
+
+	# ── I2: победа объявляется по СНЕСЁННОЙ КРЕПОСТИ, а не по пустой карте ──
+	# Сносим замок ИИ, оставляя прочие его постройки на месте: прежнее условие
+	# на таком поле не сработало бы вовсе
+	var killed := 0
+	var left_others := 0
+	for b in get_tree().get_nodes_in_group("enemy_buildings"):
+		if not is_instance_valid(b) or not (b is Building):
+			continue
+		if b is Castle:
+			(b as Building).take_damage((b as Building).max_health * 10.0 + 1000.0)
+			killed += 1
+		else:
+			left_others += 1
+	await pframes(6)
+	var beaten: bool = bool(main.call("_faction_beaten", "enemy_units",
+		"enemy_buildings"))
+	print("  снесено крепостей %d, прочих построек осталось %d" % [killed, left_others])
+	verdict("I2 нет живых и нет крепости — фракция разбита", beaten,
+		"разбита=%s (прочих построек %d)" % [str(beaten), left_others])
+
+# ═════════════════════════════════════════════════════════════════════════════
+# J. ЗАСЛОН ИИ У БАЗЫ
+# ═════════════════════════════════════════════════════════════════════════════
+## Жалоба владельца: гарнизон ИИ «собирается в единую плотную кучу в центре,
+## расталкивается, разлетается импульсом и снова пытается собраться».
+##
+## Причина была арифметическая: ширина заслона стояла числом (18 м) и делилась
+## на число отрядов, а отряд из шестидесяти человек занимает около трёх метров
+## в ширину — семь отрядов получали центры в 2.6 м друг от друга и физически не
+## могли не перекрыться. Проверяем СВОЙСТВО: шаг между соседними местами
+## заслона не меньше ширины самого отряда
+func _j_ai_screen() -> void:
+	print("\n═════ J. ЗАСЛОН ИИ У БАЗЫ ═════")
+	var ai = main.get("enemy_ai")
+	if ai == null or not ai.has_method("_screen_step"):
+		verdict("J1 шаг заслона не меньше ширины отряда", false, "нет доступа к EnemyAI")
+		return
+	var step: float = float(ai.call("_screen_step"))
+	# Ширина отряда считается ТЕМ ЖЕ построением, каким ИИ его и разворачивает
+	var squad_w: float = float(ai.get("SQUAD_COLS")) * float(ai.get("SQUAD_SPACING"))
+	print("  шаг между отрядами %.2f м при ширине отряда %.2f м" % [step, squad_w])
+	verdict("J1 шаг заслона не меньше ширины отряда", step >= squad_w,
+		"шаг %.2f м, отряд %.2f м" % [step, squad_w])
+	# И линия не бесконечна: лишние отряды уходят во второй эшелон
+	var per_row: int = int(ai.call("_screen_per_row"))
+	print("  в одну линию помещается отрядов: %d" % per_row)
+	verdict("J2 линия заслона имеет предел, за ним — второй эшелон",
+		per_row >= 1 and float(per_row) * step <= _AICfgB.SCREEN_MAX_WIDTH + step,
+		"в линии %d отрядов по %.2f м при потолке %.1f м"
+			% [per_row, step, _AICfgB.SCREEN_MAX_WIDTH])
+
+# ═════════════════════════════════════════════════════════════════════════════
+# K. ЛУЧНИКИ: ДАЛЬНОСТЬ И ЦЕЛИ
+# ═════════════════════════════════════════════════════════════════════════════
+func _k_archers() -> void:
+	print("\n═════ K. ЛУЧНИКИ ═════")
+	# ── K1: ЖЁСТКИЙ ПОТОЛОК ДАЛЬНОСТИ ──────────────────────────────────────
+	# Жалоба: «случайные сверхдальние выстрелы через всю карту». Дальность
+	# растёт от кузницы и вписывается прямо в поле бойца — потолка не было
+	var cap: float = _UCfg.stat("archer", "attack_range_cap", 0.0)
+	var base_r: float = _UCfg.stat("archer", "attack_range", 0.0)
+	verdict("K1 у лучника есть потолок дальности и он выше базовой",
+		cap > 0.0 and cap >= base_r,
+		"потолок %.1f м при базовой %.1f м" % [cap, base_r])
+	var a := _spawn("res://scenes/units/Archer.tscn", Constants.FACTION_PLAYER,
+		Vector3(-820.0, 0.0, -820.0))
+	await pframes(3)
+	# Выдаём заведомо непомерную прибавку — потолок обязан её срезать
+	var before: float = a.attack_range
+	a.attack_range = a.clamp_attack_range(a.attack_range + 500.0)
+	verdict("K2 потолок срезает любую прибавку кузницы",
+		absf(a.attack_range - cap) < 0.01,
+		"было %.1f, после +500 стало %.1f при потолке %.1f"
+			% [before, a.attack_range, cap])
+
+	# ── K3: КЛИК ПО ВРАГУ ВПЛОТНУЮ НЕ ГОНИТ СТРЕЛКА В РУКОПАШНУЮ ───────────
+	# Чужой отряд: один боец рядом со стрелком, второй далеко. Приказ отдаётся
+	# по ДАЛЬНЕМУ — ровно так и делает squad_pick_member («наименее
+	# обстрелянный»), и стрелок раньше шёл к нему сквозь ближнего
+	var esid: int = GameManager.new_squad(Constants.FACTION_ENEMY, "spearman")
+	var near_foe := _spawn("res://scenes/units/Spearman.tscn",
+		Constants.FACTION_ENEMY, Vector3(-820.0, 0.0, -815.0))
+	var far_foe := _spawn("res://scenes/units/Spearman.tscn",
+		Constants.FACTION_ENEMY, Vector3(-820.0, 0.0, -780.0))
+	GameManager.add_to_squad(esid, near_foe)
+	GameManager.add_to_squad(esid, far_foe)
+	await pframes(4)
+	var start: Vector3 = a.global_position
+	a.command_attack(far_foe, true, true, true)
+	verdict("K3 стрелок взял того, до кого достаёт, а не дальнего",
+		a.attack_target == near_foe,
+		"цель = %s" % ("ближний" if a.attack_target == near_foe else "дальний"))
+	await pframes(120)
+	var walked: float = Vector2(a.global_position.x - start.x,
+		a.global_position.z - start.z).length()
+	verdict("K4 и никуда не побежал", walked < 1.0,
+		"прошёл %.2f м" % walked)
+
+	# ── K5: ЗА УБЕГАЮЩИМ НЕ ИДЁТ ──────────────────────────────────────────
+	verdict("K5 стрелок не преследует по определению", not a.pursues_target())
+	for u in [a, near_foe, far_foe]:
+		if is_instance_valid(u):
+			(u as Node).queue_free()
+	await pframes(3)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# L. ОБОРОНА: СТРОЕМ ХОДИТ, ПООДИНОЧКЕ — НЕТ
+# ═════════════════════════════════════════════════════════════════════════════
+## ТРЕБОВАНИЕ РАЗВЕРНУЛОСЬ ВТОРОЙ РАЗ, и оба разворота стоит помнить.
+##
+## Жалоба одна и та же: «в обороне крайние копейщики выбегают из строя на
+## отдельных врагов». Первым решением был ГЛУХОЙ ЗАМОК позиции — не двигаться
+## вообще. Он закрыл жалобу и создал другую: фаланга перестала ходить строем по
+## приказу игрока, а это её штатная работа.
+##
+## Настоящая причина выбега оказалась не в разрешении двигаться, а в ТОЧКЕ:
+## приказ атаки давал КАЖДОМУ бойцу одну и ту же цель — координату врага, и
+## строй честно сходился в неё, то есть схлопывался. Первыми это видно на
+## флангах, им идти дальше всех.
+##
+## Поэтому проверяем ДВЕ ВЕЩИ ПОРОЗНЬ:
+##   • по приказу отряд идёт и СОХРАНЯЕТ СТРОЙ (L1/L2);
+##   • сам, по собственной инициативе, боец не делает к врагу ни шагу (L3).
+func _l_defense_lock() -> void:
+	print("\n═════ L. ОБОРОНА: СТРОЙ ХОДИТ, ОДИНОЧКА — НЕТ ═════")
+	var locked_cfg: bool = bool(_UCfg.get_stance(_UCfg.STANCE_DEFENSE)
+		.get("lock_position", false))
+	verdict("L0 глухой замок позиции снят (фаланга обязана ходить строем)",
+		not locked_cfg, "lock_position = %s" % str(locked_cfg))
+
+	# ── СТРОЙ ИДЁТ ПО ПРИКАЗУ И ОСТАЁТСЯ СТРОЕМ ───────────────────────────
+	var base := Vector3(-880.0, 0.0, -880.0)
+	var sid: int = GameManager.new_squad(Constants.FACTION_PLAYER, "spearman")
+	var men: Array = []
+	for i in range(8):
+		var u := _spawn("res://scenes/units/Spearman.tscn",
+			Constants.FACTION_PLAYER, base + Vector3(float(i) * 0.9 - 3.2, 0.0, 0.0))
+		GameManager.add_to_squad(sid, u)
+		u.set_stance(_UCfg.STANCE_DEFENSE)
+		men.append(u)
+	# Враг далеко впереди — по нему и отдаётся приказ
+	var foe := _spawn("res://scenes/units/Spearman.tscn", Constants.FACTION_ENEMY,
+		base + Vector3(0.0, 0.0, -14.0))
+	foe.set_tick(false)
+	await pframes(6)
+	var span0: float = _line_span(men)
+	var mid0: float = _line_mid_z(men)
+	for u in men:
+		(u as Unit).command_attack(foe, true, true, true)
+	for _i in range(300):
+		await get_tree().physics_frame
+	var span1: float = _line_span(men)
+	var mid1: float = _line_mid_z(men)
+	print("  ширина строя %.2f → %.2f м, центр по глубине %.2f → %.2f"
+		% [span0, span1, mid0, mid1])
+	verdict("L1 стена по приказу пошла вперёд", absf(mid1 - mid0) > 1.0,
+		"центр сдвинулся на %.2f м" % absf(mid1 - mid0))
+	# ШИРИНА — ЭТО И ЕСТЬ «СТРОЙ ОСТАЛСЯ СТРОЕМ». Схлопывание в точку врага
+	# сжало бы её в разы (ровно это и было видно как «фланги выбегают»)
+	verdict("L2 и осталась строем, а не схлопнулась в точку",
+		span1 > span0 * 0.7,
+		"ширина %.2f → %.2f м" % [span0, span1])
+	for u in men:
+		if is_instance_valid(u):
+			(u as Node).queue_free()
+	if is_instance_valid(foe):
+		(foe as Node).queue_free()
+	await pframes(4)
+
+	# ── ОДИНОЧКА САМ К ВРАГУ НЕ ИДЁТ ──────────────────────────────────────
+	# Ни приказа, ни отряда — только замеченный поблизости противник. Раньше
+	# авто-агро выдавало цель, и боец шёл к ней: так фланговые и «выбегали»
+	var solo := _spawn("res://scenes/units/Spearman.tscn",
+		Constants.FACTION_PLAYER, Vector3(-920.0, 0.0, -920.0))
+	solo.set_stance(_UCfg.STANCE_DEFENSE)
+	var bait := _spawn("res://scenes/units/Spearman.tscn",
+		Constants.FACTION_ENEMY, Vector3(-920.0, 0.0, -912.0))
+	bait.set_tick(false)
+	await pframes(6)
+	var at: Vector3 = solo.global_position
+	for _i in range(300):
+		await get_tree().physics_frame
+	var crept: float = Vector2(solo.global_position.x - at.x,
+		solo.global_position.z - at.z).length()
+	verdict("L3 по своей инициативе боец обороны к врагу не идёт",
+		crept < 0.5, "прошёл %.2f м к врагу в восьми метрах" % crept)
+	for u in [solo, bait]:
+		if is_instance_valid(u):
+			(u as Node).queue_free()
+	await pframes(3)
+
+## Ширина строя по оси X — по ней и видно, схлопнулся ли он
+func _line_span(men: Array) -> float:
+	var lo := INF
+	var hi := -INF
+	for m in men:
+		var u := m as Unit
+		if u == null or not is_instance_valid(u) or u.is_dead():
+			continue
+		lo = minf(lo, u.global_position.x)
+		hi = maxf(hi, u.global_position.x)
+	return 0.0 if lo == INF else hi - lo
+
+## Средняя глубина строя по оси Z
+func _line_mid_z(men: Array) -> float:
+	var sum := 0.0
+	var n := 0
+	for m in men:
+		var u := m as Unit
+		if u == null or not is_instance_valid(u) or u.is_dead():
+			continue
+		sum += u.global_position.z
+		n += 1
+	return 0.0 if n == 0 else sum / float(n)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# M. ОТХОД НЕ ОТМЕНЯЕТСЯ ЧУЖИМ ПРИКАЗОМ
+# ═════════════════════════════════════════════════════════════════════════════
+## Жалоба: отряд ИИ начинает убегать, разворачивается назад и умирает от стрел
+## в спину. До бойца доходят приказы не только от ИИ (смыкание рядов,
+## сплочённость, возврат на пост), и любой из них звал command_move без
+## keep_retreat — то есть гасил отход
+func _m_retreat_lock() -> void:
+	print("\n═════ M. ЗАМОК ОТХОДА ═════")
+	var u := _spawn("res://scenes/units/Spearman.tscn", Constants.FACTION_ENEMY,
+		Vector3(-940.0, 0.0, -940.0))
+	await pframes(3)
+	u.begin_retreat()
+	verdict("M1 отход взведён и защищён замком времени",
+		u.retreating and u.retreat_locked(),
+		"отход=%s замок=%s" % [str(u.retreating), str(u.retreat_locked())])
+	# Обычный приказ на движение — тот самый путь, которым отход и гасился
+	u.command_move(u.global_position + Vector3(0.0, 0.0, 5.0))
+	verdict("M2 обычный приказ движения отход НЕ отменяет", u.retreating,
+		"отход=%s" % str(u.retreating))
+	# А прибытие в замок — отменяет: там отход кончился по факту
+	u.end_retreat(true)
+	verdict("M3 прибытие в замок отменяет отход принудительно", not u.retreating)
+	verdict("M4 срок замка совпадает у бойца и у ИИ",
+		absf(Unit.RETREAT_LOCK_SEC - _AICfgB.RETREAT_MIN_SEC) < 0.01,
+		"боец %.1f c, ИИ %.1f c" % [Unit.RETREAT_LOCK_SEC,
+			_AICfgB.RETREAT_MIN_SEC])
+	if is_instance_valid(u):
+		(u as Node).queue_free()
+	await pframes(3)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# N. ПОВОДОК ПОГОНИ — ОБЩИЙ НА ОТРЯД
+# ═════════════════════════════════════════════════════════════════════════════
+## Жалоба: «задние бойцы отстают, теряют цель и возвращаются в строй, а передние
+## продолжают бежать; отряд растягивается на полкарты». Личный якорь и давал два
+## противоположных решения внутри одного отряда
+func _n_pursuit_anchor() -> void:
+	print("\n═════ N. ЯКОРЬ ПОГОНИ ═════")
+	var sid: int = GameManager.new_squad(Constants.FACTION_PLAYER, "spearman")
+	verdict("N1 у свежего отряда якоря погони нет",
+		GameManager.squad_pursuit_anchor(sid) == Vector3.INF)
+	var at := Vector3(-1000.0, 0.0, -1000.0)
+	GameManager.squad_pursuit_anchor_set(sid, at)
+	verdict("N2 первое касание ставит якорь ОТРЯДУ",
+		GameManager.squad_pursuit_anchor(sid) == at,
+		"якорь %s" % str(GameManager.squad_pursuit_anchor(sid)))
+	# Второй боец касается позже и дальше — якорь обязан остаться ПЕРВЫМ,
+	# иначе поводок «едет» вместе с передними и не кончается никогда
+	GameManager.squad_pursuit_anchor_set(sid, at + Vector3(0.0, 0.0, 30.0))
+	verdict("N3 второе касание якорь не переставляет",
+		GameManager.squad_pursuit_anchor(sid) == at,
+		"якорь %s" % str(GameManager.squad_pursuit_anchor(sid)))
+	GameManager.squad_pursuit_release(sid)
+	verdict("N4 конец погони снимает якорь всему отряду",
+		GameManager.squad_pursuit_anchor(sid) == Vector3.INF)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# O. ЗНАМЯ ПАДАЕТ ТОЛЬКО ОТ ГИБЕЛИ
+# ═════════════════════════════════════════════════════════════════════════════
+## Жалоба владельца: «при перемещении отрядов орков по их траектории остаются
+## синие флажки».
+##
+## Разбор. Отряд пустеет ДВУМЯ путями, и в коде они выглядели одинаково:
+## последнего бойца УБИЛИ — или его ПЕРЕВЕЛИ в другой отряд (add_to_squad
+## первым делом зовёт remove_from_squad). ИИ и орда перекладывают бойцов по
+## отрядам каждый такт размышления, и на каждом перекладывании на землю падало
+## знамя — тянущийся за ордой след из знамён её же живых отрядов. Синих потому,
+## что синий — это грейды 4-6.
+func _o_banner_trail() -> void:
+	print("\n═════ O. СЛЕД ИЗ ЗНАМЁН ═════")
+	GameManager.corpses.clear()
+	await pframes(2)
+	var sid_a: int = GameManager.new_squad(Constants.FACTION_GOBLIN, "goblin_spearman")
+	var sid_b: int = GameManager.new_squad(Constants.FACTION_GOBLIN, "goblin_spearman")
+	var u := _spawn("res://scenes/units/GoblinSpearman.tscn",
+		Constants.FACTION_GOBLIN, Vector3(-1780.0, 0.0, -1780.0))
+	GameManager.add_to_squad(sid_a, u)
+	# Отряду выдаём звание: без него знамени нет вовсе и ронять нечего
+	(GameManager.squads[sid_a] as Dictionary)["level"] = 5
+	GameManager.refresh_squad_banner(sid_a)
+	await pframes(4)
+	var before: int = GameManager.corpses.count()
+
+	# ── ПЕРЕВОД ПОСЛЕДНЕГО БОЙЦА В ДРУГОЙ ОТРЯД ──────────────────────────
+	# Отряд A пустеет и расформировывается, но НИКТО не погиб
+	GameManager.add_to_squad(sid_b, u)
+	await pframes(6)
+	verdict("O1 перевод бойца расформировал прежний отряд",
+		not GameManager.squads.has(sid_a))
+	verdict("O2 но знамени на землю не уронил",
+		GameManager.corpses.count() == before,
+		"тел на поле было %d, стало %d" % [before, GameManager.corpses.count()])
+
+	# ── А ГИБЕЛЬ — РОНЯЕТ ─────────────────────────────────────────────────
+	(GameManager.squads[sid_b] as Dictionary)["level"] = 5
+	GameManager.refresh_squad_banner(sid_b)
+	await pframes(4)
+	var before2: int = GameManager.corpses.count()
+	u.take_damage(u.max_health * 10.0 + 1000.0, null)
+	await pframes(8)
+	var got: int = GameManager.corpses.count() - before2
+	verdict("O3 гибель последнего роняет знамя (тело + знамя)", got == 2,
+		"прибавилось %d, ждали 2" % got)
+	GameManager.corpses.clear()
 	await pframes(2)

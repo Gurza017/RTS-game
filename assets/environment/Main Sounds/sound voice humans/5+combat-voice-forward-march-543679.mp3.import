@@ -1,0 +1,19 @@
+[remap]
+
+importer="mp3"
+type="AudioStreamMP3"
+uid="uid://fb1lovs1c7bg"
+path="res://.godot/imported/5+combat-voice-forward-march-543679.mp3-660dbe87a2768072c44618771c2a01e8.mp3str"
+
+[deps]
+
+source_file="res://assets/environment/Main Sounds/sound voice humans/5+combat-voice-forward-march-543679.mp3"
+dest_files=["res://.godot/imported/5+combat-voice-forward-march-543679.mp3-660dbe87a2768072c44618771c2a01e8.mp3str"]
+
+[params]
+
+loop=false
+loop_offset=0
+bpm=0
+beat_count=0
+bar_beats=4

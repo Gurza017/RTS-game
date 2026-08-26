@@ -1,0 +1,19 @@
+[remap]
+
+importer="mp3"
+type="AudioStreamMP3"
+uid="uid://dcmwqf13pnyob"
+path="res://.godot/imported/applehillstudios-combat-voice-forward-march-543679.mp3-da1c64d70a8bcef4a311c83f679431ca.mp3str"
+
+[deps]
+
+source_file="res://assets/environment/Main Sounds/sound voice humans/applehillstudios-combat-voice-forward-march-543679.mp3"
+dest_files=["res://.godot/imported/applehillstudios-combat-voice-forward-march-543679.mp3-da1c64d70a8bcef4a311c83f679431ca.mp3str"]
+
+[params]
+
+loop=false
+loop_offset=0
+bpm=0
+beat_count=0
+bar_beats=4

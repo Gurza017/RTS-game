@@ -337,9 +337,17 @@ func _e_music() -> void:
 		str(mus.playing),
 		mus.stream.resource_path.get_file() if mus.stream != null else "нет",
 		str(amb.playing)])
-	verdict("E9 в меню расы играет main_sound_background",
+	# ── У МЕНЮ ТЕПЕРЬ СВОЯ ТЕМА ────────────────────────────────────────────
+	# Здесь стояло «играет main sound background» — требование, которое
+	# владелец развернул: меню получило отдельный трек (AudioManager.MUSIC_MENU).
+	# Проверка не выброшена, а переписана на НОВОЕ свойство, и специально не
+	# на имя файла: имя — вопрос ассета, а утверждение стенда в том, что меню
+	# играет ИМЕННО СВОЮ тему, а не первую из игрового плейлиста
+	verdict("E9 в меню расы играет своя тема меню",
 		mus.playing and mus.stream != null
-			and String(mus.stream.resource_path).contains("Main sound background"))
+			and mus.stream == AudioManager._stream(AudioManager.MUSIC_MENU)
+			and not (AudioManager.MUSIC_MENU in AudioManager.MUSIC_PLAYLIST),
+		"поток %s" % (mus.stream.resource_path.get_file() if mus.stream != null else "нет"))
 	verdict("E10 в меню лес не играет", not amb.playing)
 	# Возвращаем игровой режим для остальных разделов
 	AudioManager.start_game_audio()

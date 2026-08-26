@@ -443,11 +443,30 @@ func _set_dir_flip(value: bool) -> void:
 	_flip_h_state = value
 	_apply_flip_to_node()
 
+## Поза СТОЯЩЕГО копейщика: передние ряды держат копьё выставленным, задние —
+## поднятым. Вынесена отдельно, потому что нужна теперь в трёх местах: в покое
+## и в обоих ходовых случаях, когда боец «идёт», но фактически стоит
+func _standing_key() -> String:
+	if _spear_leveled():
+		var ssec := _facing_to_dir_key(_facing.normalized())
+		_set_dir_flip(SECTOR_MIRROR[ssec])
+		return DEFENCE_KEYS[ssec]
+	return "idle"
+
 func _update_dir_sprite() -> void:
 	var tex_key: String
+	# ── ПОЗА БЕГА ТРЕБУЕТ ФАКТИЧЕСКОГО СМЕЩЕНИЯ ────────────────────────────
+	# Здесь поза бралась прямо по `state`, и оба ходовых случая врали одинаково:
+	# боец второй шеренги стоит в State.ATTACKING (цель за спинами первого
+	# ряда), шагнуть не может — а лента крутит бег. То же и с State.MOVING у
+	# запертого в тесноте. Спрашиваем, СДВИНУЛСЯ ли он на самом деле
+	# (см. Unit.moved_recently); не сдвинулся — стоит, как и положено
+	var afoot: bool = moved_recently()
 	match state:
 		State.MOVING:
-			if _spear_leveled():
+			if not afoot:
+				tex_key = _standing_key()
+			elif _spear_leveled():
 				# Передние шеренги идут с копьями наперевес, в сторону марша
 				var mdir := velocity if velocity.length() > 0.05 else _facing
 				var msec := _facing_to_dir_key(mdir.normalized())
@@ -463,8 +482,12 @@ func _update_dir_sprite() -> void:
 			if not target_in_range():
 				# БЕЖИМ К ЦЕЛИ, А НЕ МАШЕМ КОПЬЁМ В ВОЗДУХ. Поза удара включается
 				# строго после входа в зону поражения; по дороге это обычный бег
-				# (у передних шеренг — марш с копьём наперевес в сторону цели)
-				if _spear_leveled():
+				# (у передних шеренг — марш с копьём наперевес в сторону цели).
+				# НО ТОЛЬКО ЕСЛИ БОЕЦ И ПРАВДА ИДЁТ: упёршийся в своих СТОИТ —
+				# это и есть «бег на месте» из жалобы
+				if not afoot:
+					tex_key = _standing_key()
+				elif _spear_leveled():
 					tex_key = DEFENCE_KEYS[sec]
 					_set_dir_flip(SECTOR_MIRROR[sec])
 				else:
@@ -603,3 +626,14 @@ func _add_spear_procedural() -> void:
 	cone.material = tmat; tip.mesh = cone
 	tip.position = Vector3(0.55, 2.50, -0.05)
 	add_child(tip)
+
+## ── СТЕНКА КОПИЙ ПРОТИВ КОННИЦЫ ────────────────────────────────────────────
+## Копейщик — единственный род войск, который держит лобовой навал: кабан
+## налетает на выставленные копья и получает контрудар вместо того, чтобы смять
+## строй (см. Unit._charge_impact). Свойство РОДА ВОЙСК, а не стойки: копья
+## опущены навстречу коннице и в «атаке» — иначе фаланга была бы беззащитна
+## ровно в тот момент, когда идёт вперёд.
+## С фланга и с тыла не работает вовсе, и это главное: копья смотрят в одну
+## сторону, обойти строй конница по-прежнему обязана уметь
+func repels_charge() -> bool:
+	return true

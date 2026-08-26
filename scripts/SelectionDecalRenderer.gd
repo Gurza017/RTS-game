@@ -106,6 +106,17 @@ var _last_pos: Dictionary = {}  # Unit -> Vector3 (чтобы не перепи�
 ## Слой ДЕШЁВЫЙ по построению: под курсором всегда не больше одного отряда, то
 ## есть десятки экземпляров против сотен у выделения
 var _hover: Layer = null
+## ── ЗДАНИЯМ СВОЙ СЛОЙ, А НЕ ЧУЖОЙ МЕШ В МАСШТАБЕ ──────────────────────────
+## Разные меши в одном MultiMesh не живут: буфер хранит трансформы, а меш у
+## слоя один на всех. Кольцо бойца и контур здания — РАЗНЫЕ меши (см. разбор у
+## _Vis.building_ring_mesh), значит и слоя должно быть два.
+##
+## Заводится ЛЕНИВО, как и все остальные: пока игрок не навёлся ни на одну
+## постройку, узла нет вовсе и вызовов отрисовки он не стоит. Наведён — это
+## ОДИН вызов на все подсвеченные постройки разом, сколько бы их ни было
+var _hover_b: Layer = null
+## Кто из подсвеченных живёт в слое зданий (иначе снять слот не с того слоя)
+var _hover_in_b: Dictionary = {}
 var _hover_slot: Dictionary = {}
 var _hover_last: Dictionary = {}
 
@@ -210,7 +221,7 @@ func set_hover_units(units: Array, world_root: Node3D) -> void:
 	# Кого гасим: был подсвечен, в новом наборе его нет
 	var keep: Dictionary = {}
 	for u in units:
-		if is_instance_valid(u) and u is Unit:
+		if is_instance_valid(u) and (u is Unit or u is Building):
 			keep[u] = true
 	var drop: Array = []
 	for u in _hover_slot:
@@ -222,20 +233,30 @@ func set_hover_units(units: Array, world_root: Node3D) -> void:
 		_hover_drop(u)
 	if keep.is_empty():
 		return
-	if _hover == null:
-		_hover = _make_layer(_Vis.hover_ring_mesh(), world_root)
 	for u in keep:
 		if _hover_slot.has(u):
 			continue
-		if _hover.free.is_empty():
-			var new_cap: int = _hover.capacity + GROW_STEP
-			_hover.grow(GROW_STEP)
+		var is_b: bool = u is Building
+		var lay: Layer = _hover_b if is_b else _hover
+		if lay == null:
+			lay = _make_layer(_Vis.building_ring_mesh() if is_b
+				else _Vis.hover_ring_mesh(), world_root)
+			if is_b:
+				_hover_b = lay
+			else:
+				_hover = lay
+		if lay.free.is_empty():
+			var new_cap: int = lay.capacity + GROW_STEP
+			lay.grow(GROW_STEP)
 			for i in range(new_cap - GROW_STEP, new_cap):
-				_hover.free.append(i)
-		var idx: int = _hover.free.pop_back()
+				lay.free.append(i)
+		var idx: int = lay.free.pop_back()
 		_hover_slot[u] = idx
-		_hover_write(idx, (u as Unit).global_position)
-		_hover_last[u] = (u as Unit).global_position
+		_hover_in_b[u] = is_b
+		var hp3: Vector3 = (u as Node3D).global_position
+		_hover_write(idx, hp3,
+			building_ring_scale(u) if is_b else 1.0, is_b)
+		_hover_last[u] = hp3
 
 # ═════════════════════════════════════════════════════════════════════════════
 # УКАЗАТЕЛИ ОТДАННОГО ПРИКАЗА
@@ -251,7 +272,11 @@ func set_hover_units(units: Array, world_root: Node3D) -> void:
 ## владелец приказов (GameManager.squad_orders), сюда приходит уже готовый
 ## список того, что показывать в этом кадре.
 var _order_ring: Layer = null            # красные кольца на приказанной цели
+## Контур приказанного ЗДАНИЯ — свой слой по той же причине, что у наведения:
+## меш у здания другой (см. _Vis.building_ring_mesh)
+var _order_ring_b: Layer = null
 var _order_slot: Dictionary = {}
+var _order_in_b: Dictionary = {}
 var _dest: Layer = null                  # метки точек, куда послан отряд
 var _dest_n: int = 0
 
@@ -260,7 +285,7 @@ var _dest_n: int = 0
 func set_order_targets(units: Array, world_root: Node3D) -> void:
 	var keep: Dictionary = {}
 	for u in units:
-		if is_instance_valid(u) and u is Unit:
+		if is_instance_valid(u) and (u is Unit or u is Building):
 			keep[u] = true
 	var drop: Array = []
 	for u in _order_slot:
@@ -270,35 +295,48 @@ func set_order_targets(units: Array, world_root: Node3D) -> void:
 		_order_drop(u)
 	if keep.is_empty():
 		return
-	if _order_ring == null:
-		_order_ring = _make_layer(_Vis.hover_ring_mesh(), world_root)
 	for u in keep:
-		var pos: Vector3 = (u as Unit).global_position
+		var pos: Vector3 = (u as Node3D).global_position
+		var is_b: bool = u is Building
+		var k: float = building_ring_scale(u) if is_b else 1.0
+		var lay: Layer = _order_ring_b if is_b else _order_ring
+		if lay == null:
+			lay = _make_layer(_Vis.building_ring_mesh() if is_b
+				else _Vis.hover_ring_mesh(), world_root)
+			if is_b:
+				_order_ring_b = lay
+			else:
+				_order_ring = lay
 		if _order_slot.has(u):
 			# Цель ЖИВАЯ и ходит: кольцо обязано ехать за ней, иначе оно
 			# остаётся лежать там, где враг был в момент приказа
-			_order_ring.write(int(_order_slot[u]), _ID0, _ID1, _ID2,
-				Vector3(pos.x, pos.y + _Vis.RING_Y, pos.z))
+			lay.write(int(_order_slot[u]), Vector3(k, 0.0, 0.0), _ID1,
+				Vector3(0.0, 0.0, k), Vector3(pos.x, pos.y + _Vis.RING_Y, pos.z))
 			continue
-		if _order_ring.free.is_empty():
-			var new_cap: int = _order_ring.capacity + GROW_STEP
-			_order_ring.grow(GROW_STEP)
+		if lay.free.is_empty():
+			var new_cap: int = lay.capacity + GROW_STEP
+			lay.grow(GROW_STEP)
 			for i in range(new_cap - GROW_STEP, new_cap):
-				_order_ring.free.append(i)
-		var idx: int = _order_ring.free.pop_back()
+				lay.free.append(i)
+		var idx: int = lay.free.pop_back()
 		_order_slot[u] = idx
-		_order_ring.write(idx, _ID0, _ID1, _ID2,
-			Vector3(pos.x, pos.y + _Vis.RING_Y, pos.z))
+		_order_in_b[u] = is_b
+		lay.write(idx, Vector3(k, 0.0, 0.0), _ID1,
+			Vector3(0.0, 0.0, k), Vector3(pos.x, pos.y + _Vis.RING_Y, pos.z))
 
 func drop_order_target(u) -> void:
 	_order_drop(u)
 
 func _order_drop(u) -> void:
-	if not _order_slot.has(u) or _order_ring == null:
+	if not _order_slot.has(u):
 		return
-	_order_ring.hide_slot(int(_order_slot[u]))
-	_order_ring.free.append(int(_order_slot[u]))
+	var lay: Layer = _order_ring_b if bool(_order_in_b.get(u, false)) else _order_ring
+	if lay == null:
+		return
+	lay.hide_slot(int(_order_slot[u]))
+	lay.free.append(int(_order_slot[u]))
 	_order_slot.erase(u)
+	_order_in_b.erase(u)
 
 ## МЕТКИ ТОЧЕК НАЗНАЧЕНИЯ. Не по объектам, а списком точек: их единицы (по
 ## одной на выделенный отряд), и держать под них словарь незачем — слой просто
@@ -338,6 +376,8 @@ func set_move_marks(points: Array, world_root: Node3D, phase: float) -> void:
 func flush_orders() -> void:
 	if _order_ring != null:
 		_order_ring.flush()
+	if _order_ring_b != null:
+		_order_ring_b.flush()
 	if _dest != null:
 		_dest.flush()
 
@@ -347,24 +387,58 @@ func drop_hover(u) -> void:
 	_hover_drop(u)
 
 func _hover_drop(u) -> void:
-	if not _hover_slot.has(u) or _hover == null:
+	if not _hover_slot.has(u):
 		return
-	_hover.hide_slot(_hover_slot[u])
-	_hover.free.append(_hover_slot[u])
+	var lay: Layer = _hover_b if bool(_hover_in_b.get(u, false)) else _hover
+	if lay == null:
+		return
+	lay.hide_slot(_hover_slot[u])
+	lay.free.append(_hover_slot[u])
 	_hover_slot.erase(u)
+	_hover_in_b.erase(u)
 	_hover_last.erase(u)
 
-func _hover_write(idx: int, pos: Vector3) -> void:
-	_hover.write(idx, _ID0, _ID1, _ID2,
+func _hover_write(idx: int, pos: Vector3, k: float = 1.0,
+		in_b: bool = false) -> void:
+	var lay: Layer = _hover_b if in_b else _hover
+	if lay == null:
+		return
+	lay.write(idx, Vector3(k, 0.0, 0.0), _ID1, Vector3(0.0, 0.0, k),
 		Vector3(pos.x, pos.y + _Vis.RING_Y, pos.z))
 
+## ── КОНТУР ПОД ЗДАНИЕМ: РАДИУС ПО ЕГО ОСНОВАНИЮ ───────────────────────────
+## Чужой боец и чужая постройка — одинаково законные цели приказа (см.
+## SelectionManager.enemy_target_under_cursor), и обратная связь у них обязана
+## быть одна: красный контур под тем, что накроет клик.
+##
+## ЗДАНИЕ ОБВОДИТСЯ СВОИМ МЕШЕМ (_Vis.building_ring_mesh), а не увеличенным
+## кольцом бойца. Кольцо бойца — тор в 35 см о двенадцати сегментах; растянутое
+## до замка оно давало толстый угловатый многоугольник (разбор — там же, у
+## меша). Здешний тор единичного радиуса и тонкий, поэтому масштаб равен просто
+## ПОЛОВИНЕ ГАБАРИТА постройки в метрах.
+##
+## Масштабируются ТОЛЬКО оси X и Z: тор лежит в горизонтальной плоскости, и
+## общий масштаб поднял бы его над землёй колесом
+static func building_ring_scale(n) -> float:
+	var b := n as Building
+	if b == null:
+		return 1.0
+	# Чуть шире самой коробки: контур обязан лежать ВОКРУГ основания, а не
+	# резать его угол
+	return maxf(b.build_size.x, b.build_size.z) * 0.5 + BUILD_RING_MARGIN
+
+## Запас контура наружу от габарита постройки, метры
+const BUILD_RING_MARGIN := 0.35
+
 func clear_hover() -> void:
-	if _hover == null:
-		return
 	for u in _hover_slot.keys():
-		_hover.hide_slot(_hover_slot[u])
-		_hover.free.append(_hover_slot[u])
+		var lay: Layer = _hover_b if bool(_hover_in_b.get(u, false)) else _hover
+		if lay == null:
+			continue
+		lay.hide_slot(_hover_slot[u])
+		lay.free.append(_hover_slot[u])
 	_hover_slot.clear()
+	_hover_in_b.clear()
 	_hover_last.clear()
 
 func hover_count() -> int:
@@ -426,15 +500,20 @@ func _update_hover_positions() -> void:
 		if not is_instance_valid(unit):
 			stale.append(unit)
 			continue
-		var u: Unit = unit
-		var p: Vector3 = u.draw_position()
-		var was: Vector3 = _hover_last.get(u, Vector3.INF)
+		# ЗДАНИЕ НЕ ХОДИТ И draw_position() У НЕГО НЕТ. Приводить к Unit
+		# заранее нельзя (типизированное присваивание на постройке — ошибка),
+		# поэтому тип разбирается здесь, один раз на подсвеченную цель
+		var uu := unit as Unit
+		if uu == null:
+			continue
+		var p: Vector3 = uu.draw_position()
+		var was: Vector3 = _hover_last.get(uu, Vector3.INF)
 		var dx: float = p.x - was.x
 		var dz: float = p.z - was.z
 		if dx * dx + dz * dz < 0.0004:
 			continue
-		_hover_write(_hover_slot[u], p)
-		_hover_last[u] = p
+		_hover_write(_hover_slot[uu], p)
+		_hover_last[uu] = p
 	for k in stale:
 		_hover_drop(k)
 
@@ -447,14 +526,20 @@ func flush() -> void:
 		_shadows.flush()
 	if _hover != null:
 		_hover.flush()
+	if _hover_b != null:
+		_hover_b.flush()
 
 ## Полная очистка (смена сцены/сброс партии) — только бухгалтерия слотов
 func clear_bookkeeping() -> void:
 	_hover_slot.clear()
+	_hover_in_b.clear()
 	_hover_last.clear()
 	if _hover != null:
 		_hover.hide_all()
 		_hover.flush()
+	if _hover_b != null:
+		_hover_b.hide_all()
+		_hover_b.flush()
 		_hover.free = range(_hover.capacity)
 	for l in [_rings, _shadows]:
 		if l == null:

@@ -9,6 +9,8 @@ extends Node
 ##   D КАЙТ      — лучники прячутся за спины своей пехоты
 ##   E ОТХОД     — выбитый отряд уходит в замок на восстановление
 ##   F ЗАСЛОН    — гарнизон стоит строем лицом к противнику, а не кольцом
+##   H ЗАМОРОЗКА — стоящий заслон не переиздаёт приказ («пульсирующая армия»)
+##   I ЦЕНТР     — полная армия выходит отвоёвывать центр карты
 ##   G ЦЕНА      — такт размышления укладывается в бюджет
 ##
 ## Числа берутся из ai_start_army_limit / unit_stats_config / forge_config —
@@ -104,6 +106,8 @@ func _run() -> void:
 	await _d_kite()
 	await _e_retreat()
 	await _f_screen()
+	await _h_frozen()
+	await _i_recap()
 	await _g_cost()
 
 	print("\n═════ ИТОГ ═════")
@@ -469,6 +473,229 @@ func _f_screen() -> void:
 
 	mark.queue_free()
 	await frames(3)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# H. ЗАМОРОЖЕННАЯ ЦЕЛЬ: СТОЯЩИЙ ЗАСЛОН НЕ ПЕРЕИЗДАЁТ ПРИКАЗ
+# ═════════════════════════════════════════════════════════════════════════════
+# Жалоба владельца: армия ИИ у базы «сжимается в точку и разъезжается обратно»
+# раз в секунду, просаживая кадр. Причин было две, и обе проверяются здесь.
+#
+#   H1. ШИРИНА МЕСТА. Шаг между соседними отрядами заслона выводился из ОБЩЕЙ
+#       шестёрки колонок, а копейщиков ИИ разворачивает по числу шеренг — 15
+#       колонок, 8.7 м. Места перекрывались, отряды лезли друг в друга,
+#       расталкивание их разбрасывало. Проверяем СВОЙСТВО: шаг не меньше
+#       ширины отряда ЭТОГО рода войск.
+#
+#   H2-H3. ЗАМОРОЗКА. Стоящему на своих местах заслону приказ переиздавался
+#       каждый такт — а это set_stance и command_move каждому бойцу, то есть
+#       вся оборона разом делала шаг. Проверяем, что второй такт подряд НЕ
+#       трогает никого: ни один боец не ушёл из IDLE и никто не сдвинулся.
+func _h_frozen() -> void:
+	print("\n═════ H. ЗАМОРОЗКА СЕТКИ ═════")
+	if castle == null:
+		verdict("H0 у ИИ есть замок", false, "замок не найден")
+		return
+	_clear_ai()
+	await frames(2)
+
+	# H1: шаг заслона не уже отряда — у КАЖДОГО рода войск по отдельности
+	var narrow: Array = []
+	for t in _AICfg.combat_types():
+		var uid: String = String(t)
+		var w: float = float(ai._squad_width(uid))
+		var step: float = float(ai._screen_step_for(uid))
+		print("  %-9s ширина отряда %.2f м, шаг заслона %.2f м" % [uid, w, step])
+		if step < w:
+			narrow.append(uid)
+	verdict("H1 шаг заслона не уже отряда ни у одного рода войск",
+		narrow.is_empty(), "уже нормы: %s" % str(narrow))
+
+	# H2-H3: два такта подряд по одной и той же обстановке
+	var base: Vector3 = castle.global_position \
+		+ ai._defense_course(castle) * _AICfg.SCREEN_SPEAR_DIST
+	var men := _ai_squad("spearman", base, _UCfg.squad_size("spearman"))
+	await frames(3)
+	ai._regroup()
+	# Первый такт: приказ выдаётся и отряд расходится по местам
+	ai._assign_home_posts(castle, ai.squads)
+	ai._apply_orders()
+	# ── ЖДЁМ, ПОКА ВСЕ ВСТАНУТ, И ЖДЁМ ДОЛГО ────────────────────────────────
+	# Заморозка судит СТОЯЩИЙ отряд, и «стоящий» здесь не фигура речи:
+	# _posts_intact на идущем отряде отвечает «не трогать» (он и так исполняет
+	# прошлый приказ), то есть на неустоявшемся строю проверка проверяла бы не
+	# то. Шестидесяти копейщикам, которых высадили кучей и развели в строй
+	# 15×4 в двадцати метрах в стороне, на это нужно около 1200 физкадров —
+	# первая версия ждала 600 и мерила отряд НА ХОДУ
+	var walking := 0
+	var waited := 0
+	for _i in range(1200):
+		walking = 0
+		for u in men:
+			if is_instance_valid(u) and (u as Unit).state != Unit.State.IDLE:
+				walking += 1
+		if walking == 0:
+			break
+		waited += 1
+		await frames(1)
+	var states: Dictionary = {}
+	for u in men:
+		var st: int = (u as Unit).state
+		states[st] = int(states.get(st, 0)) + 1
+	print("  ожидание остановки: %d кадров, ещё в движении %d, состояния %s" % [
+		waited, walking, str(states)])
+
+	var before: Array = []
+	for u in men:
+		before.append((u as Node3D).global_position)
+	var sqd: Dictionary = ai.squads[0]
+	var issued_before: bool = bool(sqd["issued"])
+	# Диагностика: ровно те три числа, по которым заморозка и принимает решение
+	var f_face: Vector3 = sqd.get("face", Vector3.ZERO)
+	var f_cols: int = int(ai._squad_cols("spearman", (sqd["members"] as Array).size()))
+	var f_intact: bool = bool(ai._posts_intact(sqd["members"], sqd["target"],
+		f_face, f_cols))
+	var f_threat = ai._nearest_player_target(ai._squad_centroid(sqd["members"]),
+		_AICfg.DEFENSE_ENGAGE_RADIUS)
+	print("  зонд заморозки: роль=%s issued=%s курс=(%.2f,%.2f) колонок=%d стоят_по_местам=%s угроза=%s" % [
+		String(sqd["role"]), str(issued_before), f_face.x, f_face.z, f_cols,
+		str(f_intact), "нет" if f_threat == null else String((f_threat as Node).name)])
+
+	# ── СЧИТАЕМ РАЗБУЖЕННЫХ ЭТИМ ВЫЗОВОМ, А НЕ ВСЕХ ИДУЩИХ ─────────────────
+	# Здесь стояло «после двух кадров посчитать, кто не в покое», и проверка
+	# ловила НЕ ТО, что утверждает. Идти боец может не только по приказу ИИ:
+	# за эти кадры проходит обход смыкания строя (GameManager._sweep_reform), и
+	# он законно уводит на места тех, кого оттёрло расталкиванием — замер дал
+	# «разбужено 3 из 60», и все трое были от смыкания.
+	# Утверждение же здесь ровно одно: ТАКТ ИИ стоящий заслон не трогает.
+	# Значит, и мерить надо разницу ДО и ПОСЛЕ вызова, а сам вызов синхронен
+	# (command_move ставит State.MOVING тут же)
+	var was_idle: Array = []
+	for i0 in range(men.size()):
+		var u0 := men[i0] as Unit
+		was_idle.append(is_instance_valid(u0) and u0.state == Unit.State.IDLE)
+
+	# Второй такт по НЕИЗМЕННОЙ обстановке — обязан не сделать ничего
+	ai._assign_home_posts(castle, ai.squads)
+	ai._apply_orders()
+
+	var woken := 0
+	for i1 in range(men.size()):
+		var u1 := men[i1] as Unit
+		if not bool(was_idle[i1]) or not is_instance_valid(u1):
+			continue
+		if u1.state != Unit.State.IDLE:
+			woken += 1
+	await frames(2)
+
+	var shifted := 0.0
+	for i in range(men.size()):
+		var u := men[i] as Unit
+		if not is_instance_valid(u):
+			continue
+		shifted = maxf(shifted, (u.global_position as Vector3).distance_to(before[i]))
+	print("  после повторного такта: разбужено %d из %d, худший сдвиг %.2f м" % [
+		woken, men.size(), shifted])
+	verdict("H2 повторный такт не будит стоящий заслон", woken == 0,
+		"разбужено %d из %d (приказ был выдан=%s)" % [woken, men.size(), str(issued_before)])
+	verdict("H3 повторный такт не двигает строй", shifted < 0.5,
+		"худший сдвиг %.2f м" % shifted)
+	_clear_ai()
+	await frames(2)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# I. ОТВОЕВАТЬ ЦЕНТР
+# ═════════════════════════════════════════════════════════════════════════════
+# Жалоба владельца: игрок берёт центр карты, ИИ садится в глухую оборону у базы
+# и не выходит из неё, даже восстановив армию до лимита.
+#
+# Проверяем ТРИ свойства решения, а не числа из конфига:
+#   I1 — при полной армии и занятом игроком центре ИИ переходит в наступление;
+#   I2 — дома остаётся ровно RECAP_HOME_GUARD отрядов на род, остальные идут
+#        на ЦЕНТР («не оставлять лишних юнитов в бесконечной обороне»);
+#   I3 — гистерезис: отвоёванный центр возвращает ИИ в оборону сам.
+func _i_recap() -> void:
+	print("\n═════ I. ОТВОЕВАТЬ ЦЕНТР ═════")
+	if not _AICfg.AI_RECAP_CENTER:
+		print("  AI_RECAP_CENTER выключен — раздел пропущен")
+		return
+	if castle == null:
+		verdict("I0 у ИИ есть замок", false, "замок не найден")
+		return
+	_clear_ai()
+	ai.recap_center = false
+	await frames(2)
+
+	var center: Vector3 = ai._rally_point()
+	# Армия ИИ: набираем ВЫШЕ порога наступления. Считается доля по БОЙЦАМ,
+	# поэтому и набираем по бойцам, а не по числу отрядов
+	var cap: int = _AICfg.total_army_cap()
+	var need: int = int(ceil(float(cap) * _AICfg.RECAP_ARMY_FRACTION))
+	var kinds := ["spearman", "archer", "warrior"]
+	var have := 0
+	var ki := 0
+	var home: Vector3 = castle.global_position + Vector3(-14.0, 0.0, 0.0)
+	while have < need:
+		var uid: String = String(kinds[ki % kinds.size()])
+		var n: int = _UCfg.squad_size(uid)
+		_ai_squad(uid, home + Vector3(float(ki % 8) * 6.0, 0.0, float(ki / 8) * 6.0), n)
+		have += n
+		ki += 1
+	# Центр держит игрок: его бойцов там больше, чем наших (наших там нет вовсе)
+	var theirs: Array = []
+	for i in range(40):
+		theirs.append(_spawn("spearman", Constants.FACTION_PLAYER,
+			center + Vector3(float(i % 8) * 0.8, 0.0, float(i / 8) * 0.8)))
+	await frames(4)
+	ai._regroup()
+	print("  армия ИИ %d бойцов (%d%% лимита %d), у центра бойцов игрока %d" % [
+		ai.army_size(), int(ai._army_fill() * 100.0), cap,
+		ai._player_combat_near(center)])
+
+	ai._command_squads_defensive(castle)
+	await frames(2)
+	verdict("I1 полная армия при потерянном центре идёт в наступление",
+		ai.recap_center, "recap=%s, армия %d%% при пороге %d%%" % [
+			str(ai.recap_center), int(ai._army_fill() * 100.0),
+			int(_AICfg.RECAP_ARMY_FRACTION * 100.0)])
+
+	var guards: Dictionary = {}
+	var to_center := 0
+	var worst_off := 0.0
+	for s in ai.squads:
+		var sq: Dictionary = s
+		var uid2: String = String(sq["type"])
+		if String(sq["role"]) == ai.ROLE_GUARD:
+			guards[uid2] = int(guards.get(uid2, 0)) + 1
+		elif String(sq["role"]) == ai.ROLE_RECAP:
+			to_center += 1
+			worst_off = maxf(worst_off, (sq["target"] as Vector3).distance_to(center))
+	var guard_ok := true
+	for k in guards:
+		if int(guards[k]) > _AICfg.RECAP_HOME_GUARD:
+			guard_ok = false
+	print("  роли: дома %s, на центр %d отрядов, дальше всех от центра %.1f м" % [
+		str(guards), to_center, worst_off])
+	verdict("I2 дома не больше RECAP_HOME_GUARD на род, остальное — на центр",
+		guard_ok and to_center > 0,
+		"дома %s при лимите %d, на центр %d" % [
+			str(guards), _AICfg.RECAP_HOME_GUARD, to_center])
+
+	# I3: центр отбит — наступление сворачивается само
+	for u in theirs:
+		if is_instance_valid(u):
+			(u as Node).queue_free()
+	# Свои у центра есть: переносим один отряд туда, иначе «отвоёван» не считается
+	var mine: Array = ai.squads[0]["members"]
+	for u in mine:
+		if is_instance_valid(u):
+			(u as Node3D).global_position = center
+	await frames(4)
+	ai._update_recap()
+	verdict("I3 отвоёванный центр возвращает ИИ в оборону", not ai.recap_center,
+		"recap=%s, у центра своих %d, чужих %d" % [str(ai.recap_center),
+			ai._own_near(center), ai._player_combat_near(center)])
+	_clear_ai()
+	await frames(2)
 
 # ═════════════════════════════════════════════════════════════════════════════
 # G. ЦЕНА ТАКТА

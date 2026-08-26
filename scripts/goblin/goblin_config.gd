@@ -145,6 +145,7 @@ const VETERAN_AUTO_PICKS := 4
 const VETERAN_PREFERENCE := ["bonus_attack", "bonus_health", "bonus_defense",
 	"bonus_armor", "bonus_speed"]
 
+
 # ── РАСПИСАНИЕ ──────────────────────────────────────────────────────────────
 ## До этой минуты орда СПИТ: не ищет цели, не считает путь, не тикает мозгами.
 ## Тридцать минут — заказ владельца

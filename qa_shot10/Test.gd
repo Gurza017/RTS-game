@@ -69,9 +69,9 @@ func _run() -> void:
 	await frames(4)
 	# Пара званий, чтобы на карточках были звёзды
 	GameManager.squads[int(sids[4])]["level"] = 2
-	GameManager.refresh_star(int(sids[4]))
+	GameManager.refresh_squad_banner(int(sids[4]))
 	GameManager.squads[int(sids[6])]["level"] = 5
-	GameManager.refresh_star(int(sids[6]))
+	GameManager.refresh_squad_banner(int(sids[6]))
 	# Одному отряду потреплем состав — шкала должна укоротиться
 	var hurt: Array = GameManager.squad_members(int(sids[5]))
 	for m in hurt:
