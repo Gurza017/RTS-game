@@ -53,11 +53,29 @@ static func other_factions(faction: int) -> Array:
 	return out
 
 ## Имена групп чужих зданий — для тех, кто ищет цель, а не «врага ИИ»
+## ГРУППЫ ЧУЖИХ ЗДАНИЙ — ГОТОВЫМ СПИСКОМ, А НЕ НОВЫМ МАССИВОМ НА КАЖДЫЙ ВЫЗОВ.
+##
+## Спрашивают это из самого горячего места в игре: поиск цели
+## (Unit._find_nearest_enemy_in_range), сотня с лишним вызовов в кадр в большом
+## бою. Прежняя версия на каждый такой вызов строила ДВА массива — свой и тот,
+## что возвращает other_factions, — то есть платила аллокацией за ответ,
+## который не меняется никогда: фракций три, и кто кому чужой, известно на
+## старте партии.
+##
+## Список отдаётся ТЕМ ЖЕ объектом, а не копией: вызывающие только читают его.
+## Портить его нельзя — это общий на всю игру справочник, а не рабочий массив
+static var _enemy_bld_groups: Array = []
+
 static func enemy_building_groups(faction: int) -> Array:
-	var out: Array = []
-	for f in other_factions(faction):
-		out.append(building_group(f))
-	return out
+	if _enemy_bld_groups.is_empty():
+		for f in range(FACTION_COUNT):
+			var row: Array = []
+			for o in other_factions(f):
+				row.append(building_group(int(o)))
+			_enemy_bld_groups.append(row)
+	if faction < 0 or faction >= _enemy_bld_groups.size():
+		return []
+	return _enemy_bld_groups[faction]
 
 const RESOURCE_WOOD  = 0
 const RESOURCE_GOLD  = 1

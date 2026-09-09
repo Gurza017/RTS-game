@@ -349,11 +349,27 @@ func _test_training_to_limits() -> void:
 			"постов=%d, зазор=%.1f м" % [
 				int(surplus_snap["guard_posts"]), float(surplus_snap["post_gap"])])
 
+## ── СКОЛЬКО ГАРНИЗОННЫХ ОТРЯДОВ ЭТОГО ТИПА ВООБЩЕ ВОЗМОЖНО ────────────────
+## Гарнизон просит HOME_GUARD_PER_TYPE отрядов каждого типа, но ВСЕГО отрядов
+## типа не больше SQUAD_LIMIT. При семёрке в гарнизоне и лимитах 10/6/5 семь
+## лучников не существует в природе: их всего пять. Стенд обязан проверять
+## СВОЙСТВО («гарнизон укомплектован настолько, насколько возможно»), а не
+## число из одного конфига в отрыве от другого — иначе он краснеет на
+## правильном коде, что и происходило (guard=18 при «ожидалось 21», по типам
+## мечники 6 из 6 и лучники 5 из 5, то есть ровно потолок)
+func _guard_want(uid: String) -> int:
+	return mini(_AICfg.HOME_GUARD_PER_TYPE, _AICfg.squad_limit(uid))
+
+func _guard_want_total() -> int:
+	var n := 0
+	for t in _AICfg.combat_types():
+		n += _guard_want(String(t))
+	return n
 ## Поймать момент, когда гарнизон уже укомплектован, а лимит армии ещё нет
 func _snap_surplus() -> void:
 	if not surplus_snap.is_empty() or ai.army_ready():
 		return
-	var want_guard: int = _AICfg.combat_types().size() * _AICfg.HOME_GUARD_PER_TYPE
+	var want_guard: int = _guard_want_total()
 	var roles: Dictionary = {}
 	for s in ai.squads:
 		var r: String = String((s as Dictionary)["role"])
@@ -477,15 +493,15 @@ func _test_roles() -> void:
 	print("  полевых отрядов=%d, из них дальше %.0f м от озера=%d, минимальный зазор между целями=%.1f м" % [
 		field_targets.size(), _AICfg.LAKE_CONTEST_RADIUS, field_far, min_field_gap])
 
-	var want_guard: int = _AICfg.combat_types().size() * _AICfg.HOME_GUARD_PER_TYPE
+	var want_guard: int = _guard_want_total()
 	var per_type_ok := true
 	for t in _AICfg.combat_types():
-		if int(guard_by_type.get(String(t), 0)) != _AICfg.HOME_GUARD_PER_TYPE:
+		if int(guard_by_type.get(String(t), 0)) != _guard_want(String(t)):
 			per_type_ok = false
 	if _AICfg.DEFENSIVE_MODE:
 		# ОБОРОНИТЕЛЬНЫЙ РЕЖИМ: ролей field/assault не бывает вовсе — излишки
 		# уходят в заслон (line) и патрули (patrol), см. EnemyAI._command_squads_defensive
-		verdict("5 гарнизон = HOME_GUARD_PER_TYPE на тип",
+		verdict("5 гарнизон укомплектован до потолка каждого типа",
 			guard_total == want_guard and per_type_ok,
 			"guard=%d, ожидалось %d, по типам %s" % [guard_total, want_guard, str(guard_by_type)])
 		verdict("5 оборона: штурмовых ролей нет",
@@ -500,7 +516,7 @@ func _test_roles() -> void:
 			patrol_n <= _AICfg.PATROL_SQUADS,
 			"patrol=%d, лимит %d" % [patrol_n, _AICfg.PATROL_SQUADS])
 	elif _AICfg.SEND_SURPLUS_TO_LAKE:
-		verdict("5 гарнизон = HOME_GUARD_PER_TYPE на тип",
+		verdict("5 гарнизон укомплектован до потолка каждого типа",
 			guard_total == want_guard and per_type_ok,
 			"guard=%d, ожидалось %d, по типам %s" % [guard_total, want_guard, str(guard_by_type)])
 		verdict("5 излишки в роли field у озера",

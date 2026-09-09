@@ -177,18 +177,26 @@ func slot_position(idx: int) -> Vector3:
 ## всегда ближе внутренней — «ближайший свободный вообще» расставил бы бригаду
 ## широким хороводом в паре метров от руды (тот же разбор, что в
 ## ResourceNode.claim_slot)
-func claim_slot(who: Node3D) -> Vector3:
+## `renew` — «дай ДРУГОЕ место»: прежнее считается занятым (разбор — в
+## ResourceNode.claim_slot)
+func claim_slot(who: Node3D, renew: bool = false) -> Vector3:
 	if who == null:
 		return center
 	var wid: int = who.get_instance_id()
+	var avoid: int = -1
 	if _slot_owner.has(wid):
-		return slot_position(int(_slot_owner[wid]))
+		if not renew:
+			return slot_position(int(_slot_owner[wid]))
+		avoid = int(_slot_owner[wid])
+		_slot_owner.erase(wid)
 	var taken: Dictionary = {}
 	for k in _slot_owner.keys():
 		if is_instance_valid(instance_from_id(int(k))):
 			taken[int(_slot_owner[k])] = true
 		else:
 			_slot_owner.erase(k)
+	if avoid >= 0:
+		taken[avoid] = true
 	var base: int = 0
 	var ax: Vector2 = stand
 	var pick: int = -1
@@ -210,7 +218,7 @@ func claim_slot(who: Node3D) -> Vector3:
 		base += n
 		ax += Vector2(RING_STEP, RING_STEP)
 	if pick < 0:
-		pick = slot_total() + (wid % SLOT_MAX)
+		pick = avoid if avoid >= 0 else slot_total() + (wid % SLOT_MAX)
 	_slot_owner[wid] = pick
 	return slot_position(pick)
 

@@ -121,14 +121,22 @@ func take_damage(amount: float, attacker: Node3D = null) -> void:
 
 ## Долевое снижение входящего урона щитом
 func _incoming_damage_factor(attacker: Node3D) -> float:
+	# ── БАЗА СЧИТАЕТСЯ ВСЕГДА ──────────────────────────────────────────────
+	# В базе живёт легендарная «Стена щитов» (−40 % от стрел), и она положена
+	# мечнику ровно так же, как всем. Раньше здесь стоял безусловный выход при
+	# опущенном щите — то есть перк отряда мечников не работал бы вовсе, и
+	# заметить это можно было бы только по числам
+	var base: float = super._incoming_damage_factor(attacker)
 	if not _guard_active:
-		return 1.0
-	# УДАР В СПИНУ ЩИТ ИГНОРИРУЕТ полностью
+		return base
+	# УДАР В СПИНУ ЩИТ ИГНОРИРУЕТ полностью — но базовое снижение остаётся
 	if attacker != null and not _is_front_attack(attacker):
-		return 1.0
-	# Стрелы щит держит лучше, чем сталь в упор
+		return base
+	# Стрелы щит держит лучше, чем сталь в упор. Множители ПЕРЕМНОЖАЮТСЯ, а не
+	# заменяют друг друга: щит и легендарный перк — разные вещи, и оба должны
+	# работать. Ноля при этом не выходит ни при каких числах
 	var cut: float = GUARD_CUT_RANGED if attacker is Archer else GUARD_CUT_MELEE
-	return 1.0 - cut
+	return base * (1.0 - cut)
 
 ## Атакующий во фронтальном секторе?
 func _is_front_attack(attacker: Node3D) -> bool:
@@ -199,8 +207,12 @@ func _effective_speed() -> float:
 
 # Сон _process. Базовая версия отказывается спать при любой анимации, кроме
 # "idle", — со щитом наизготовку стоящая армия мечников не заснула бы никогда
-# и съела бы кадр. Спать со щитом можно: AnimatedSprite3D крутит цикл сам,
-# без нашего _process. Под угрозой не спим — щит должен опуститься вовремя
+# и съела бы кадр. Под угрозой не спим — щит должен опуститься вовремя.
+# ЗДЕСЬ СТОЯЛО «AnimatedSprite3D крутит цикл сам, без нашего _process» — это
+# было верно до общей отрисовки: теперь узел на паузе (_look_detach_node), и
+# ленту листает ТОЛЬКО визуальный тик. Уснувший мечник замирал на случайном
+# кадре idle/guard («еле дышит»), поэтому многокадровую ленту не усыпляем —
+# то же правило, что у базы и у копейщика
 func _process_can_sleep() -> bool:
 	if Time.get_ticks_msec() < _anim_lock_until_ms:
 		return false
@@ -208,7 +220,7 @@ func _process_can_sleep() -> bool:
 		return false
 	if _anim_name != &"" and _anim_name != &"idle" and _anim_name != GUARD_ANIM:
 		return false
-	return true
+	return not (_look_loop and _look_frames > 1)
 
 func _setup_warrior_visual() -> void:
 	var fname := GameManager.race_of(faction)

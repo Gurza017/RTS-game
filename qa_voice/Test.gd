@@ -49,6 +49,7 @@ func _squad(kind: String, at: Vector3, n: int) -> Array:
 	var scene := "res://scenes/units/Spearman.tscn"
 	if kind == "archer":  scene = "res://scenes/units/Archer.tscn"
 	if kind == "warrior": scene = "res://scenes/units/Warrior.tscn"
+	if kind == "worker":  scene = "res://scenes/units/Worker.tscn"
 	for i in range(n):
 		var u: Unit = load(scene).instantiate()
 		u.faction = Constants.FACTION_PLAYER
@@ -295,6 +296,69 @@ func _c_triggers() -> void:
 			sm.selected_squad_count(), sm.MASS_ORDER_SQUADS,
 			str(sm._selection_has_spearmen()), AudioManager.voice_last])
 
+	# ── C6б: РАБОЧИЕ МОЛЧАТ, СКОЛЬКО БЫ ИХ НИ ВЫДЕЛИЛИ ─────────────────────
+	# ЖАЛОБА ВЛАДЕЛЬЦА: «выделяю рамкой пять крестьян — они издают громкий
+	# боевой клич, будто это фаланга копейщиков».
+	#
+	# САМ КЛИЧ (battle_cry) им не доставался и раньше: squad_battle_cry
+	# отсеивает отряды без оружия. Слышно было ДРУГОЕ — реплику команды: каждый
+	# рабочий числится отрядом ИЗ ОДНОГО ЧЕЛОВЕКА (учётная единица), и пять
+	# крестьян давали ровно пять «отрядов», то есть порог массовости.
+	# Проверяем ОБА канала разом: и реплику, и клич
+	var workers: Array = []
+	for wi in range(7):
+		var wr := _squad("worker", base + Vector3(float(wi) * 6.0, 0.0, 120.0), 1)
+		for wu in wr[1]:
+			workers.append(wu)
+	await frames(4)
+	sm._clear_selection()
+	for wu2 in workers:
+		sm._select(wu2)
+	await frames(2)
+	verdict("C6б семеро рабочих — это семь отрядов по общему счёту",
+		sm.selected_squad_count() >= sm.MASS_ORDER_SQUADS,
+		"отрядов %d при пороге %d" % [sm.selected_squad_count(),
+			sm.MASS_ORDER_SQUADS])
+	verdict("C6в ...но БОЕВЫХ среди них ноль",
+		sm.selected_combat_squad_count() == 0,
+		"боевых отрядов %d" % sm.selected_combat_squad_count())
+	_voice_reset()
+	var cry0: int = GameManager.cry_decisions
+	sm._issue_formation_move(base + Vector3(0.0, 0.0, 140.0), false)
+	await frames(2)
+	verdict("C6г приказ семерым рабочим реплики НЕ даёт",
+		AudioManager.voice_last == "",
+		"реплика «%s»" % AudioManager.voice_last)
+	verdict("C6д и боевого клича у рабочих нет вовсе",
+		GameManager.cry_decisions == cry0,
+		"кличей решено %d" % (GameManager.cry_decisions - cry0))
+	# ── C6е: СМЕШАННОЕ ВЫДЕЛЕНИЕ СЧИТАЕТ ТОЛЬКО СОЛДАТ ─────────────────────
+	# Обоз при войске не должен ни добавлять массовости, ни отнимать её:
+	# порог считается по боевым, и рабочие в выделении на него не влияют
+	sm._clear_selection()
+	for wu3 in workers:
+		sm._select(wu3)
+	for si3 in range(squads.size()):
+		for u4 in GameManager.squad_members(int(squads[si3])):
+			sm._select(u4)
+	await frames(2)
+	_voice_reset()
+	sm._issue_formation_move(base + Vector3(0.0, 0.0, 150.0), false)
+	await frames(2)
+	verdict("C6е войско с обозом реплику по-прежнему получает",
+		AudioManager.voice_last == "mass_march",
+		"боевых %d из %d отрядов, реплика «%s»" % [
+			sm.selected_combat_squad_count(), sm.selected_squad_count(),
+			AudioManager.voice_last])
+	for wu4 in workers:
+		if is_instance_valid(wu4):
+			(wu4 as Unit).take_damage((wu4 as Unit).max_health * 10.0, null)
+	await frames(3)
+	sm._clear_selection()
+	for u5 in GameManager.squad_members(int(squads[0])):
+		sm._select(u5)
+	await frames(2)
+
 	# ── C7: ВЫРОЖДЕННАЯ ЛИНИЯ — ЭТО НЕ СТРОЙ ───────────────────────────────
 	# Протяжка длиной в сантиметры уходит в обычный приказ движения (так
 	# устроен _execute_line_formation), и озвучиваться она обязана как марш,
@@ -420,9 +484,17 @@ func _d_march() -> void:
 		used <= AudioManager.MARCH_VOICES and used > 0,
 		"роздано %d при потолке %d" % [used, AudioManager.MARCH_VOICES])
 
-	# ── D2/D3: ФАЗА И ПИТЧ У КАЖДОГО СВОИ ──────────────────────────────────
-	# Без питча голоса складываются когерентно (клиппинг), без фазы бьют шаг
-	# в один такт — это один человек, только громкий. Нужны ОБА
+	# ── D2/D3: ЛУП ИГРАЕТ ЧИСТЫМ, БЕЗ ЕДИНОЙ ОБРАБОТКИ ─────────────────────
+	# РАЗВОРОТ ТРЕБОВАНИЯ (заказ владельца). Здесь проверялось ОБРАТНОЕ: что у
+	# каждого отряда СВОЙ питч и СВОЯ фаза старта. Оба были платой за шесть
+	# голосов — копии одного файла складываются когерентно, и без расхождения
+	# шина клиппила. Владелец услышал в этом «поломанный звук» и попросил
+	# подключить оригинальный луп в чистом виде; голос стал один, платить
+	# больше не за что, и обработка снята целиком.
+	#
+	# ПРОВЕРЯЕМ ФАКТ ЗАПУСКА, А НЕ КОНСТАНТЫ: числа взяты из полей записи
+	# _march, то есть из того, с чем голос реально стартовал. Тихая правка,
+	# вернувшая расстройку, покраснеет здесь немедленно
 	var pitches: Array = []
 	var phases: Array = []
 	for sid in AudioManager._march:
@@ -434,46 +506,112 @@ func _d_march() -> void:
 	for pv in pitches:
 		p_lo = minf(p_lo, float(pv))
 		p_hi = maxf(p_hi, float(pv))
-	var uniq_ph: Dictionary = {}
-	for fv in phases:
-		uniq_ph[snappedf(float(fv), 0.01)] = true
-	# ── ДИАПАЗОН СЧИТАЕТСЯ ВМЕСТЕ С ТЕМПОМ ──────────────────────────────────
-	# Питч отряда — это его личная расстройка, ДОМНОЖЕННАЯ на общий темп шага
-	# (MARCH_TEMPO). Сверять с голым MARCH_PITCH нельзя: проверка краснела бы
-	# от одного лишь ускорения лупа, ничего не сломавшего
-	var lim_lo: float = float(AudioManager.MARCH_PITCH[0]) * AudioManager.MARCH_TEMPO
-	var lim_hi: float = float(AudioManager.MARCH_PITCH[1]) * AudioManager.MARCH_TEMPO
-	print("  питч: от %.3f до %.3f (диапазон %.2f..%.2f); разных фаз %d из %d" % [
-		p_lo, p_hi, lim_lo, lim_hi, uniq_ph.size(), phases.size()])
-	verdict("D2 питч у отрядов разный и в заданном диапазоне",
-		pitches.size() >= 2 and p_hi > p_lo and p_lo >= lim_lo - 0.001
-			and p_hi <= lim_hi + 0.001,
-		"от %.3f до %.3f при диапазоне %.2f..%.2f" % [p_lo, p_hi, lim_lo, lim_hi])
-	verdict("D3 фаза старта у каждого отряда своя",
-		uniq_ph.size() == phases.size(),
-		"разных фаз %d из %d голосов" % [uniq_ph.size(), phases.size()])
-	# И фаза размазана по ВСЕЙ длине лупа, а не по первой секунде: иначе
-	# расхождение слышно не будет вовсе
-	var walk := AudioManager._stream(AudioManager.MARCH_WALK_LOOP)
 	var ph_hi := 0.0
-	for fv2 in phases:
-		ph_hi = maxf(ph_hi, float(fv2))
-	verdict("D4 сдвиг старта берётся по всей длине лупа",
-		walk != null and ph_hi > 0.0 and ph_hi <= walk.get_length(),
-		"самый поздний старт %.2f с при длине лупа %.2f с" % [
-			ph_hi, walk.get_length() if walk != null else -1.0])
+	for fv in phases:
+		ph_hi = maxf(ph_hi, absf(float(fv)))
+	print("  питч: от %.3f до %.3f; самый поздний старт %.3f с" % [p_lo, p_hi, ph_hi])
+	# ── D2: ШАГ НЕ ТРОНУТ, У БЕГА СВОЙ ПИТЧ И ТОЛЬКО ОН ────────────────────
+	# Здесь стояло «питч ровно 1.0 у всех». Требование развёрнуто: владелец
+	# попросил, чтобы бег звучал быстрее шага (AudioManager.MARCH_RUN_PITCH).
+	# Проверять надо ровно это, а не «единицу везде»: ЛИЧНОЙ расстройки по
+	# отрядам быть по-прежнему не должно — она и была «поломанным звуком», —
+	# поэтому допустимых значений ровно два, по одному на состояние
+	var pitch_ok := not pitches.is_empty()
+	for pv2 in pitches:
+		var dp1: float = absf(float(pv2) - 1.0)
+		var dp2: float = absf(float(pv2) - AudioManager.MARCH_RUN_PITCH)
+		if dp1 >= 0.001 and dp2 >= 0.001:
+			pitch_ok = false
+	verdict("D2 питч только по СОСТОЯНИЮ: шаг 1.0, бег MARCH_RUN_PITCH",
+		pitch_ok, "от %.3f до %.3f (бег %.3f)"
+			% [p_lo, p_hi, AudioManager.MARCH_RUN_PITCH])
+	verdict("D3 луп играет с начала, без сдвига старта", ph_hi < 0.001,
+		"самый поздний старт %.3f с" % ph_hi)
+	# ── D4: ГОЛОС ОДИН ─────────────────────────────────────────────────────
+	# Именно множественность голосов и требовала расстройки. Проверяем её, а не
+	# «питч единица»: оставь шесть голосов с единичным питчем — и получишь
+	# когерентное сложение, то есть клиппинг вместо чистого лупа
+	var walk := AudioManager._stream(AudioManager.MARCH_WALK_LOOP)
+	# ── D4: ГОЛОСА РАЗВЕДЕНЫ ПО СОСТОЯНИЯМ, А НЕ РАЗМНОЖЕНЫ ────────────────
+	# Здесь стояло «голос ровно один». Требование развёрнуто (владелец:
+	# «раздели микширование слоёв для разных отрядов и их состояний»), но
+	# ЗАЩИЩАЕМОЕ СВОЙСТВО прежнее: голоса не должны быть КОПИЯМИ ОДНОГО
+	# ФАЙЛА — именно копии складываются когерентно и требуют расстройки.
+	# Поэтому проверяем не число, а что каждому состоянию отведён свой луп и
+	# что двадцать ШАГАЮЩИХ отрядов берут ровно один голос на всех
+	verdict("D4 слои марша — разные файлы, а не копии одного",
+		AudioManager.MARCH_WALK_LOOP != AudioManager.MARCH_RUN_LOOP and used == 1,
+		"шаг %s, бег %s, роздано на 20 шагающих %d" % [
+			AudioManager.MARCH_WALK_LOOP.get_file(),
+			AudioManager.MARCH_RUN_LOOP.get_file(), used])
 
-	# ── D4б: ТЕМП ШАГА УСКОРЕН ─────────────────────────────────────────────
-	# Заказ владельца: «визуально пехота идёт быстрее, чем звучит аудиоряд —
-	# ускорить примерно на 15%». Проверяем СВОЙСТВО: центр диапазона питча
-	# сдвинут вверх ровно на заданный множитель, а не «питч больше единицы»
-	var mid: float = (float(AudioManager.MARCH_PITCH[0])
-		+ float(AudioManager.MARCH_PITCH[1])) * 0.5
-	verdict("D4б темп шага ускорен на заданный множитель",
-		AudioManager.MARCH_TEMPO > 1.0
-			and absf(mid * AudioManager.MARCH_TEMPO - (lim_lo + lim_hi) * 0.5) < 0.001,
-		"множитель %.2f, центр диапазона %.3f -> %.3f" % [
-			AudioManager.MARCH_TEMPO, mid, (lim_lo + lim_hi) * 0.5])
+	# ── D6: ЧЕТЫРЕ ОТРЯДА РАЗНОГО ТИПА И РАЗНОГО СОСТОЯНИЯ ─────────────────
+	# Полифония заведена ради ровно этого случая (заказ владельца: «проверь,
+	# как ведёт себя новая полифония при одновременном марше 4+ отрядов
+	# разного типа»). Блок D выше докладывает ДВАДЦАТЬ ОДИНАКОВО ШАГАЮЩИХ
+	# отрядов и потому меряет только потолок; здесь смесь: два шагают, два
+	# бегут, и все четыре в радиусе слышимости.
+	#
+	# ЧТО ИМЕННО ПРОВЕРЯЕМ, ЧТОБЫ НЕ БЫЛО КАШИ В ШИНЕ:
+	#   • голосов ровно два — по одному на СОСТОЯНИЕ, а не по одному на отряд;
+	#   • это разные потоки (шаг и бег), а не две копии одного файла: копии
+	#     складываются когерентно и требуют расстройки, разные — нет;
+	#   • сумма двух голосов укладывается в бюджет марша.
+	# Четвёртая опасность — ЧЕХАРДА (голос скачет между отрядами по нескольку
+	# раз в секунду) — проверяется отдельно: повторный доклад с теми же
+	# отрядами не должен ничего перезапускать
+	AudioManager.march_stop_all()
+	var mixed: Array = []
+	for i in range(4):
+		mixed.append({
+			"sid": 910000 + i,
+			"at": base + Vector3(-6.0 + 4.0 * float(i), 0.0, 0.0),
+			"run": i >= 2,
+		})
+	AudioManager.march_report(mixed)
+	await frames(1)
+	var kinds: Dictionary = {}
+	var streams: Dictionary = {}
+	for sid5 in AudioManager._march:
+		var rec5: Dictionary = AudioManager._march[sid5]
+		kinds[int(rec5["kind"])] = int(kinds.get(int(rec5["kind"]), 0)) + 1
+		var pl: AudioStreamPlayer3D = AudioManager._march_pool[int(rec5["voice"])]
+		if pl != null and is_instance_valid(pl) and pl.stream != null:
+			streams[pl.stream.resource_path] = true
+	print("  смесь 4 отрядов (2 шага + 2 бега): голосов %d, по состояниям %s, разных потоков %d"
+		% [AudioManager._march.size(), str(kinds), streams.size()])
+	verdict("D6 смесь состояний берёт по голосу на состояние, а не на отряд",
+		AudioManager._march.size() == 2 and kinds.size() == 2,
+		"голосов %d, состояний %d" % [AudioManager._march.size(), kinds.size()])
+	verdict("D6б два голоса несут РАЗНЫЕ потоки, а не копии одного",
+		streams.size() == 2, "разных потоков %d" % streams.size())
+	# Повторный доклад тем же составом: ничего не перезапускается
+	var before5: Array = []
+	for sid6 in AudioManager._march:
+		before5.append(int((AudioManager._march[sid6] as Dictionary)["voice"]))
+	AudioManager.march_report(mixed)
+	await frames(1)
+	var after5: Array = []
+	for sid7 in AudioManager._march:
+		after5.append(int((AudioManager._march[sid7] as Dictionary)["voice"]))
+	before5.sort()
+	after5.sort()
+	verdict("D6в повторный доклад не устраивает чехарду голосов",
+		before5 == after5, "было %s, стало %s" % [str(before5), str(after5)])
+	AudioManager.march_stop_all()
+	await frames(1)
+
+	# ── D4б: НАД ЛУПОМ НЕТ НИ ОДНОГО СЛОЯ ──────────────────────────────────
+	# Слой «звон доспехов» заводился дважды и оба раза откачен владельцем;
+	# второй вердикт — «посторонние глухие удары, бах-бах». Проверяем, что
+	# категории нет ни в банке, ни в таблице лимитов: вернуть её одной строкой
+	# слишком просто, а на слух она снова окажется стуком поверх лупа
+	verdict("D4б поверх лупа не подмешан ни один слой",
+		not AudioManager.SFX_BANK.has("armor_march")
+			and not AudioManager.SFX_LIMITS.has("armor_march"),
+		"в банке %s, в лимитах %s" % [
+			str(AudioManager.SFX_BANK.has("armor_march")),
+			str(AudioManager.SFX_LIMITS.has("armor_march"))])
 
 	# ── D4в: ГРОМКОСТЬ НЕ ЗАВИСИТ ОТ КАМЕРЫ ────────────────────────────────
 	# Жалоба владельца: «при зуме камеры звук ходьбы скачет от резкого громкого
@@ -528,19 +666,32 @@ func _d_march() -> void:
 				and pl.stream == AudioManager._stream(AudioManager.MARCH_RUN_LOOP),
 			"было %d, стало %d" % [was_kind, now_kind])
 
-	# ── D7: ВСТАЛИ — ЗАМОЛЧАЛИ ─────────────────────────────────────────────
+	# ── D7: ВСТАЛИ — ЗАМОЛЧАЛИ, НО НЕ РЫВКОМ ───────────────────────────────
 	# Луп сам не кончится никогда: отряд, выпавший из доклада, обязан быть
-	# погашен, иначе над стоящим строем топочет призрак
+	# погашен, иначе над стоящим строем топочет призрак.
+	#
+	# ТРЕБОВАНИЕ РАЗВЁРНУТО ВЛАДЕЛЬЦЕМ: «никаких ударных звуков при остановке,
+	# марш должен плавно затихать». Здесь проверялась тишина ЧЕРЕЗ ОДИН КАДР —
+	# то есть ровно мгновенный обрыв `stop()`, который и давал щелчок («бах» на
+	# каждой из десяти остановок). Теперь голос уходит в хвост и досушивается
+	# за MARCH_FADE_OUT; проверять надо ДВЕ вещи и порознь: запись отряда
+	# снимается СРАЗУ (иначе он продолжал бы считаться марширующим), а звук
+	# умолкает В СРОК ЗАТУХАНИЯ, а не мгновенно и не никогда
 	AudioManager.march_report([])
 	await frames(1)
+	verdict("D7а запись о марше снимается сразу",
+		AudioManager._march.is_empty(),
+		"осталось записей %d" % AudioManager._march.size())
+	# С запасом в треть срока: обход стенда идёт кадрами, а не по часам
+	await frames(int(AudioManager.MARCH_FADE_OUT * 60.0 * 1.35) + 4)
 	var quiet := true
 	for p2 in AudioManager._march_pool:
 		if (p2 as AudioStreamPlayer3D).playing:
 			quiet = false
-	verdict("D7 отряд, выпавший из доклада, замолкает",
-		AudioManager._march.is_empty() and quiet,
-		"осталось записей %d, играющих голосов есть=%s" % [
-			AudioManager._march.size(), str(not quiet)])
+	verdict("D7б голос замолкает в срок затухания",
+		quiet and AudioManager._march_tail.is_empty(),
+		"играющих голосов есть=%s, хвостов %d" % [
+			str(not quiet), AudioManager._march_tail.size()])
 
 	# ── D8: ИЗ ТУМАНА НЕ ТОПАЮТ ────────────────────────────────────────────
 	# Та же защита, что у боевых звуков: по непрерывному топоту из черноты
@@ -765,6 +916,27 @@ func _f_headroom() -> void:
 	verdict("F1 марш 20 отрядов укладывается в бюджет громкости",
 		sum_incoherent <= budget,
 		"%.3f при бюджете %.2f" % [sum_incoherent, budget])
+
+	# ── КОГЕРЕНТНОГО СЛОЖЕНИЯ НЕТ, ПОТОМУ ЧТО ФАЙЛЫ РАЗНЫЕ ─────────────────
+	# Голосов снова два (шаг и бег), и «когерентная сумма = N × амплитуда»
+	# к ним НЕ ОТНОСИТСЯ: когерентно складываются копии ОДНОГО сигнала, а тут
+	# два разных сэмпла. Именно поэтому не вернулись ни питч по отрядам, ни
+	# сдвиг фазы — их заводили как плату за копии.
+	# Проверяем ПРИЧИНУ, а не арифметику: голоса несут разные файлы, и
+	# некогерентная сумма (единственная здесь применимая) в бюджет влезает
+	verdict("F1б слои несут разные файлы — когерентно складывать нечего",
+		AudioManager.MARCH_WALK_LOOP != AudioManager.MARCH_RUN_LOOP
+			and sum_incoherent <= budget,
+		"некогерентная %.3f при бюджете %.2f (когерентная %.3f к разным файлам неприменима)" % [
+			sum_incoherent, budget, sum_worst])
+	# ── ГРОМКОСТЬ НЕ УПАЛА ВМЕСТЕ С ЧИСЛОМ ГОЛОСОВ ─────────────────────────
+	# Шесть голосов по −19 дБ давали суммарно 0.275 полной шкалы. Оставь
+	# прежние децибелы при одном голосе — и получишь 0.112, то есть ровно ту
+	# жалобу «тихо», с которой правка начиналась. Проверяем СВОЙСТВО: марш не
+	# тише прежнего суммарного уровня и не громче бюджета
+	var prev_sum: float = 0.275
+	verdict("F1в один голос звучит не тише прежних шести",
+		one >= prev_sum, "%.3f при прежней сумме %.3f" % [one, prev_sum])
 
 	# ── ЛИМИТЕРА НА МАСТЕРЕ БОЛЬШЕ НЕТ, И ЭТО ТРЕБОВАНИЕ ────────────────────
 	# ТРЕБОВАНИЕ РАЗВЁРНУТО ВЛАДЕЛЬЦЕМ. Хард-лимитер ставился как «страховка от

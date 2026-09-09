@@ -45,8 +45,19 @@ static func close_ranks(members: Array, slots: Array,
 		return 0
 	var free_men: Array = []
 	for m in members:
-		if m != null and is_instance_valid(m) and not m.is_dead():
-			free_men.append(m)
+		if m == null or not is_instance_valid(m) or m.is_dead():
+			continue
+		# ── ПРИКАЗ ИГРОКА СМЫКАНИЕМ НЕ ПЕРЕБИВАЕТСЯ ────────────────────────
+		# Смыкание шлёт `command_move` на МЕСТО В РАЗМЕТКЕ, а разметка описывает
+		# ПРЕЖНИЙ строй — то есть точку рядом с бойцом. Отряд, которому игрок
+		# только что велел уходить, по определению растянут (передние тронулись,
+		# задние ещё в телах), и смыкание срабатывает именно тогда, когда мешает
+		# больше всего: приказ на отход подменялся приказом «вернись на место».
+		# Тот же довод и то же лечение, что у подзыва сплочённости
+		# (GameManager._cohesion_guard)
+		if m.player_order_active():
+			continue
+		free_men.append(m)
 	if free_men.is_empty():
 		return 0
 	var moved := 0

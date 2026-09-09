@@ -272,6 +272,7 @@ func command_build(site: Node3D) -> void:
 	build_target = site
 	move_target  = site.work_position(global_position)
 	state        = State.BUILDING
+	_build_settled = false   # новая стройка — новый подход
 	# ── СТАРАЯ МЕТКА ПРИКАЗА СНИМАЕТСЯ ВМЕСТЕ С ПРИКАЗОМ ───────────────────
 	# Метка точки движения гаснет по ПРИБЫТИЮ отряда (см.
 	# GameManager._refresh_order_marks). Рабочий, которого послали в точку, а
@@ -340,6 +341,10 @@ func on_construction_finished() -> void:
 ## вещи, добор до стены идёт ниже (см. ConstructionSite.WORK_PAD)
 const BUILD_ARRIVE_PAD := 0.9
 
+## Защёлка «я уже на стройке» (разбор — в _process_build).
+## Снимается там же и любым новым приказом на стройку
+var _build_settled: bool = false
+
 ## КУДА рабочий доводит себя, встав на работу: отступ от стены здания.
 ## ЗЕРКАЛО ConstructionSite.WORK_PAD, а не ссылка на него: Building.gd
 ## предзагружает Worker.tscn, поэтому preload ConstructionSite.gd отсюда
@@ -360,19 +365,40 @@ func _process_build(delta: float) -> void:
 	# РАДИУСА КРУГА вокруг здания — с короткой стороны барака это больше двух
 	# метров от стены, и молоток стучал по воздуху («стоит на расстоянии»)
 	var edge: float = _build_edge(dir)
-	if dist > edge + BUILD_ARRIVE_PAD:
+	# ── ПРИХОД НА СТРОЙКУ ЗАЩЁЛКИВАЕТСЯ ──────────────────────────
+	# Жалоба владельца: «второй рабочий подходит, встаёт рядом и
+	# визуально ничего не делает». Здесь была КАЧЕЛЯ, та же самая, что
+	# ловилась у секторов вокруг здания (см. Unit._ring_done): оба рабочих
+	# идут в ОДНУ точку у стены, разбор наложения отталкивает второго на
+	# полметра — и тем самым выводит его ЗА порог прихода. Дальше он
+	# СНИМАЛ себя с артели (remove_builder) и шёл обратно — то есть и стройку
+	# не ускорял, и анимацию имел ходьбы, а не молотка.
+	# Защёлка взводится в момент прихода, а снимается только настоящим
+	# уходом со стройки (втрое дальше порога) или новым приказом:
+	# толчок соседа стройку больше не рвёт
+	var leave: float = edge + BUILD_ARRIVE_PAD * (3.0 if _build_settled else 1.0)
+	if dist > leave:
+		_build_settled = false
 		# Ещё идём к стройке
 		if build_target.has_method("remove_builder"):
 			build_target.remove_builder(self)
 		var ndir := dir / maxf(dist, 0.001)
 		_facing  = ndir
 		velocity = ndir * move_speed
+		# ── ДЕТЕКТОР ЗАЦИКЛИВАНИЯ РАБОТАЕТ И ЗДЕСЬ (см. Unit._tick_stuck) ────
+		# Дорога на стройку идёт через тот же `_move_blocked`, то есть обход
+		# стволов на ней есть — а признать себя наматывающим круги было нечем:
+		# детектор жил в `_process_move`, куда эта ветка не заходит вовсе.
+		# Рабочий мог обходить один комель по кругу до конца партии
+		_tick_stuck(delta, dist)
 		# Шаг через _move_blocked: он обходит озеро ПО БЕРЕГУ. Раньше шаг в воду
 		# просто отбрасывался, и рабочий, у которого стройка за озером, замирал
 		# у кромки навсегда
 		_move_blocked(velocity * delta)
 		return
+	_reset_stuck()
 	# Пришли: стоим и машем молотком
+	_build_settled = true
 	velocity = Vector3.ZERO
 	if build_target.has_method("add_builder"):
 		build_target.add_builder(self)
@@ -433,7 +459,11 @@ func _update_sprite_anim() -> void:
 	match state:
 		State.BUILDING:
 			# У самой стройки — МОЛОТОК, по дороге к ней — обычный бег
-			want = "build" if velocity.length() < 0.1 else "walk"
+			# ПО ФАКТУ ПЕРЕМЕЩЕНИЯ, А НЕ ПО velocity: velocity — это
+			# НАМЕРЕНИЕ идти, и у рабочего, вставшего вплотную к срубу, оно
+			# остаётся ненулевым. Это и есть жалоба «бегут на месте вместо
+			# анимации молотка» — та же грабля, что уже ловилась у пехоты
+			want = "walk" if moved_recently() else "build"
 		State.GATHERING:
 			match _work_res_type():
 				Constants.RESOURCE_WOOD:
@@ -459,7 +489,7 @@ func _update_sprite_anim() -> void:
 		State.MOVING:
 			want = "walk"
 		_:
-			want = "walk" if velocity.length() > 0.1 else "idle"
+			want = "walk" if moved_recently() else "idle"
 	# Через _set_anim: вид бойца живёт числами в Unit, узел спрайта в общей
 	# отрисовке не трогается вовсе (см. Unit._look_bind)
 	if want != _anim_name:
@@ -511,6 +541,16 @@ func tick_physics(delta: float, prof: bool = false, bm: bool = true,
 		_soa_working = working
 		GameManager.army.set_flag(_soa, _Army.F_WORKING, working)
 
+	# ── ОКНО ЗАМЕРА РАБОТАЕТ И В «РАБОЧИХ» СОСТОЯНИЯХ ───────────────
+	# Две жалобы владельца с ОДНОЙ причиной: «рабочие, неся ресурсы в
+	# замок, идут спиной вперёд» и «на стройке бегут на месте вместо
+	# анимации молотка». Оба ответа — и «идёт ли», и «куда» — считает
+	# окно замера в базовом tick_physics, а три ветки ниже до него НЕ
+	# ДОХОДЯТ вовсе — выходят раньше. Значит, у работающего оно не
+	# тикало ни разу: _mv_dir оставался направлением К дереву, пока
+	# рабочий едет ОТ него, — и зеркало честно рисовало его спиной.
+	# Одного вызова хватает на обе беды и на все три ветки
+	_sample_movement()
 	if state == State.BUILDING:
 		_sync_soa_row()
 		_process_build(delta)
@@ -554,6 +594,19 @@ func tick_physics(delta: float, prof: bool = false, bm: bool = true,
 			_wake_process()
 			return
 		super.tick_physics(delta, prof, bm, bonus_ver)
+		# ── ЗАСТРЯЛ ПО ДОРОГЕ К СВОЕЙ ТОЧКЕ — БЕРЁМ ДРУГУЮ ─────────────────
+		# Первая ступень лечения застревания — выключить стволы (см.
+		# Unit.TRUNK_IGNORE_SEC), и почти всегда её хватает. Эта ступень
+		# ВТОРАЯ и срабатывает только когда первая уже не помогла: столько
+		# проверок подряд без продвижения означает, что держит НЕ ствол —
+		# чужое тело, край воды, край карты, — и выключать нечего. Тогда
+		# меняется сама цель: место на кольце, а не способ до него дойти.
+		# Порог в тактах, а не в кадрах: такт детектора STUCK_CHECK_SEC
+		if _stuck_streak >= STUCK_REPATH_TICKS and state == State.MOVING \
+				and gather_target != null and is_instance_valid(gather_target):
+			_reset_stuck()
+			move_target = gather_target.claim_slot(self, true)
+			_gather_slot_valid = true
 		if state == State.IDLE and gather_target != null and is_instance_valid(gather_target):
 			if _in_work_reach():
 				state         = State.GATHERING
@@ -630,6 +683,11 @@ func carry_capacity() -> float:
 ## Насколько близко к своей точке на кольце нужно подойти, чтобы считать, что
 ## рабочий на месте. Заметно шире базовых 30 см: в бригаде соседи всё время
 ## подталкивают друг друга, и слишком узкий круг просто не достигается
+## Сколько тактов детектора зацикливания подряд без продвижения означает,
+## что пора менять САМУ ТОЧКУ, а не способ до неё дойти (см. tick_physics).
+## Четыре такта по STUCK_CHECK_SEC = две секунды: выключение стволов длится
+## полторы, то есть первая ступень уже отработала и не помогла
+const STUCK_REPATH_TICKS := 4
 const SLOT_ARRIVE := 0.6
 
 ## Насколько точно рабочий доводит себя до слота, уже работая (см. _process_gather).
@@ -837,6 +895,9 @@ func _process_return(delta: float) -> void:
 		var ndir := dir.normalized()
 		_facing  = ndir
 		velocity = ndir * move_speed
+		# Тот же детектор, что и на пути к стройке: обратная дорога к складу
+		# идёт мимо тех же деревьев (см. Unit._tick_stuck)
+		_tick_stuck(delta, dir.length())
 		# ВОДА ПРОВЕРЯЕТСЯ И НА ОБРАТНОМ ПУТИ. Здесь стояла прямая интеграция
 		# без единой проверки: гружёный рабочий шёл к складу НАПРЯМУЮ ЧЕРЕЗ
 		# ОЗЕРО, хотя к ресурсу шёл в обход. _move_blocked ведёт его по берегу

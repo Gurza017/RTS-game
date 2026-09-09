@@ -518,7 +518,9 @@ func _test_arrow_timing() -> void:
 	flat.global_position = flat._start_pos
 	await frames(1)
 	flat._stick_into_ground()
-	var axis: Vector3 = flat._mat.get_shader_parameter("axis")
+	# Ось теперь данные ЭКЗЕМПЛЯРА в общем MultiMesh (этап D3): читаем кэш
+	# стрелы — ровно то число, что уезжает в instance-цвет слоя
+	var axis: Vector3 = flat._axis_now
 	var deg: float = rad_to_deg(asin(clampf(-axis.normalized().y, -1.0, 1.0)))
 	verdict("F7 воткнувшаяся стрела стоит круто, а не лежит плашмя",
 		deg >= 30.0, "наклон вниз %.0f°" % deg)
@@ -869,15 +871,19 @@ func _test_fade_and_volume() -> void:
 	main.world_add(a)
 	a.global_position = a._start_pos
 	await frames(1)
-	var scissor_full: float = a._mat.get_shader_parameter("alpha_scissor")
+	# Материал теперь ОДИН НА СЛОЙ (этап D3): порог среза — общебакетный
+	# uniform, до которого гашение экземпляра дотянуться не может ФИЗИЧЕСКИ,
+	# а покрытие едет в instance-цвете. Свойство то же: порог не снимается
+	var lmat: ShaderMaterial = GameManager.arrows_mm.mat
+	var scissor_full: float = lmat.get_shader_parameter("alpha_scissor")
 	a._set_fade(0.5)
-	var scissor_fade: float = a._mat.get_shader_parameter("alpha_scissor")
+	var scissor_fade: float = lmat.get_shader_parameter("alpha_scissor")
 	verdict("K1 гашение НЕ снимает порог среза (иначе весь квад — чёрный)",
 		absf(scissor_fade - scissor_full) < 0.0001 and scissor_fade > 0.0,
 		"порог был %.2f, стал %.2f" % [scissor_full, scissor_fade])
 	verdict("K2 гашение идёт покрытием, а не альфой",
-		absf(float(a._mat.get_shader_parameter("fade")) - 0.5) < 0.0001,
-		"fade = %.2f" % float(a._mat.get_shader_parameter("fade")))
+		absf(a._fade_now - 0.5) < 0.0001,
+		"fade = %.2f" % a._fade_now)
 	a.queue_free()
 	await frames(1)
 
@@ -893,7 +899,7 @@ func _test_fade_and_volume() -> void:
 		main.world_add(st)
 		st.global_position = st._start_pos
 		st._stick_into_ground()
-		axes.append((st._mat.get_shader_parameter("axis") as Vector3).normalized())
+		axes.append(st._axis_now.normalized())
 	var min_dot := 1.0
 	for i in range(axes.size()):
 		for j in range(i + 1, axes.size()):

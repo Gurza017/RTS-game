@@ -5,4 +5,7 @@
     <EnableDynamicLoading>true</EnableDynamicLoading>
     <RootNamespace>TenThousandSpearmen</RootNamespace>
   </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Vosk" Version="0.3.38" />
+  </ItemGroup>
 </Project>

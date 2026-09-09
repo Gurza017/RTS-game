@@ -63,6 +63,11 @@ func _ready() -> void:
 	# было бы негде. Число живёт в конфиге (CONSTRUCTION_MIN_SEC), поставить 0 —
 	# вернуть прежнее мгновенное появление
 	build_time = maxf(build_time, _UCfg.CONSTRUCTION_MIN_SEC)
+	# СЛОЖНОСТЬ КРУТИТ ТЕМП СТРОЙКИ ТОЛЬКО У ПРОТИВНИКА (см.
+	# game_difficulty_config.build_time). Порог видимости применён ДО неё:
+	# «стройку должно быть видно» — требование интерфейса, а не баланса, и
+	# ускоренная стройка ИИ не имеет права его отменять
+	build_time = _Diff.build_time(faction, build_time)
 	super._ready()
 	add_to_group("construction_sites")
 	_build_progress_label()
@@ -81,12 +86,9 @@ func _ready() -> void:
 # когда картинки нет на диске: правило проекта — визуал никогда не роняет игру.
 # ─────────────────────────────────────────────────────────────────────────────
 func _build_visual() -> void:
-	var collider := CollisionShape3D.new()
-	var shape := BoxShape3D.new()
-	shape.size = build_size
-	collider.shape = shape
-	collider.position.y = build_size.y * 0.5
-	add_child(collider)
+	# Форму попадания заводит база (см. Building._add_pick_shape): дальше её
+	# подгоняют под картинку стройки тем же способом, что и у готового здания
+	_add_pick_shape()
 
 	if _build_site_sprite():
 		# Маркер выделения — общий для всех построек, и по картинке стройки он
@@ -94,6 +96,8 @@ func _build_visual() -> void:
 		selection_ring = make_selection_marker()
 		add_child(selection_ring)
 		_fit_marker_to_sprite(_site_tex, _site_sprite.mesh as QuadMesh)
+		# И форма попадания луча — по той же картинке (см. Building)
+		_fit_pick_to_sprite(_site_tex, _site_sprite.mesh as QuadMesh)
 		return
 
 	var wood := StandardMaterial3D.new()

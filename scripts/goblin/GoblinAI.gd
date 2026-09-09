@@ -12,7 +12,8 @@ extends Node
 ##                там со всеми, кто попался: синими, красными, друг с другом их
 ##                никто не разводит.
 ##   волна выбита ОБОРОНА ДЕРЕВНИ. Уцелевшие и свежие держат хижины, орда копит
-##                еду и нанимает армию заново до ARMY_SQUADS отрядов.
+##                еду и нанимает армию заново до полного штата орды
+##                (goblin_config.army_squads()).
 ##   набрали      СНОВА В ЦЕНТР. Зачистили центр — идём на САМОГО СЛАБОГО
 ##                игрока (по здоровью зданий и числу бойцов) и добиваем его.
 ##   и по кругу.
@@ -25,6 +26,7 @@ extends Node
 ## ничего — отряд наступает, отходит и лечится как тело).
 
 const _GobCfg := preload("res://scripts/goblin/goblin_config.gd")
+const _Diff := preload("res://scripts/game_difficulty_config.gd")
 const _UCfg   := preload("res://scripts/unit_stats_config.gd")
 
 # ── РОЛИ ОТРЯДА ─────────────────────────────────────────────────────────────
@@ -63,11 +65,15 @@ func reset() -> void:
 	_think = 0.0
 	_awake = false
 	last_action = ""
+	_order_queue.clear()
+	_order_at = 0
 
 func _process(delta: float) -> void:
 	if main == null:
 		return
 	clock += delta
+	# Недоразданные приказы прошлого такта — по порции за кадр (см. _drain_orders)
+	_drain_orders()
 	_think -= delta
 	if _think > 0.0:
 		return
@@ -85,8 +91,10 @@ func tick() -> void:
 		# Просыпаемся по часам ИЛИ раньше, если орду пришли бить: спящий боец
 		# не отвечает на удар вовсе, и без этой оговорки разведчик игрока
 		# вырезал бы деревню бесплатно за полчаса до её пробуждения
-		if clock < _GobCfg.DORMANT_UNTIL_SEC and not _attacked():
-			last_action = "спит (%.0f с до подъёма)" % (_GobCfg.DORMANT_UNTIL_SEC - clock)
+		# Срок спячки крутит сложность: на Hard орда просыпается раньше
+		var wake_at: float = _Diff.goblin_dormant_sec()
+		if clock < wake_at and not _attacked():
+			last_action = "спит (%.0f с до подъёма)" % (wake_at - clock)
 			return
 		_wake_horde()
 	_economy()
@@ -223,10 +231,10 @@ func army_size() -> int:
 ## Найм идёт ПО ОДНОМУ заказу за такт и только пока армия не полна. Заказ
 ## ставится в хижину как обычный заказ найма — со всей штатной механикой:
 ## списание в момент заказа, выход шеренга за шеренгой, свой squad_id.
-## Звёзд новобранцам не полагается (заказ владельца): серебро есть только у
-## стартовых отрядов
+## Ранга новобранцам не полагается (заказ владельца): знамя есть только у тех
+## стартовых отрядов, которым его выдала goblin_config.START_SQUADS
 func _economy() -> void:
-	if squads.size() >= _GobCfg.ARMY_SQUADS:
+	if squads.size() >= _GobCfg.army_squads():
 		return
 	var huts := _huts()
 	if huts.is_empty():
@@ -255,12 +263,12 @@ func _missing_type() -> String:
 		var t: String = String((s as Dictionary)["type"])
 		have[t] = int(have.get(t, 0)) + 1
 	var want: Dictionary = {}
-	for t in _GobCfg.ARMY_COMPOSITION:
+	for t in _GobCfg.army_composition():
 		want[String(t)] = int(want.get(String(t), 0)) + 1
 	for t in want:
 		if int(have.get(String(t), 0)) < int(want[t]):
 			return String(t)
-	return String(_GobCfg.ARMY_COMPOSITION[0])
+	return String(_GobCfg.army_composition()[0])
 
 func _huts() -> Array:
 	var out: Array = []
@@ -337,7 +345,7 @@ func _decide_phase() -> void:
 				phase = PHASE_DEFEND
 				last_action += "|волна выбита, оборона деревни"
 		PHASE_DEFEND:
-			if squads.size() >= _GobCfg.ARMY_SQUADS:
+			if squads.size() >= _GobCfg.army_squads():
 				phase = PHASE_CENTER
 				last_action += "|орда собрана, новая волна в центр"
 
@@ -409,6 +417,47 @@ func _weakest_target() -> Vector3:
 ## которым отряд разваливается: каждый получает своего ближайшего врага и
 ## растекается по округе. command_attack сам разложит отряд по моделям чужого
 ## отряда (GameManager.squad_pick_member)
+# ─────────────────────────────────────────────────────────────────────────────
+# РАЗДАЧА ПРИКАЗОВ: РЕШЕНИЕ СРАЗУ, ИСПОЛНЕНИЕ ПОРЦИЯМИ И ТОЛЬКО ПО ДЕЛУ
+# ─────────────────────────────────────────────────────────────────────────────
+# Зонд qa_mass3k/AIProbe (сент. 2026) поймал здесь горб 46-72 мс КАЖДЫЙ такт:
+# _issue_orders выдавал command_attack/command_move КАЖДОМУ из тысячи гоблинов
+# в один кадр и КАЖДЫЕ две секунды, даже когда ни фаза, ни цель, ни точка не
+# менялись. На кадре свалки это читалось как стабильные ~2.4 мс «мышления ИИ»
+# (замер qa_mass3k) — рывок, размазанный усреднением по секунде.
+#
+# Лечение — ДВА приёма красного ИИ, перенесённые сюда дословно:
+#  1) НЕИЗМЕНИВШИЙСЯ ПРИКАЗ НЕ ПЕРЕИЗДАЁТСЯ (правило stagnant target,
+#     EnemyAI._posts_intact). Отряд, уже втянутый в бой, новых приказов не
+#     получает вовсе — бойцов ведут сцепка, авто-агро и подтягивание фланга;
+#     переиздание только дёргало их (command_attack будит, метит позу грязной
+#     и переставляет стену — см. «цена костыля была не там, где её мерили»).
+#     Марш к той же точке переиздаётся не чаще REISSUE_KEEPALIVE_SEC —
+#     страховка от застрявших остаётся, но вчетверо реже.
+#  2) РАЗДАЧА НАРЕЗАНА ПО КАДРАМ (EnemyAI._drain_orders): решение по всем
+#     отрядам принимается одним тактом (картина мира согласована), а дорогие
+#     обходы состава складываются в очередь и разбираются по
+#     ORDER_BUDGET_MEMBERS бойцов за кадр.
+var _order_queue: Array = []
+var _order_at: int = 0
+const ORDER_BUDGET_MEMBERS := 150
+## Как часто повторять марш В ТУ ЖЕ точку отряду вне боя (страховка от
+## застрявших). Прежние две секунды (каждый такт) были не страховкой, а
+## основной статьёй расхода кадра
+const REISSUE_KEEPALIVE_SEC := 8.0
+
+func _drain_orders() -> void:
+	if _order_at >= _order_queue.size():
+		return
+	var left: int = ORDER_BUDGET_MEMBERS
+	while _order_at < _order_queue.size() and left > 0:
+		var plan: Dictionary = _order_queue[_order_at]
+		_order_at += 1
+		left -= _issue_squad(plan)
+	if _order_at >= _order_queue.size():
+		_order_queue.clear()
+		_order_at = 0
+
 func _issue_orders() -> void:
 	var aim := village
 	match phase:
@@ -418,6 +467,10 @@ func _issue_orders() -> void:
 			if aim == Vector3.ZERO:
 				aim = Vector3.ZERO
 		PHASE_DEFEND: aim = village
+	# Недоразобранный план прошлого такта выбрасывается целиком: обстановка
+	# пересчитана, и выдавать поверх неё вчерашние приказы хуже, чем не выдать
+	_order_queue.clear()
+	_order_at = 0
 	var i := 0
 	for s in squads:
 		var sq: Dictionary = s
@@ -433,38 +486,75 @@ func _issue_orders() -> void:
 		sq["role"] = ROLE_CENTER if phase == PHASE_CENTER else \
 			(ROLE_HUNT if phase == PHASE_HUNT else ROLE_DEFEND)
 		sq["target"] = goal
+		var sid: int = int(sq["id"])
 		var center := _squad_center(sq)
 		# Цель поблизости — атакуем её; нет — идём к точке
 		var foe: Node3D = _nearest_foe(center, _GobCfg.CENTER_RADIUS)
 		if foe != null:
-			for m in members:
-				if not is_instance_valid(m):
-					continue
-				var u := m as Unit
-				if u != null and not u.is_dead():
-					u.command_attack(foe, true, true)
+			# ОТРЯД УЖЕ ДЕРЁТСЯ — НЕ ТРОГАТЬ. Приказ нужен один раз, на входе
+			# в бой; дальше цели раздают сцепка и авто-агро, а переиздание
+			# каждые две секунды только будило и передёргивало всю орду
+			if GameManager.squad_in_combat(sid):
+				continue
+			_order_queue.append({"sq": sq, "foe": foe})
 			continue
-		# ── ТОЛПОЙ, А НЕ В ОДНУ ТОЧКУ ───────────────────────────────────────
-		# Раньше всем бойцам отряда выдавалась ОДНА цель: сотня гоблинов шла в
-		# один пятачок, упиралась друг в друга и разбиралась расталкиванием уже
-		# на месте. Теперь у каждого своё место в толпе (диск со сдвигом,
-		# goblin_config.horde_offset), и оно же кладётся в разметку отряда —
-		# чтобы смыкание после боя собирало ТОЛПУ, а не квадрат фаланги
-		var slots: Array = []
-		var n: int = members.size()
-		for k in range(n):
-			var ho: Vector2 = _GobCfg.horde_offset(k, n, int(sq["id"]))
-			slots.append(Vector3(goal.x + ho.x, 0.0, goal.z + ho.y))
-		GameManager.squad_set_formation(int(sq["id"]), slots,
-			(goal - center).normalized() if goal.distance_to(center) > 0.1 else Vector3.FORWARD,
-			false)
-		for k2 in range(n):
-			if not is_instance_valid(members[k2]):
+		# Марш в ту же точку не переиздаётся чаще страховочного срока
+		var prev_goal: Vector3 = sq.get("ordered_goal", Vector3.INF)
+		var prev_at: float = float(sq.get("ordered_at", -1.0e9))
+		if prev_goal.distance_to(goal) < 0.5 \
+				and clock - prev_at < REISSUE_KEEPALIVE_SEC:
+			continue
+		_order_queue.append({"sq": sq, "goal": goal, "center": center})
+
+## Исполнить одну запись плана (обход состава — дорогая часть).
+## Возвращает число бойцов, которым выдан приказ, — им и меряется бюджет кадра
+func _issue_squad(plan: Dictionary) -> int:
+	var sq: Dictionary = plan["sq"]
+	var members: Array = sq["members"]
+	var issued := 0
+	# Живость — на СЫРОЙ ссылке, до приведения типа (правило 5): цель могла
+	# пасть, пока запись ждала своего кадра, а типизированное присваивание
+	# освобождённого объекта не даёт null — оно бросает исключение
+	var foe_raw: Variant = plan.get("foe")
+	if foe_raw != null:
+		if not is_instance_valid(foe_raw):
+			return 0
+		var foe := foe_raw as Node3D
+		for m in members:
+			if not is_instance_valid(m):
 				continue
-			var u2 := members[k2] as Unit
-			if u2 == null or u2.is_dead():
-				continue
-			u2.command_move(GameManager.land_target(slots[k2]))
+			var u := m as Unit
+			if u != null and not u.is_dead():
+				u.command_attack(foe, true, true)
+				issued += 1
+		return issued
+	var goal: Vector3 = plan["goal"]
+	var center: Vector3 = plan["center"]
+	sq["ordered_goal"] = goal
+	sq["ordered_at"] = clock
+	# ── ТОЛПОЙ, А НЕ В ОДНУ ТОЧКУ ───────────────────────────────────────────
+	# Раньше всем бойцам отряда выдавалась ОДНА цель: сотня гоблинов шла в
+	# один пятачок, упиралась друг в друга и разбиралась расталкиванием уже
+	# на месте. Теперь у каждого своё место в толпе (диск со сдвигом,
+	# goblin_config.horde_offset), и оно же кладётся в разметку отряда —
+	# чтобы смыкание после боя собирало ТОЛПУ, а не квадрат фаланги
+	var slots: Array = []
+	var n: int = members.size()
+	for k in range(n):
+		var ho: Vector2 = _GobCfg.horde_offset(k, n, int(sq["id"]))
+		slots.append(Vector3(goal.x + ho.x, 0.0, goal.z + ho.y))
+	GameManager.squad_set_formation(int(sq["id"]), slots,
+		(goal - center).normalized() if goal.distance_to(center) > 0.1 else Vector3.FORWARD,
+		false)
+	for k2 in range(n):
+		if not is_instance_valid(members[k2]):
+			continue
+		var u2 := members[k2] as Unit
+		if u2 == null or u2.is_dead():
+			continue
+		u2.command_move(GameManager.land_target(slots[k2]))
+		issued += 1
+	return issued
 
 ## Ближайший чужой ЛЮБОЙ стороны. Гоблины враждебны всем, поэтому спрашиваем
 ## обе фракции и берём ближайшего

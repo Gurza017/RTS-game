@@ -495,15 +495,21 @@ func _d_leaks() -> void:
 	#     уже с появлением щелчков интерфейса — проверка краснела и до речи.
 	# Смысл у обеих один и он остаётся: за время боя НИ ОДИН пул не растёт.
 	# Поэтому сверяем с суммой ОБЪЯВЛЕННЫХ размеров, а не с числом из головы
-	var want_3d: int = AudioManager.POOL_SIZE + AudioManager.MARCH_VOICES
+	# ── РАЗМЕР ПУЛА МАРША — MARCH_POOL_SIZE, А НЕ MARCH_VOICES ─────────────
+	# Голосов в пуле на один больше, чем звучащих отрядов: лишний держит ХВОСТ
+	# ЗАТУХАНИЯ остановившегося отряда (см. AudioManager.MARCH_POOL_SIZE).
+	# Спрашиваем объявленный размер пула, а не число одновременных голосов —
+	# иначе проверка судит об одном, а код строит другое
+	var want_3d: int = AudioManager.POOL_SIZE + AudioManager.MARCH_POOL_SIZE
 	var want_flat: int = 2 + AudioManager.UI_VOICES + AudioManager.VOICE_VOICES
 	print("  детей у AudioManager: 3D-голосов %d (ждём %d = бой %d + марш %d), плоских %d (ждём %d)" % [
-		players, want_3d, AudioManager.POOL_SIZE, AudioManager.MARCH_VOICES,
+		players, want_3d, AudioManager.POOL_SIZE, AudioManager.MARCH_POOL_SIZE,
 		streamers, want_flat])
 	verdict("D4 3D-пулы не разрастаются за время боя",
 		players == want_3d and AudioManager._pool.size() == AudioManager.POOL_SIZE
-			and AudioManager._march_pool.size() == AudioManager.MARCH_VOICES,
-		"нашли %d при ожидаемых %d" % [players, want_3d])
+			and AudioManager._march_pool.size() == AudioManager.MARCH_POOL_SIZE,
+		"нашли %d при ожидаемых %d (пул марша %d, ждём %d)" % [players, want_3d,
+			AudioManager._march_pool.size(), AudioManager.MARCH_POOL_SIZE])
 	verdict("D5 плоских плееров ровно столько, сколько объявлено",
 		streamers == want_flat, "нашли %d, ждали %d" % [streamers, want_flat])
 

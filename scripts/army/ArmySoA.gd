@@ -54,6 +54,12 @@ const F_TRUNK_IGNORE := 1 << 12
 const F_LOCAL_XFORM := 1 << 13
 ## Бой этого бойца можно считать пакетно (см. ArmyCore.FAtkSimple)
 const F_ATK_SIMPLE := 1 << 14
+## ── ПРИКАЗ ИГРОКА ПРОХОДИТ СКВОЗЬ ЧУЖИЕ ТЕЛА ────────────────────────────────
+## Живёт ровно столько, сколько тикает замок приказа игрока минус его хвост
+## (Unit._forced_move_pass): полторы секунды, за которые из свалки выходят, но
+## сквозь оборону не проходят. Второй и последний признак, дающий сквозной
+## проход, — F_RETREATING. Битов 15 и 16 не берём: там спячка и сон отрисовки
+const F_ORDER_PASS := 1 << 17
 
 ## Во сколько раз теснее обычного разрешено стоять работающему у жилы
 const WORK_OVERLAP := 0.62
@@ -122,6 +128,13 @@ func capacity() -> int:
 
 func used() -> int:
 	return _c.Used()
+
+## За этим номером занятых строк нет. По нему, а не по ёмкости, идут покадровые
+## проходы солвера (см. ArmyCore._top): ёмкость растёт под ПИК армии и назад не
+## сжимается, и после большой рубки обход по ней перебирал бы впустую в разы
+## больше строк, чем есть бойцов
+func top() -> int:
+	return _c.Top()
 
 func alloc_for(u) -> int:
 	return _c.AllocFor(u)
@@ -198,7 +211,7 @@ func write_pose_batch(rows: PackedInt32Array, xs: PackedFloat32Array,
 		vxs: PackedFloat32Array, vzs: PackedFloat32Array,
 		sts: PackedInt32Array, gates: PackedInt32Array,
 		eff: PackedFloat32Array) -> int:
-	return _c.WritePoseBatch(rows, xs, ys, zs, vxs, vzs, sts, gates, eff)
+	return _c.WritePoseBatch(rows, xs, ys, zs, vxs, vzs, sts, gates, eff, -1)
 
 ## ПАКЕТНЫЙ ПРОХОД БОЯ. Возвращает бойцов, которых пакет НЕ закрыл, — им нужен
 ## полный автомат. Разбор — в шапке ArmyCore.BatchCombat
@@ -210,6 +223,137 @@ func batch_combat(delta: float, attacking_state: int, pull_up_speed: float,
 ## Строка цели атаки (пишется по событию из Unit.set_attack_target)
 func set_target(i: int, t: int) -> void:
 	_c.SetTarget(i, t)
+
+## ── ДРЁМА ПЕРЕЗАРЯДКИ В ЯДРЕ (этап C, сент. 2026) ──────────────────────────
+## Пока строка под F_ATK_SNOOZE, таймер удара и стражу цели ведёт TickSnooze по
+## колонкам, а GDScript-автомат боя у бойца — голый return. Взвод и снятие —
+## события; покадровый путь — один вызов tick_snooze на весь мир
+const F_ATK_SNOOZE := 1 << 18
+
+func atk_snooze_arm(i: int, cd: float, reach: float) -> void:
+	_c.AtkSnoozeArm(i, cd, reach)
+
+func atk_snooze_clear(i: int) -> float:
+	return _c.AtkSnoozeClear(i)
+
+## Возвращает ЧИСЛО проснувшихся; сам список забирается take_woken() и только
+## при ненулевом счёте — в тихий кадр ни одной аллокации
+func tick_snooze(delta: float, spare: float) -> int:
+	return _c.TickSnooze(delta, spare)
+
+func take_woken() -> Array:
+	return _c.TakeWoken()
+
+## ── ОБЩАЯ ОТРИСОВКА: БУФЕРЫ БАКЕТОВ И ПОКАДРОВЫЙ ДОГОН (этап C.1) ──────────
+## Буферы MultiMesh и покадровый догон картинки живут в ядре; GDScript
+## (FarUnitRenderer) остаётся владельцем жизненного цикла бакетов и редких
+## записей. Разбор — в шапке ArmyCore, раздел «ОБЩАЯ ОТРИСОВКА»
+const F_VIS_SELF := 1 << 19
+## Тыловой напор (этап D1): строка давит к точке боя без входа в GDScript.
+## Аренда из GameManager._recalc_melee, шаг — ArmyCore.RearPressPass
+const F_REAR_PRESS := 1 << 21
+
+## Маска тумана войны (этап D3): попиксельная часть в ядре
+func fog_setup(cols: int, rows: int, half_x: float, half_z: float,
+		mask_cell: float, edge_feather: float) -> void:
+	_c.FogSetup(cols, rows, half_x, half_z, mask_cell, edge_feather)
+
+func fog_reset() -> void:
+	_c.FogReset()
+
+## Источники плоскими тройками [x, z, r]; возвращает [lit, seen, rgba]
+func fog_refresh(src: PackedFloat32Array) -> Array:
+	return _c.FogRefresh(src)
+
+## Число потоков пакетных проходов ядра (этап D2). Потокам разрешена только
+## чистая математика по колонкам; вода/узлы/подача — главный поток
+func set_threads(t: int) -> void:
+	_c.SetThreads(t)
+
+func rear_press_arm(i: int, tx: float, tz: float, speed: float, stop: float) -> void:
+	_c.RearPressArm(i, tx, tz, speed, stop)
+
+func rear_press_clear(i: int) -> void:
+	_c.RearPressClear(i)
+
+func rear_press_pass(delta: float, shards: int, phase: int) -> int:
+	return _c.RearPressPass(delta, shards, phase)
+
+## Автопилот подхода (этап D1): дальняя дорога к назначенной цели без входа
+## в GDScript-автомат; направление — на живую строку цели каждый такт
+const F_AUTOPILOT := 1 << 22
+
+func autopilot_arm(i: int, speed: float, stop: float) -> void:
+	_c.AutopilotArm(i, speed, stop)
+
+func autopilot_clear(i: int) -> void:
+	_c.AutopilotClear(i)
+
+func autopilot_pass(delta: float, shards: int, phase: int,
+		tick: int, scan_mod: int, scan_r: float) -> int:
+	return _c.AutopilotPass(delta, shards, phase, tick, scan_mod, scan_r)
+
+func take_press_woken() -> Array:
+	return _c.TakePressWoken()
+
+
+func rb_create(mm_rid: RID) -> int:
+	return _c.RbCreate(mm_rid)
+
+func rb_ensure(b: int, instances: int) -> void:
+	_c.RbEnsure(b, instances)
+
+func rb_write_full(b: int, idx: int, pos: Vector3, frame: int, mirror: bool,
+		flash: float, hp: float) -> void:
+	_c.RbWriteFull(b, idx, pos.x, pos.y, pos.z, frame, mirror, flash, hp)
+
+func rb_write_pos(b: int, idx: int, pos: Vector3) -> void:
+	_c.RbWritePos(b, idx, pos.x, pos.y, pos.z)
+
+func rb_write_frame(b: int, idx: int, frame: int) -> void:
+	_c.RbWriteFrame(b, idx, frame)
+
+func rb_write_color(b: int, idx: int, r: float, g: float, bl: float, a: float) -> void:
+	_c.RbWriteColor(b, idx, r, g, bl, a)
+
+func rb_write_dmg(b: int, idx: int, flash: float, hp: float) -> void:
+	_c.RbWriteDmg(b, idx, flash, hp)
+
+func rb_hide_slot(b: int, idx: int) -> void:
+	_c.RbHideSlot(b, idx)
+
+func rb_hide_all(b: int) -> void:
+	_c.RbHideAll(b)
+
+## Окно чтения слота для стендов: 16 float как есть (не покадровый путь)
+func rb_slot(b: int, idx: int) -> PackedFloat32Array:
+	return _c.RbSlot(b, idx)
+
+func rb_dirty(b: int) -> bool:
+	return _c.RbDirty(b)
+
+func rb_clear_dirty(b: int) -> void:
+	_c.RbClearDirty(b)
+
+func rb_flush() -> void:
+	_c.RbFlush()
+
+func row_bind(i: int, b: int, idx: int, base_y: float,
+		draw: Vector3, draw_init: bool) -> void:
+	_c.RowBind(i, b, idx, base_y, draw.x, draw.y, draw.z, draw_init)
+
+func row_unbind(i: int) -> void:
+	_c.RowUnbind(i)
+
+func draw_pos(i: int) -> Vector3:
+	return _c.DrawPos(i)
+
+func row_sync_draw(i: int, p: Vector3) -> void:
+	_c.RowSyncDraw(i, p.x, p.y, p.z)
+
+func batch_visual(delta: float, lerp_k: float, snap_sq: float,
+		bob_amp: float, bob_sprint: float) -> void:
+	_c.BatchVisual(delta, lerp_k, snap_sq, bob_amp, bob_sprint)
 
 ## Направление, посчитанное пакетным боем
 func facing_x(i: int) -> float:
@@ -252,8 +396,17 @@ func ally_overlap(row: int, at_x: float, at_z: float, min_dist: float,
 		max_push: float) -> Vector3:
 	return _c.AllyOverlap(row, at_x, at_z, min_dist, max_push)
 
-func enemy_block(row: int, tx: float, tz: float, min_dist: float) -> Vector3:
-	return _c.EnemyBlock(row, tx, tz, min_dist)
+func enemy_block(row: int, tx: float, tz: float, min_dist: float, away_ok: bool = false) -> Vector3:
+	return _c.EnemyBlock(row, tx, tz, min_dist, away_ok)
+
+## Окно для стендов: сколько живых С ЭТИМИ БИТАМИ стоят ближе radius к чужому
+func enemy_overlap_count_flagged(radius: float, mask: int) -> int:
+	return _c.EnemyOverlapCountFlagged(radius, mask)
+
+## Окно для стендов: сколько живых стоят ближе radius к чужому телу
+## (инвариант твёрдости строя, см. ArmyCore.EnemyOverlapCount)
+func enemy_overlap_count(radius: float) -> int:
+	return _c.EnemyOverlapCount(radius)
 
 func allies_ahead(row: int, dx_dir: float, dz_dir: float, look: float,
 		half_width: float) -> int:
@@ -309,7 +462,7 @@ func batch_move_queued(rows: PackedInt32Array, xs: PackedFloat32Array,
 		lim_x: float, lim_z: float, bounds_on: bool, water_on: bool,
 		block_r: float, trunk_clear: float, relief_amp: float, gm) -> int:
 	return _c.BatchMoveQueued(rows, xs, zs, fls, lim_x, lim_z, bounds_on,
-		water_on, block_r, trunk_clear, relief_amp, gm)
+		water_on, block_r, trunk_clear, relief_amp, gm, -1)
 
 ## cross_squad — во сколько раз шире держатся бойцы РАЗНЫХ отрядов
 ## (см. Unit.SEP_CROSS_SQUAD и разбор в ArmyCore.BatchSeparation)
@@ -317,10 +470,10 @@ func batch_separation(delta: float, min_dist: float, max_step: float,
 		interval: float, lim_x: float, lim_z: float, moving_state: int,
 		attacking_state: int, water_on: bool, gm, deadzone: float = 0.0,
 		relief_amp: float = 0.0, cross_squad: float = 1.0,
-		pass_relief: float = 1.0) -> int:
+		pass_relief: float = 1.0, trunk_clear: float = 0.0) -> int:
 	return _c.BatchSeparation(delta, min_dist, max_step, interval, lim_x, lim_z,
 		moving_state, attacking_state, water_on, gm, deadzone, relief_amp,
-		cross_squad, pass_relief)
+		cross_squad, pass_relief, trunk_clear)
 
 func advance_matrix(rows: PackedInt32Array, ax: float, az: float, ny: float,
 		cx: float, cz: float, amp: float = 0.0) -> int:

@@ -47,7 +47,9 @@ func _run() -> void:
 		and _Army.F_GARRISONED == 1 << 6 and _Army.F_CLEAR_TRUNK == 1 << 7
 		and _Army.F_CLEAR_ENEMY == 1 << 8 and _Army.F_SELECTED == 1 << 9
 		and _Army.F_WORKING == 1 << 10 and _Army.F_STEP_PENDING == 1 << 11
-		and _Army.F_TRUNK_IGNORE == 1 << 12)
+		and _Army.F_TRUNK_IGNORE == 1 << 12
+		and _Army.F_ATK_SIMPLE == 1 << 14
+		and _Army.F_ORDER_PASS == 1 << 17)
 
 	print("\n───── B. СТРОКА ВЫДАЁТСЯ И ЗАПОЛНЯЕТСЯ ─────")
 	var Spear := load("res://scenes/units/Spearman.tscn") as PackedScene

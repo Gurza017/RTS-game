@@ -51,11 +51,11 @@ func dmg_of(u: Unit) -> Array:
 	var s = GameManager.far_units.slot_of(u)
 	if s == null or s.bucket == null:
 		return []
-	var buf: PackedFloat32Array = s.bucket.buf
-	var o: int = s.index * s.bucket.STRIDE
-	if o + 15 >= buf.size():
+	# Буфер живёт в ядре (этап C.1) — читаем через окно для стендов
+	var raw: PackedFloat32Array = GameManager.army.rb_slot(s.bucket.core_id, s.index)
+	if raw.size() < 16:
 		return []
-	return [buf[o + 14], buf[o + 15]]
+	return [raw[14], raw[15]]
 
 func spawn(fac: int, at: Vector3) -> Unit:
 	var u: Unit = load("res://scenes/units/Spearman.tscn").instantiate()
@@ -160,9 +160,11 @@ func _run() -> void:
 	await frames(20)
 	var s0 = GameManager.far_units.slot_of(crowd[0])
 	var before: Array = dmg_of(crowd[0])
-	s0.bucket.dirty = false
+	# Флаг грязности живёт в ядре (этап C.1) — окно для стендов в ArmySoA
+	GameManager.army.rb_clear_dirty(s0.bucket.core_id)
 	await frames(3)
-	verdict("F1 целый неподвижный строй не грязнит буфер", not s0.bucket.dirty)
+	verdict("F1 целый неподвижный строй не грязнит буфер",
+		not GameManager.army.rb_dirty(s0.bucket.core_id))
 	var after: Array = dmg_of(crowd[0])
 	verdict("F2 и не переписывает состояние урона",
 		before.size() == 2 and after.size() == 2

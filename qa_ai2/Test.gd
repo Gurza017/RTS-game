@@ -55,6 +55,10 @@ func _spawn(kind: String, fac: int, at: Vector3) -> Unit:
 	u.faction = fac
 	main.world_add(u)
 	u.global_position = Vector3(at.x, GameManager.get_terrain_height(at.x, at.z), at.z)
+	# Строка ядра обязана стать валидной СРАЗУ (как в qa_mass3k): иначе сетка
+	# соседей не видит свежепоставленного до его первого личного тика, и
+	# проверки контакта зависят от фазы шардов — B4 держался ровно на этом
+	u.sync_row()
 	return u
 
 ## Отряд ИИ: настоящий отряд GameManager (нужен для гарнизона) плюс запись в ai
@@ -215,9 +219,17 @@ func _b_phalanx() -> void:
 		def_cnt == men.size(),
 		"в защите %d из %d" % [def_cnt, men.size()])
 
-	# Появился противник в радиусе контакта — стойка меняется на АТАКУ
+	# Появился противник в радиусе контакта — стойка меняется на АТАКУ.
+	# ── ОТ ЦЕНТРОИДА, А НЕ ОТ БАЗЫ (сент. 2026) ─────────────────────────────
+	# Контакт меряется от ЖИВОГО центра марширующего отряда
+	# (_issue_plan: _nearest_player_target(_squad_centroid, CONTACT_RADIUS)),
+	# а приманка ставилась от точки СТАРТА — и проверка держалась на том,
+	# сколько именно метров отряд успел пройти к этому месту стенда. Сдвиг
+	# фазы тика армии (этап C.2) её вскрыл: центроид оказался в 11.4 м от
+	# приманки при честном «нет контакта». Свойство же — «противник в радиусе
+	# контакта ОТ ОТРЯДА» — ставим приманку от него самого
 	var foe := _spawn("warrior", Constants.FACTION_PLAYER,
-		base + Vector3(_AICfg.CONTACT_RADIUS * 0.5, 0.0, 0.0))
+		ai._squad_centroid(men) + Vector3(_AICfg.CONTACT_RADIUS * 0.5, 0.0, 0.0))
 	await frames(3)
 	sq["issued"] = false
 	ai._apply_orders()

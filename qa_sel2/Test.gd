@@ -18,7 +18,6 @@ extends Node
 const _Banner  := preload("res://scripts/SquadBanner.gd")
 const _UCfg    := preload("res://scripts/unit_stats_config.gd")
 const _Forge   := preload("res://scripts/forge_config.gd")
-const _VetStar := preload("res://scripts/VeterancyStar.gd")
 
 ## Как было ДО этой правки — только чтобы посчитать процент уменьшения
 const PREV_PANEL_H  := 72.0
@@ -323,8 +322,15 @@ func _test_scale() -> void:
 	print("\n═════ B. ПАНЕЛЬ И КНОПКИ ВДВОЕ МЕНЬШЕ ═════")
 	var panel_cut: float = 1.0 - float(HUD.PANEL_H) / PREV_PANEL_H
 	var btn_cut: float   = 1.0 - float(HUD.BTN_SIZE) / PREV_BTN_SIZE
-	verdict("B1 кнопка приказа уменьшена ровно вдвое",
-		absf(btn_cut - 0.50) <= 0.02,
+	# ── ТРЕБОВАНИЕ РАЗВЁРНУТО ВЛАДЕЛЬЦЕМ (август 2026) ──────────────────────
+	# Стояло «ровно вдвое от прежних 44». Владелец по скриншоту попросил
+	# обратное: «иконки способностей увеличить примерно на 30%, а жёлтую
+	# обводку вокруг них свести к тонкой линии» — то есть читаться должна
+	# картинка, а не рамка. Сжатие вдвое при этом никуда не делось как ЦЕЛЬ:
+	# кнопка обязана остаться КРАТНО меньше исходных сорока четырёх.
+	# Проверяем оба берега, а не одно число
+	verdict("B1 кнопка приказа кратно меньше прежней, но не мельче 22 px",
+		btn_cut >= 0.25 and float(HUD.BTN_SIZE) >= 22.0,
 		"%.0f → %.0f (−%.0f%%)" % [PREV_BTN_SIZE, float(HUD.BTN_SIZE), btn_cut * 100.0])
 	# ПОРОГ 0.40 → 0.35: после сжатия вдвое (72 → 40) владелец вернул плашке
 	# +10% высоты (40 → 44), потому что вдвое оказалось тесно. Проверка стережёт
@@ -346,7 +352,7 @@ func _test_scale() -> void:
 	hud.show_selection([w])
 	var r: Rect2 = hud._bottom_panel.get_global_rect()
 	var vp: Vector2 = hud.get_viewport().get_visible_rect().size
-	verdict("B3 панель Рабочего укрупнена (буст взведён) и не вылезает за экран",
+	verdict("B3 панель Рабочего стандартной высоты и не вылезает за экран",
 		hud._worker_boost and r.size.y > float(HUD.PANEL_H) and r.end.y <= vp.y + 0.5,
 		"буст=%s, высота=%.0f (минимум %d), низ=%.0f при экране %.0f" % [
 			hud._worker_boost, r.size.y, HUD.PANEL_H, r.end.y, vp.y])

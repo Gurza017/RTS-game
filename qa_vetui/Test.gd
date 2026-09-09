@@ -161,32 +161,38 @@ func _a_alert() -> void:
 	verdict("A4 длинной подписи у значка больше нет",
 		String(btn.tooltip_text) == "", "«%s»" % String(btn.tooltip_text))
 
-	# Клик: камера переводится ПЛАВНО (глиссада, а не прыжок) и зажигается метка
+	# ── КАМЕРА ВСТАЁТ НА ОТРЯД СРАЗУ (заказ владельца, разворот) ───────────
+	# Была плавная глиссада, и стенд сторожил именно её («поехала, а не
+	# прыгнула»). Требование развёрнуто: по клику на значок камера обязана
+	# оказаться на отряде В ТОТ ЖЕ КАДР — пока она ехала, игрок смотрел на
+	# пустое поле, а метка над отрядом успевала отгореть
 	var cam = main.get("_camera")
 	var before: Vector3 = cam._focus
 	hud._on_alert_pressed(sid)
 	await frames(1)
-	var right_after: Vector3 = cam._focus
 	var goal: Vector3 = GameManager.squad_centroid(sid)
 	var d0: float = Vector2(before.x - goal.x, before.z - goal.z).length()
-	var d1: float = Vector2(right_after.x - goal.x, right_after.z - goal.z).length()
-	verdict("A5 камера ПОЕХАЛА к отряду, а не прыгнула",
-		d1 < d0 and d1 > 0.5,
-		"было %.1f м, через кадр %.1f м" % [d0, d1])
-	verdict("A6 по клику зажглась подсветка отряда",
-		hud._ping_left > 0.0 and hud._ping_sid == sid
-		and hud._ping_tr != null and hud._ping_tr.visible,
-		"осталось %.2f с" % hud._ping_left)
-	# Доезжает до конца сама
-	for _i in range(240):
-		await get_tree().process_frame
-		if Vector2(cam._focus.x - goal.x, cam._focus.z - goal.z).length() < 1.0:
-			break
-	verdict("A7 глиссада доводит камеру до отряда",
-		Vector2(cam._focus.x - goal.x, cam._focus.z - goal.z).length() < 1.0,
-		"осталось %.2f м" % Vector2(cam._focus.x - goal.x, cam._focus.z - goal.z).length())
-	# Ручное движение камеры глиссаду отменяет — иначе камера уползала бы
-	# из-под пальцев игрока
+	var d1: float = Vector2(cam._focus.x - goal.x, cam._focus.z - goal.z).length()
+	verdict("A5 камера встала на отряд СРАЗУ, а не поехала",
+		d1 < 1.0, "было %.1f м, стало %.1f м" % [d0, d1])
+	# ── ПОДСВЕТКА — ШТАТНЫЕ КОЛЬЦА ВЫДЕЛЕНИЯ, А НЕ СВОЯ МЕТКА ──────────────
+	# Пульсирующего кольца-радара больше нет вовсе: отряд просто ВЫДЕЛЯЕТСЯ,
+	# и под ногами у него те же жёлтые кольца, что при обычном клике мышью
+	verdict("A6 радар-метки в HUD не осталось",
+		not ("_ping_tr" in hud), "поле _ping_tr всё ещё объявлено")
+	var sel_ok := true
+	for m in GameManager.squad_members(sid):
+		if not (m in sm.selected_units):
+			sel_ok = false
+	verdict("A6б по клику отряд выделен целиком", sel_ok and not sm.selected_units.is_empty(),
+		"выделено %d из %d" % [sm.selected_units.size(),
+			GameManager.squad_members(sid).size()])
+	verdict("A7 кольцо выделения выдано каждому бойцу",
+		GameManager.sel_decals.registered_count() >= GameManager.squad_members(sid).size(),
+		"колец %d при %d бойцах" % [GameManager.sel_decals.registered_count(),
+			GameManager.squad_members(sid).size()])
+	# Механизм плавного перевода камеры остался в проекте и обязан работать:
+	# он нужен всему остальному, что двигает объектив мягко
 	cam.glide_to(Vector3(0.0, 0.0, 0.0))
 	cam._pan_by(Vector2(1.0, 0.0))
 	verdict("A8 ручной пан отменяет глиссаду", cam._glide.x == INF)
@@ -218,6 +224,29 @@ func _b_axis() -> void:
 	verdict("B3 ось задана ОДНОЙ константой, а не числом в двух местах",
 		absf(panel.offset_left - hud.PANEL_LEFT) < 0.01,
 		"offset_left=%.1f, PANEL_LEFT=%.1f" % [panel.offset_left, hud.PANEL_LEFT])
+	# ── И ШИРИНА У НИХ ОДНА (заказ владельца по скриншоту) ─────────────────
+	# Карточка статов держала ширину числом (STAT_PANEL_W), а нижняя панель
+	# считала свою по содержимому — и содержимое почти всегда шире. Правый край
+	# нижней панели вылезал за карточку. Теперь число одно на двоих (HUD._panel_w)
+	verdict("B4 обе панели одной ширины",
+		absf(stats.size.x - panel.size.x) < 0.51,
+		"карточка %.0f, панель %.0f" % [stats.size.x, panel.size.x])
+	verdict("B5 названия отряда в ВЕРХНЕЙ карточке больше нет",
+		not _text_of(stats).contains(_UCfg.veteran_rank_name("spearman", 1)),
+		"«%s»" % _text_of(stats))
+	verdict("B6 звание осталось в подписи нижней панели, ОДНОЙ строкой",
+		hud.info_label.visible
+			and String(hud.info_label.text).contains(
+				_UCfg.veteran_rank_name("spearman", 1))
+			and hud.info_label.autowrap_mode == TextServer.AUTOWRAP_OFF,
+		"«%s», перенос=%d" % [hud.info_label.text, hud.info_label.autowrap_mode])
+	# Подпись начинается от ЛЕВОГО КРАЯ панели, а не после портрета
+	verdict("B7 подпись стоит у левого края панели, а не за портретом",
+		hud.info_label.global_position.x
+			< hud._portrait_wrap.global_position.x + 0.51,
+		"подпись x=%.0f, портрет x=%.0f" % [
+			hud.info_label.global_position.x,
+			hud._portrait_wrap.global_position.x])
 	_drop(sid)
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -434,7 +463,14 @@ func _g_tip() -> void:
 		var key: String = String(k)
 		if not mods.has(key):
 			continue
-		var line: String = "%s %s" % [hud._mod_amount(float(mods[key])),
+		# ЗНАК — ПО СМЫСЛУ ХАРАКТЕРИСТИКИ. У задержки удара и разброса прибавка
+		# конфига ВЫЧИТАЕТСЯ, и плашка обязана показать её со знаком «−»:
+		# иначе на одном экране один и тот же модификатор стоял бы в плашке с
+		# плюсом, а в таблице статов с минусом (см. HUD.NEGATIVE_STATS)
+		var amt: float = float(mods[key])
+		if hud.NEGATIVE_STATS.has(_UCfg.modifier_stat_name(key)):
+			amt = -amt
+		var line: String = "%s %s" % [hud._mod_amount(amt),
 			String(hud.MOD_SHORT_LABELS.get(key, key.to_upper()))]
 		want_lines.append(line)
 		if not (line in texts):
@@ -476,3 +512,14 @@ func _vet_sum(u: Unit) -> float:
 	if u == null or not is_instance_valid(u):
 		return -1.0
 	return u.max_health + u.vet_attack + u.vet_armor + u.vet_defense + u.vet_speed
+
+## Весь текст поддерева одной строкой (Label и RichTextLabel)
+func _text_of(root: Node) -> String:
+	var out := ""
+	if root is Label:
+		out += String((root as Label).text) + " "
+	elif root is RichTextLabel:
+		out += String((root as RichTextLabel).text) + " "
+	for c in root.get_children():
+		out += _text_of(c)
+	return out

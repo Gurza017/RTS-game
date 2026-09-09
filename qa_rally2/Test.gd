@@ -226,7 +226,17 @@ func _a_intercept() -> void:
 	print("\n═════ A. ПЕРЕХВАТ В ЖИВОМ БОЮ ═════")
 	var wall_x := 0.0
 	var wall_z := -20.0
-	var foes: Array = _mk_wall(Constants.FACTION_ENEMY, wall_x, wall_z, 20, 1.2)
+	# ── ШАГ СТЕНЫ — СТРОЕВОЙ ИНТЕРВАЛ ИГРЫ, А НЕ КРУГЛОЕ ЧИСЛО ─────────────
+	# Здесь стояло 1.2 м, и проверка A1 краснела НА ПРАВИЛЬНОМ КОДЕ. Личный
+	# круг между бойцами РАЗНЫХ отрядов равен SEP_MIN_DIST × SEP_CROSS_SQUAD =
+	# 0.4167 × 1.6 = 0.667 м, то есть при шаге 1.2 м середина просвета отстоит
+	# от обоих соседей на 0.6 м — меньше требуемого, но ОЧЕНЬ БЛИЗКО, и
+	# двадцать напирающих такую щель находят. Это не «прошли призраками», это
+	# редкий забор: настоящая шеренга в игре стоит по Building.squad_spacing
+	# (0.55 м), то есть ВДВОЕ плотнее, и там середина просвета в 0.275 м от
+	# соседей — пройти нельзя. Берём число у игры, а не у стенда (правило 10)
+	var wall_step: float = Building.new().squad_spacing
+	var foes: Array = _mk_wall(Constants.FACTION_ENEMY, wall_x, wall_z, 20, wall_step)
 	await frames(3)
 	# Врагам назначаем ПОСТ на их же месте: так стоит любой отряд в игре
 	for f in foes:
@@ -242,7 +252,7 @@ func _a_intercept() -> void:
 		sm._select_one(u)
 	var goal := Vector3(wall_x + 14.0, 0.0, wall_z)
 	print("  стена x=%.1f (20 бойцов, ширина %.1f м), свой отряд x=%.1f, приказ в x=%.1f" % [
-		wall_x, 19.0 * 1.2, start.x, goal.x])
+		wall_x, 19.0 * wall_step, start.x, goal.x])
 	# Настоящий путь приказа движения по земле
 	sm._issue_formation_move(goal)
 	sm._clear_selection()
@@ -623,16 +633,54 @@ func _f_edges() -> void:
 	print("\n═════ F. ГРАНИЧНЫЕ СЛУЧАИ ═════")
 
 	# ── F1: точка сбора ЗА краем карты ──────────────────────────────────────
-	var b: Building = _new_building("barracks", Vector3(100.0, 0.0, -45.0))
+	# ── КОРИДОР ДО КРАЯ КАРТЫ СТЕНД ВЫБИРАЕТ САМ ───────────────────────────
+	# Барак стоял на жёстком (100, −45), а точка сбора зажимается в край карты
+	# (x = 128.5). Между ними — двадцать восемь метров СЛУЧАЙНО СГЕНЕРИРОВАННОЙ
+	# карты, и попади туда озеро, отряд встанет у воды совершенно законно:
+	# поиска пути в игре нет, шаг в воду не проходит. Зонд это и показал —
+	# приказ у всех верный (цели ровно в точке сбора), а ближний остаётся в
+	# 24.6 м. Проверка мерила ЖРЕБИЙ, а не поведение точки сбора.
+	#
+	# Сценарий, зависящий от окружения, обязан это окружение задавать (правило
+	# из CLAUDE.md, там же разобрано на qa_helpbuild). Ищем полосу, вдоль
+	# которой до края карты нет воды, и ставим барак на неё. Не нашли —
+	# честно говорим об этом, а не выдаём жребий за вердикт
+	var edge_x: float = GameManager.clamp_to_map(900.0, 0.0).x
+	var dry_z := 1.0e9
+	for zi in range(-60, 61, 5):
+		var zc := float(zi)
+		var wet := false
+		var xs := 100.0
+		while xs <= edge_x + 0.01:
+			if GameManager.is_water(xs, zc):
+				wet = true
+				break
+			xs += 1.0
+		if not wet:
+			dry_z = zc
+			break
+	print("  сухой коридор до края карты: z=%s" % (
+		"%.0f" % dry_z if dry_z < 1.0e8 else "НЕ НАЙДЕН"))
+	if dry_z > 1.0e8:
+		dry_z = -45.0
+	var b: Building = _new_building("barracks", Vector3(100.0, 0.0, dry_z))
 	await frames(3)
-	b.set_rally_point(Vector3(900.0, 0.0, -45.0))
-	var lim: Vector2 = GameManager.clamp_to_map(900.0, -45.0)
+	b.set_rally_point(Vector3(900.0, 0.0, dry_z))
+	var lim: Vector2 = GameManager.clamp_to_map(900.0, dry_z)
 	print("  точка сбора за краем (900, −45) → зажата в (%.1f, %.1f), предел карты %.1f" % [
 		b.rally_point.x, b.rally_point.z, lim.x])
 	verdict("F1 точка сбора за краем карты зажата внутрь поля",
 		absf(b.rally_point.x - lim.x) < 0.01 and absf(b.rally_point.x) < 130.0,
 		"x=%.2f" % b.rally_point.x)
 	var men: Array = await _train(b, "spearman", 10, 20000)
+	var dbg_t: Array = []
+	for dm in men:
+		var du := dm as Unit
+		if du != null and is_instance_valid(du):
+			dbg_t.append("%.0f/%.0f->%.0f/%.0f" % [du.global_position.x, du.global_position.z, du.move_target.x, du.move_target.z])
+	print("  ZOND F2: has_rally=%s, точка (%.1f, %.1f), барак (%.1f, %.1f), цели %s" % [
+		str(b.has_rally), b.rally_point.x, b.rally_point.z,
+		b.global_position.x, b.global_position.z, str(dbg_t.slice(0, 4))])
 	var s1: float = await _settle(men, 40000)
 	var d1: float = _min_dist_to(men, b.rally_point)
 	print("  отряд дошёл за %.1f с, ближний %.2f м от зажатой точки" % [s1, d1])

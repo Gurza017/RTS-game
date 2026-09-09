@@ -60,7 +60,13 @@ const GATE_DISTANCE := 6.5
 ## Направление задаёт нарисованный фасад (Building.facade_dir), а не положение
 ## замка на карте: правило «фасад к середине карты» здесь и было ошибкой —
 ## картинка замка прибита к мировому +Z, и ворота уезжали от неё в сторону
+## ── НО НЕ ДАЛЬШЕ ПЕРИМЕТРА РИСУНКА (разбор — в Building.gate_depth) ────────
+## GATE_DISTANCE выведен из коробки замка (8 м), а нарисован он на 8.66 м в
+## ширину, то есть полуширина рисунка 4.33 — на два метра ближе. Отряд честно
+## возникал за кольцом, на пустой траве
 func gate_depth() -> float:
+	if _draw_half_w >= 0.0:
+		return minf(GATE_DISTANCE, _draw_half_w + GATE_CLEARANCE)
 	return GATE_DISTANCE
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -77,6 +83,46 @@ func gate_depth() -> float:
 var garrison: Array = []          # отряды ВНУТРИ замка
 var _incoming: Array = []         # отряды, которые ещё идут ко входу
 
+## ── БОЕЦ ИСЧЕЗАЕТ У ДВЕРЕЙ, А НЕ ЗА ПЯТЬ МЕТРОВ ДО НИХ ──────────────────────
+## Жалоба владельца со скриншотом: «точка входа находится не у ворот крепости, а
+## сильно ниже — прямо в чистом поле».
+##
+## Так и было по арифметике. Ворота стоят на переднем крае НАРИСОВАННОГО
+## основания (Building.gate_depth, у замка это 5.23 м от центра), а зачисление
+## внутрь шло по допуску GARRISON_ENTER_RADIUS = 5 м ВОКРУГ ворот. Отряд идёт с
+## поля, то есть подходит с дальней стороны, — значит боец пропадал с экрана,
+## едва оказавшись в 10 м от центра замка, метрах в пяти от его нарисованного
+## края. Замер (зонд qa_keep): нарисованная точка вошедшего — (−90, 99) при
+## замке в (−90, 90) и воротах в (−90, 95.2).
+##
+## РАДИУС ДВЕРЕЙ ВЫВЕДЕН, А НЕ ПОДОБРАН. До самой точки ворот доходит только
+## ГОЛОВА очереди — остальных держит разбор наложения, — а голове хватает
+## допуска прибытия плюс пары строевых интервалов. Очередь при этом не
+## застаивается: вошедший освобождает место следующему тем же кадром.
+func _door_radius() -> float:
+	return Unit.ARRIVE_RADIUS + squad_spacing * 2.0
+
+## ── НО СТОЯТЬ У ДВЕРЕЙ ВЕЧНО НИКТО НЕ ОБЯЗАН ────────────────────────────────
+## Тугой радиус — это про КАРТИНКУ, и платить за неё зависшим отрядом нельзя.
+## Отставший, которого не пускает к воротам чужая толпа, ствол или собственный
+## обоз, через DOOR_PATIENCE секунд зачисляется по прежнему, широкому допуску из
+## конфига. То есть GARRISON_ENTER_RADIUS не отменён — он стал СТРАХОВКОЙ, а не
+## обычным путём, и мягкой блокировки, от которой тут однажды уже лечились
+## (см. «ПРИХОД СЧИТАЕТСЯ ОТ ВОРОТ» ниже), не возвращается
+const DOOR_PATIENCE := 8.0
+
+## Когда отряд встал в очередь ко входу, ticks_msec. Ключ — sid
+var _incoming_at: Dictionary = {}
+
+func _enter_radius(squad_id: int) -> float:
+	var door: float = minf(_door_radius(), _UCfg.GARRISON_ENTER_RADIUS)
+	var since: Variant = _incoming_at.get(squad_id)
+	if since == null:
+		return door
+	if float(Time.get_ticks_msec() - int(since)) * 0.001 < DOOR_PATIENCE:
+		return door
+	return _UCfg.GARRISON_ENTER_RADIUS
+
 ## Отправить отряд в Замок. false — гарнизон полон или отряд не годится
 func request_garrison(squad_id: int) -> bool:
 	if squad_id <= 0:
@@ -89,6 +135,7 @@ func request_garrison(squad_id: int) -> bool:
 	if members.is_empty():
 		return false
 	_incoming.append(squad_id)
+	_incoming_at[squad_id] = Time.get_ticks_msec()
 	# РАЗМЕТКА СТРОЯ СНИМАЕТСЯ: отряд отходит, а не марширует квадратом, и
 	# смыкание рядов по дороге к воротам только тормозило бы его
 	GameManager.squad_clear_formation(squad_id)
@@ -128,6 +175,12 @@ func absorb_unit(u: Unit) -> void:
 	# выполнялось вовсе. Отряд числился в замке, но продолжал жить на карте.
 	u.set_draw(false)
 	u.set_tick(false)
+	# ── ВСЁ, ЧТО РИСУЕТСЯ НАД БОЙЦОМ, СНИМАЕТСЯ ВМЕСТЕ С НИМ ────────────────
+	# Кольцо выделения, прицельная подсветка и полоска здоровья — это СЛОТЫ В
+	# ОБЩИХ СЛОЯХ, а не дети узла: скрытием узла они не гаснут, а ездят по
+	# НАРИСОВАННОЙ точке, которая у снятого с визуального тика бойца замерзает
+	# навсегда. Разбор и замер — в GameManager.forget_on_map
+	GameManager.forget_on_map(u)
 	GameManager.unit_grid.remove(u)
 	# Вне групп фракции боец не попадает ни в поиск целей, ни в подсчёты ИИ
 	for g in Constants.UNIT_GROUPS.values():
@@ -236,8 +289,8 @@ func _release_members(squad_id: int) -> void:
 		release_unit(u, gate + off)
 		# ПРИКАЗ ПОЛУЧАЮТ ВСЕ ЧЛЕНЫ ОТРЯДА, а не только те, кто сидел внутри:
 		# часть могла остаться снаружи (сбилась по дороге, отменённый вход), и
-		# без общего приказа отряд остаётся разорванным на две кучки, а звезда
-		# ранга висит в пустоте между ними
+		# без общего приказа отряд остаётся разорванным на две кучки, а знамя
+		# уезжает со знаменосцем в одну из них
 		u.command_move(dest + off, false, exit_dir)
 		slots.append(dest + off)
 	GameManager.squad_set_formation(squad_id, slots, exit_dir, false)
@@ -249,8 +302,7 @@ func _release_members(squad_id: int) -> void:
 # этом ЖИВЫ, но сняты со всего: невидимы, вне тика, вне групп фракции, вне
 # сетки, и стоят в точке замка (см. absorb_unit). Здание исчезало — и они
 # оставались невидимыми призраками навсегда: ни в бою, ни в подсчёте армии, ни
-# на экране. Со стороны это и есть «юниты и звёздочки просто бесследно
-# исчезают». Хуже того, отряд числился живым, и проверка победы его считала.
+# на экране. Со стороны это и есть «юниты просто бесследно исчезают». Хуже того, отряд числился живым, и проверка победы его считала.
 #
 # ЧТО СТАЛО. Гарнизон честно вываливается наружу и продолжает драться. Из двух
 # предложенных вариантов («успевают выбежать» / «гибнут в руинах») выбран
@@ -290,6 +342,7 @@ func _evacuate_on_death() -> void:
 				# режиме, где он не дерётся и не отвечает
 				u.end_retreat(true)
 	_incoming.clear()
+	_incoming_at.clear()
 
 ## Сколько бойцов не хватает отряду до полного состава
 func garrison_missing(squad_id: int) -> int:
@@ -328,7 +381,7 @@ func _process_garrison(delta: float) -> void:
 			var u: Unit = m
 			if u.garrisoned:
 				continue
-			if u.global_position.distance_to(gate) <= _UCfg.GARRISON_ENTER_RADIUS:
+			if u.global_position.distance_to(gate) <= _enter_radius(sid):
 				absorb_unit(u)
 				continue
 			all_in = false
@@ -377,6 +430,11 @@ func _process_garrison(delta: float) -> void:
 		else:
 			still.append(sid)
 	_incoming = still
+	# Часы очереди держим ровно на тех, кто ещё идёт: вошедший и отменивший
+	# поход обязаны начать отсчёт заново, если их пошлют в замок снова
+	for sid_key in _incoming_at.keys():
+		if not still.has(sid_key):
+			_incoming_at.erase(sid_key)
 
 	# 2) лечение и пополнение тех, кто уже внутри
 	var keep: Array = []
@@ -450,11 +508,9 @@ func _process(delta: float) -> void:
 			ResourceManager.gather_resource(faction, Constants.RESOURCE_GOLD, GOLD_INCOME)
 
 func _build_visual() -> void:
-	var collider := CollisionShape3D.new()
-	var shape    := BoxShape3D.new()
-	shape.size = build_size; collider.shape = shape
-	collider.position.y = build_size.y / 2.0
-	add_child(collider)
+	# Форму попадания заводит база: её потом подгоняют под рисунок
+	# (см. Building._add_pick_shape / _fit_pick_to_sprite)
+	_add_pick_shape()
 
 	if ResourceLoader.exists(GLB_PATH):
 		var scene := load(GLB_PATH) as PackedScene

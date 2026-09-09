@@ -2,6 +2,8 @@ extends Node
 
 ## Балансная таблица: стартовые запасы игрока и ИИ (см. reset_resources)
 const _UCfg := preload("res://scripts/unit_stats_config.gd")
+## Пресеты сложности: они правят стартовый запас ПРОТИВНИКА (см. reset_resources)
+const _Diff := preload("res://scripts/game_difficulty_config.gd")
 
 signal resources_changed(faction)
 
@@ -26,10 +28,24 @@ func reset_resources() -> void:
 	# СТАРТ сохранён специально: когда у ИИ было на 50 дерева и 50 золота больше,
 	# он закладывал постройку раньше игрока, и это читалось как «ресурсы падают
 	# с неба». Раздельные блоки нужны, чтобы фору МОЖНО было дать осознанно
+	# СЛОЖНОСТЬ ПРАВИТ ЗАПАС ТОЛЬКО ПРОТИВНИКУ. Игрок получает базовые числа на
+	# любом уровне: сложность меняет соперника, а не правила игрока, — иначе
+	# «лёгкая» превратилась бы в «дать игроку денег», и сравнивать две партии
+	# между собой стало бы нельзя (см. game_difficulty_config.starting_resources)
 	for f in range(Constants.FACTION_COUNT):
-		resources[f] = _UCfg.starting_resources(f)
+		resources[f] = _Diff.starting_resources(f, _UCfg.starting_resources(f))
 	gathered.clear()          # новая партия — новый счёт добытого
 	resources_changed.emit(Constants.FACTION_PLAYER)
+
+## ПОСТАВИТЬ склад в точное значение. Нужно ровно одному месту — загрузке
+## партии (SaveLoadManager): там запас не «прибавляется», а ВОССТАНАВЛИВАЕТСЯ,
+## и складывать его с тем, что выдал старт новой карты, нельзя
+func set_amount(faction: int, type: int, amount: float) -> void:
+	if not resources.has(faction):
+		_init_faction(faction)
+	(resources[faction] as Dictionary)[type] = maxf(amount, 0.0)
+	if faction == Constants.FACTION_PLAYER:
+		resources_changed.emit(faction)
 
 func add_resource(faction: int, type: int, amount: float) -> void:
 	if not resources.has(faction):

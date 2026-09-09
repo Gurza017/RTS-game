@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://oreshotqa1"]
+
+[ext_resource type="Script" path="res://qa_gold/OreShot.gd" id="1"]
+
+[node name="OreShot" type="Node"]
+script = ExtResource("1")

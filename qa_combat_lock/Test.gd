@@ -119,6 +119,17 @@ func _run() -> void:
 	var foes := _squad("spearman", Constants.FACTION_ENEMY, origin + Vector3(0, 0, 2.5), 5)
 
 	var sid := _squad_id_of(men)
+	# ── ПРОТИВНИК ДЕРЁТСЯ ДО ПОСЛЕДНЕГО, И ЭТО ЧАСТЬ СЦЕНАРИЯ ──────────────
+	# Стенд про ТАЙМИНГ СМЫКАНИЯ, а не про мораль: он ждёт, что бой кончится
+	# гибелью последнего врага. С появлением паники (см. docs/BALANCE_MATH.md,
+	# раздел 3) выбитый на четыре пятых отряд бросает бой и убегает — драка
+	# кончается РАНЬШЕ, чем умирает последний, и стенд ловил своё же смыкание
+	# как «сработало, пока враг жив».
+	# Выдаём противнику легендарный перк «Непреклонные»: он и означает
+	# «этот отряд не паникует». Паника проверяется своим стендом (qa_balance)
+	var foe_sid := _squad_id_of(foes)
+	if GameManager.squads.has(foe_sid):
+		(GameManager.squads[foe_sid] as Dictionary)["chosen"] = ["legend_steadfast"]
 	var stale_slots: Array = []
 	for i in range(men.size()):
 		var u: Unit = men[i]

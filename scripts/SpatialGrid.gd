@@ -82,11 +82,13 @@ func ally_overlap(node: Node3D, at: Vector3, min_dist: float, max_push: float) -
 		return Vector3.ZERO
 	return _core().AllyOverlap(u._soa, at.x, at.z, min_dist, max_push)
 
-func enemy_block(node: Node3D, target_pos: Vector3, min_dist: float) -> Vector3:
+## away_ok — только под билетом прохода: шаг ПРОЧЬ от тела внутри радиуса
+## не блокируется (см. ArmyCore.ScanBlock)
+func enemy_block(node: Node3D, target_pos: Vector3, min_dist: float, away_ok: bool = false) -> Vector3:
 	var u := node as Unit
 	if u == null or u._soa < 0:
 		return Vector3.ZERO
-	return _core().EnemyBlock(u._soa, target_pos.x, target_pos.z, min_dist)
+	return _core().EnemyBlock(u._soa, target_pos.x, target_pos.z, min_dist, away_ok)
 
 ## dir должен быть единичным и лежать в плоскости XZ
 func allies_ahead(node: Node3D, dir: Vector3, look: float, half_width: float) -> int:

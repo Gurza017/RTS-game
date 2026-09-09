@@ -1,6 +1,8 @@
 extends Node3D
 class_name FogOfWar
 
+const _Opt = preload("res://scripts/perf_config.gd")
+
 ## ═══════════════════════════════════════════════════════════════════════════
 ## ТУМАН ВОЙНЫ
 ## ═══════════════════════════════════════════════════════════════════════════
@@ -89,6 +91,9 @@ func setup(half_x: float, half_z: float) -> void:
 	_img = Image.create(cols, rows, false, Image.FORMAT_RGBA8)
 	_img.fill(Color(0, 0, 0, 1))
 	_tex = ImageTexture.create_from_image(_img)
+	# Попиксельная часть пересчёта живёт в ядре (этап D3)
+	GameManager.army.fog_setup(cols, rows, _half_x, _half_z,
+		MASK_CELL, EDGE_FEATHER)
 	_build_plane()
 	# РАСТИТЕЛЬНОСТЬ ЧИТАЕТ ТУ ЖЕ САМУЮ МАСКУ, чтобы замереть вне видимой зоны
 	# (см. veg_multimesh.gdshader). Отдаём её ОДИН РАЗ: текстура за партию не
@@ -133,6 +138,7 @@ func clear_permanent() -> void:
 	_permanent.clear()
 
 func reset() -> void:
+	GameManager.army.fog_reset()
 	if _lit.is_empty():
 		return
 	for i in range(_lit.size()):
@@ -210,11 +216,33 @@ func _process(delta: float) -> void:
 func refresh() -> void:
 	if cols <= 0:
 		return
-	for i in range(_lit.size()):
-		_lit[i] = 0
 	var sources: Dictionary = {}
 	_collect_unit_sources(sources)
 	_collect_building_sources(sources)
+	# ── ПОПИКСЕЛЬНАЯ ЧАСТЬ — В ЯДРЕ (этап D3) ───────────────────────────────
+	# GDScript собирает ИСТОЧНИКИ (группы, слияние по ячейкам) и хранит копии
+	# lit/seen для чтения (is_lit каждого бойца — без границы языков); штампы,
+	# накопление «разведано» и сборка RGBA идут одним вызовом в C#
+	if _Opt.fog_core:
+		var src := PackedFloat32Array()
+		src.resize((sources.size() + _permanent.size()) * 3)
+		var w := 0
+		for p in _permanent:
+			var d: Dictionary = p
+			src[w] = float(d["x"]); src[w + 1] = float(d["z"])
+			src[w + 2] = float(d["r"]); w += 3
+		for key in sources.keys():
+			var sa: Array = sources[key]
+			src[w] = float(sa[0]); src[w + 1] = float(sa[1])
+			src[w + 2] = float(sa[2]); w += 3
+		var res: Array = GameManager.army.fog_refresh(src)
+		_lit = res[0]
+		_seen = res[1]
+		_apply_enemy_building_visibility()
+		_upload_rgba(res[2])
+		return
+	for i in range(_lit.size()):
+		_lit[i] = 0
 	for p in _permanent:
 		var d: Dictionary = p
 		_stamp(_lit, float(d["x"]), float(d["z"]), float(d["r"]))
@@ -361,6 +389,16 @@ func _stamp(map: PackedByteArray, x: float, z: float, radius: float) -> void:
 			var o: int = base + ix
 			if v > map[o]:
 				map[o] = v
+
+## Готовый RGBA от ядра — прямо в текстуру
+func _upload_rgba(data: PackedByteArray) -> void:
+	if _img == null or cols <= 0:
+		return
+	_img.set_data(cols, rows, false, Image.FORMAT_RGBA8, data)
+	if _tex == null:
+		_tex = ImageTexture.create_from_image(_img)
+	else:
+		_tex.update(_img)
 
 ## Переложить обе карты в текстуру: R — видно сейчас, G — разведано
 func _upload() -> void:

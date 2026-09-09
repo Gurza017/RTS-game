@@ -17,6 +17,7 @@ extends Node
 ## зависит от global_script_class_cache.cfg.
 
 const _AICfg := preload("res://scripts/ai_start_army_limit.gd")
+const _Diff := preload("res://scripts/game_difficulty_config.gd")
 const _UCfg  := preload("res://scripts/unit_stats_config.gd")
 const _FCfg  := preload("res://scripts/forge_config.gd")
 
@@ -106,7 +107,7 @@ func reset() -> void:
 	squads.clear()
 	_think_timer = 0.0
 	_peace_timer = 0.0
-	_peace_over  = _AICfg.PEACE_SECONDS <= 0.0
+	_peace_over  = _Diff.ai_peace_seconds() <= 0.0
 	_wave_index  = 0
 	_tactic      = _AICfg.tactic_for_wave(0)
 	_lake_taken  = false
@@ -124,7 +125,7 @@ func _process(delta: float) -> void:
 		return
 	if not _peace_over:
 		_peace_timer += delta
-		if _peace_timer >= _AICfg.PEACE_SECONDS:
+		if _peace_timer >= _Diff.ai_peace_seconds():
 			_peace_over = true
 	# Смена патрульной точки идёт по СВОЕМУ таймеру, а не по такту размышления:
 	# иначе патруль перескакивал бы на новую дугу каждые THINK_INTERVAL секунд
@@ -153,7 +154,7 @@ func tick() -> void:
 	_regroup()                    # разложить новых бойцов по отрядам
 	if army_size() >= _AICfg.ARMY_LOST_THRESHOLD:
 		_had_army = true           # с этого момента аварийный барак разрешён
-	_auto_veteran()               # звёздочки отрядов раздаются сами
+	_auto_veteran()               # награды за ранг разбираются сами
 	_economy(castle)              # рабочие: добыча и найм
 	if castle == null:
 		# ── ЗАМОК ПАЛ ────────────────────────────────────────────────────────
@@ -176,7 +177,7 @@ func tick() -> void:
 # ─────────────────────────────────────────────────────────────────────────────
 # ВЕТЕРАНСКИЕ НАГРАДЫ ИИ
 # Отряд игрока получает окно выбора в интерфейсе; у ИИ интерфейса нет, и без
-# этого его звёздочки копились неиспользованными — при равных числах в конфиге
+# этого его награды копились неразобранными — при равных числах в конфиге
 # игрок получал преимущество просто потому, что ему есть куда нажать.
 # Выбор идёт по списку предпочтений из конфига, а не случайно: поведение
 # воспроизводимо и его видно в отчёте стенда.
@@ -210,7 +211,7 @@ func _auto_veteran() -> void:
 					break
 			if not GameManager.apply_veteran_choice(sid, pick):
 				break
-			last_action += "|звезда отряду %d (%s)" % [sid,
+			last_action += "|награда отряду %d (%s)" % [sid,
 				String((choices[pick] as Dictionary).get("stat", "?"))]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -314,7 +315,7 @@ func army_size() -> int:
 func army_ready() -> bool:
 	for t in _AICfg.combat_types():
 		var uid: String = String(t)
-		if squad_count(uid) < _AICfg.squad_limit(uid):
+		if squad_count(uid) < _Diff.ai_squad_limit(uid):
 			return false
 	return not squads.is_empty()
 
@@ -393,7 +394,7 @@ func _economy(castle: Castle) -> void:
 	if castle == null:
 		return
 	var queued := _queued_count(castle, "worker")
-	if workers.size() + queued >= _AICfg.WORKER_LIMIT:
+	if workers.size() + queued >= _Diff.ai_worker_limit():
 		return
 	# Замок занят армией — рабочие ждут, КРОМЕ полного вымирания экономики
 	if not castle.production_queue.is_empty() and workers.size() > 0:
@@ -668,7 +669,7 @@ func _most_needed(types: Array, bld: Building) -> String:
 	var best_gap := 0
 	for t in types:
 		var uid: String = String(t)
-		var limit: int = _AICfg.squad_limit(uid)
+		var limit: int = _Diff.ai_squad_limit(uid)
 		if limit <= 0:
 			continue
 		var have: int = squad_count(uid) + _queued_count(bld, uid)
@@ -970,7 +971,7 @@ var recap_center: bool = false
 ## Доля набранной армии от полного лимита, 0..1. Считается ПО БОЙЦАМ: отряды у
 ## разных родов разного размера, и счёт по отрядам врал бы вдвое
 func _army_fill() -> float:
-	var cap: int = _AICfg.total_army_cap()
+	var cap: int = _Diff.ai_total_army_cap()
 	if cap <= 0:
 		return 0.0
 	return float(army_size()) / float(cap)
@@ -1481,6 +1482,24 @@ func _squad_strength(sq: Dictionary) -> float:
 	var full_hp: float = float(peak) * maxf(sample.max_health, 1.0)
 	return hp / full_hp
 
+## НАИБОЛЬШИЙ РАНГ ВЕТЕРАНСТВА В ТАКТИЧЕСКОЙ ГРУППЕ.
+## Группа ИИ — это НЕ отряд реестра: в неё может входить несколько отрядов, и
+## ранги у них разные. «Есть ли что беречь» решает лучший из них.
+## Ноль означает «новобранцы, ни одной лычки»
+func _squad_vet_level(sq: Dictionary) -> int:
+	var best := 0
+	var seen: Dictionary = {}
+	for m in sq["members"]:
+		var u := m as Unit
+		if u == null or not is_instance_valid(u):
+			continue
+		var sid: int = u.squad_id
+		if sid <= 0 or seen.has(sid):
+			continue
+		seen[sid] = true
+		best = maxi(best, GameManager.squad_level(sid))
+	return best
+
 ## ── ОТСТУПЛЕНИЕ В КРЕПОСТЬ ──────────────────────────────────────────────────
 ## Выбитый отряд, оставленный в поле, доедают бесплатно. Отправленный в замок —
 ## лечится и пополняется до штатной численности и возвращается в строй.
@@ -1519,7 +1538,16 @@ func _try_retreat(sq: Dictionary, castle: Castle) -> bool:
 	# когда бойцы уйдут внутрь (_regroup выкидывает их из состава)
 	if String(sq["role"]) == ROLE_RETREAT:
 		return true
-	if _squad_strength(sq) > _AICfg.RETREAT_STRENGTH:
+	# ── ПОРОГ ОТХОДА У ВЕТЕРАНОВ СВОЙ ───────────────────────────────────────
+	# Заказ владельца: опытный отряд обязан уходить на восстановление, а не
+	# погибать. Разбор, почему число отдельное, — в AICfg.RETREAT_STRENGTH_VETERAN.
+	# Ранг берётся МАКСИМАЛЬНЫЙ по составу: тактическая группа ИИ (sq) может
+	# держать несколько отрядов реестра, и «есть ли что беречь» решает лучший
+	# из них, а не первый попавшийся
+	var limit: float = _AICfg.RETREAT_STRENGTH
+	if _squad_vet_level(sq) >= _AICfg.RETREAT_VETERAN_LEVEL:
+		limit = maxf(limit, _AICfg.RETREAT_STRENGTH_VETERAN)
+	if _squad_strength(sq) > limit:
 		return false
 	# ── ЗАВЯЗАЛСЯ В РУКОПАШНОЙ — ДЕРЁТСЯ ДО КОНЦА ───────────────────────────
 	# Отряд, развернувшийся спиной посреди схватки, не отступает, а гибнет: он
@@ -1542,6 +1570,15 @@ func _try_retreat(sq: Dictionary, castle: Castle) -> bool:
 	# тихо, значит оголить рубеж без всякой причины
 	var anchor := _squad_centroid(sq["members"])
 	if _nearest_player_target(anchor, _AICfg.RETREAT_THREAT_RADIUS) == null:
+		return false
+	# ── У САМОГО ПРОТИВНИКА РЕШЕНИЕ ОБ АТАКЕ НЕ ОТМЕНЯЕТСЯ ─────────────────
+	# Разбор — в AICfg.AI_NO_RETREAT_RANGE. Коротко: запрет по КОНТАКТУ выше
+	# срабатывает уже после первого удара, а разворот случается раньше — отряд
+	# дошёл на дистанцию выстрела, получил стрелу и пошёл обратно, ни разу не
+	# ударив. Проверка стоит ПОСЛЕ поиска угрозы: тот же самый скан, второго не
+	# добавляется
+	if _AICfg.AI_NO_RETREAT_RANGE > 0.0 \
+			and _nearest_player_target(anchor, _AICfg.AI_NO_RETREAT_RANGE) != null:
 		return false
 	var sent := false
 	var seen: Dictionary = {}
@@ -1821,6 +1858,23 @@ func _apply_orders() -> void:
 		var course_frozen: bool = course.length_squared() > 1e-6
 		var cols: int = _squad_cols(uid, members.size())
 		var need_issue: bool = not bool(sq["issued"])
+		# ── СМЕНА РОЛИ НЕ ВЫДЁРГИВАЕТ ОТРЯД ИЗ РУКОПАШНОЙ ───────────────────
+		# Жалоба владельца: «подбегают, бьют, отбегают назад и снова бегут».
+		#
+		# Ниже такая защита уже стоит (см. _in_melee у ветки «подтолкнуть
+		# бездельников»), но она срабатывает ТОЛЬКО когда приказ этому отряду
+		# уже был отдан. А ролей у обороны три, и такт размышления меняет их на
+		# ходу: сцепившийся отряд получал новую роль, вместе с ней свежий
+		# command_move — а тот у бойца с живой целью цель СНИМАЕТ. Отряд
+		# разворачивался спиной прямо в контакте, доходил до нового места,
+		# авто-агро вело его обратно, и цикл повторялся.
+		#
+		# Пока отряд в контакте, новый план ему не выдаётся вовсе: sq["issued"]
+		# остаётся ложью, и приказ уйдёт первым же тактом после того, как
+		# схватка кончится. ОТХОД — единственное исключение, и оно обязательно:
+		# разбитый отряд обязан уметь выйти из боя в замок
+		if need_issue and role != ROLE_RETREAT and _in_melee(sq):
+			continue
 		# ── ЗАМОРОЖЕННАЯ ЦЕЛЬ (STAGNANT TARGET) ─────────────────────────────
 		# Цель отряда не менялась, курс задан планом, противника в зоне нет —
 		# значит и раскладка мест не изменилась ни на сантиметр. Переиздавать
@@ -2307,7 +2361,7 @@ func report() -> String:
 	var parts: Array = []
 	for t in _AICfg.combat_types():
 		var uid: String = String(t)
-		parts.append("%s %d/%d" % [uid, squad_count(uid), _AICfg.squad_limit(uid)])
+		parts.append("%s %d/%d" % [uid, squad_count(uid), _Diff.ai_squad_limit(uid)])
 	var roles: Dictionary = {}
 	for s in squads:
 		var r: String = String((s as Dictionary)["role"])

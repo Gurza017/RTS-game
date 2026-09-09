@@ -6,6 +6,10 @@ const FACTION_KEYS   = ["humans", "undead", "orc", "elves", "dwarves"]
 
 const _GS       := preload("res://scripts/game_settings.gd")
 const _SSParser := preload("res://scripts/SpriteSheetParser.gd")
+## Пресеты сложности: подписи, подсказки и сам выбор живут там
+const _Diff     := preload("res://scripts/game_difficulty_config.gd")
+## Загрузка сохранённой партии прямо со стартового экрана
+const _SaveLoad := preload("res://scripts/SaveLoadManager.gd")
 
 var _player_opt: OptionButton
 var _ai_opt:     OptionButton
@@ -15,6 +19,10 @@ var _ai_color_opt:     OptionButton
 func _ready() -> void:
 	anchor_right  = 1.0
 	anchor_bottom = 1.0
+	# ВЫБОР СЛОЖНОСТИ ЧИТАЕТСЯ С ДИСКА ДО ВЁРСТКИ: кнопки строятся уже с
+	# подсвеченной прошлой игрой — иначе игрок каждый запуск видел бы «Обычная»
+	# независимо от того, что выбрал вчера
+	_Diff.load_saved()
 	_build_ui()
 	# Панель выбора расы играет основную тему
 	AudioManager.play_menu_music()
@@ -89,6 +97,8 @@ func _build_ui() -> void:
 	_ai_color_opt = _make_color_option(_GS.DEFAULT_AI_COLOR)
 	grid.add_child(_make_option_row("Цвет ИИ:", _ai_color_opt))
 
+	_add_spacer(vbox, 10)
+	_build_difficulty_row(vbox)
 	_add_spacer(vbox, 14)
 
 	# Кнопка старт — заметная, но КОМПАКТНАЯ и соразмерная соседним.
@@ -105,6 +115,8 @@ func _build_ui() -> void:
 	btn.pressed.connect(_on_start)
 	vbox.add_child(btn)
 
+	_add_spacer(vbox, 6)
+	_build_load_row(vbox)
 	_add_spacer(vbox, 10)
 
 	# ─── ОПЦИИ ЗВУКА ПРЯМО В ГЛАВНОМ МЕНЮ ────────────────────────────────────
@@ -142,6 +154,87 @@ func _build_ui() -> void:
 
 ## Панель ползунков громкости в главном меню
 var _audio_box: VBoxContainer = null
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ВЫБОР СЛОЖНОСТИ
+#
+# РЯД КНОПОК, А НЕ ВЫПАДАЮЩИЙ СПИСОК, и это не вкусовщина. Сложность —
+# единственная настройка на этом экране, которая меняет саму партию, а не
+# картинку: её видно должно быть сразу, без раскрытия списка. Плюс под рядом
+# стоит СТРОКА-ПОДСКАЗКА, объясняющая выбранное словами, — в пункт списка её
+# не положить.
+#
+# Кнопки строятся из _Diff.ORDER, а подписи берутся из пресета: добавление
+# четвёртого уровня сложности в конфиг доезжает сюда само.
+# ─────────────────────────────────────────────────────────────────────────────
+var _diff_buttons: Dictionary = {}
+var _diff_hint: Label = null
+
+## Цвет выбранной кнопки: от спокойного зелёного к тревожному красному.
+## Ключи — те же, что в конфиге; незнакомый уровень получит серый
+const DIFF_TINTS := {
+	"easy":   Color(0.18, 0.42, 0.20),
+	"normal": Color(0.20, 0.34, 0.52),
+	"hard":   Color(0.46, 0.16, 0.14),
+}
+
+func _build_difficulty_row(vbox: VBoxContainer) -> void:
+	var cap := Label.new()
+	cap.text = "Сложность"
+	cap.add_theme_font_size_override("font_size", 14)
+	cap.add_theme_color_override("font_color", Color(0.82, 0.84, 0.90))
+	cap.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vbox.add_child(cap)
+
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 8)
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	vbox.add_child(row)
+
+	_diff_buttons.clear()
+	for id in _Diff.ORDER:
+		var key: String = String(id)
+		var btn := Button.new()
+		btn.text = _Diff.label(key)
+		btn.custom_minimum_size = Vector2(118, 32)
+		btn.focus_mode = Control.FOCUS_NONE
+		btn.add_theme_font_size_override("font_size", 14)
+		row.add_child(btn)
+		_diff_buttons[key] = btn
+		btn.pressed.connect(func(): _on_difficulty(key))
+
+	_diff_hint = Label.new()
+	_diff_hint.add_theme_font_size_override("font_size", 12)
+	_diff_hint.add_theme_color_override("font_color", Color(0.62, 0.66, 0.76))
+	_diff_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_diff_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_diff_hint.custom_minimum_size = Vector2(380, 0)
+	vbox.add_child(_diff_hint)
+	_refresh_difficulty()
+
+## Клик по кнопке. НА ДИСК ПИШЕМ СРАЗУ, тем же приёмом, что и громкость:
+## файл крошечный, а отдельная кнопка «применить» — лишний шаг для игрока
+func _on_difficulty(id: String) -> void:
+	_Diff.set_current(id)
+	_Diff.save()
+	_refresh_difficulty()
+
+## Подсветить выбранное и обновить строку-подсказку
+func _refresh_difficulty() -> void:
+	var cur: String = _Diff.current()
+	for key in _diff_buttons:
+		var k: String = String(key)
+		var btn: Button = _diff_buttons[k]
+		var on: bool = (k == cur)
+		var tint: Color = DIFF_TINTS.get(k, Color(0.24, 0.26, 0.32)) as Color
+		# Невыбранные — приглушены до трети яркости: ряд читается с одного
+		# взгляда, а не «какая из трёх кнопок чуть светлее»
+		var base: Color = tint if on else tint.darkened(0.55)
+		_style_btn(btn, base, base.lightened(0.18), tint.lightened(0.35))
+		btn.add_theme_color_override("font_color",
+			Color(0.98, 0.98, 0.98) if on else Color(0.66, 0.68, 0.74))
+	if _diff_hint != null:
+		_diff_hint.text = _Diff.hint(cur)
 
 ## Те же три шины, что и в меню паузы. Значения берутся и пишутся через
 ## AudioManager, поэтому выставленное здесь сразу действует и переживает
@@ -182,6 +275,61 @@ func _build_audio_sliders(box: VBoxContainer) -> void:
 			AudioManager.set_bus_volume(bus, v)
 			pct.text = "%d%%" % int(v * 100.0)
 			AudioManager.save_settings())
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ЗАГРУЗКА ПАРТИИ СО СТАРТОВОГО ЭКРАНА
+#
+# КНОПКА ПОЯВЛЯЕТСЯ, ТОЛЬКО ЕСЛИ ЕСТЬ ЧТО ГРУЗИТЬ. Пустой ряд «Слот 1 — пусто,
+# Слот 2 — пусто» на первом запуске игры не сообщает ничего, кроме того, что
+# игрок ещё не играл, — и занимает треть экрана.
+#
+# Выбор расы и цвета при загрузке НЕ читается: они лежат в самом сохранении
+# (см. SaveLoadManager.request_load) — иначе загруженная армия сменила бы цвет
+# посреди партии.
+# ─────────────────────────────────────────────────────────────────────────────
+func _build_load_row(vbox: VBoxContainer) -> void:
+	var any := false
+	for i in range(_SaveLoad.SLOT_COUNT):
+		if _SaveLoad.has_save(i + 1):
+			any = true
+			break
+	if not any:
+		return
+	var cap := Label.new()
+	cap.text = "Загрузить партию"
+	cap.add_theme_font_size_override("font_size", 14)
+	cap.add_theme_color_override("font_color", Color(0.82, 0.84, 0.90))
+	cap.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vbox.add_child(cap)
+
+	var err_lbl := Label.new()
+	err_lbl.add_theme_font_size_override("font_size", 11)
+	err_lbl.add_theme_color_override("font_color", Color(0.92, 0.66, 0.60))
+	err_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	err_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	err_lbl.custom_minimum_size = Vector2(380, 0)
+
+	for i in range(_SaveLoad.SLOT_COUNT):
+		var slot: int = i + 1
+		if not _SaveLoad.has_save(slot):
+			continue
+		var btn := Button.new()
+		btn.text = _SaveLoad.slot_label(slot)
+		btn.custom_minimum_size = Vector2(380, 28)
+		btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+		btn.focus_mode = Control.FOCUS_NONE
+		btn.add_theme_font_size_override("font_size", 12)
+		_style_btn(btn, Color(0.12, 0.22, 0.32), Color(0.18, 0.32, 0.46),
+			Color(0.30, 0.50, 0.70))
+		vbox.add_child(btn)
+		btn.pressed.connect(func():
+			# Кэш листов сбрасывается ровно как при обычном старте: цвета сторон
+			# приедут из сохранения, и набор прошлой партии тут не при чём
+			_SSParser.clear_cache()
+			var err: String = _SaveLoad.request_load(get_tree(), slot)
+			if not err.is_empty():
+				err_lbl.text = err)
+	vbox.add_child(err_lbl)
 
 func _make_label(text: String) -> Label:
 	var lbl := Label.new()

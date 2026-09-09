@@ -721,12 +721,22 @@ func _test_bonus_effects() -> void:
 			await arm_squad(sq_b)
 			GameManager.apply_veteran_choice(sq_b, idx)
 			var t_after: float = measure_taken(bu, 60.0)
-			var want_cut: float = b_arm + b_def
-			print("  ЗАЩИТА «%s»: из 60 прошло %.1f → %.1f (ждали -%.1f), vet_armor=%.1f vet_defense=%.1f" % [
-				nm, t_before, t_after, want_cut, bu.vet_armor, bu.vet_defense])
-			verdict("5 «%s» реально срезала урон на %.1f" % [nm, want_cut],
-				absf((t_before - t_after) - want_cut) < 0.01,
-				"было %.1f стало %.1f" % [t_before, t_after])
+			# ── ЖДЁМ НЕ ВЫЧИТАНИЕ, А ФОРМУЛУ ────────────────────────────────
+			# Здесь стояло «прошло УМЕНЬШИЛОСЬ ровно на сумму брони»: под
+			# вычитание `урон − защита` это было верно. Формула заменена на
+			# долевую с затуханием (см. docs/BALANCE_MATH.md, раздел 1), и
+			# теперь +2 брони режут не два очка урона, а свою долю.
+			# Проверка переписана на ТУ ЖЕ функцию, по которой считает бой:
+			# стенд не имеет права держать вторую копию формулы
+			var arm_before: float = bu.armor + bu.defense
+			var arm_after: float = arm_before + b_arm + b_def
+			var want_before: float = _UCfg.damage_after_armor(60.0, arm_before)
+			var want_after: float = _UCfg.damage_after_armor(60.0, arm_after)
+			print("  ЗАЩИТА «%s»: из 60 прошло %.1f → %.1f (по формуле %.1f → %.1f), vet_armor=%.1f vet_defense=%.1f" % [
+				nm, t_before, t_after, want_before, want_after, bu.vet_armor, bu.vet_defense])
+			verdict("5 «%s» срезала урон по формуле брони" % nm,
+				t_after < t_before and absf(t_after - want_after) < 0.05,
+				"было %.1f стало %.1f, формула ждёт %.1f" % [t_before, t_after, want_after])
 		elif eid == "health" and b_hp > 0.0:
 			var sq_h: int = await make_squad(1, at)
 			var h: Unit = GameManager.squad_members(sq_h)[0]

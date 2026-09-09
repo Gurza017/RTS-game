@@ -437,12 +437,41 @@ func _playing_of(cat: String) -> int:
 func _g_sliders() -> void:
 	print("\n═════ G. НАСТРОЙКИ ЗВУКА В МЕНЮ ═════")
 	var hud = main.hud
+	# ── НАСТРОЙКИ ТЕПЕРЬ СВЁРНУТЫ ЗА КНОПКОЙ (заказ владельца) ─────────────
+	# Раньше ползунки, сложность и V-Sync стояли на паузе развёрнутыми, и
+	# столбец не помещался в экран — «Загрузить игру» уезжала за нижнюю кромку.
+	# Стенд проверяет обе половины требования: свёрнутое меню ползунков НЕ
+	# показывает, а по кнопке «Настройки» они появляются все три
+	hud._pause_options_open = false
 	hud._show_pause_menu()
 	await frames(3)
+	var folded: Array = []
+	_collect_sliders(hud, folded)
+	verdict("G0 по умолчанию настройки свёрнуты — ползунков нет",
+		folded.is_empty(), "нашли %d" % folded.size())
+	var opts: Node = _find_deep(hud, "PauseOptions")
+	verdict("G0б кнопка «Настройки» на месте", opts != null)
+	# ── СВЁРНУТОЕ МЕНЮ СТОИТ ПО ЦЕНТРУ ЭКРАНА И ВЛЕЗАЕТ В НЕГО ─────────────
+	# Прокрутка заведена ради развёрнутых настроек (без неё «Загрузить игру»
+	# уезжала за нижнюю кромку). Но пока настройки свёрнуты, меню обязано
+	# выглядеть как раньше — столбцом посреди экрана, а не прижатым к верху:
+	# ScrollContainer выдаёт ребёнку его МИНИМУМ, и без явного растягивания
+	# CenterContainer центрировать было бы нечего
+	var vp: Vector2 = get_viewport().get_visible_rect().size
+	if opts != null:
+		var col: Control = (opts as Control).get_parent() as Control
+		var mid: float = col.global_position.y + col.size.y * 0.5
+		verdict("G0в свёрнутое меню стоит по центру экрана",
+			absf(mid - vp.y * 0.5) < 24.0 and col.size.y <= vp.y,
+			"центр столбца %.0f при середине экрана %.0f, высота %.0f из %.0f" % [
+				mid, vp.y * 0.5, col.size.y, vp.y])
+	if opts != null:
+		(opts as Button).pressed.emit()
+		await frames(3)
 	var sliders: Array = []
 	_collect_sliders(hud, sliders)
 	print("  ползунков в меню паузы: %d" % sliders.size())
-	verdict("G1 меню паузы отдаёт три ползунка", sliders.size() == 3,
+	verdict("G1 развёрнутые настройки отдают три ползунка", sliders.size() == 3,
 		"нашли %d" % sliders.size())
 
 	var all_always := true
@@ -473,3 +502,13 @@ func _collect_sliders(node: Node, out: Array) -> void:
 		out.append(node)
 	for c in node.get_children():
 		_collect_sliders(c, out)
+
+## Найти узел по имени в поддереве (кнопка «Настройки» лежит внутри прокрутки)
+func _find_deep(root: Node, nm: String) -> Node:
+	if root.name == nm:
+		return root
+	for c in root.get_children():
+		var r := _find_deep(c, nm)
+		if r != null:
+			return r
+	return null

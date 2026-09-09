@@ -59,19 +59,21 @@ const HUT_GATE := 3.2
 func sprite_fps() -> float:
 	return _GobCfg.HUT_SMOKE_FPS
 
+## Не дальше периметра рисунка — см. Building.gate_depth
 func gate_depth() -> float:
+	if _draw_half_w >= 0.0:
+		return minf(HUT_GATE, _draw_half_w + GATE_CLEARANCE)
 	return HUT_GATE
 
 ## ЗАМКОВОЙ МОДЕЛИ У ХИЖИНЫ НЕТ. База Castle грузит castle.glb; здесь нужен
 ## только коллайдер и запасной примитив — картинку положит поверх
 ## Building._maybe_load_building_sprite
 func _build_visual() -> void:
-	var collider := CollisionShape3D.new()
-	var shape := BoxShape3D.new()
-	shape.size = build_size
-	collider.shape = shape
-	collider.position.y = build_size.y * 0.5
-	add_child(collider)
+	# Форму попадания заводит база — её потом подгоняют под рисунок хижины
+	# (см. Building._add_pick_shape / _fit_pick_to_sprite). Хижина нарисована
+	# вдвое выше своей коробки, и без этой подгонки клик в её крышу пролетал
+	# над коробкой в землю за домом
+	_add_pick_shape()
 	_build_procedural_visual()
 	selection_ring = make_selection_marker()
 	add_child(selection_ring)
@@ -89,7 +91,7 @@ func _process(delta: float) -> void:
 	var ticks: float = _food_timer / _GobCfg.HUT_TICK_SEC
 	_food_timer = 0.0
 	ResourceManager.gather_resource(faction, Constants.RESOURCE_FOOD,
-		_GobCfg.HUT_FOOD_PER_MIN * (_GobCfg.HUT_TICK_SEC / 60.0) * ticks)
+		_Diff.goblin_hut_food_per_min() * (_GobCfg.HUT_TICK_SEC / 60.0) * ticks)
 
 ## Хижине покадровый тик нужен ВСЕГДА: она капает еду, а не только держит
 ## гарнизон. Замковое условие «тикаю, если я игрок или есть гарнизон» здесь

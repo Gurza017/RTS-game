@@ -1,7 +1,7 @@
 extends Node
 
 ## СТЕНД: АПДЕЙТ ИЗ ЧЕТЫРЁХ БЛОКОВ
-##   A ВЕТЕРАНСТВО — 7 грейдов, бронза/серебро/красная, звёзды −30 %
+##   A ВЕТЕРАНСТВО — 7 грейдов знамён: таблица, значок ранга, звание, картинка
 ##   B КУЗНИЦА     — очередь исследований, отмена ПКМ с возвратом 100 %,
 ##                   светлое приглушение + зелёная галочка вместо тёмной плашки
 ##   C БОНУСЫ      — ряд иконок отряда, римский стек II/III/IV, окно-подсказка
@@ -12,7 +12,7 @@ extends Node
 
 const _UCfg  := preload("res://scripts/unit_stats_config.gd")
 const _Forge := preload("res://scripts/forge_config.gd")
-const _Star := preload("res://scripts/VeterancyStar.gd")
+const _Banner := preload("res://scripts/BannerArt.gd")
 
 var main: Node = null
 var hud        = null
@@ -65,86 +65,85 @@ func _summary() -> void:
 	print("  провалов: %d из %d" % [bad, verdicts.size()])
 
 # ═════════════════════════════════════════════════════════════════════════════
-# A. ВЕТЕРАНСТВО: ГРЕЙДЫ ЗВЁЗД
+# A. ВЕТЕРАНСТВО: СЕМЬ ГРЕЙДОВ ЗНАМЁН
 # ═════════════════════════════════════════════════════════════════════════════
+# Звёздочки заменены знамёнами (заказ владельца, авг. 2026), и вместе с ними
+# ушла прежняя звёздная шкала. Проверяется теперь ЕДИНСТВЕННЫЙ источник
+# правды — VET_BANNER_TIERS: по нему рисуется знамя в мире (BannerArt), по нему
+# же подписывается ранг в панели (veteran_badge_text / veteran_rank_name).
 
 func _block_a() -> void:
-	print("\n═════ A. ВЕТЕРАНСТВО (звёзды) ═════")
-	# Конфиг теперь раздельный по 4 боевым типам (VET_CONFIG) — звёзды
-	# (VET_STAR_TIERS) остались общим стилем показа, а вот пороги/бонусы
-	# берём для представителя ("spearman"), тот же тип, что даёт _make_squad
+	print("\n═════ A. ВЕТЕРАНСТВО (знамёна) ═════")
+	# Пороги и награды раздельные по боевым типам (VET_CONFIG); грейды знамён —
+	# общий стиль показа. Представитель тот же, что даёт _make_squad
 	var utype := "spearman"
 	var maxl: int = _UCfg.max_veteran_level(utype)
 	print("  уровней: %d, порогов: %d, грейдов: %d" % [maxl,
-		(_UCfg.VET_CONFIG[utype]["thresholds"] as Array).size(), _UCfg.VET_STAR_TIERS.size()])
+		(_UCfg.VET_CONFIG[utype]["thresholds"] as Array).size(),
+		_UCfg.VET_BANNER_TIERS.size()])
 
-	# A1 — таблицы согласованы: на каждый уровень есть и порог, и грейд, и выбор
-	var ok1 := maxl > 0 and _UCfg.VET_STAR_TIERS.size() >= maxl
-	var seen_tiers: Array = []
+	# A1 — таблицы согласованы: на каждый уровень есть порог, грейд и выбор
+	var ok1 := maxl > 0 and _UCfg.VET_BANNER_TIERS.size() >= maxl
+	var shapes: Array = []
 	for lvl in range(1, maxl + 1):
-		var tier: Dictionary = _UCfg.veteran_star_tier(lvl)
-		if tier.is_empty() or int(tier.get("count", 0)) < 1:
+		var tier: Dictionary = _UCfg.veteran_banner_tier(lvl)
+		if tier.is_empty() or String(tier.get("rank", "")).is_empty():
 			ok1 = false
 		if _UCfg.veteran_choices(utype, lvl).is_empty():
 			ok1 = false
 		if _UCfg.veteran_threshold(utype, lvl) <= 0:
 			ok1 = false
-		var tn: String = String(tier.get("tier", ""))
-		if not (tn in seen_tiers):
-			seen_tiers.append(tn)
+		var sh: int = int(tier.get("shape", -1))
+		if not (sh in shapes):
+			shapes.append(sh)
 	verdict("A1 у каждого уровня есть порог, грейд и список наград",
-		ok1, "грейды по порядку: %s" % str(seen_tiers))
+		ok1, "формы по порядку: %s" % str(shapes))
 
-	# A2 — грейдов ТРИ и высший заметно крупнее базового
-	var first: Dictionary = _UCfg.veteran_star_tier(1)
-	var last: Dictionary  = _UCfg.veteran_star_tier(maxl)
-	var ok2: bool = seen_tiers.size() >= 3 \
-		and float(last.get("scale", 1.0)) > float(first.get("scale", 1.0)) \
-		and (last.get("color") as Color) != (first.get("color") as Color)
-	verdict("A2 три грейда, высший крупнее и другого цвета", ok2,
-		"scale %0.2f → %0.2f" % [float(first.get("scale", 1.0)),
-			float(last.get("scale", 1.0))])
+	# A2 — форм ровно три (вымпел / гвидон / штандарт) и высший грейд — штандарт
+	var last: Dictionary = _UCfg.veteran_banner_tier(maxl)
+	var ok2: bool = shapes.size() == 3 		and int(last.get("shape", -1)) == _UCfg.BANNER_STANDARD
+	verdict("A2 три формы знамени, высший грейд — штандарт", ok2,
+		"форм %d, высшая %d" % [shapes.size(), int(last.get("shape", -1))])
 
-	# A3 — РАЗМЕР ЗВЕЗДЫ ПЕРЕСМОТРЕН.
-	# Прежние 0.098 (−30 % от 0.14) подбирались под звезду, висевшую над головой
-	# ОДНОГО бойца-командира. Теперь она стоит над центром масс всего отряда
-	# (см. qa_sel2 E6) и по заказу владельца увеличена ВДВОЕ
-	var want_r: float = 0.14 * 0.7 * 2.0
-	var ok3: bool = absf(_Star.STAR_RADIUS - want_r) < 0.0005
-	verdict("A3 радиус звезды удвоен (0.098 → %0.3f)" % want_r, ok3,
-		"STAR_RADIUS=%0.4f" % _Star.STAR_RADIUS)
-
-	# A4 — мех строится на всех уровнях, ширина ряда растёт вместе с count,
-	#      а высший грейд (одна звезда) выше базового с тем же count
-	var ok4 := true
-	var widths: Array = []
-	var heights: Array = []
+	# A3 — ЗНАЧОК РАНГА ВЫВОДИТСЯ ИЗ ТОЙ ЖЕ ТАБЛИЦЫ и различает соседние грейды.
+	# Это главное свойство: пока значок считали отдельно от знамени, они
+	# разъезжались при первой правке одного из них
+	var badges: Array = []
+	var ok3 := true
 	for lvl in range(1, maxl + 1):
-		var node: MeshInstance3D = _Star.create(lvl)
-		if node.mesh == null:
-			ok4 = false
-			widths.append(0.0)
-			heights.append(0.0)
-		else:
-			var aabb: AABB = node.mesh.get_aabb()
-			widths.append(aabb.size.x)
-			heights.append(aabb.size.y)
-		node.free()
-	# внутри одного грейда ряд из двух звёзд шире, чем из одной
-	for lvl in range(2, maxl + 1):
-		var t_prev: Dictionary = _UCfg.veteran_star_tier(lvl - 1)
-		var t_cur: Dictionary  = _UCfg.veteran_star_tier(lvl)
-		if String(t_prev.get("tier", "")) != String(t_cur.get("tier", "")):
+		var b: String = _UCfg.veteran_badge_text(lvl)
+		if b.is_empty():
+			ok3 = false
+		if b in badges:
+			ok3 = false
+		badges.append(b)
+	verdict("A3 значок ранга свой у каждого из семи уровней", ok3,
+		"значки: %s" % " ".join(PackedStringArray(badges)))
+
+	# A4 — ЗВАНИЕ СОБИРАЕТСЯ ИЗ ДВУХ КОНФИГОВ: ранг из таблицы грейдов,
+	# существительное из STATS.name_genitive_plural того рода войск
+	var name7: String = _UCfg.veteran_rank_name(utype, maxl)
+	var ok4: bool = name7.contains(String(last.get("rank", "?"))) 		and name7.contains(_UCfg.stat_str(utype, "name_genitive_plural", "?")) 		and _UCfg.veteran_rank_name("worker", maxl) != name7
+	verdict("A4 звание отряда собрано из ранга и рода войск", ok4, name7)
+
+	# A5 — картинка строится на всех уровнях, кэшируется по номеру грейда
+	# и у разных грейдов РАЗНАЯ (иначе шкала званий нечитаема)
+	var ok5 := true
+	var first_tex: Texture2D = null
+	for lvl in range(1, maxl + 1):
+		var tex: Texture2D = _Banner.texture_for(lvl)
+		if tex == null or tex.get_width() <= 0:
+			ok5 = false
 			continue
-		if int(t_cur.get("count", 0)) > int(t_prev.get("count", 0)):
-			if float(widths[lvl - 1]) <= float(widths[lvl - 2]):
-				ok4 = false
-	# высшая (красная) звезда выше первой бронзовой — это и есть «чуть крупнее»
-	if float(heights[maxl - 1]) <= float(heights[0]):
-		ok4 = false
-	verdict("A4 меши всех уровней строятся, высота высшего грейда больше",
-		ok4, "h[1]=%0.3f h[%d]=%0.3f" % [float(heights[0]), maxl,
-			float(heights[maxl - 1])])
+		if lvl == 1:
+			first_tex = tex
+		elif tex == first_tex:
+			ok5 = false
+	# повторный запрос обязан вернуть ТОТ ЖЕ объект — иначе кэша нет
+	if first_tex != null and _Banner.texture_for(1) != first_tex:
+		ok5 = false
+	verdict("A5 знамя рисуется на всех уровнях и кэшируется", ok5,
+		"холст %dx%d" % [_Banner.W, _Banner.H])
 
 # ═════════════════════════════════════════════════════════════════════════════
 # B. КУЗНИЦА: ОЧЕРЕДЬ И ОТМЕНА

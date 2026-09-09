@@ -106,6 +106,7 @@ func _run() -> void:
 
 	print("\n───── A. %d ЗАКАЗОВ ПОДРЯД ИЗ ОДНОГО БАРАКА ─────" % ORDERS)
 	var lat_by_order: Array = []
+	var fwd_by_order: Array = []
 	var worst := 0.0
 	var off_map := 0
 	for k in range(ORDERS):
@@ -113,6 +114,7 @@ func _run() -> void:
 		# Отступ берётся ЗНАКОВЫЙ и по центру отряда: полосы 1 и 2 отходят на
 		# одну и ту же величину в РАЗНЫЕ стороны, и по модулю они неразличимы
 		var lat_sum := 0.0
+		var fwd_sum := 0.0
 		var cnt := 0
 		for n in fresh:
 			var u := n as Unit
@@ -121,12 +123,14 @@ func _run() -> void:
 			var d: Vector3 = u.move_target - gate
 			d.y = 0.0
 			lat_sum += d.dot(side)
+			fwd_sum += d.dot(exit_dir)
 			cnt += 1
 			if absf(u.move_target.x) > GameManager.map_lim_x + 0.01 \
 					or absf(u.move_target.z) > GameManager.map_lim_z + 0.01:
 				off_map += 1
 		var lat: float = lat_sum / maxf(float(cnt), 1.0)
 		lat_by_order.append(lat)
+		fwd_by_order.append(fwd_sum / maxf(float(cnt), 1.0))
 		worst = maxf(worst, absf(lat))
 		if k < 3 or k >= ORDERS - 3:
 			print("    заказ %2d: отступ вбок %+.2f м" % [k + 1, lat])
@@ -157,11 +161,18 @@ func _run() -> void:
 	# два заказа подряд обязаны собираться в РАЗНЫХ местах. Именно это ломала
 	# первая версия фикса, обнулявшая счётчик на простое здания (qa_rally2
 	# E7/E8: центры отрядов в 0.71 м, 17 бойцов вплотную к чужим)
+	# ── РАЗНОС МЕРИМ В ПЛОСКОСТИ, А НЕ ТОЛЬКО ВБОК (правка 31.08.2026) ─────
+	# Здесь сравнивались ТОЛЬКО боковые отступы, потому что полосы расходились
+	# вбок. Теперь они расходятся ВГЛУБЬ (заказ владельца «спавн ровно перед
+	# воротами», разбор — в Building._lane_shift), и боковой разнос равен нулю
+	# ПО ЗАМЫСЛУ. Свойство, ради которого проверка заведена, при этом ровно то
+	# же и никуда не делось: два заказа подряд обязаны собираться в РАЗНЫХ
+	# местах. Меряем расстояние между точками, а не одну его составляющую
 	var min_gap := INF
 	for k in range(ORDERS - 1):
-		var a: float = float(lat_by_order[k])
-		var c: float = float(lat_by_order[k + 1])
-		min_gap = minf(min_gap, absf(a - c))
+		var dl: float = float(lat_by_order[k]) - float(lat_by_order[k + 1])
+		var df: float = float(fwd_by_order[k]) - float(fwd_by_order[k + 1])
+		min_gap = minf(min_gap, sqrt(dl * dl + df * df))
 	verdict("B1 соседние заказы не садятся в одну точку", min_gap > 0.5,
 		"худший разрыв между соседними заказами %.2f м" % min_gap)
 	verdict("B2 счётчик полос ограничен сверху", b._exit_lane < Building.EXIT_LANES,
@@ -228,7 +239,18 @@ func _run() -> void:
 		# снос относительно НЕВЕРНОЙ оси и потому была зелёной, пока баг был жив.
 		# Сверяемся с тем же, с чем сверяется игрок глазами, — с фасадом
 		var fd: Vector3 = yard.facade_dir()
-		var to_gate: Vector3 = g - yard.global_position
+		# ── ОТСЧЁТ ОТ СЕРЕДИНЫ РИСУНКА, А НЕ ОТ УЗЛА ───────────────────────
+		# Здесь стояла `yard.global_position`, и проверка ловила НЕ ДЕФЕКТ, а
+		# намеренную поправку: непрозрачная часть кадра смещена внутри самого
+		# кадра, и ворота сдвигаются на `_draw_cx` РОВНО ЗАТЕМ, чтобы совпасть
+		# с серединой рисунка — той же, по которой кладётся кольцо на земле
+		# (Building.ring_center). У замка это −0.01 м, то есть худший «снос»
+		# выходил ровно 0.0100 при требовании < 0.01 — ножевой красный на
+		# правильном коде. Сверяемся с тем же центром, с каким сверяется сам
+		# код, и порог остаётся жёстким
+		var origin: Vector3 = yard.ring_center()
+		origin.y = yard.global_position.y
+		var to_gate: Vector3 = g - origin
 		to_gate.y = 0.0
 		var sidew: float = absf(to_gate.dot(Vector3(-fd.z, 0.0, fd.x)))
 		worst_front = maxf(worst_front, sidew)

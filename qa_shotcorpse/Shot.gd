@@ -205,25 +205,6 @@ func _run() -> void:
 	cam.jump_to(solo, 7.0)
 	await _shot("solo")
 
-	# ── 5. ЗВЁЗДЫ ВЕТЕРАНОВ: КАНТ И ПАЛИТРА ────────────────────────────────
-	# Все три грейда рядом, над бойцами и над травой: кант обязан читаться на
-	# любом фоне, а цвета — отличаться друг от друга с одного взгляда
-	var vet := _clear_spot(-115.0)
-	var lvls: Array = [1, 4, 7]
-	for k in range(lvls.size()):
-		var at: Vector3 = vet + Vector3(float(k) * 3.0 - 3.0, 0.0, 0.0)
-		var u := _spawn("res://scenes/units/Spearman.tscn", Constants.FACTION_PLAYER, at)
-		await pframes(2)
-		var star = load("res://scripts/VeterancyStar.gd").create(int(lvls[k]))
-		main.world_add(star)
-		# Высоту над грунтом звезда ставит себе сама (VeterancyStar.STAR_HEIGHT),
-		# и присваивание global_position её затирает — прибавляем обратно
-		star.global_position = Vector3(at.x,
-			GameManager.get_terrain_height(at.x, at.z) + star.position.y, at.z)
-	await pframes(6)
-	cam.jump_to(vet, 7.0)
-	await _shot("stars")
-
 	print("тел на поле: %d, торчащих стрел: %d"
 		% [GameManager.corpses.count(), GameManager.stuck_arrow_count()])
 	print("=== SHOTCORPSE DONE ===")

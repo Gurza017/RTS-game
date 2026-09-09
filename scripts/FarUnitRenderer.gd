@@ -58,104 +58,88 @@ class Bucket:
 	var mm: MultiMesh
 	var free: Array = []
 	var capacity: int = 0
-	## Теневая копия буфера MultiMesh. Записи идут сюда, в сервер уходит целиком
-	var buf: PackedFloat32Array = PackedFloat32Array()
-	## Было ли хоть одно изменение с прошлой подачи
-	var dirty: bool = false
+	## Материал бакета — только ради привязки ног (см. set_foot). Лента у бакета
+	## одна, значит и привязка одна
+	var mat: ShaderMaterial = null
+	## Что уже отдано шейдеру. Заведомо невозможное число, чтобы первый же
+	## вызов прошёл
+	var _foot: float = -1.0e9
+	## ── БУФЕР ЖИВЁТ В ЯДРЕ (этап C.1) ──────────────────────────────────────
+	## Теневая копия буфера MultiMesh переехала в C# (ArmyCore.Rb): у vis_far
+	## пакетная природа, и покадровый догон с записью позиций идёт одним
+	## C#-проходом BatchVisual. Здесь остался номер бакета в ядре; все записи
+	## ниже — делегаты в ArmySoA, и зовутся они ПО СОБЫТИЮ (смена ленты, кадр
+	## походки, урон, скрытие), а не покадрово
+	var core_id: int = -1
 
-	## ВСЕ ЗАПИСИ В БУФЕР — ТОЛЬКО ЗДЕСЬ, ВНУТРИ САМОГО БАКЕТА.
-	## Packed-массивы в GDScript — значения с копированием при записи: если
-	## взять `b.buf[i] = x` снаружи, интерпретатор достаёт массив в временную
-	## переменную, правит копию и кладёт обратно, то есть копирует несколько
-	## килобайт на каждый float. Внутри метода класса-владельца `buf` —
-	## прямой адрес члена, и запись идёт на месте
 	func grow(step: int) -> void:
 		var new_cap: int = capacity + step
 		# Новые ячейки — нули: нулевая матрица и есть «спрятанный слот»
-		buf.resize(new_cap * STRIDE)
+		GameManager.army.rb_ensure(core_id, new_cap)
 		for i in range(capacity, new_cap):
 			free.append(i)
 		mm.instance_count = new_cap
 		capacity = new_cap
-		dirty = true
 
-	## Полная запись: позиция + кадр + зеркало + состояние урона
+	## ── ПРИВЯЗКА НОГ ЭТОЙ ЛЕНТЫ — В ШЕЙДЕР ─────────────────────────────────
+	## Сколько от начала координат слота ВНИЗ до грунта. Шейдер берёт отсюда
+	## точку, глубиной которой рисуется весь спрайт (mm_unit_sprite, foot_drop):
+	## вывести её из геометрии квада нельзя, между низом квада и ступнями лежит
+	## пустое поле кадра, и величина этого поля у каждой ленты своя.
+	##
+	## ЭТО РОВНО `base_y`, И ПЕРВАЯ ВЕРСИЯ ОШИБЛАСЬ ИМЕННО ЗДЕСЬ. Стояло
+	## `half_h - base_y` — «от низа квада до ступней», число само по себе
+	## осмысленное и как раз равное прежней ошибке. Но шейдер отсчитывает вниз
+	## НЕ ОТ НИЗА КВАДА, А ОТ НАЧАЛА КООРДИНАТ СЛОТА, а оно и стоит на
+	## `грунт + base_y`. Вычесть надо ровно подъём — иначе остаётся
+	## `half_h - 2*base_y`, то есть у копейщика 1.25 м из прежних 1.85, и
+	## армия тонет по-прежнему, только мельче. Поймал qa_visual_smoke: замер
+	## сошёлся с этой формулой на всех четырёх размерах листа.
+	##
+	## ЗАПИСЬ ИДЁТ ТОЛЬКО НА ИЗМЕНЕНИЕ. Зовут это и из горячего пути обновления
+	## внешности, а установка uniform'а — обращение в сервер отрисовки; число же
+	## постоянно, пока бакет жив, и первый вызов остаётся единственным
+	func set_foot(base_y: float) -> void:
+		if absf(base_y - _foot) < 0.0005:
+			return
+		_foot = base_y
+		if mat != null:
+			mat.set_shader_parameter("foot_drop", base_y)
+
+	## Полная запись: позиция + кадр + зеркало + состояние урона.
+	## Кадр и зеркало едут в цвете (r — кадр/255, g — зеркало); состояние
+	## урона переписывается ВМЕСТЕ с остальным — полная запись идёт при смене
+	## ленты, и раненый, сменивший позу, не должен мигать чистым спрайтом
 	func write(idx: int, pos: Vector3, frame: int, mirror: bool,
 			flash: float, hp: float) -> void:
-		var o: int = idx * STRIDE
-		buf[o]      = 1.0
-		buf[o + 1]  = 0.0
-		buf[o + 2]  = 0.0
-		buf[o + 3]  = pos.x
-		buf[o + 4]  = 0.0
-		buf[o + 5]  = 1.0
-		buf[o + 6]  = 0.0
-		buf[o + 7]  = pos.y
-		buf[o + 8]  = 0.0
-		buf[o + 9]  = 0.0
-		buf[o + 10] = 1.0
-		buf[o + 11] = pos.z
-		# Кадр и зеркало едут в цвете: r — номер кадра, делённый на 255 (канал
-		# может оказаться восьмибитным), g — признак отражения. См. шапку шейдера
-		buf[o + 12] = float(frame) / 255.0
-		buf[o + 13] = 1.0 if mirror else 0.0
-		# ── СОСТОЯНИЕ УРОНА ПЕРЕПИСЫВАЕТСЯ ВМЕСТЕ С ОСТАЛЬНЫМ ───────────────
-		# Здесь стояли константы 0.0 и 1.0 («вспышки нет, боец цел»), и это
-		# было верно, пока каналы были свободны. Теперь нет: полная запись
-		# идёт и при СМЕНЕ ЛЕНТЫ, то есть при каждом переезде в другой бакет,
-		# а в свалке они идут постоянно. Раненый, сменивший позу, на один кадр
-		# становился бы целым — то есть мигал бы чистым спрайтом всю драку
-		buf[o + 14] = flash
-		buf[o + 15] = hp
-		dirty = true
+		GameManager.army.rb_write_full(core_id, idx, pos, frame, mirror, flash, hp)
 
-	## Быстрый путь идущего бойца: только три float позиции. Кадр и зеркало
-	## лежат в тех же шестнадцати числах и остаются нетронутыми
+	## Быстрый путь идущего бойца: только три float позиции (запасной режим и
+	## разлёт; штатный покадровый путь ведёт BatchVisual в ядре)
 	func write_pos(idx: int, pos: Vector3) -> void:
-		var o: int = idx * STRIDE
-		buf[o + 3]  = pos.x
-		buf[o + 7]  = pos.y
-		buf[o + 11] = pos.z
-		dirty = true
+		GameManager.army.rb_write_pos(core_id, idx, pos)
 
-	## ТОЛЬКО НОМЕР КАДРА — ОДИН float. Нужен затем, что лента листается ЧАЩЕ,
-	## чем пересчитывается вся внешность: походка идёт на 6-10 кадрах в секунду
-	## и обязана доезжать до буфера на каждом своём шаге, а разбор спрайта
-	## (лента, зеркало, размер) стоит на порядок дороже и идёт раз в anim_every
+	## ТОЛЬКО НОМЕР КАДРА — походка листается на своих 6-10 к/с и обязана
+	## доезжать до буфера на каждом шаге ленты
 	func write_frame(idx: int, frame: int) -> void:
-		buf[idx * STRIDE + 12] = float(frame) / 255.0
-		dirty = true
+		GameManager.army.rb_write_frame(core_id, idx, frame)
 
-	## ТОЛЬКО СОСТОЯНИЕ УРОНА — ДВА float. Отдельный путь по той же причине,
-	## что и у кадра: вспышка живёт считанные кадры и обязана доезжать до
-	## буфера немедленно, а полный разбор спрайта идёт раз в anim_every и на
-	## отклик от удара опоздал бы на треть секунды
+	## ТОЛЬКО СОСТОЯНИЕ УРОНА — вспышка живёт считанные кадры
 	func write_dmg(idx: int, flash: float, hp: float) -> void:
-		var o: int = idx * STRIDE
-		buf[o + 14] = flash
-		buf[o + 15] = hp
-		dirty = true
+		GameManager.army.rb_write_dmg(core_id, idx, flash, hp)
 
 	## Спрятать слот — нулевая матрица (MultiMesh не умеет «скрыть экземпляр»,
 	## зато вырожденный треугольник растеризатор отбрасывает сразу)
 	func hide_slot(idx: int) -> void:
-		var o: int = idx * STRIDE
-		for i in range(STRIDE):
-			buf[o + i] = 0.0
-		dirty = true
+		GameManager.army.rb_hide_slot(core_id, idx)
 
 	func hide_all() -> void:
-		for i in range(buf.size()):
-			buf[i] = 0.0
-		dirty = true
+		GameManager.army.rb_hide_all(core_id)
 
-	## Отдать накопленное в RenderingServer одним вызовом
+	## Подачу в RenderingServer делает ядро (ArmyCore.RbFlush), одним вызовом
+	## на весь мир — см. FarUnitRenderer.flush ниже
 	func flush() -> void:
-		if not dirty:
-			return
-		dirty = false
-		if capacity > 0:
-			mm.set_buffer(buf)
+		pass
 
 ## Что и куда положено про конкретного бойца. Класс, а не словарь: обращение к
 ## полю дешевле поиска по строковому ключу, а трогаем мы это на каждого бойца
@@ -278,11 +262,19 @@ func _get_or_make_bucket(key: String, sheet: Texture2D, frames: int,
 	mat.render_priority = 1
 	quad.material = mat
 
+	# Привязку ног ставит первый же зарегистрировавшийся боец (см. set_foot):
+	# здесь её взять неоткуда — бакет знает ленту, но не знает, на какой высоте
+	# у неё нарисованы ступни
+	b.mat = mat
+
 	b.mm = MultiMesh.new()
 	b.mm.transform_format = MultiMesh.TRANSFORM_3D
 	b.mm.use_colors = true
 	b.mm.mesh = quad
 	b.mm.instance_count = 0
+	# Буфер бакета заводится в ядре (см. шапку класса Bucket): подача в
+	# RenderingServer и покадровый догон позиций идут оттуда
+	b.core_id = GameManager.army.rb_create(b.mm.get_rid())
 
 	b.mmi = MultiMeshInstance3D.new()
 	b.mmi.multimesh = b.mm
@@ -341,6 +333,7 @@ func register(unit: Unit, world_root: Node3D, mirror: bool) -> Slot:
 	# поэтому растяжение высоты и подъёма центра одним множителем оставляет
 	# подошву на грунте
 	s.base_y = base_y * _BB.V_STRETCH
+	b.set_foot(s.base_y)
 	s.frame  = sf[1]
 	s.mirror = mirror
 	s.pos    = unit.global_position + Vector3(0.0, s.base_y, 0.0)
@@ -351,6 +344,16 @@ func register(unit: Unit, world_root: Node3D, mirror: bool) -> Slot:
 	s.hp     = unit.health_shade()
 	_slot[unit] = s
 	b.write(s.index, s.pos, s.frame, mirror, s.flash, s.hp)
+	# ── ПРИВЯЗКА СТРОКИ К СЛОТУ: ПОКАДРОВЫЙ ДОГОН ВЕДЁТ ЯДРО ────────────────
+	# Нарисованная точка передаётся отсюда: при переезде между бакетами (смена
+	# ленты) она обязана сохраниться, иначе картинка прыгнет на логическую.
+	# Боец без строки в ядре (_soa < 0) остаётся на событийных записях слота —
+	# как и раньше
+	if unit._soa >= 0:
+		GameManager.army.row_bind(unit._soa, b.core_id, s.index, s.base_y,
+			unit._draw_pos if unit._draw_init else unit.global_position,
+			unit._draw_init)
+		unit._rb_bound = true
 	return s
 
 ## Слот бойца или null (для тех, кто держит на него прямую ссылку)
@@ -366,6 +369,12 @@ func unregister(unit: Unit) -> void:
 	if s.bucket != null and s.bucket.mm != null:
 		s.bucket.hide_slot(s.index)
 		s.bucket.free.append(s.index)
+	# Отвязать строку от слота: догон ядра не должен писать в отданное место.
+	# Живость — на сырой ссылке (правило 5): сюда приходят и из _exit_tree
+	if is_instance_valid(unit):
+		if unit._soa >= 0:
+			GameManager.army.row_unbind(unit._soa)
+		unit._rb_bound = false
 	_slot.erase(unit)
 
 ## ПОЛНОЕ ОБНОВЛЕНИЕ: позиция, кадр, зеркало, при необходимости — переезд в
@@ -416,6 +425,10 @@ func refresh(unit: Unit, pos: Vector3, mirror: bool, known: Slot = null) -> Slot
 	# Высоту центра берём заново: в запасном режиме (mm_render_all выключен) в
 	# неё подмешано покачивание шага, которое пишет сам узел спрайта
 	s.base_y = unit._sprite_base_y * _BB.V_STRETCH
+	# И ЗДЕСЬ ТОЖЕ, а не только при регистрации: у копейщика sheet_frame()
+	# отдаёт общий SPRITE_BASE_Y, а настоящая привязка ленты (_sprite_base_y)
+	# доезжает только сюда. Запись идёт лишь на изменение, см. set_foot
+	s.bucket.set_foot(s.base_y)
 	var p := Vector3(pos.x, pos.y + s.base_y, pos.z)
 	var frame: int = unit._look_frame
 	if frame == s.frame and mirror == s.mirror:
@@ -440,11 +453,11 @@ func update_pos(unit: Unit, pos: Vector3) -> void:
 func update_transform(unit: Unit, pos: Vector3, mirror: bool) -> void:
 	refresh(unit, pos, mirror)
 
-## ОТДАТЬ НАКОПЛЕННОЕ В РЕНДЕР. Один set_buffer на изменившийся бакет за кадр;
+## ОТДАТЬ НАКОПЛЕННОЕ В РЕНДЕР. Один MultimeshSetBuffer на изменившийся бакет
+## за кадр, и делает это ЯДРО (буферы живут там, см. шапку класса Bucket);
 ## зовётся из GameManager._process ПОСЛЕ всех юнитов (см. process_priority)
 func flush() -> void:
-	for key in _buckets:
-		(_buckets[key] as Bucket).flush()
+	GameManager.army.rb_flush()
 
 func is_registered(unit: Unit) -> bool:
 	return _slot.has(unit)
@@ -470,5 +483,5 @@ func clear_bookkeeping() -> void:
 		if b.mm != null:
 			b.hide_all()
 			b.free = range(b.capacity)
-			b.flush()
+	GameManager.army.rb_flush()
 	_slot.clear()

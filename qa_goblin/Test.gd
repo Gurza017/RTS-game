@@ -129,8 +129,8 @@ func _b_village() -> void:
 		"самая дальняя хижина в %.1f м при радиусе %.0f" % [far, _GobCfg.VILLAGE_RADIUS])
 	var sq := GameManager.squads_of_faction(Constants.FACTION_GOBLIN)
 	verdict("B4 стартовых отрядов ровно столько, сколько в составе орды",
-		sq.size() == _GobCfg.ARMY_SQUADS,
-		"отрядов %d, в конфиге %d" % [sq.size(), _GobCfg.ARMY_SQUADS])
+		sq.size() == _GobCfg.army_squads(),
+		"отрядов %d, в конфиге %d" % [sq.size(), _GobCfg.army_squads()])
 	# Размеры отрядов — из конфига, а не из стенда
 	var wrong: Array = []
 	for s in sq:
@@ -149,36 +149,70 @@ func _b_village() -> void:
 # ═════════════════════════════════════════════════════════════════════════════
 # C. ВЕТЕРАНСТВО СТАРТОВОЙ ОРДЫ
 # ═════════════════════════════════════════════════════════════════════════════
+# ЧИСЛА НЕ ХАРДКОДЯТСЯ: и состав орды, и ранг каждого отряда, и число наград
+# читаются из goblin_config.START_SQUADS — той самой таблицы, по которой орду
+# и спавнят (Main._spawn_goblin_village). Проверяется СВОЙСТВО «на карте стоит
+# ровно то, что заказано в конфиге», а не «пять отрядов серебряные»: правка
+# таблицы владельцем обязана вести стенд за собой, а не красить его в красный.
+# ═════════════════════════════════════════════════════════════════════════════
 func _c_veterancy() -> void:
-	print("\n═════ C. СЕРЕБРО ПЯТИ ОТРЯДАМ ═════")
+	print("\n═════ C. РАНГИ СТАРТОВОЙ ОРДЫ ═════")
+	var roster: Array = _GobCfg.start_squads()
+	# Заказано: сколько отрядов каждого ранга и сколько наград каждому из них
+	var want_ranked := 0
+	var want_plain := 0
+	for row in roster:
+		if int((row as Dictionary)["vet"]) > 0:
+			want_ranked += 1
+		else:
+			want_plain += 1
+
 	var sq := GameManager.squads_of_faction(Constants.FACTION_GOBLIN)
-	var silver := 0
+	var ranked := 0
 	var plain := 0
-	var picks_ok := true
+	var picks_bad: Array = []
 	var pending_left := 0
+	var levels: Array = []
 	for s in sq:
 		var d: Dictionary = s
 		var sid: int = int(d["id"])
 		var lvl: int = GameManager.squad_level(sid)
+		pending_left += GameManager.squad_pending(sid)
 		if lvl <= 0:
 			plain += 1
 			continue
-		var tier: Dictionary = _UCfg.veteran_star_tier(lvl)
-		if String(tier.get("tier", "")) == _GobCfg.VETERAN_TIER:
-			silver += 1
-		if GameManager.squad_chosen(sid).size() != _GobCfg.VETERAN_AUTO_PICKS:
-			picks_ok = false
-		pending_left += GameManager.squad_pending(sid)
-	verdict("C1 серебряных отрядов ровно столько, сколько заказано",
-		silver == _GobCfg.VETERAN_START_SQUADS,
-		"серебро %d, в конфиге %d" % [silver, _GobCfg.VETERAN_START_SQUADS])
-	verdict("C2 остальные стартовые отряды без звёзд",
-		plain == _GobCfg.ARMY_SQUADS - _GobCfg.VETERAN_START_SQUADS,
-		"без звёзд %d" % plain)
-	verdict("C3 у ветеранов роздано ровно N наград", picks_ok,
-		"ожидалось по %d" % _GobCfg.VETERAN_AUTO_PICKS)
+		ranked += 1
+		levels.append(lvl)
+		# Сколько наград роздано этому отряду. В конфиге они заданы построчно,
+		# поэтому сверяемся с МНОЖЕСТВОМ заказанных значений: какой именно
+		# отряд на карте соответствует какой строке, стенд знать не обязан
+		var got: int = GameManager.squad_chosen(sid).size()
+		var found := false
+		for row in roster:
+			var r: Dictionary = row
+			if int(r["vet"]) == lvl and int(r["picks"]) == got:
+				found = true
+				break
+		if not found:
+			picks_bad.append("ур.%d: наград %d" % [lvl, got])
+
+	verdict("C1 ранговых отрядов ровно столько, сколько в конфиге",
+		ranked == want_ranked,
+		"на карте %d, в конфиге %d" % [ranked, want_ranked])
+	verdict("C2 остальные стартовые отряды без ранга",
+		plain == want_plain, "без ранга %d, в конфиге %d" % [plain, want_plain])
+	verdict("C3 каждому ранговому роздано столько наград, сколько заказано",
+		picks_bad.is_empty(), "расхождения: %s" % str(picks_bad))
 	verdict("C4 неразобранных наград не осталось", pending_left == 0,
 		"ждут выбора: %d" % pending_left)
+	# Уровень обязан лежать в границах таблицы грейдов знамён: выше седьмого
+	# ранга не существует, и «уровень 9» молча схлопнулся бы в картинку седьмого
+	var lvl_ok := true
+	for l in levels:
+		if int(l) < 1 or int(l) > _UCfg.VET_BANNER_TIERS.size():
+			lvl_ok = false
+	verdict("C5 ранги лежат в границах таблицы знамён", lvl_ok,
+		"уровни: %s" % str(levels))
 	# Награды действительно дошли до бойцов, а не осели в записи отряда
 	var boosted := false
 	for s in sq:
@@ -190,11 +224,10 @@ func _c_veterancy() -> void:
 		if men.is_empty():
 			continue
 		var u := men[0] as Unit
-		if u.vet_attack > 0.0 or u.vet_armor > 0.0 or u.max_health \
-				> _UCfg.stat(u.stat_id, "health", 0.0):
+		if u.vet_attack > 0.0 or u.vet_armor > 0.0 or u.max_health 				> _UCfg.stat(u.stat_id, "health", 0.0):
 			boosted = true
 			break
-	verdict("C5 ветеранские прибавки дошли до самих бойцов", boosted)
+	verdict("C6 ветеранские прибавки дошли до самих бойцов", boosted)
 
 # ═════════════════════════════════════════════════════════════════════════════
 # D. ЭКОНОМИКА ХИЖИНЫ
@@ -304,27 +337,43 @@ func _f_combat() -> void:
 	gob.sync_row()
 	await pframes(4)
 	gob.command_move(Vector3(418.0, 0.0, 402.4))
+	# ── ГОБЛИН МОЖЕТ ПОГИБНУТЬ ДО КОНЦА ОКНА, И ЭТО НЕ ПРОВАЛ ──────────────
+	# Девять копейщиков убивают одного гоблина за пару секунд после контакта,
+	# а окно — четыре. Обращение к освобождённому узлу роняло весь блок
+	# МОЛЧА (SCRIPT ERROR в выводе, три вердикта не печатались, сводка
+	# показывала «0 провалов»). Точка и факт боя снимаются, пока узел жив;
+	# гибель в контакте — это и упор, и рубка, то есть ровно то, что здесь
+	# проверяется
 	var passed := false
-	for _i in range(240):
-		await get_tree().physics_frame
-		if gob.global_position.x > 409.5:
-			passed = true
-			break
-	print("  гоблин дошёл до x=%.2f (стена на x=408.0)" % gob.global_position.x)
-	verdict("F1 гоблин НЕ проходит сквозь строй копейщиков", not passed,
-		"x=%.2f" % gob.global_position.x)
-	verdict("F2 гоблин упёрся в стену вплотную",
-		gob.global_position.x > 404.0,
-		"x=%.2f (шёл от 400)" % gob.global_position.x)
-	# Контакт обязан переводить в бой, а не в челнок
+	var died := false
 	var engaged := false
-	for _i in range(180):
+	var last_x: float = 400.0
+	for _i in range(240 + 180):
 		await get_tree().physics_frame
+		if not is_instance_valid(gob) or gob.is_dead():
+			died = true
+			break
+		last_x = gob.global_position.x
 		if gob.attack_target != null or gob.state == Unit.State.ATTACKING:
 			engaged = true
+		if last_x > 409.5:
+			passed = true
 			break
-	verdict("F3 при контакте гоблин фиксируется в рубке", engaged,
-		"состояние=%d, цель=%s" % [gob.state, str(gob.attack_target != null)])
+		if engaged and _i >= 240:
+			break
+	print("  гоблин дошёл до x=%.2f (стена на x=408.0)%s" % [last_x,
+		", погиб в контакте" if died else ""])
+	verdict("F1 гоблин НЕ проходит сквозь строй копейщиков", not passed,
+		"x=%.2f" % last_x)
+	# «Вплотную» — это КОНТАКТ, а не координата: стена не стоит на месте,
+	# копейщики в покое сами выходят на гоблина по авто-агро (поводок 14 м),
+	# и встреча случается там, где они сошлись (замер: x = 403 при стене на
+	# 408). Гибель в контакте — тот же упор
+	verdict("F2 гоблин упёрся в стену вплотную", last_x > 404.0 or died,
+		"x=%.2f (шёл от 400), погиб в контакте=%s" % [last_x, str(died)])
+	# Контакт обязан переводить в бой, а не в челнок
+	verdict("F3 при контакте гоблин фиксируется в рубке", engaged or died,
+		"в бою=%s, погиб=%s" % [str(engaged), str(died)])
 	var hurt := false
 	for w in wall:
 		if is_instance_valid(w) and (w as Unit).current_health < (w as Unit).max_health:
@@ -442,7 +491,7 @@ func _i_waves() -> void:
 		String(ai.phase) == ai.PHASE_DEFEND, "фаза=%s" % String(ai.phase))
 	# 2) набрали полную орду -> снова в центр
 	ai.squads = saved
-	var need: int = _GobCfg.ARMY_SQUADS
+	var need: int = _GobCfg.army_squads()
 	while ai.squads.size() < need:
 		ai.squads.append({"id": -ai.squads.size() - 1, "type": "goblin_spearman",
 			"members": [], "role": ai.ROLE_DEFEND, "target": Vector3.ZERO, "peak": 1})

@@ -184,7 +184,14 @@ func _probe_feedback() -> void:
 	main.world_add(castle)
 	castle.global_position = Vector3(-240.0, 0.0, -240.0)
 	await frames(5)
-	var half: float = maxf(castle.build_size.x, castle.build_size.z) * 0.5
+	# ── «СТЕНА» — ЭТО КРАЙ РИСУНКА, А НЕ КОРОБКИ ИЗ КОНФИГА ────────────────
+	# ТРЕБОВАНИЕ РАЗВЁРНУТО ВЛАДЕЛЬЦЕМ («копейщики тыкают копьями в пустой
+	# воздух, не доходя до стены»). Здесь стоял полугабарит `build_size`, а
+	# коробка почти всегда крупнее рисунка — то есть проверка судила о стене,
+	# которой на экране нет. Спрашиваем ТО ЖЕ СВОЙСТВО, что и проверка D2
+	# ниже, и то же, из которого считает сам бой (Unit._pad_of): постройка
+	# обмерила свой спрайт один раз при загрузке
+	var half: float = castle.ring_radius()
 	print("[зонд] замок: габарит=%s половина=%.2f" % [str(castle.build_size), half])
 
 	cam.global_position = castle.global_position + Vector3(0.0, 40.0, 40.0)
@@ -207,13 +214,24 @@ func _probe_feedback() -> void:
 	# Мерим в МЕТРАХ, а не в кратности кольцу бойца: у здания теперь свой меш
 	# единичного радиуса (см. UnitVisuals.building_ring_mesh), потому что
 	# растянутое кольцо бойца давало толстый угловатый многоугольник
+	# ── РАДИУС БЕРЁТСЯ ОТ РИСУНКА, А НЕ ОТ КОРОБКИ КОНФИГА ─────────────────
+	# Раньше здесь стоял полугабарит build_size. Владелец пожаловался, что
+	# кольцо ложится ПОД спрайт: коробка описывает пятно для размещения, а
+	# игрок видит рисунок, и совпадают они не всегда (у хижины гоблинов коробка
+	# 4 м при нарисованных 3.28). Радиус спрашиваем у самой постройки —
+	# она обмерила свой спрайт один раз при загрузке (Building.ring_radius)
 	var k_b: float = GameManager.sel_decals.building_ring_scale(castle)
 	var k_u: float = GameManager.sel_decals.building_ring_scale(sp)
-	var want_r: float = maxf(castle.build_size.x, castle.build_size.z) * 0.5
-	verdict("D2 контур под зданием ложится по его основанию",
+	var want_r: float = castle.ring_radius()
+	verdict("D2 контур под зданием ложится по его НАРИСОВАННОМУ основанию",
 		absf(k_b - want_r - GameManager.sel_decals.BUILD_RING_MARGIN) < 0.01
 			and is_equal_approx(k_u, 1.0),
-		"контур %.2f м при половине габарита %.2f, боец %.2f" % [k_b, want_r, k_u])
+		"контур %.2f м при полуширине рисунка %.2f, боец %.2f" % [k_b, want_r, k_u])
+	# И ЦЕНТР КОЛЬЦА — середина основания рисунка, а не начало координат узла:
+	# у спрайта под стенами есть прозрачное поле
+	verdict("D2б контур поднят на основание рисунка",
+		castle.ring_center().y > castle.global_position.y,
+		"подъём %.3f м" % (castle.ring_center().y - castle.global_position.y))
 
 	# E — копейщик останавливается У СТЕНЫ, а не в центре коробки
 	var hp0: float = castle.current_health

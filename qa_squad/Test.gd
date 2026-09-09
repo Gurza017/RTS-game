@@ -599,6 +599,11 @@ func _test_orders() -> void:
 	for i in range(foes.size()):
 		var e2: Unit = foes[i]
 		e2.global_position = foe_base + Vector3(0.0, 0.0, float(i) * 0.8)
+		# Телепорт узла ОБЯЗАН доехать до строки ядра сразу: клик ищет врага
+		# сеткой соседей по СТРОКАМ, а свой тик у переставленного случится
+		# неизвестно когда (проверка держалась на этой случайности и падала
+		# от сдвига фазы тактов армии — зонд: grid_рядом=0 при иксах в упор)
+		e2.sync_row()
 	await frames(2)
 
 	# Настоящий путь игрока: наводим камеру и «кликаем» ПКМ по врагу
@@ -1217,7 +1222,7 @@ func _test_mass_and_reset() -> void:
 	# Сколько отрядов ЗАВОДИТ сама start_game — считаем по конфигам, а не по
 	# памяти: стартовые рабочие ИИ (у каждого свой отряд из одного) плюс орда
 	# гоблинов в правом верхнем углу
-	var want_after: int = _AICfg.START_WORKERS + _GobCfg.ARMY_SQUADS
+	var want_after: int = _AICfg.START_WORKERS + _GobCfg.army_squads()
 	var max_id := 0
 	for k in GameManager.squads.keys():
 		max_id = maxi(max_id, int(k))

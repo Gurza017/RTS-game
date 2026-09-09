@@ -253,7 +253,11 @@ func set_hover_units(units: Array, world_root: Node3D) -> void:
 		var idx: int = lay.free.pop_back()
 		_hover_slot[u] = idx
 		_hover_in_b[u] = is_b
-		var hp3: Vector3 = (u as Node3D).global_position
+		# ТОЧКА КОЛЬЦА У ЗДАНИЯ — СЕРЕДИНА НАРИСОВАННОГО ОСНОВАНИЯ, а не
+		# начало координат узла: у спрайта под стенами есть прозрачное поле, и
+		# кольцо, положенное честно на грунт, оказывалось ПОД домом на траве
+		# (см. Building.ring_center)
+		var hp3: Vector3 = (u as Building).ring_center() if is_b 			else (u as Node3D).global_position
 		_hover_write(idx, hp3,
 			building_ring_scale(u) if is_b else 1.0, is_b)
 		_hover_last[u] = hp3
@@ -296,8 +300,10 @@ func set_order_targets(units: Array, world_root: Node3D) -> void:
 	if keep.is_empty():
 		return
 	for u in keep:
-		var pos: Vector3 = (u as Node3D).global_position
 		var is_b: bool = u is Building
+		# У здания — середина нарисованного основания (см. Building.ring_center),
+		# у бойца — его точка. Причина та же, что у колец наведения выше
+		var pos: Vector3 = (u as Building).ring_center() if is_b else (u as Node3D).global_position
 		var k: float = building_ring_scale(u) if is_b else 1.0
 		var lay: Layer = _order_ring_b if is_b else _order_ring
 		if lay == null:
@@ -423,12 +429,27 @@ static func building_ring_scale(n) -> float:
 	var b := n as Building
 	if b == null:
 		return 1.0
-	# Чуть шире самой коробки: контур обязан лежать ВОКРУГ основания, а не
+	# ── РАДИУС ПО НАРИСОВАННОМУ ОСНОВАНИЮ, А НЕ ПО КОРОБКЕ КОНФИГА ──────────
+	# Коробка описывает пятно для размещения и коллизии, а игрок видит РИСУНОК,
+	# и совпадают они далеко не всегда: у хижины гоблинов коробка 4 м, а дом
+	# нарисован на 3.28 м — кольцо выходило в полтора раза шире дома и
+	# наполовину торчало перед ним. Величину даёт сама постройка, обмерив свой
+	# спрайт один раз при загрузке (см. Building.ring_radius)
+	# Чуть шире самого рисунка: контур обязан лежать ВОКРУГ основания, а не
 	# резать его угол
-	return maxf(b.build_size.x, b.build_size.z) * 0.5 + BUILD_RING_MARGIN
+	return b.ring_radius() + BUILD_RING_MARGIN
 
-## Запас контура наружу от габарита постройки, метры
-const BUILD_RING_MARGIN := 0.35
+## Запас контура наружу от габарита постройки, метры.
+## ── СОКРАЩЁН ПО ЖАЛОБЕ «КРУЖОК СМЕЩЁН ОТНОСИТЕЛЬНО ЦЕНТРА СПРАЙТА» ─────────
+## Радиус кольца и без того считается по НАРИСОВАННОМУ основанию, и стенд
+## qa_pivot это подтверждает: у хижины подъём кольца 0.421 м при нижней кромке
+## рисунка ровно 0.421 — то есть кольцо лежит там, где надо. Смещённым его
+## делал РАЗМЕР: 1.64 м полуширины рисунка плюс 0.35 запаса — это круг
+## диаметром 3.98 м под домом шириной 3.28, на четверть шире. Под камерой в 45°
+## ближняя дуга такого круга уходит заметно ниже подошвы, и глазом это читается
+## не как «широкое кольцо», а как «кольцо не под домом».
+## 0.15 — контур по-прежнему ЛЕЖИТ ВОКРУГ основания, а не режет его угол
+const BUILD_RING_MARGIN := 0.15
 
 func clear_hover() -> void:
 	for u in _hover_slot.keys():

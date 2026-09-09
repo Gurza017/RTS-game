@@ -6,6 +6,8 @@ extends Node
 ##   A ЛУЧНИКИ   — приказ отойти посреди боя не даёт стрелкам развернуться
 ##                 обратно и продолжить стрельбу
 ##   B КОПЕЙЩИКИ — то же самое в ближнем бою (никаких «двух шагов назад»)
+##   D ОКРУЖЕНИЕ — приказ игрока выводит бойца из свалки ТЕЛОМ: с первого
+##                 клика, а не со второго
 ##   C ФЛАГ СНИМАЕТСЯ — после прихода в точку отряд снова ловит НОВОГО врага
 ##                 на пути как обычно (march-перехват не сломан навсегда)
 ##
@@ -98,6 +100,7 @@ func _run() -> void:
 	await _a_archers_disengage()
 	await _b_spearmen_disengage()
 	await _c_flag_resets()
+	await _d_surrounded()
 
 	print("\n═════ ИТОГ ═════")
 	for row in _log:
@@ -317,4 +320,116 @@ func _c_flag_resets() -> void:
 
 	for u in mine + foes + wall:
 		if is_instance_valid(u): (u as Node).queue_free()
+	await frames(3)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# D. ПРИКАЗ ИГРОКА ВЫВОДИТ БОЙЦА ИЗ СВАЛКИ ТЕЛОМ, А НЕ ТОЛЬКО ВНИМАНИЕМ
+#
+# ЖАЛОБА ВЛАДЕЛЬЦА: «отряд в плотной рубке не идёт с первого правого клика,
+# приходится кликать второй раз». Блок B этого не ловит: там противник стоит
+# ОДНОЙ шеренгой с одной стороны, и вбок боец уходит свободно. Здесь боец
+# ОКРУЖЁН — враги вокруг него кольцом, — и шаг упирается в чужие тела с любой
+# стороны: лобовая составляющая съедается, боковая упирается на втором проходе,
+# и _move_blocked выходит, не сдвинув его ни на сантиметр.
+#
+# Проверяется СВОЙСТВО, а не число кадров: сдвинулся ли боец с места за секунду
+# после ОДНОГО приказа. И второе свойство — что послабление КОНЕЧНО: приказ,
+# отданный не игроком (внутренние механики), тел не проходит
+# ═════════════════════════════════════════════════════════════════════════════
+func _d_surrounded() -> void:
+	print("\n═════ D. ПРИКАЗ ИЗ ОКРУЖЕНИЯ ═════")
+	var at := Vector3(-300, 0, 300)
+	var me: Unit = _new("spearman", Constants.FACTION_PLAYER, at)
+	# Кольцо врагов вплотную: радиус берём от личного круга бойца, а не числом —
+	# иначе стенд разъедется с SEP_MIN_DIST при первой же правке плотности
+	var r: float = Unit.SEP_MIN_DIST * 0.9
+	var ring: Array = []
+	for i in range(8):
+		var ang: float = TAU * float(i) / 8.0
+		var foe: Unit = _new("spearman", Constants.FACTION_ENEMY,
+			at + Vector3(cos(ang), 0.0, sin(ang)) * r)
+		# ── КОЛЬЦО НЕ БЬЁТ, А ТОЛЬКО СТОИТ ТЕЛАМИ ──────────────────────────
+		# Проверяется ПРОХОДИМОСТЬ, а не выживание: восемь копейщиков убивают
+		# одного за полсекунды, и стенд мерил бы, успел ли он умереть, а не
+		# сдвинулся ли он с места. Урон снимаем, тела остаются
+		foe.attack_damage = 0.0
+		ring.append(foe)
+	await frames(6)
+	# Боец в бою: цель назначена, он в контакте
+	me.command_attack(ring[0], false)
+	await frames(20)
+	var before: Vector3 = me.global_position
+	# ОДИН приказ, и именно ПРИКАЗ ИГРОКА (player_order = true) — только он
+	# взводит замок FORCED_MOVE_SEC, от которого и считается послабление
+	var goal := at + Vector3(0.0, 0.0, -40.0)
+	me.command_move(goal, false, Vector3.ZERO, false, true)
+	verdict("D1 приказ принят: цель снята, состояние MOVING",
+		me.attack_target == null and me.state == Unit.State.MOVING,
+		"цель=%s состояние=%d" % [str(me.attack_target), me.state])
+	for _i in range(60):
+		await get_tree().physics_frame
+	var moved: float = Vector2(me.global_position.x - before.x,
+		me.global_position.z - before.z).length()
+	# ── РЕШЕНИЕ ВЛАДЕЛЬЦА (03.09.2026): СТРОЙ МОНОЛИТЕН, СКВОЗЬ ТЕЛА НЕ
+	# ВЫХОДИТ НИКТО ──────────────────────────────────────────────────────
+	# Билет прохода не снимает чужие тела, а сужает их до ядра
+	# (Unit.PASS_CORE_FRAC = 0.55 → 0.30 м), и пройти между двумя телами можно
+	# только в просвет шире ДВУХ ядер. Соседи этого кольца стоят в
+	# 2·r·sin(π/8) = 0.29 м — теснее, чем шеренга в бою (0.33), — и выход из
+	# такого кольца означал бы проход сквозь фалангу. Требование «из свалки с
+	# первого клика» владелец снял в пользу монолитной фаланги; прежний
+	# вердикт (moved > 1.0) утверждал снятое требование. Теперь стенд
+	# стережёт ОБЕ стороны решения: сквозь плотное кольцо не выйти (D2a), а
+	# из кольца с просветом шире двух ядер — выйти (D2b), то есть билет
+	# по-прежнему работает там, где ему положено
+	var gap: float = 2.0 * r * sin(PI / 8.0)
+	var core: float = Unit.BLOCK_RADIUS * Unit.PASS_CORE_FRAC
+	verdict("D2a сквозь плотное кольцо (просвет < 2 ядер) НЕ выходит — строй монолитен",
+		moved < 0.5 and gap < 2.0 * core,
+		"прошёл %.2f м за секунду; просвет %.3f м, ядро %.3f м" % [moved, gap, core])
+	# И послабление кончается вместе с замком: боец не превращается в призрака
+	for _i in range(240):
+		await get_tree().physics_frame
+	verdict("D3 послабление КОНЕЧНО — замок приказа истёк",
+		not me._forced_move_pass(),
+		"остаток замка %.2f с" % me._move_lock)
+	for u in ring:
+		if is_instance_valid(u): (u as Node).queue_free()
+	if is_instance_valid(me): (me as Node).queue_free()
+	await frames(3)
+
+	# ── D2b: ИЗ РЕДКОГО КОЛЬЦА (просвет шире двух ядер) БИЛЕТ ВЫВОДИТ ─────
+	var at2 := Vector3(-300, 0, 340)
+	var me2: Unit = _new("spearman", Constants.FACTION_PLAYER, at2)
+	# Радиус подобран так, чтобы просвет между соседями был шире двух ядер с
+	# запасом: 2·r2·sin(π/8) = 2·core·1.3
+	var r2: float = (2.0 * core * 1.3) / (2.0 * sin(PI / 8.0))
+	var ring2: Array = []
+	for i in range(8):
+		var ang2: float = TAU * float(i) / 8.0
+		var foe2: Unit = _new("spearman", Constants.FACTION_ENEMY,
+			at2 + Vector3(cos(ang2), 0.0, sin(ang2)) * r2)
+		foe2.attack_damage = 0.0
+		ring2.append(foe2)
+	await frames(6)
+	me2.command_attack(ring2[0], false)
+	await frames(20)
+	var before2: Vector3 = me2.global_position
+	me2.command_move(at2 + Vector3(0.0, 0.0, -40.0), false, Vector3.ZERO, false, true)
+	# «Вышел» — это ПОЛОЖЕНИЕ, а не пройденная длина: на прямом пути к цели
+	# стоит тело кольца (угол 270°), и боец обходит его скольжением под
+	# билетом, теряя на этом путь (замер: 0.72 м за первую секунду). Через две
+	# секунды он обязан быть СНАРУЖИ кольца
+	for _i in range(120):
+		await get_tree().physics_frame
+	var moved2: float = Vector2(me2.global_position.x - before2.x,
+		me2.global_position.z - before2.z).length()
+	var out2: float = Vector2(me2.global_position.x - at2.x, me2.global_position.z - at2.z).length()
+	var gap2: float = 2.0 * r2 * sin(PI / 8.0)
+	verdict("D2b из редкого кольца (просвет > 2 ядер) с ПЕРВОГО приказа выходит",
+		out2 > r2 + 0.3, "через 2 с в %.2f м от центра кольца (радиус %.2f), прошёл %.2f м; просвет %.3f м, ядро %.3f м" % [
+			out2, r2, moved2, gap2, core])
+	for u in ring2:
+		if is_instance_valid(u): (u as Node).queue_free()
+	if is_instance_valid(me2): (me2 as Node).queue_free()
 	await frames(3)

@@ -12,3 +12,5 @@ First Alfa 1.0/
 
 # Файлы экспорта
 export_presets.cfg
+# Модели распознавания речи (45 МБ, качаются отдельно — см. voice_models/README.md)
+voice_models/vosk-*/

@@ -165,7 +165,10 @@ func launch() -> void:
 	_pooled     = false
 	visible     = true
 	# Стрела из пула могла лежать в нём наполовину растаявшей — вернуть ей
-	# полную непрозрачность и обратно поставить срез альфы
+	# полную непрозрачность; спрятанный слот заново получает полный базис
+	_fade_now = 1.0
+	if _slot_i >= 0:
+		GameManager.arrows_mm.write(_slot_i, global_position, _axis_now, 1.0)
 	_set_fade(1.0)
 	set_process(true)
 	# Ось выставляем СРАЗУ: первый кадр полёта уже с правильным наклоном
@@ -181,6 +184,8 @@ func _despawn() -> void:
 	_in_corpse = false
 	_fading = false
 	visible = false
+	if _slot_i >= 0:
+		GameManager.arrows_mm.hide(_slot_i)
 	set_process(false)
 	set_physics_process(false)
 	# Из реестра торчащих — обязательно и до возврата в пул: иначе потолок
@@ -279,8 +284,30 @@ func _strike(u: Unit) -> void:
 		return
 	_despawn()
 
-var _visual: MeshInstance3D = null
-var _mat: ShaderMaterial = null
+# ── КАРТИНКА ЖИВЁТ В ОБЩЕМ MultiMesh (этап D3, см. ArrowRenderer) ───────────
+# Узел остался ЛОГИКОЙ (полёт, попадание, сроки, пул); слот слоя держит
+# позицию, ось и долю покрытия. Прежние _visual/_mat сняты вместе с их
+# вызовом отрисовки на каждую стрелу
+var _slot_i: int = -1
+## Поколение слоя, у которого взят слот: слой пересобирается на смене сцены,
+## и слот прошлого поколения возвращать некуда (см. ArrowRenderer.release)
+var _slot_gen: int = -1
+var _axis_now: Vector3 = Vector3.RIGHT
+var _fade_now: float = 1.0
+
+## ── СЛОТ ВОЗВРАЩАЕТСЯ ВМЕСТЕ С УЗЛОМ ───────────────────────────────────────
+## Узел стрелы освобождают мимо пула (переполнение ARROW_POOL_MAX, выгрузка
+## сцены), и слот общего MultiMesh при этом никто не отдавал: буфер рос по
+## 64 слота на каждую пачку выброшенных узлов и целиком уезжал в рендер
+## каждым грязным кадром. Именно это выглядело как «стрелы забивают буферы»
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_PREDELETE and _slot_i >= 0:
+		# На выходе из игры автозагрузка может уйти раньше стрелы
+		if is_instance_valid(GameManager):
+			var mm = GameManager.arrows_mm
+			if mm != null:
+				mm.release(_slot_i, _slot_gen)
+		_slot_i = -1
 
 # Квад строится ВДОЛЬ ЛОКАЛЬНОЙ ОСИ X: size = (длина, толщина). Шейдер
 # axis_billboard кладёт этот +X на переданную мировую ось — то есть на вектор
@@ -288,28 +315,17 @@ var _mat: ShaderMaterial = null
 # толщиной 10-12 px, справа сходящий на нет наконечник 12→2 px), поэтому
 # локальный +X = направление полёта, и разворот на 180° не нужен.
 func _build_visual() -> void:
-	_visual  = MeshInstance3D.new()
-	_visual.name = "ArrowSprite"
-	var quad := QuadMesh.new()
-	_mat = ShaderMaterial.new()
-	_mat.shader = _AXIS_SHADER
 	var tex := _load_arrow_texture()
 	if tex:
 		var sz := tex.get_size()
 		if sz.y > 0.0:
 			_arrow_aspect = sz.x / sz.y
-		_mat.set_shader_parameter("albedo_tex", tex)
-		_mat.set_shader_parameter("modulate", Color.WHITE)
 	else:
-		# Fallback: тонкая золотистая полоска в полную длину стрелы
 		_arrow_aspect = 6.0
-		_mat.set_shader_parameter("modulate", Color(0.85, 0.70, 0.20))
-	_scissor0 = 0.2
-	_mat.set_shader_parameter("alpha_scissor", _scissor0)
-	quad.size = Vector2(ARROW_LENGTH, ARROW_LENGTH / maxf(_arrow_aspect, 0.01))
-	quad.material = _mat
-	_visual.mesh = quad
-	add_child(_visual)
+	if GameManager.arrows_mm.ensure(get_parent() as Node3D, tex,
+			ARROW_LENGTH, _arrow_aspect):
+		_slot_i = GameManager.arrows_mm.acquire()
+		_slot_gen = GameManager.arrows_mm.gen
 
 # Картинка обрезается по непрозрачной области: в исходных 64x64 стрела
 # занимает 43x12 в середине, и без обрезки квад был бы почти пустым
@@ -351,19 +367,26 @@ func _velocity_dir(t: float) -> Vector3:
 	return v.normalized()
 
 func _apply_axis(dir: Vector3) -> void:
-	if _mat != null:
-		_mat.set_shader_parameter("axis", dir)
+	_axis_now = dir
+	_push_visual()
+
+## Слот слоя: позиция + ось + покрытие одной записью
+func _push_visual() -> void:
+	if _slot_i >= 0:
+		GameManager.arrows_mm.write_flight(_slot_i, global_position,
+			_axis_now, _fade_now)
 
 func _process(delta: float) -> void:
-	# СРОК ЖИЗНИ — ПОЛЕМ, А НЕ ТАЙМЕРОМ (см. шапку у _life). Считается и у
-	# ЛЕТЯЩЕЙ, и у ВОТКНУВШЕЙСЯ: воткнувшаяся раньше снимала себя с _process
-	# целиком и полагалась на SceneTreeTimer, а его больше нет
-	_life += delta
-	# ТОРЧАЩАЯ ЖИВЁТ ПО СВОЕМУ СРОКУ и ничего больше не считает: ни дуги, ни
-	# попаданий. Её ветка целиком в _tick_stuck
+	# ЗДЕСЬ ЖИВЁТ ТОЛЬКО ЛЕТЯЩАЯ. Срок торчащей считает общий обход реестра
+	# (GameManager._sweep_stuck_arrows), и свой _process ей выключают в тот же
+	# миг, когда она втыкается, — в грунт (_stick_into_ground) или в тело
+	# (stick_decor). Ранний выход оставлен страховкой на случай, если какой-то
+	# путь оставит нотификацию включённой: считать срок ДВАЖДЫ хуже, чем не
+	# считать его здесь вовсе
 	if _spent:
-		_tick_stuck(delta)
 		return
+	# СРОК ПОЛЁТА — ПОЛЕМ, А НЕ ТАЙМЕРОМ (см. шапку у _life)
+	_life += delta
 	if _life >= MAX_FLIGHT_SEC:
 		_despawn()
 		return
@@ -404,9 +427,19 @@ func _process(delta: float) -> void:
 # в землю НАКОНЕЧНИКОМ вперёд и торчит там до конца MAX_LIFETIME, выступая
 # над грунтом на STUCK_EXPOSED своей длины.
 func _stick_into_ground() -> void:
-	# _process НЕ выключаем: на нём теперь висит отсчёт срока жизни, и без него
-	# воткнувшаяся стрела торчала бы в грунте вечно (см. _process)
+	# ── СВОЙ _process ВЫКЛЮЧАЕТСЯ, СРОК СЧИТАЕТ ОБЩИЙ ОБХОД ────────────────
+	# Здесь стояло прямо обратное («_process НЕ выключаем: на нём висит отсчёт
+	# срока жизни»), и это была нотификация движка на КАЖДУЮ торчащую стрелу —
+	# до MAX_STUCK_ARROWS = 160 узлов, каждый ради одного сложения float.
+	# Реестр торчащих у GameManager уже есть (он держит потолок), и обойти его
+	# одним циклом дешевле, чем сто шестьдесят раз войти в GDScript из движка.
+	# Тот же приём и та же причина, что у тел (CorpseRenderer): декорация не
+	# заводит своего тика.
+	# ЗАМЕТЬТЕ: в реестр стрела становится в конце этой же функции, и обход
+	# подхватит её со следующего кадра — терять при этом нечего, срок у неё
+	# сорок пять секунд
 	_spent = true
+	set_process(false)
 	set_physics_process(false)
 	_disable_physics()
 	# ВТЫКАНИЕ В ЗЕМЛЮ — сухой удар мимо цели. Тише попадания в тело (см.
@@ -429,6 +462,15 @@ func _stick_into_ground() -> void:
 	var gy := GameManager.get_terrain_height(global_position.x, global_position.z)
 	var entry := Vector3(global_position.x, gy, global_position.z)
 	global_position = entry - dir * (ARROW_LENGTH * (STUCK_EXPOSED - 0.5))
+	# ── КАРТИНКА ЕДЕТ ЗА ТОЧКОЙ ЯВНО ───────────────────────────────────────
+	# Пока стрела была узлом со своим спрайтом, перенос узла переносил и
+	# картинку сам. В общем MultiMesh (этап D3) слот знает только то, что в
+	# него записали, а записывала его _apply_axis ВЫШЕ — ещё в точке конца
+	# дуги, на высоте груди цели. Стрела на экране оставалась висеть в
+	# воздухе под углом втыкания до самого растворения (первая запись с
+	# верной точкой шла из _set_fade, через сорок секунд). Это и был баг
+	# «стрелы зависают пачками в воздухе»
+	_push_visual()
 
 	# Своего таймера у воткнувшейся стрелы нет: срок считает _tick_stuck.
 	# А вот в общий реестр торчащих её поставить обязаны — он и держит
@@ -487,9 +529,9 @@ func fade_out_in(sec: float) -> void:
 	if _in_corpse:
 		_in_corpse = false
 		_stuck_life = STUCK_LIFETIME - want
-		# Пока стрела торчала в теле, счёт ей был не нужен и _process стоял
-		# выключенным (см. stick_decor). Теперь она догорает — счёт нужен
-		set_process(true)
+		# Включать себе _process больше не нужно: счёт всем торчащим ведёт
+		# общий обход реестра (GameManager._sweep_stuck_arrows), а в реестре
+		# стрела состоит с самого втыкания
 		return
 	var left: float = STUCK_LIFETIME - _stuck_life
 	if want < left:
@@ -499,6 +541,14 @@ func fade_out_in(sec: float) -> void:
 ## переиспользование стрел ради того и заведено
 func despawn_now() -> void:
 	_despawn()
+
+## ВХОД ДЛЯ ОБЩЕГО ОБХОДА (GameManager._sweep_stuck_arrows). Летящая стрела
+## сюда не попадает — в реестре торчащих её нет; проверка на всякий случай,
+## потому что реестр держит узлы, а не состояния
+func tick_stuck(delta: float) -> void:
+	if _pooled or not _spent:
+		return
+	_tick_stuck(delta)
 
 # ── ЖИЗНЬ ТОРЧАЩЕЙ СТРЕЛЫ ───────────────────────────────────────────────────
 # Одинаково для воткнувшейся в грунт и оставшейся в теле: разницы между ними
@@ -521,8 +571,6 @@ func _tick_stuck(delta: float) -> void:
 ## пиксель целиком по порогу и потому не умеет гасить плавно — стрела с ним
 ## не растворялась бы, а осыпалась дырами и в конце прыжком исчезала
 func _set_fade(k: float) -> void:
-	if _mat == null:
-		return
 	# ── ГАСИМ ПОКРЫТИЕМ, А НЕ АЛЬФОЙ И НЕ ПОРОГОМ ──────────────────────────
 	# Здесь стояло «снять порог среза в ноль, потому что срез не умеет гасить
 	# плавно». Снятый порог и был чёрным прямоугольником под гаснущей стрелой:
@@ -535,7 +583,8 @@ func _set_fade(k: float) -> void:
 	# (см. axis_billboard.gdshader). modulate остаётся белым: его альфа в
 	# непрозрачном проходе всё равно не читается, и держать её значило бы
 	# делать вид, что она на что-то влияет
-	_mat.set_shader_parameter("fade", k)
+	_fade_now = k
+	_push_visual()
 
 ## ── ВСТАТЬ В ТЕЛО: ТОЧКА И УГОЛ ЗАДАНЫ СНАРУЖИ ─────────────────────────────
 ## Зовёт CorpseRenderer.stick_arrows для стрелы, добившей бойца: куда именно
@@ -558,7 +607,10 @@ func stick_decor(at: Vector3, dir: Vector3) -> void:
 		d = d.normalized()
 	_apply_axis(d)
 	global_position = at - d * (ARROW_LENGTH * (STUCK_EXPOSED - 0.5))
+	_push_visual()
 	visible = true
+	if _slot_i >= 0:
+		GameManager.arrows_mm.write(_slot_i, global_position, _axis_now, _fade_now)
 	set_process(false)
 	GameManager.note_stuck_arrow(self)
 

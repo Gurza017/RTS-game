@@ -1,5 +1,10 @@
 # BALANCE — карта настроек
 
+> **Расчёт баланса (TTK, мораль, экономика, ветеранство) — в
+> [`docs/BALANCE_MATH.md`](docs/BALANCE_MATH.md).** Там объяснено, ПОЧЕМУ числа
+> такие и что сломается, если их двигать; здесь — только где они лежат.
+> Проверяет всё стенд `qa_balance` (20 проверок, headless).
+
 Где какое число лежит. Всё перечисленное правится **без единой строчки кода**:
 конфиги — обычные словари GDScript, движок читает их вживую.
 
@@ -257,6 +262,20 @@
 | Размеры и шрифты интерфейса | `scripts/HUD.gd`, блок констант в шапке |
 | Слои столкновений, фракции | `scripts/Constants.gd` |
 | Ветер, качание растительности | `scripts/BillboardUtil.gd` → `WIND_CYCLE_MIN/MAX` |
+| Скорость выставления копий фалангой | `scripts/Spearman.gd` → `DROP_DELAY_MAX_MS` |
+| Порог «идёт / стоит» для анимации ходьбы | `scripts/Unit.gd` → `MOVE_ANIM_MIN_SPEED`, `MOVE_ANIM_SAMPLE_MS` |
+| Кольцо отрядов вокруг атакуемого здания | `scripts/SelectionManager.gd` → `RING_STANDOFF`, `RING_ARC`, `RING_FIGHT_REACH`, `RING_ROW_DEPTH`, `RING_SQUAD_GAP` |
+| Сколько ждёт вторая линия осады | `scripts/GameManager.gd` → `RING_HOLD_SEC` |
+| Ширина тыловых эшелонов при растяжении фронта | `scripts/SelectionManager.gd` → `BACK_ECHELON_WIDEN`, `BACK_ECHELON_MAX_ROWS` |
+| Кусты по краю рудной гряды | `scripts/Main.gd` → `CLUSTER_BUSH_MIN/MAX`, `CLUSTER_BUSH_RIM`, `CLUSTER_BUSH_SCALE` |
+| Радиус обзора (туман войны) | `scripts/unit_stats_config.gd` → `VISION_MULT`, `VISION_MIN`, `BUILDING_VISION` |
+| Кольцо подсветки у дерева | `scripts/Main.gd` → `HOVER_TREE_RADIUS`, `HOVER_LIFT` |
+| Сколько приказ игрока непрерываем | `scripts/Unit.gd` → `FORCED_MOVE_SEC`, `FORCED_MOVE_PASS_SEC`, `DISENGAGE_SEC` |
+| Частота опроса бойца (шарды физтика) | `scripts/perf_config.gd` → `tick_shard_1/2/3_max`, `tick_shards_max` |
+| **Снижение урона бронёй** | `scripts/unit_stats_config.gd` → `ARMOR_SOFTNESS`, `damage_after_armor()` |
+| **Мораль и паника (белый флаг)** | `scripts/unit_stats_config.gd` → блок `MORALE_*` / `PANIC_*` |
+| **Аура и перки легендарного отряда** | `scripts/unit_stats_config.gd` → блок `LEGEND_*` |
+| **Темп добычи рабочего** | `scripts/unit_stats_config.gd` → `STATS.worker` (`gather_time`, `gather_amount`, скорости) |
 
 ---
 
@@ -279,3 +298,53 @@
 | настройки ИИ | `qa_ai`, `qa_ai2` |
 | экономику и ресурсы | `qa_res2`, `qa_mine`, `qa_tree`, `qa_stump` |
 | что угодно из перечисленного | плюс `qa_mass_perf --count=3000` на скорость |
+
+---
+
+## Сложность партии и стартовые составы
+
+`scripts/game_difficulty_config.gd` → `PRESETS`
+
+**Пресет не хранит ни одного базового числа** — только МНОЖИТЕЛИ поверх
+остальных таблиц и один список-замену. Поэтому правка лимита в
+`ai_start_army_limit.gd` доезжает до всех трёх сложностей разом, а «Обычная»
+по построению равна прежней игре без сложностей (проверяет `qa_difficulty`,
+блок B).
+
+| ключ пресета | что множит | первоисточник числа |
+|---|---|---|
+| `ai_squad_mult` | лимит отрядов ИИ по родам войск | `ai_start_army_limit.SQUAD_LIMIT` |
+| `ai_worker_mult` | потолок рабочих ИИ | `ai_start_army_limit.WORKER_LIMIT` |
+| `ai_resource_mult` | стартовый запас ИИ | `unit_stats_config.AI_STARTING_RESOURCES` |
+| `ai_train_mult` | ВРЕМЯ найма отряда у ИИ | `unit_stats_config.TRAINING[...].time` |
+| `ai_build_mult` | ВРЕМЯ отстройки здания у ИИ | `unit_stats_config.BUILDINGS[...].build_time` |
+| `ai_peace_mult` | длину мирной фазы | `ai_start_army_limit.PEACE_SECONDS` |
+| `ai_start_squads` | ЗАМЕНЯЕТ стартовые отряды ИИ | `ai_start_army_limit.START_SQUADS` |
+| `goblin_dormant_mult` | срок спячки орды | `goblin_config.DORMANT_UNTIL_SEC` |
+| `goblin_food_mult` | доход хижины | `goblin_config.HUT_FOOD_PER_MIN` |
+| `goblin_vet_shift` | СДВИГ ранга стартовых отрядов орды | `goblin_config.START_SQUADS` |
+
+**У множителей времени «меньше — быстрее»**: это множитель ВРЕМЕНИ, а не темпа.
+Единственное исключение из правила «плюс — это хорошо» во всём балансе, и
+держится оно ровно на двух ключах, чтобы не заводить обратных знаков в таблицу.
+
+**Сложность не трогает урон, запас жизни и броню** — ни на одном уровне. Боец
+на «Тяжёлой» дерётся ровно так же, как на «Лёгкой»; крутятся только лимиты и
+темп. Иначе замер боя перестал бы быть сравнимым между уровнями.
+
+### Стартовые отряды (обе фракции)
+
+`goblin_config.START_SQUADS` и `ai_start_army_limit.START_SQUADS` — один и тот
+же формат строки:
+
+| поле | смысл |
+|---|---|
+| `unit` | id рода войск, ключ `unit_stats_config.STATS` |
+| `count` | моделей в отряде; **0 = уставной размер** (`SQUAD_SIZE_*`) |
+| `vet` | ранг при рождении, 1..7 по `VET_BANNER_TIERS`; 0 — новобранцы |
+| `picks` | сколько наград раздать автоматически (не больше, чем ступеней ранга) |
+
+У ИИ список **пуст по умолчанию**, и это баланс, а не заготовка: старт равный,
+армия растёт только через очередь найма (стережёт `qa_ai`, проверка 2).
+Непустым его делает пресет `Hard`.
+

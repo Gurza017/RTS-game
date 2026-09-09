@@ -30,6 +30,21 @@ func wait_ms(ms: int) -> void:
 	while Time.get_ticks_msec() < end:
 		await get_tree().process_frame
 
+## Ждать, пока отряд перестанет двигаться. Признак — `moved_recently()`, то
+## есть ФАКТ смещения за окно замера, а не `velocity` (намерение): упёршийся
+## боец намерение сохраняет и «идёт» вечно. Потолок в ФИЗКАДРАХ, а не в
+## миллисекундах: при снятом ограничении кадров отрисовка обгоняет физику
+func _settle_spot(men: Array, max_frames: int) -> void:
+	for _i in range(max_frames):
+		await get_tree().physics_frame
+		var moving := 0
+		for m in men:
+			var u := m as Unit
+			if u != null and is_instance_valid(u) and u.moved_recently():
+				moving += 1
+		if moving == 0:
+			return
+
 func verdict(title: String, ok: bool, detail: String = "") -> void:
 	if ok: _pass += 1
 	else:  _fail += 1
@@ -170,7 +185,15 @@ func _test_gate_spawn() -> void:
 
 	# И построился квадратом: ширина примерно равна глубине
 	var men := _spawned_near(b, 30.0)
-	await wait_ms(600)
+	# ── ЖДЁМ СВОЙСТВО, А НЕ ЧАСЫ (правила 11 и 12 в CLAUDE.md) ─────────────
+	# Здесь стояло `wait_ms(600)` — ожидание по СТЕННЫМ часам, и оно же было
+	# единственной причиной, по которой A10 мигал. На свободной машине отряд
+	# успевает построиться за эти шестьсот миллисекунд (соотношение сторон
+	# 1.29-1.36), а на загруженной — нет, и замер заставал его НА ПОЛПУТИ:
+	# в большом прогоне шлюза, когда рядом работали другие стенды, выходило
+	# ровно 2.20 при пороге 2.2. Ждём, пока строй ВСТАНЕТ, и не дольше
+	# потолка в физкадрах — тогда число перестаёт зависеть от загрузки
+	await _settle_spot(men, 900)
 	var minx := INF; var maxx := -INF; var minz := INF; var maxz := -INF
 	for m in men:
 		var p: Vector3 = (m as Node3D).global_position
@@ -328,8 +351,77 @@ func _test_retreat() -> void:
 	for m in men:
 		if is_instance_valid(m) and (m as Unit).garrisoned:
 			inside_now += 1
+	# ЗОНД: кто не дошёл и где он стоит относительно врага и ворот. Нужен,
+	# потому что «внутри 5 из 6» ничего не говорит о причине: застрял о
+	# врага, не успел по стенным часам или встал у самых ворот
+	var stuck_txt := ""
+	for m in men:
+		if is_instance_valid(m) and not (m as Unit).garrisoned:
+			var u := m as Unit
+			var p: Vector3 = u.global_position
+			stuck_txt += " [%s в (%.1f, %.1f), до врага %.2f м, до ворот %.1f м, retreating=%s, цель=%s, контакт=%s]" % [
+				u.name, p.x, p.z,
+				Vector2(p.x - foe.global_position.x, p.z - foe.global_position.z).length(),
+				Vector2(p.x - castle._gate_position().x, p.z - castle._gate_position().z).length()
+					if castle.has_method("_gate_position") else -1.0,
+				str(u.retreating), str(u.attack_target != null), str(u._enemy_contact)]
+			stuck_txt += " {state=%d vel=%s move_target=(%.1f, %.1f) soa=%d order_pass=%s retreat_pass=%s from=(%.1f, %.1f) lock=%.2f panicked=%s garr_req=%s}" % [
+				u.state, str(u.velocity), u.move_target.x, u.move_target.z, u._soa,
+				str(u._forced_move_pass()), str(u._retreat_pass()),
+				u._retreat_from.x, u._retreat_from.z, u._move_lock, str(u._panicked),
+				str(u.get("_garrison_target") != null)]
+			stuck_txt += " {bm_on=%s sprint=%s clear_enemy=%s soa_pos=%s}" % [
+				str(u._bm_on), str(u.sprinting), str(u._clear_enemy),
+				str(GameManager.army.pos_or(u._soa, Vector3.INF))]
+	# ОПЫТ: чем именно отбрасывается шаг недошедшего
+	for m in men:
+		if is_instance_valid(m) and not (m as Unit).garrisoned:
+			var u := m as Unit
+			var p0: Vector3 = u.global_position
+			var b0: int = GameManager.army.bm_blocked
+			var sc0: int = GameManager.army.bm_enemy_scans
+			var tc0: int = GameManager.army.bm_trunk_calls
+			var blocked_sum := 0
+			var scans_sum := 0
+			var pending_sum := 0
+			var moved_frames := 0
+			var flags_seen := 0
+			var pprev: Vector3 = p0
+			for _k in range(60):
+				await get_tree().physics_frame
+				blocked_sum += GameManager.army.bm_blocked
+				scans_sum += GameManager.army.bm_enemy_scans
+				pending_sum += GameManager.army.bm_pending
+				flags_seen |= int(GameManager.army._c.Flags(u._soa))
+				var pn: Vector3 = u.global_position
+				if Vector2(pn.x - pprev.x, pn.z - pprev.z).length_squared() > 1e-10:
+					moved_frames += 1
+				pprev = pn
+			stuck_txt += " {60 кадров: заявок %d, сканов %d, отказов %d, кадров со сдвигом %d, флаги 0x%x (order_pass=%s retreating=%s clear_enemy=%s)}" % [
+				pending_sum, scans_sum, blocked_sum, moved_frames, flags_seen,
+				str((flags_seen >> 17) & 1 == 1), str((flags_seen >> 1) & 1 == 1), str((flags_seen >> 8) & 1 == 1)]
+			var p1: Vector3 = u.global_position
+			var dirv := Vector3(u.move_target.x - p0.x, 0.0, u.move_target.z - p0.z).normalized()
+			var np: Vector3 = p0 + dirv * 0.033
+			var fx: Vector3 = foe.global_position
+			var n := Vector3(p0.x - fx.x, 0.0, p0.z - fx.z).normalized()
+			var tang: Vector3 = dirv - n * dirv.dot(n)
+			var core: float = Unit.BLOCK_RADIUS * Unit.PASS_CORE_FRAC
+			stuck_txt += " {за 60 физкадров сдвиг %.3f м, отказов ядра +%d, сканов +%d | прямой шаг: block=%s | касательный: block=%s (|t|=%.3f) | до врага %.3f}" % [
+				Vector2(p1.x - p0.x, p1.z - p0.z).length(),
+				GameManager.army.bm_blocked - b0, GameManager.army.bm_enemy_scans - sc0,
+				str(GameManager.army.enemy_block(u._soa, np.x, np.z, core, true)),
+				str(GameManager.army.enemy_block(u._soa, p0.x + tang.x * 0.033, p0.z + tang.z * 0.033, core, true)),
+				tang.length(), Vector2(p0.x - fx.x, p0.z - fx.z).length()]
+			var tp: Vector3 = p0 + tang * 0.033
+			stuck_txt += " {вода: тут=%s прямой=%s касат=%s, water_active=%s, стволов рядом (в 1.5 м)=%d, trunk_ignore=%.2f, bm_trunk_calls +%d}" % [
+				str(GameManager.is_water(p0.x, p0.z)), str(GameManager.is_water(np.x, np.z)),
+				str(GameManager.is_water(tp.x, tp.z)), str(GameManager.get("water_active")),
+				GameManager.army.trunk_count_near(p0.x, p0.z, 1.5) if GameManager.army.has_method("trunk_count_near") else -1,
+				u._trunk_ignore, GameManager.army.bm_trunk_calls - tc0]
+			break
 	verdict("C9 отряд дошёл до замка и зашёл внутрь",
-		inside_now == men.size(), "внутри %d из %d" % [inside_now, men.size()])
+		inside_now == men.size(), "внутри %d из %d%s" % [inside_now, men.size(), stuck_txt])
 	if inside_now == men.size():
 		verdict("C10 режим отхода снят на входе",
 			not (men[0] as Unit).retreating)
