@@ -14,6 +14,7 @@ class_name Arrow
 ## Прицеливание с УПРЕЖДЕНИЕМ и разбросом считает стрелок (см. Archer.gd):
 ## сюда приходит уже готовая точка попадания.
 
+const _Opt := preload("res://scripts/perf_config.gd")
 const _AXIS_SHADER := preload("res://shaders/axis_billboard.gdshader")
 
 var _start_pos:  Vector3 = Vector3.ZERO
@@ -59,6 +60,9 @@ const STUCK_FADE := 4.0
 # фигурой бойца в 0.97 м стрела в три четверти метра читалась бревном.
 # Толщина следует за длиной сама: квад строится как (длина, длина/пропорции)
 const ARROW_LENGTH := 0.65
+## Кость короче стрелы: она метательная, а не стрелковая
+const BONE_LENGTH := 0.42
+const BONE_SHEET := "res://assets/factions/orc/Troll/Gnoll/Gnoll_Bone.png"
 # Какая доля длины стрелы ТОРЧИТ над землёй после промаха (остальное в грунте)
 const STUCK_EXPOSED := 2.0 / 3.0
 # ── МИНИМАЛЬНЫЙ НАКЛОН ВНИЗ ПРИ ВТЫКАНИИ ────────────────────────────────────
@@ -132,6 +136,36 @@ var _fading: bool = false
 ## работа в горячем пути, которой в этом проекте не место. Стрелок знает свою
 ## цель и кладёт её сюда; проверка одна и в самом конце дуги
 var _hit_node: Node3D = null
+## ── ПОЛЁТ ВЕДЁТ ЯДРО (perf_config.arrow_core) ────────────────────────────
+## Пока летит — узел без _process, запись в ArmyCore (ArrowLaunch). Ядро
+## само ищет попадание тем же EnemyAt по XZ-радиусу и отдаёт событие на
+## приземление или касание (см. ArrowRenderer.drain_events → core_event)
+var _flight_id: int = -1
+static var _next_flight_id: int = 1
+
+## Событие от ядра: коснулась чужого (victim) или долетела (victim == null).
+## Дальше — ровно то, что делал _process в этих же точках
+func core_event(victim, pos: Vector3, axis: Vector3) -> void:
+	_flight_id = -1
+	if _spent or _pooled:
+		return
+	global_position = pos
+	_axis_now = axis
+	_life = maxf(_life, _dist / maxf(_speed, 0.01))
+	if victim != null and is_instance_valid(victim):
+		var u := victim as Unit
+		if u != null and u != shooter and not u.is_dead():
+			_strike(u)
+			return
+	_progress = 1.0
+	if _hit_node != null and is_instance_valid(_hit_node) and damage > 0.0:
+		var b := _hit_node as Building
+		if b != null and not b.is_dead() 				and global_position.distance_to(b.global_position) <= BUILDING_HIT_RADIUS:
+			AudioManager.play_3d("bow_impact", global_position)
+			var who: Node = shooter if (is_instance_valid(shooter) 				and not shooter.is_queued_for_deletion()) else null
+			b.take_damage(damage, who)
+			_hit_node = null
+	_stick_into_ground()
 ## Исходный порог среза альфы. На время растворения он снимается в ноль:
 ## срез по альфе не умеет гасить плавно, он просто выключает пиксель
 var _scissor0: float = 0.2
@@ -168,8 +202,20 @@ func launch() -> void:
 	# полную непрозрачность; спрятанный слот заново получает полный базис
 	_fade_now = 1.0
 	if _slot_i >= 0:
-		GameManager.arrows_mm.write(_slot_i, global_position, _axis_now, 1.0)
+		_layer().write(_slot_i, global_position, _axis_now, 1.0)
 	_set_fade(1.0)
+	_apply_axis(_velocity_dir(0.0))
+	# ── ПОЛЁТ ВЕДЁТ ЯДРО (perf_config.arrow_core) ──────────────────────────
+	# Запись в ArmyCore вместо _process: позицию, ось и попадание считает
+	# BatchArrows одним проходом, сюда вернётся событие core_event
+	if _Opt.arrow_core and _slot_i >= 0 and _dist >= 0.001 			and _layer().core_id >= 0:
+		_flight_id = _next_flight_id
+		_next_flight_id += 1
+		_layer().register_flight(_flight_id, self)
+		GameManager.army.arrow_launch(_flight_id, _layer().core_id,
+			_slot_i, _start_pos, _end_pos, _arc_height, _speed / _dist, faction)
+		set_process(false)
+		return
 	set_process(true)
 	# Ось выставляем СРАЗУ: первый кадр полёта уже с правильным наклоном
 	_apply_axis(_velocity_dir(0.0))
@@ -184,8 +230,12 @@ func _despawn() -> void:
 	_in_corpse = false
 	_fading = false
 	visible = false
+	if _flight_id >= 0:
+		GameManager.army.arrow_cancel(_flight_id)
+		_layer().unregister_flight(_flight_id)
+		_flight_id = -1
 	if _slot_i >= 0:
-		GameManager.arrows_mm.hide(_slot_i)
+		_layer().hide(_slot_i)
 	set_process(false)
 	set_physics_process(false)
 	# Из реестра торчащих — обязательно и до возврата в пул: иначе потолок
@@ -282,12 +332,33 @@ func _strike(u: Unit) -> void:
 	if is_instance_valid(u) and u.is_dead():
 		_stick_into_corpse(u)
 		return
+	# ── ЗАСТРЯЛА В ТУШЕ ЖИВОГО (заказ 10.09.2026) ────────────
+	# Оговорка выше («раненый стрелу не уносит: стрела за ним не
+	# поедет») верна для всей пехоты и остаётся в силе: arrow_sockets() у неё
+	# ноль. А вот тролль тикает каждый кадр и ведёт торчащие в нём стрелы сам
+	# (Troll.stick_arrow → Arrow.move_stuck)
+	if is_instance_valid(u) and not u.is_dead() and u.arrow_sockets() > 0:
+		if u.stick_arrow(self):
+			stick_decor(global_position, _velocity_dir(_progress))
+			return
 	_despawn()
 
 # ── КАРТИНКА ЖИВЁТ В ОБЩЕМ MultiMesh (этап D3, см. ArrowRenderer) ───────────
 # Узел остался ЛОГИКОЙ (полёт, попадание, сроки, пул); слот слоя держит
 # позицию, ось и долю покрытия. Прежние _visual/_mat сняты вместе с их
 # вызовом отрисовки на каждую стрелу
+## ── КОСТЬ ГНОЛЛА ──────────────────────────────────────────────────────────
+## Тот же снаряд по всей логике (дуга, попадание, урон, втыкание, срок), но
+## СВОЙ слой отрисовки (GameManager.bones_mm) и своя картинка: материал у
+## MultiMesh один на бакет, и подменить текстуру одной стреле нельзя. Признак
+## ставится ДО _ready() (см. GameManager.spawn_arrow) и больше не меняется —
+## слот слоя узел берёт один раз и держит пожизненно
+var bone: bool = false
+
+## Слой, которому принадлежит картинка этого снаряда
+func _layer():
+	return GameManager.bones_mm if bone else GameManager.arrows_mm
+
 var _slot_i: int = -1
 ## Поколение слоя, у которого взят слот: слой пересобирается на смене сцены,
 ## и слот прошлого поколения возвращать некуда (см. ArrowRenderer.release)
@@ -304,7 +375,7 @@ func _notification(what: int) -> void:
 	if what == NOTIFICATION_PREDELETE and _slot_i >= 0:
 		# На выходе из игры автозагрузка может уйти раньше стрелы
 		if is_instance_valid(GameManager):
-			var mm = GameManager.arrows_mm
+			var mm = _layer()
 			if mm != null:
 				mm.release(_slot_i, _slot_gen)
 		_slot_i = -1
@@ -322,16 +393,44 @@ func _build_visual() -> void:
 			_arrow_aspect = sz.x / sz.y
 	else:
 		_arrow_aspect = 6.0
-	if GameManager.arrows_mm.ensure(get_parent() as Node3D, tex,
-			ARROW_LENGTH, _arrow_aspect):
-		_slot_i = GameManager.arrows_mm.acquire()
-		_slot_gen = GameManager.arrows_mm.gen
+	var length: float = BONE_LENGTH if bone else ARROW_LENGTH
+	if _layer().ensure(get_parent() as Node3D, tex, length, _arrow_aspect):
+		_slot_i = _layer().acquire()
+		_slot_gen = _layer().gen
 
 # Картинка обрезается по непрозрачной области: в исходных 64x64 стрела
 # занимает 43x12 в середине, и без обрезки квад был бы почти пустым
 static var _tex_cache: Dictionary = {}
 
+## Кость: первый кадр ленты, обрезанный по рисунку (см. _load_arrow_texture)
+func _load_bone_texture() -> Texture2D:
+	if _tex_cache.has(BONE_SHEET):
+		return _tex_cache[BONE_SHEET]
+	if not ResourceLoader.exists(BONE_SHEET):
+		_tex_cache[BONE_SHEET] = null
+		return null
+	var tex := load(BONE_SHEET) as Texture2D
+	var img: Image = tex.get_image() if tex != null else null
+	if img == null:
+		_tex_cache[BONE_SHEET] = null
+		return null
+	var fh: int = img.get_height()
+	var frames: int = maxi(img.get_width() / maxi(fh, 1), 1)
+	var frame: Image = img.get_region(Rect2i(0, 0, maxi(img.get_width() / frames, 1), fh))
+	var r: Rect2i = frame.get_used_rect()
+	if r.size.x > 0 and r.size.y > 0:
+		frame = frame.get_region(r)
+	var out: Texture2D = ImageTexture.create_from_image(frame)
+	_tex_cache[BONE_SHEET] = out
+	return out
+
 func _load_arrow_texture() -> Texture2D:
+	# КОСТЬ ГНОЛЛА — ПЕРВЫЙ КАДР ЧЕТЫРЁХКАДРОВОЙ ЛЕНТЫ. Крутиться в полёте ей
+	# нечем: слой стрел кладёт квад на ВЕКТОР СКОРОСТИ (mm_arrow), листания
+	# кадров у него нет вовсе. Кадр режется тем же способом, что часовой
+	# башни — Image.get_region: AtlasTexture в sampler2D уезжает целиком
+	if bone:
+		return _load_bone_texture()
 	for p in _ARROW_PATHS:
 		var path: String = p
 		if _tex_cache.has(path):
@@ -373,7 +472,7 @@ func _apply_axis(dir: Vector3) -> void:
 ## Слот слоя: позиция + ось + покрытие одной записью
 func _push_visual() -> void:
 	if _slot_i >= 0:
-		GameManager.arrows_mm.write_flight(_slot_i, global_position,
+		_layer().write_flight(_slot_i, global_position,
 			_axis_now, _fade_now)
 
 func _process(delta: float) -> void:
@@ -594,6 +693,18 @@ func _set_fade(k: float) -> void:
 ## неё нет, гасит её тело (см. _in_corpse), — а покадровый вызов на каждую
 ## торчащую стрелу это ровно та цена, из-за которой поле после большого залпа
 ## тормозило. Обратно счёт включит fade_out_in, когда тело начнёт таять
+## ── СТРЕЛА ТОРЧИТ В ЖИВОЙ ТУШЕ (заказ 10.09.2026) ─────────────────────────
+## Точку такой стрелы ведёт САМА ЖЕРТВА (Troll.tick_physics): она одна, тикает
+## каждый кадр и знает, куда её несёт. Стрела при этом обычная торчащая — свой
+## тик выключен, срок считает общий обход реестра
+func move_stuck(at: Vector3, dir: Vector3) -> void:
+	if _pooled:
+		return
+	var d := dir.normalized()
+	_axis_now = d
+	global_position = at - d * (ARROW_LENGTH * (STUCK_EXPOSED - 0.5))
+	_push_visual()
+
 func stick_decor(at: Vector3, dir: Vector3) -> void:
 	_spent = true
 	_in_corpse = true
@@ -610,7 +721,7 @@ func stick_decor(at: Vector3, dir: Vector3) -> void:
 	_push_visual()
 	visible = true
 	if _slot_i >= 0:
-		GameManager.arrows_mm.write(_slot_i, global_position, _axis_now, _fade_now)
+		_layer().write(_slot_i, global_position, _axis_now, _fade_now)
 	set_process(false)
 	GameManager.note_stuck_arrow(self)
 

@@ -109,6 +109,34 @@ func hide(idx: int) -> void:
 	if idx >= 0 and core_id >= 0:
 		GameManager.army.rb_hide_slot(core_id, idx)
 
+## ── РЕЕСТР ПОЛЁТОВ, КОТОРЫЕ ВЕДЁТ ЯДРО (perf_config.arrow_core) ───────────
+## id полёта → узел стрелы: события от BatchArrows приходят по id
+var _flights: Dictionary = {}
+
+func register_flight(id: int, arrow: Node3D) -> void:
+	_flights[id] = arrow
+
+func unregister_flight(id: int) -> void:
+	_flights.erase(id)
+
+func flight_count() -> int:
+	return _flights.size()
+
+## Разобрать события ядра за кадр: касание чужого или приземление
+func drain_events() -> void:
+	if _flights.is_empty():
+		return
+	var ev: Array = GameManager.army.take_arrow_events()
+	var n: int = ev.size()
+	var k := 0
+	while k + 3 < n:
+		var id: int = int(ev[k])
+		var a = _flights.get(id)
+		_flights.erase(id)
+		if a != null and is_instance_valid(a):
+			a.core_event(ev[k + 1], ev[k + 2], ev[k + 3])
+		k += 4
+
 func set_layer_visible(v: bool) -> void:
 	if mmi != null and is_instance_valid(mmi):
 		mmi.visible = v

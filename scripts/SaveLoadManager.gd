@@ -81,7 +81,14 @@ const FORMAT_VERSION := 1
 ## 3 — вариант рисунка куска руды выбирается по классу прямо при спавне кучи
 ## (Main.ORE_VARIANT_POOLS): на каждый кусок добавился вызов randi(), поток
 ## генератора сдвинулся — то же зерно даёт другой лес и другое озеро
-const WORLD_GEN_VERSION := 3
+## 4 (10.09.2026): плато, река в низине, ничейные рудники с резервом площадок,
+## кусты на плато — то же зерно даёт другой мир
+## 4 → 5 (спринт 13): в генерацию мира добавлен рассев декораций Deco 01-18
+## (Main._scatter_deco). Сама расстановка леса и руды не менялась, но
+## декорации берут числа из ТОГО ЖЕ генератора случайных — поток сдвинулся, и
+## одно зерно даёт другой лес. Старое сохранение легло бы постройками на
+## чужой рельеф (та же причина, что у версий 2 и 3)
+const WORLD_GEN_VERSION := 5
 
 ## Сколько слотов сохранения показывает интерфейс
 const SLOT_COUNT := 3
@@ -441,9 +448,16 @@ static func _make_building(id: String) -> Building:
 		"barracks":   return Barracks.new()
 		"smithy":     return Smithy.new()
 		"mine":       return Mine.new()
-		"house":      return load("res://scripts/House.gd").new()
+		"archery":    return load("res://scripts/Archery.gd").new()
+		"tower":      return load("res://scripts/Tower.gd").new()
 		"town_center": return load("res://scripts/TownCenter.gd").new()
 		"goblin_hut": return load("res://scripts/goblin/GoblinHut.gd").new()
+		"troll_lair": return load("res://scripts/goblin/TrollLair.gd").new()
+	# Три дома — один скрипт, картинка по ключу (House.variant_id)
+	if _UCfg.is_house(id):
+		var h: Building = load("res://scripts/House.gd").new()
+		h.variant_id = id
+		return h
 	return null
 
 ## Бойцы разбираются из колонок. Порядок восстановления внутри отряда тот же,

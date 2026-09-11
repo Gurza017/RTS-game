@@ -43,6 +43,123 @@ using System;
 // только математика: на входе числа, на выходе числа.
 public partial class ArmyCore : RefCounted
 {
+    // ── РЕЛЬЕФ: ГОРА И РУСЛО (09.09.2026) ────────────────────────────────
+    // Высота земли в ядре считалась ТРЕМЯ КОПИЯМИ одной формулы гармоник; с
+    // горой у замка игрока и рекой посередине карты (Main.get_terrain_height)
+    // формула стала составной, и копии обязаны совпасть с GDScript — иначе
+    // боец на холме уходил бы под землю. Параметры подаёт GameManager
+    // (refresh_map_bounds); нули означают «нет горы» / «нет реки».
+    // Вода реки проверяется ЗДЕСЬ, без вызова is_water в GDScript на каждый
+    // шаг (тот стоил бы два межъязыковых перехода на ходящего бойца);
+    // наружу уходит только slide_around_water, и только когда шаг упёрся
+    private bool _hillOn = false;
+    private float _hillCx, _hillCz, _hillH, _hillSigma2 = 1.0f;
+    private bool _riverOn = false;
+    private float _riverHalfW, _riverMeander, _riverK, _fordZ, _fordHalf;
+    private float _riverDepth, _fordDepth, _riverBank, _riverMargin;
+    // Русло только в поле карты (|z| <= _riverHalfZ) — см. Main.river_in_field
+    private float _riverHalfZ = 1e9f;
+    // Плато (Main.plateau_list): по 5 чисел — cx, cz, r_flat, h, ramp_dir
+    private float[] _plat = System.Array.Empty<float>();
+    private float _platGentle = 14.0f, _platSteep = 4.5f, _platCone = 0.75f;
+
+    public void SetPlateaus(float[] data, float gentle, float steep, float cone)
+    {
+        _plat = data ?? System.Array.Empty<float>();
+        _platGentle = gentle; _platSteep = steep; _platCone = cone;
+    }
+
+    // Та же формула, что Main.plateau_height
+    private float PlateauHeight(float x, float z)
+    {
+        float total = 0.0f;
+        for (int i = 0; i + 4 < _plat.Length; i += 5)
+        {
+            float dx = x - _plat[i], dz = z - _plat[i + 1];
+            float rf = _plat[i + 2];
+            float reach = rf + _platGentle;
+            if (Math.Abs(dx) > reach || Math.Abs(dz) > reach) continue;
+            float h = _plat[i + 3];
+            float d = Mathf.Sqrt(dx * dx + dz * dz);
+            if (d <= rf) { total += h; continue; }
+            float da = Math.Abs(Mathf.Wrap(Mathf.Atan2(dz, dx) - _plat[i + 4], -Mathf.Pi, Mathf.Pi));
+            float k = 1.0f - Mathf.SmoothStep(_platCone, _platCone + 0.6f, da);
+            float w = _platSteep + (_platGentle - _platSteep) * k;
+            float t = Mathf.Clamp((d - rf) / w, 0.0f, 1.0f);
+            total += h * (1.0f - t * t * (3.0f - 2.0f * t));
+        }
+        return total;
+    }
+
+    // Высота ядра наружу — стендам, сверяющим обе копии формулы (qa_map F4)
+    public float HeightAt(float x, float z, float reliefAmp) => Height(x, z, reliefAmp);
+
+    public void SetHill(float cx, float cz, float h, float radius)
+    {
+        _hillOn = h > 0.0f && radius > 0.0f;
+        _hillCx = cx; _hillCz = cz; _hillH = h;
+        float s = radius * 0.5f;
+        _hillSigma2 = 2.0f * s * s;
+    }
+
+    public void SetRiver(bool on, float halfW, float meander, float k, float fordZ,
+        float fordHalf, float depth, float fordDepth, float bank, float margin,
+        float halfZ)
+    {
+        _riverOn = on;
+        _riverHalfZ = halfZ;
+        _riverHalfW = halfW; _riverMeander = meander; _riverK = k;
+        _fordZ = fordZ; _fordHalf = fordHalf;
+        _riverDepth = depth; _fordDepth = fordDepth; _riverBank = bank; _riverMargin = margin;
+    }
+
+    private float RiverX(float z) => _riverMeander * Mathf.Sin(z * _riverK);
+    private bool InFord(float z) => Mathf.Abs(z - _fordZ) < _fordHalf;
+
+    private float RiverDepth(float x, float z)
+    {
+        if (!_riverOn || Mathf.Abs(z) > _riverHalfZ) return 0.0f;
+        float d = Mathf.Abs(x - RiverX(z));
+        float edge = _riverHalfW + _riverBank;
+        if (d >= edge) return 0.0f;
+        float depth = InFord(z) ? _fordDepth : _riverDepth;
+        float t = Mathf.Clamp((edge - d) / _riverBank, 0.0f, 1.0f);
+        return depth * t;
+    }
+
+    private float HillHeight(float x, float z)
+    {
+        if (!_hillOn) return 0.0f;
+        float dx = x - _hillCx, dz = z - _hillCz;
+        float q = (dx * dx + dz * dz) / _hillSigma2;
+        if (q > 12.0f) return 0.0f;
+        return _hillH * Mathf.Exp(-q);
+    }
+
+    // Та же формула, что Main.get_terrain_height: гармоники + гора − русло
+    private float Height(float x, float z, float reliefAmp)
+    {
+        if (reliefAmp == 0.0f) return 0.0f;
+        return reliefAmp * (
+              0.55f * Mathf.Sin(x * 0.031f + z * 0.017f)
+            + 0.30f * Mathf.Sin(x * 0.013f - z * 0.041f + 1.7f)
+            + 0.15f * Mathf.Sin(x * 0.077f + z * 0.059f + 3.1f))
+            + HillHeight(x, z) + PlateauHeight(x, z) - RiverDepth(x, z);
+    }
+
+    // Вода реки — то же правило, что Main.is_water для русла
+    private bool RiverWater(float x, float z)
+    {
+        if (!_riverOn || Mathf.Abs(z) > _riverHalfZ) return false;
+        return Mathf.Abs(x - RiverX(z)) < _riverHalfW + _riverMargin && !InFord(z);
+    }
+
+    // Река — своей арифметикой; озеро (если когда-нибудь включат) — GDScript
+    private bool IsWaterAt(float x, float z, GodotObject gm)
+    {
+        if (_riverOn) return RiverWater(x, z);
+        return gm != null && (bool)gm.Call("is_water", x, z);
+    }
     private const int GrowStep = 1024;
 
     // ── КОЛОНКИ ────────────────────────────────────────────────────────────
@@ -479,8 +596,14 @@ public partial class ArmyCore : RefCounted
         Array.Resize(ref _rbBaseY, cap);
         Array.Resize(ref _drawX, cap); Array.Resize(ref _drawY, cap);
         Array.Resize(ref _drawZ, cap); Array.Resize(ref _bobPhase, cap);
+        Array.Resize(ref _anFps, cap); Array.Resize(ref _anFrames, cap);
+        Array.Resize(ref _anLoop, cap); Array.Resize(ref _anPhase, cap);
+        Array.Resize(ref _anFrame, cap);
+        Array.Resize(ref _ringB, cap); Array.Resize(ref _shB, cap);
+        Array.Resize(ref _decI, cap); Array.Resize(ref _hpB, cap); Array.Resize(ref _hpI, cap);
         // Новые ячейки привязки к отрисовке обязаны быть «не привязан»
-        for (int ri = _capacity; ri < cap; ri++) _rbB[ri] = -1;
+        for (int ri = _capacity; ri < cap; ri++)
+        { _rbB[ri] = -1; _ringB[ri] = -1; _shB[ri] = -1; _hpB[ri] = -1; _anFrame[ri] = -1; }
         Array.Resize(ref _atkDmg, cap); Array.Resize(ref _atkRange, cap);
         Array.Resize(ref _speed, cap);
         Array.Resize(ref _sepT, cap); Array.Resize(ref _sepR, cap);
@@ -541,6 +664,8 @@ public partial class ArmyCore : RefCounted
     {
         if (i < 0 || i >= _capacity) return;
         _flags[i] = 0;
+        _anFrames[i] = 0; _anFrame[i] = -1;
+        _ringB[i] = -1; _shB[i] = -1; _hpB[i] = -1;
         _st[i] = 0;
         _fac[i] = -1;
         _sq[i] = 0;
@@ -583,6 +708,16 @@ public partial class ArmyCore : RefCounted
     // Одно число за вызов: их зовёт сам боец оттуда, где он и так менял эту
     // величину. Массивы наружу не отдаются НИКОГДА — см. шапку файла
     public void SetPos(int i, float x, float y, float z) { _px[i] = x; _py[i] = y; _pz[i] = z; }
+    /// БОЕЦ ВНЕ КАРТЫ (гарнизон): строка живёт, но координата «ненастоящая».
+    /// Без этого вошедший в замок или башню оставался в сетке соседей на
+    /// последней точке у ворот, и его находили и BestEnemy, и стрелы (EnemyAt):
+    /// «лучники в башне получают урон» (09.09.2026). Возврат — WritePose
+    /// (sync_row при выходе) снова ставит FPosValid
+    public void SetOffMap(int i, bool on)
+    {
+        if (i < 0 || i >= _capacity) return;
+        if (on) _flags[i] &= ~FPosValid; else _flags[i] |= FPosValid;
+    }
     public void SetVel(int i, float x, float z) { _vx[i] = x; _vz[i] = z; }
     public void SetHp(int i, float cur, float mx) { _hp[i] = cur; _hpMax[i] = mx; }
     public void SetState(int i, int s) { _st[i] = s; }
@@ -991,7 +1126,7 @@ public partial class ArmyCore : RefCounted
 
     public Vector3 EnemyBlock(int row, float tx, float tz, float minDist, bool awayOk = false)
     {
-        if (row < 0) return Vector3.Zero;
+        if (row < 0 || SkipBodyScan) return Vector3.Zero;
         int myf = _fac[row];
         int mySlot = FacSlot(myf);
         if (!EnemyNear(tx, tz, myf, minDist)) return Vector3.Zero;
@@ -1446,7 +1581,7 @@ public partial class ArmyCore : RefCounted
             // выше выгоды
             if (waterOn && gm != null)
             {
-                if ((bool)gm.Call("is_water", nx, nz))
+                if (IsWaterAt(nx, nz, gm))
                 {
                     Vector3 slid = (Vector3)gm.Call("slide_around_water",
                         new Vector3(x, 0.0f, z), new Vector3(sx, 0.0f, sz));
@@ -1646,12 +1781,7 @@ public partial class ArmyCore : RefCounted
             if (tdx * tdx + tdz * tdz > thStep)
             {
                 _thX[i] = nx; _thZ[i] = nz;
-                _thY[i] = reliefAmp != 0.0f
-                    ? reliefAmp * (
-                        0.55f * Mathf.Sin(nx * 0.031f + nz * 0.017f)
-                      + 0.30f * Mathf.Sin(nx * 0.013f - nz * 0.041f + 1.7f)
-                      + 0.15f * Mathf.Sin(nx * 0.077f + nz * 0.059f + 3.1f))
-                    : 0.0f;
+                _thY[i] = Height(nx, nz, reliefAmp);
             }
             float ny = _thY[i];
             _px[i] = nx; _py[i] = ny; _pz[i] = nz;
@@ -1675,9 +1805,15 @@ public partial class ArmyCore : RefCounted
     /// awayOk — ТОЛЬКО ПОД БИЛЕТОМ ПРОХОДА: тело, от которого шаг УДАЛЯЕТ,
     /// не блокирует, даже если новая точка ещё внутри радиуса. Без билета
     /// блокируется любая точка внутри радиуса (см. разбор ниже)
+    /// ИЗМЕРИТЕЛЬНАЯ РУЧКА (хак №2, 09.09.2026): проверка чужих тел на шаге
+    /// выключена целиком. Семантику ломает (тела проходят друг сквозь друга),
+    /// нужна только чтобы узнать ПОТОЛОК выигрыша любой замены этой проверки
+    public bool SkipBodyScan = false;
+
     private void ScanBlock(int row, float nx, float nz, float blockR, float blockSq,
         int mySlot, int dead, ref float bx, ref float bz, bool awayOk = false)
     {
+        if (SkipBodyScan) return;
         int cx0 = (int)((nx - blockR - _gx0) * _ginv);
         int cz0 = (int)((nz - blockR - _gz0) * _ginv);
         int cx1 = (int)((nx + blockR - _gx0) * _ginv);
@@ -2090,13 +2226,8 @@ public partial class ArmyCore : RefCounted
             float nx2 = _sepNX[i], nz2 = _sepNZ[i];
             var u = _unitOf[i];
             if (u == null || !GodotObject.IsInstanceValid(u)) continue;
-            if (waterOn && gm != null && (bool)gm.Call("is_water", nx2, nz2)) continue;
-            float ny = reliefAmp != 0.0f
-                ? reliefAmp * (
-                    0.55f * Mathf.Sin(nx2 * 0.031f + nz2 * 0.017f)
-                  + 0.30f * Mathf.Sin(nx2 * 0.013f - nz2 * 0.041f + 1.7f)
-                  + 0.15f * Mathf.Sin(nx2 * 0.077f + nz2 * 0.059f + 3.1f))
-                : 0.0f;
+            if (waterOn && IsWaterAt(nx2, nz2, gm)) continue;
+            float ny = Height(nx2, nz2, reliefAmp);
             _px[i] = nx2; _py[i] = ny; _pz[i] = nz2;
             if (u is Node3D n3)
             {
@@ -2127,12 +2258,7 @@ public partial class ArmyCore : RefCounted
             float wx = ax + rx * ox + cx * oz;
             float wz = az + rz * ox + cz * oz;
             _px[i] = wx; _pz[i] = wz;
-            _py[i] = amp != 0.0f
-                ? ny + amp * (
-                    0.55f * Mathf.Sin(wx * 0.031f + wz * 0.017f)
-                  + 0.30f * Mathf.Sin(wx * 0.013f - wz * 0.041f + 1.7f)
-                  + 0.15f * Mathf.Sin(wx * 0.077f + wz * 0.059f + 3.1f))
-                : ny;
+            _py[i] = ny + Height(wx, wz, amp);
             _flags[i] |= FPosValid;
             n++;
         }
@@ -2452,14 +2578,64 @@ public partial class ArmyCore : RefCounted
         }
     }
 
-    /// Полный пересчёт: источники плоским массивом троек [x, z, r].
-    /// Возвращает [lit, seen, rgba] — копии для чтения и текстуры
-    public Godot.Collections.Array FogRefresh(float[] src)
+    // ── ИСТОЧНИКИ ПО БОЙЦАМ СОБИРАЕТ ЯДРО (09.09.2026) ──────────────────────
+    // GDScript обходил все _live_units (global_position — СВОЙСТВО, правило 2,
+    // плюс is_instance_valid, is_dead и словарь на каждого): на 4000 бойцах
+    // это 3.4 мс из 4.6 мс пересчёта, и всё это ложилось в ОДИН кадр раз в
+    // UPDATE_INTERVAL — тот самый микролаг. Здесь те же правила: только живые
+    // строки своей фракции с настоящей координатой (гарнизон — нет), радиус
+    // обзора от _atkRange по формуле unit_stats_config.vision_radius,
+    // слияние по грубой ячейке srcCell с наибольшим радиусом (как _add_source)
+    private readonly System.Collections.Generic.Dictionary<long, int> _fogSrcKey = new();
+    private float[] _fogSrcX = new float[256], _fogSrcZ = new float[256], _fogSrcR = new float[256];
+    private int _fogSrcN;
+
+    public Godot.Collections.Array FogRefreshRows(int faction, float visMult, float visMin,
+        float srcCell, float pad, float[] extra)
     {
         int n = _fogCols * _fogRows;
         Array.Clear(_fogLit, 0, n);
-        for (int k = 0; k + 2 < src.Length; k += 3)
-            FogStamp(src[k], src[k + 1], src[k + 2]);
+        _fogSrcKey.Clear();
+        _fogSrcN = 0;
+        float inv = 1.0f / Math.Max(srcCell, 0.001f);
+        int dead = DeadState;
+        for (int k = 0; k < _liveCount; k++)
+        {
+            int i = _liveRows[k];
+            if ((_flags[i] & FPosValid) == 0 || _fac[i] != faction || _st[i] == dead) continue;
+            float r = Math.Max(_atkRange[i] * visMult, visMin) + pad;
+            int kx = (int)Mathf.Floor(_px[i] * inv);
+            int kz = (int)Mathf.Floor(_pz[i] * inv);
+            long key = ((long)kz << 32) ^ (uint)kx;
+            if (_fogSrcKey.TryGetValue(key, out int idx))
+            {
+                if (r > _fogSrcR[idx]) _fogSrcR[idx] = r;
+                continue;
+            }
+            if (_fogSrcN >= _fogSrcX.Length)
+            {
+                int cap = _fogSrcX.Length * 2;
+                Array.Resize(ref _fogSrcX, cap); Array.Resize(ref _fogSrcZ, cap); Array.Resize(ref _fogSrcR, cap);
+            }
+            _fogSrcX[_fogSrcN] = (kx + 0.5f) * srcCell;
+            _fogSrcZ[_fogSrcN] = (kz + 0.5f) * srcCell;
+            _fogSrcR[_fogSrcN] = r;
+            _fogSrcKey[key] = _fogSrcN;
+            _fogSrcN++;
+        }
+        for (int s2 = 0; s2 < _fogSrcN; s2++)
+            FogStamp(_fogSrcX[s2], _fogSrcZ[s2], _fogSrcR[s2]);
+        for (int k = 0; k + 2 < extra.Length; k += 3)
+            FogStamp(extra[k], extra[k + 1], extra[k + 2]);
+        return FogFinish();
+    }
+
+    /// Число ячеек-источников последнего пересчёта (зонды)
+    public int FogSourceCount() => _fogSrcN;
+
+    private Godot.Collections.Array FogFinish()
+    {
+        int n = _fogCols * _fogRows;
         var lit = _fogLit; var seen = _fogSeen; var rgba = _fogRgba;
         for (int i = 0; i < n; i++)
         {
@@ -2474,6 +2650,17 @@ public partial class ArmyCore : RefCounted
         var res = new Godot.Collections.Array();
         res.Add(lit); res.Add(seen); res.Add(rgba);
         return res;
+    }
+
+    /// Полный пересчёт: источники плоским массивом троек [x, z, r].
+    /// Возвращает [lit, seen, rgba] — копии для чтения и текстуры
+    public Godot.Collections.Array FogRefresh(float[] src)
+    {
+        int n = _fogCols * _fogRows;
+        Array.Clear(_fogLit, 0, n);
+        for (int k = 0; k + 2 < src.Length; k += 3)
+            FogStamp(src[k], src[k + 1], src[k + 2]);
+        return FogFinish();
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -2676,6 +2863,195 @@ public partial class ArmyCore : RefCounted
     private float[] _drawZ = Array.Empty<float>();
     private float[] _bobPhase = Array.Empty<float>();
 
+    // ── КАДР ЛЕНТЫ ЛИСТАЕТ ЯДРО (визуальный проход, этап E1, 09.09.2026) ────
+    // Параметры ленты пишутся ПО СОБЫТИЮ из Unit._set_anim / Spearman
+    // (_apply_dir_tex) — RowAnim; фазу и номер кадра ведёт BatchVisual каждый
+    // кадр отрисовки и пишет в слот ТОЛЬКО на смену номера. Прежде каждый
+    // видимый боец листал кадр в GDScript и на каждую смену пересекал
+    // границу (Slot.set_frame → RbWriteFrame). Побочная выгода: стоящий боец
+    // с зацикленной лентой покоя может СПАТЬ по картинке — дышать за него
+    // продолжает ядро (см. Unit._process_can_sleep)
+    private float[] _anFps = Array.Empty<float>();
+    private int[] _anFrames = Array.Empty<int>();
+    private bool[] _anLoop = Array.Empty<bool>();
+    private float[] _anPhase = Array.Empty<float>();
+    private int[] _anFrame = Array.Empty<int>();
+
+    // ── КОЛЬЦА ВЫДЕЛЕНИЯ, ТЕНИ И ПОЛОСКИ ЗДОРОВЬЯ — ТОЖЕ СЛОТЫ, ВЕДОМЫЕ ЯДРОМ ─
+    // Слои колец/теней (SelectionDecalRenderer) и полосок (HpBarRenderer)
+    // держат буферы в тех же Rb, что и бакеты бойцов; привязка строки к слоту
+    // — по событию (выделение, Alt), позиция — из нарисованной точки строки в
+    // том же проходе. Прежде GDScript на каждый выделенный отряд в каждом
+    // кадре читал draw_position (переход границы) и писал 24 float в
+    // PackedFloat32Array: две тысячи выделенных стоили 14 мс кадра
+    private int[] _ringB = Array.Empty<int>();
+    private int[] _shB = Array.Empty<int>();
+    private int[] _decI = Array.Empty<int>();
+    private int[] _hpB = Array.Empty<int>();
+    private int[] _hpI = Array.Empty<int>();
+    private float _ringY, _shadowY, _hpBarY;
+
+    // ── ДЕКЛАРАТИВНЫЕ СТРЕЛЫ (хак физтика №1, 09.09.2026) ────────────────
+    // Стрела на время полёта — не узел с _process, а ЗАПИСЬ: старт, конец,
+    // высота дуги, темп. Ядро каждый кадр двигает все полёты одним проходом,
+    // пишет позицию и ось в слот общего MultiMesh стрел и ищет попадание тем
+    // же EnemyAt, что звал GDScript (правило XZ-радиуса сохранено дословно).
+    // Наружу уходят только СОБЫТИЯ: [id, жертва|null, x, y, z, ax, ay, az] —
+    // одна пачка на кадр вместо трёх переходов границы на стрелу на кадр
+    // НОМЕР БУФЕРА — У КАЖДОГО ПОЛЁТА СВОЙ (спринт 14). Здесь стояло ОДНО
+    // поле `_afB`, и каждый новый запуск перетирал его всем, кто уже в
+    // воздухе: BatchArrows писал позиции ВСЕХ полётов в буфер последнего
+    // стрелявшего. С появлением второго слоя снарядов (кости гноллов,
+    // спринт 13) это стало видно глазом — стрела лучника летела стрелой и
+    // на середине дуги превращалась в кость, а на земле лежала костью.
+    // Слоёв теперь два, и их будет больше: буфер обязан ехать со снарядом
+    private int _afN;
+    private int[] _afId = new int[64], _afSlot = new int[64], _afFac = new int[64];
+    private int[] _afB = new int[64];
+    private float[] _afSx = new float[64], _afSy = new float[64], _afSz = new float[64];
+    private float[] _afEx = new float[64], _afEy = new float[64], _afEz = new float[64];
+    private float[] _afArc = new float[64], _afT = new float[64], _afRate = new float[64];
+    private readonly Godot.Collections.Array _afEvents = new();
+
+    public void ArrowLaunch(int id, int b, int slot, Vector3 s, Vector3 e,
+        float arcH, float rate, int fac)
+    {
+        if (_afN >= _afId.Length)
+        {
+            int cap = _afId.Length * 2;
+            Array.Resize(ref _afId, cap); Array.Resize(ref _afSlot, cap); Array.Resize(ref _afFac, cap);
+            Array.Resize(ref _afB, cap);
+            Array.Resize(ref _afSx, cap); Array.Resize(ref _afSy, cap); Array.Resize(ref _afSz, cap);
+            Array.Resize(ref _afEx, cap); Array.Resize(ref _afEy, cap); Array.Resize(ref _afEz, cap);
+            Array.Resize(ref _afArc, cap); Array.Resize(ref _afT, cap); Array.Resize(ref _afRate, cap);
+        }
+        int k = _afN++;
+        _afB[k] = b;
+        _afId[k] = id; _afSlot[k] = slot; _afFac[k] = fac;
+        _afSx[k] = s.X; _afSy[k] = s.Y; _afSz[k] = s.Z;
+        _afEx[k] = e.X; _afEy[k] = e.Y; _afEz[k] = e.Z;
+        _afArc[k] = arcH; _afT[k] = 0.0f; _afRate[k] = rate;
+    }
+
+    public void ArrowCancel(int id)
+    {
+        for (int k = 0; k < _afN; k++)
+            if (_afId[k] == id) { AfRemove(k); return; }
+    }
+
+    public int ArrowFlights() => _afN;
+
+    private void AfRemove(int k)
+    {
+        int last = _afN - 1;
+        if (k != last)
+        {
+            _afId[k] = _afId[last]; _afSlot[k] = _afSlot[last]; _afFac[k] = _afFac[last];
+            _afB[k] = _afB[last];
+            _afSx[k] = _afSx[last]; _afSy[k] = _afSy[last]; _afSz[k] = _afSz[last];
+            _afEx[k] = _afEx[last]; _afEy[k] = _afEy[last]; _afEz[k] = _afEz[last];
+            _afArc[k] = _afArc[last]; _afT[k] = _afT[last]; _afRate[k] = _afRate[last];
+        }
+        _afN = last;
+    }
+
+    /// Шаг всех полётов. Обход С КОНЦА: снятый полёт подменяется последним
+    public void BatchArrows(float delta, float hitRadius)
+    {
+        if (_afN == 0) return;
+        for (int k = _afN - 1; k >= 0; k--)
+        {
+            // БУФЕР У КАЖДОГО СВОЙ: снаряды разных слоёв (стрелы, кости)
+            // летят вперемешку, и писать их в один буфер нельзя
+            int bIdx = _afB[k];
+            if (bIdx < 0 || bIdx >= _rb.Count) { AfRemove(k); continue; }
+            var rb = _rb[bIdx];
+            var buf = rb.Buf;
+            float t = _afT[k] + _afRate[k] * delta;
+            if (t > 1.0f) t = 1.0f;
+            _afT[k] = t;
+            float sx = _afSx[k], sy = _afSy[k], sz = _afSz[k];
+            float ex = _afEx[k], ey = _afEy[k], ez = _afEz[k];
+            float x = sx + (ex - sx) * t;
+            float y = sy + (ey - sy) * t + Mathf.Sin(t * Mathf.Pi) * _afArc[k];
+            float z = sz + (ez - sz) * t;
+            // Ось — та же формула, что Arrow._velocity_dir
+            float ax = ex - sx, ay = ey - sy + Mathf.Pi * Mathf.Cos(t * Mathf.Pi) * _afArc[k], az = ez - sz;
+            float al = Mathf.Sqrt(ax * ax + ay * ay + az * az);
+            if (al < 1e-4f) { ax = 0.0f; ay = 0.0f; az = -1.0f; } else { ax /= al; ay /= al; az /= al; }
+            int o = _afSlot[k] * RbStride;
+            if (o + RbStride <= buf.Length)
+            {
+                buf[o + 3] = x; buf[o + 7] = y; buf[o + 11] = z;
+                buf[o + 12] = ax * 0.5f + 0.5f; buf[o + 13] = ay * 0.5f + 0.5f;
+                buf[o + 14] = az * 0.5f + 0.5f; buf[o + 15] = 1.0f;
+                rb.Dirty = true;
+            }
+            // Попадание — тем же правилом, что было в Arrow._check_hit
+            var victim = EnemyAt(x, z, hitRadius, _afFac[k]);
+            if (victim != null || t >= 1.0f)
+            {
+                _afEvents.Add(_afId[k]);
+                _afEvents.Add(victim);
+                _afEvents.Add(new Vector3(x, y, z));
+                _afEvents.Add(new Vector3(ax, ay, az));
+                AfRemove(k);
+            }
+        }
+    }
+
+    /// События полётов за кадр (плоско по четыре: id, жертва|null, точка, ось)
+    public Godot.Collections.Array TakeArrowEvents()
+    {
+        var res = new Godot.Collections.Array(_afEvents);
+        _afEvents.Clear();
+        return res;
+    }
+
+    public void DecalConfig(float ringY, float shadowY, float hpBarY)
+    { _ringY = ringY; _shadowY = shadowY; _hpBarY = hpBarY; }
+
+    public void RowAnim(int i, int frames, float fps, bool loop, float phase)
+    {
+        if (i < 0 || i >= _capacity) return;
+        _anFrames[i] = frames; _anFps[i] = fps; _anLoop[i] = loop;
+        _anPhase[i] = phase; _anFrame[i] = -1;
+    }
+
+    public void DecalBind(int i, int ringB, int shB, int idx)
+    {
+        if (i < 0 || i >= _capacity) return;
+        _ringB[i] = ringB; _shB[i] = shB; _decI[i] = idx;
+    }
+    public void DecalUnbind(int i)
+    {
+        if (i < 0 || i >= _capacity) return;
+        _ringB[i] = -1; _shB[i] = -1;
+    }
+    public void HpBind(int i, int b, int idx)
+    {
+        if (i < 0 || i >= _capacity) return;
+        _hpB[i] = b; _hpI[i] = idx;
+    }
+    public void HpUnbind(int i)
+    {
+        if (i < 0 || i >= _capacity) return;
+        _hpB[i] = -1;
+    }
+
+    /// Полный трансформ слота тремя строками базиса и точкой (кольца, тени,
+    /// полоски — у них базис не единичный). Цвет не трогается
+    public void RbWriteXform(int b, int idx, Vector3 b0, Vector3 b1, Vector3 b2, Vector3 pos)
+    {
+        var r = _rb[b];
+        int o = idx * RbStride;
+        var buf = r.Buf;
+        buf[o] = b0.X; buf[o + 1] = b1.X; buf[o + 2] = b2.X; buf[o + 3] = pos.X;
+        buf[o + 4] = b0.Y; buf[o + 5] = b1.Y; buf[o + 6] = b2.Y; buf[o + 7] = pos.Y;
+        buf[o + 8] = b0.Z; buf[o + 9] = b1.Z; buf[o + 10] = b2.Z; buf[o + 11] = pos.Z;
+        r.Dirty = true;
+    }
+
     /// Разлёт от тарана ведёт картинку сам (Unit._smoothed, свой темп догона):
     /// на это окно строка выходит из пакетного догона
     public const int FVisSelf = 1 << 19;
@@ -2819,6 +3195,11 @@ public partial class ArmyCore : RefCounted
         _drawX[i] = dx; _drawY[i] = dy; _drawZ[i] = dz;
         if (drawInit) _flags[i] |= FDrawInit;
         else _flags[i] &= ~FDrawInit;
+        // Переезд между бакетами (смена ленты): GDScript записал слот со своим
+        // _look_frame, который у ведомой ядром ленты не листается, — кадр
+        // ставится ядром ЗДЕСЬ, из своей фазы
+        if (_anFrame[i] >= 0 && b >= 0)
+            _rb[b].Buf[idx * RbStride + 12] = _anFrame[i] / 255.0f;
     }
 
     public void RowUnbind(int i)
@@ -2856,9 +3237,10 @@ public partial class ArmyCore : RefCounted
     //   • неподвижного не переписываем — порог тот же, что у Slot.move_to.
     // Строки под FVisSelf (разлёт) и без привязки пропускаются.
     public void BatchVisual(float delta, float lerpK, float snapSq,
-        float bobAmp, float bobSprintMult)
+        float bobAmp, float bobSprintMult, bool animCore = false, bool decalCore = false)
     {
         const float MoveEpsSq = 1e-6f;
+        float ringY = _ringY, shadowY = _shadowY, hpBarY = _hpBarY;
         // Проход целиком из чистой математики по колонкам и буферам (записи —
         // только в СВОЮ строку и в СВОЙ слот бакета), поэтому параллелится
         // диапазонами без локов; флаг Dirty — благоприятная гонка (все пишут
@@ -2871,6 +3253,39 @@ public partial class ArmyCore : RefCounted
             int b = _rbB[i];
             if (b < 0) continue;
             int fl = _flags[i];
+            // ── КАДР ЛЕНТЫ: ДО ветки разлёта, боец в полёте тоже листает ────
+            if (animCore)
+            {
+                int nfr = _anFrames[i];
+                if (nfr > 1 && _anFps[i] > 0.0f)
+                {
+                    float ph = _anPhase[i] + delta * _anFps[i];
+                    int f;
+                    if (_anLoop[i])
+                    {
+                        // Фаза держится в пределах ленты: float не растёт вечно
+                        if (ph >= nfr * 4.0f) ph -= nfr * 4.0f;
+                        f = ((int)ph) % nfr;
+                    }
+                    else
+                    {
+                        if (ph > nfr) ph = nfr;
+                        f = Math.Min((int)ph, nfr - 1);
+                    }
+                    _anPhase[i] = ph;
+                    if (f != _anFrame[i])
+                    {
+                        _anFrame[i] = f;
+                        var ra = _rb[b];
+                        ra.Buf[_rbI[i] * RbStride + 12] = f / 255.0f;
+                        ra.Dirty = true;
+                    }
+                }
+                else if (nfr == 1 && _anFrame[i] != 0)
+                {
+                    _anFrame[i] = 0;
+                }
+            }
             if ((fl & FVisSelf) != 0) continue;
             float px = _px[i], py = _py[i], pz = _pz[i];
             float sx, sz;
@@ -2917,9 +3332,54 @@ public partial class ArmyCore : RefCounted
             float odx = sx - buf[o + 3];
             float ody = wy - buf[o + 7];
             float odz = sz - buf[o + 11];
-            if (odx * odx + ody * ody + odz * odz < MoveEpsSq) continue;
-            buf[o + 3] = sx; buf[o + 7] = wy; buf[o + 11] = sz;
-            r.Dirty = true;
+            if (odx * odx + ody * ody + odz * odz >= MoveEpsSq)
+            {
+                buf[o + 3] = sx; buf[o + 7] = wy; buf[o + 11] = sz;
+                r.Dirty = true;
+            }
+            if (!decalCore) continue;
+            // ── КОЛЬЦО, ТЕНЬ, ПОЛОСКА — ИЗ ТОЙ ЖЕ НАРИСОВАННОЙ ТОЧКИ ───────
+            int rbB = _ringB[i];
+            if (rbB >= 0)
+            {
+                int di = _decI[i] * RbStride;
+                var rr = _rb[rbB];
+                float ry = py + ringY;
+                var rbuf = rr.Buf;
+                if (rbuf[di + 3] != sx || rbuf[di + 7] != ry || rbuf[di + 11] != sz)
+                {
+                    rbuf[di + 3] = sx; rbuf[di + 7] = ry; rbuf[di + 11] = sz;
+                    rr.Dirty = true;
+                }
+                int shB = _shB[i];
+                if (shB >= 0)
+                {
+                    var rs = _rb[shB];
+                    float sy = py + shadowY;
+                    var sbuf = rs.Buf;
+                    if (sbuf[di + 3] != sx || sbuf[di + 7] != sy || sbuf[di + 11] != sz)
+                    {
+                        sbuf[di + 3] = sx; sbuf[di + 7] = sy; sbuf[di + 11] = sz;
+                        rs.Dirty = true;
+                    }
+                }
+            }
+            int hb = _hpB[i];
+            if (hb >= 0)
+            {
+                int hi = _hpI[i] * RbStride;
+                var rh = _rb[hb];
+                float hy = py + hpBarY;
+                float frac = _hpMax[i] > 0.0f ? Mathf.Clamp(_hp[i] / _hpMax[i], 0.0f, 1.0f) : 0.0f;
+                var hbuf = rh.Buf;
+                if (hbuf[hi + 3] != sx || hbuf[hi + 7] != hy || hbuf[hi + 11] != sz
+                    || Math.Abs(hbuf[hi + 12] - frac) > 0.002f)
+                {
+                    hbuf[hi + 3] = sx; hbuf[hi + 7] = hy; hbuf[hi + 11] = sz;
+                    hbuf[hi + 12] = frac;
+                    rh.Dirty = true;
+                }
+            }
         }
         }
         int T = CoreThreads;

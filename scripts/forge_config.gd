@@ -180,8 +180,9 @@ const UNITS := {
 		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"2d": {"icon": "icon_gold.png", "prereq": [], "link": [],
-		"name": "Учёт и порядок", "desc": "+0.2 к скорости, +3 к грузу за ходку",
-		"cost_gold": 400.0, "cost_wood": 550.0, "cost_stone": 150.0, "research_time": 40.0,
+		"name": "Учёт и порядок", "desc": "+0.2 к скорости, +3 к грузу за ходку, +25 % к темпу стройки",
+		"cost_gold": 400.0, "cost_wood": 550.0, "cost_stone": 150.0, "cost_food": 120.0, "research_time": 40.0,
+		"bonus_build": 0.25,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
 		"bonus_health": 0.0, "bonus_speed": 0.2, "bonus_range": 0.0,
@@ -213,7 +214,7 @@ const UNITS := {
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"3d": {"icon": "icon_drop.png", "prereq": [], "link": [],
 		"name": "Артельный обоз", "desc": "+3 к грузу за ходку, −0.35 с к циклу добычи",
-		"cost_gold": 500.0, "cost_wood": 700.0, "cost_stone": 200.0, "research_time": 45.0,
+		"cost_gold": 500.0, "cost_wood": 700.0, "cost_stone": 200.0, "cost_food": 180.0, "research_time": 45.0,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
 		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
@@ -244,8 +245,9 @@ const UNITS := {
 		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"4d": {"icon": "icon_might.png", "prereq": [], "link": [],
-		"name": "Гильдия артелей", "desc": "+0.25 к скорости, +4 к грузу за ходку",
-		"cost_gold": 800.0, "cost_wood": 1000.0, "cost_stone": 300.0, "research_time": 60.0,
+		"name": "Гильдия артелей", "desc": "+0.25 к скорости, +4 к грузу за ходку, +50 % к темпу стройки",
+		"cost_gold": 800.0, "cost_wood": 1000.0, "cost_stone": 300.0, "cost_food": 300.0, "research_time": 60.0,
+		"bonus_build": 0.5,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
 		"bonus_health": 0.0, "bonus_speed": 0.25, "bonus_range": 0.0,
@@ -312,8 +314,14 @@ const UNITS := {
 		"bonus_health": 12.0, "bonus_speed": 0.0, "bonus_range": 0.0,
 		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+	# ── ЯРОСТНЫЙ НАБЕГ (заказ спринта 13) ─────────────────────────────────
+	# Прежнее имя узла — «Град ударов», «Серия быстрых атак»: то же самое
+	# другими словами, и кода за ним не стояло вовсе. Теперь у него есть
+	# поведение (Warrior.start_rage_dash): рывок с ЗАФИКСИРОВАННЫМИ щитами и
+	# серия из пяти быстрых ударов «обычный → мощный → обычный → мощный →
+	# обычный». Включается двойным ПКМ по земле (SelectionManager)
 	"1d": {"icon": "icon_dual_sword.png", "prereq": [], "link": [],
-		"name": "Град ударов", "desc": "Серия быстрых атак",
+		"name": "Яростный Набег", "desc": "Двойной ПКМ: рывок под щитами и серия из 5 ударов",
 		"cost_gold": 200.0, "cost_wood": 300.0, "cost_stone": 0.0, "research_time": 25.0, "squad_unlock_cost": 400.0,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
@@ -570,8 +578,13 @@ const UNITS := {
 		"bonus_health": 20.0, "bonus_speed": 0.0, "bonus_range": 0.0,
 		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+	# ── НАТИСК ФАЛАНГИ (заказ спринта 13, ЧЕТВЁРТЫЙ слот) ─────────────────
+	# Прежнее имя узла — «Стойкость», «Не отступает»: кода за ним тоже не
+	# стояло. Теперь: строй смыкается, идёт МЕДЛЕННО И СЛАЖЕННО, первые
+	# PHALANX_PUSH_HITS ударов усилены, после них отряд переходит в
+	# ОТТЕСНЕНИЕ — растёт напор и падает входящий урон
 	"4d": {"icon": "icon_skull.png", "prereq": [], "link": [],
-		"name": "Стойкость", "desc": "Не отступает",
+		"name": "Натиск Фаланги", "desc": "Двойной ПКМ: сомкнутый ход, 10 усиленных ударов, затем оттеснение",
 		"cost_gold": 800.0, "cost_wood": 1000.0, "cost_stone": 300.0, "research_time": 60.0, "squad_unlock_cost": 1200.0,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
@@ -1072,8 +1085,14 @@ static func ability_nodes(unit_id: String) -> Array:
 	return out
 
 ## Сколько золота стоит докупить способность конкретному отряду
-static func squad_unlock_cost(node: Dictionary) -> float:
-	return maxf(float(node.get("squad_unlock_cost", 0.0)), 0.0)
+## ── ВТОРОЙ ОПЛАТЫ ЗА СПОСОБНОСТЬ БОЛЬШЕ НЕТ (заказ владельца 10.09.2026) ──
+## Было так: исследование в кузнице ОТКРЫВАЛО способность роду войск, а каждый
+## отряд потом покупал её себе отдельно за `squad_unlock_cost` золота. Владелец
+## это отменил: «спец-бонус открывается сразу для всех юнитов соответствующего
+## типа, плату за применение убрать». Поля в таблице оставлены историей —
+## правка баланса ими больше ничего не включает
+static func squad_unlock_cost(_node: Dictionary) -> float:
+	return 0.0
 
 ## СПОСОБНОСТЬ-РЕЖИМ: куплена — и дальше её включает и выключает игрок.
 ## Обычная способность срабатывает сама; эта висит переключателем на панели

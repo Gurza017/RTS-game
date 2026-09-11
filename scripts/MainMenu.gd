@@ -1,6 +1,27 @@
 extends Control
 class_name MainMenu
 
+## ═══════════════════════════════════════════════════════════════════════════
+## ГЛАВНОЕ МЕНЮ — ЧЕТЫРЕ КНОПКИ И ДВА ПОДМЕНЮ (заказ владельца 10.09.2026)
+## ═══════════════════════════════════════════════════════════════════════════
+## Прежний экран был свалкой: подзаголовок, четыре выпадающих списка, ряд
+## сложности со строкой-подсказкой, кнопка старта, ряд слотов сохранений,
+## кнопка звука и выход — всё в одном столбце. Теперь так:
+##
+##   ГЛАВНАЯ    заголовок «10 000 копейщиков» и РОВНО ЧЕТЫРЕ кнопки:
+##              START / Загрузить / Опции / Выход
+##   ЗАГРУЗИТЬ  подменю со слотами (пустой слот виден, но не нажимается)
+##   ОПЦИИ      подменю: партия (расы и цвета), сложность ВЫПАДАЮЩИМ СПИСКОМ,
+##              звук (три шины) и отображение (FPS, прокрутка камеры краем)
+##
+## СТРАНИЦЫ — ЭТО ТРИ VBox'а В ОДНОМ КОНТЕЙНЕРЕ, а не отдельные сцены: выбор
+## расы и цвета читается кнопкой «START» с той же самой страницы опций, и
+## разнеси их по сценам — пришлось бы заводить второе хранилище выбора.
+##
+## ВЫБОР ЖИВЁТ НА ДИСКЕ, А НЕ В ПАМЯТИ МЕНЮ: сложность — user://difficulty.cfg
+## (_Diff), громкость — user://audio_settings.cfg (AudioManager), отображение —
+## user://view_settings.cfg (_GS). Поэтому «применить» нигде не нужно.
+
 const FACTION_LABELS = ["Люди", "Нежить", "Орки", "Эльфы", "Гномы"]
 const FACTION_KEYS   = ["humans", "undead", "orc", "elves", "dwarves"]
 
@@ -11,31 +32,32 @@ const _Diff     := preload("res://scripts/game_difficulty_config.gd")
 ## Загрузка сохранённой партии прямо со стартового экрана
 const _SaveLoad := preload("res://scripts/SaveLoadManager.gd")
 
+## Ширина кнопок главной страницы и подменю
+const BTN_W := 220
+const BTN_H := 44
+
 var _player_opt: OptionButton
 var _ai_opt:     OptionButton
 var _player_color_opt: OptionButton
 var _ai_color_opt:     OptionButton
+var _diff_opt:   OptionButton
+var _diff_hint:  Label = null
+
+## Страницы: главная, загрузка, опции. Видна всегда ровно одна
+var _page_main: VBoxContainer = null
+var _page_load: VBoxContainer = null
+var _page_opts: VBoxContainer = null
 
 func _ready() -> void:
 	anchor_right  = 1.0
 	anchor_bottom = 1.0
-	# ВЫБОР СЛОЖНОСТИ ЧИТАЕТСЯ С ДИСКА ДО ВЁРСТКИ: кнопки строятся уже с
-	# подсвеченной прошлой игрой — иначе игрок каждый запуск видел бы «Обычная»
-	# независимо от того, что выбрал вчера
+	# ВЫБОР ЧИТАЕТСЯ С ДИСКА ДО ВЁРСТКИ: списки строятся уже с прошлым выбором
 	_Diff.load_saved()
+	_GS.load_view_settings()
 	_build_ui()
 	# Панель выбора расы играет основную тему
 	AudioManager.play_menu_music()
 
-## ВЕРСТКА СТАРТОВОГО ЭКРАНА — КОМПАКТНАЯ, С ГАРАНТИЕЙ ПОМЕЩЕНИЯ В ОКНО.
-## Раньше separation=20 у vbox складывался ЕЩЁ и с явными _add_spacer() между
-## теми же самыми элементами (двойной отступ), а сам блок стоял в
-## CenterContainer, который при переполнении не обрезает контент, а раздвигает
-## его симметрично за оба края окна — так кнопка «Старт» пряталась под нижней
-## границей. Итоговая высота той версты ~970px против 720px окна.
-## Здесь: ужатые отступы, раса+цвет сведены в HBox-строки, все четыре строки —
-## в GridContainer 2×2 (Игрок/ИИ × Раса/Цвет), а сверху — ScrollContainer как
-## страховка на случай ещё меньшего разрешения, чем 1280×720.
 func _build_ui() -> void:
 	var bg := ColorRect.new()
 	bg.color          = Color(0.06, 0.08, 0.14)
@@ -49,38 +71,152 @@ func _build_ui() -> void:
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	add_child(scroll)
 
+	# CenterContainer внутри ScrollContainer обязан тянуться по ОБЕИМ осям:
+	# прокрутка выдаёт ребёнку ровно его минимум, и свёрнутая страница
+	# прижалась бы к верхней кромке вместо середины экрана
 	var center := CenterContainer.new()
-	# Заполняет всю ширину скролла, чтобы CenterContainer мог отцентровать
-	# vbox по горизонтали; по высоте раскладка выше — скролл сам решает,
-	# нужна ли прокрутка, сравнивая её с высотой окна
 	center.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	center.size_flags_vertical   = Control.SIZE_EXPAND_FILL
 	scroll.add_child(center)
 
-	var vbox := VBoxContainer.new()
-	vbox.add_theme_constant_override("separation", 10)
-	center.add_child(vbox)
+	var stack := VBoxContainer.new()
+	stack.add_theme_constant_override("separation", 12)
+	center.add_child(stack)
 
-	# Заголовок — шрифт и отступ над ним уменьшены
+	# ЗАГОЛОВОК — ОДИН, БЕЗ ПОДЗАГОЛОВКА (заказ владельца): строка «Стратегия
+	# реального времени» ничего не сообщала игроку, который её и так открыл
 	var title := Label.new()
+	title.name = "MenuTitle"
 	title.text = "10 000 КОПЕЙЩИКОВ"
 	title.add_theme_font_size_override("font_size", 32)
 	title.add_theme_color_override("font_color", Color(0.95, 0.82, 0.22))
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	vbox.add_child(title)
+	stack.add_child(title)
 
-	var sub := Label.new()
-	sub.text = "Стратегия реального времени"
-	sub.add_theme_font_size_override("font_size", 13)
-	sub.add_theme_color_override("font_color", Color(0.60, 0.62, 0.72))
-	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	vbox.add_child(sub)
+	_add_spacer(stack, 18)
 
-	_add_spacer(vbox, 8)
+	_page_main = VBoxContainer.new()
+	_page_main.name = "PageMain"
+	_page_main.add_theme_constant_override("separation", 10)
+	stack.add_child(_page_main)
+	_build_main_page(_page_main)
 
-	# Раса и цвет сведены в сетку 2×2: строка — сторона (Игрок/ИИ),
-	# столбец — параметр (Раса/Цвет). Вдвое ниже прежних четырёх пар
-	# «подпись сверху + выпадающий список»
+	_page_load = VBoxContainer.new()
+	_page_load.name = "PageLoad"
+	_page_load.add_theme_constant_override("separation", 8)
+	_page_load.visible = false
+	stack.add_child(_page_load)
+	_build_load_page(_page_load)
+
+	_page_opts = VBoxContainer.new()
+	_page_opts.name = "PageOptions"
+	_page_opts.add_theme_constant_override("separation", 8)
+	_page_opts.visible = false
+	stack.add_child(_page_opts)
+	_build_options_page(_page_opts)
+
+## Показать ровно одну страницу. Стенд зовёт её по имени, поэтому строка, а не
+## enum: страниц три, и таблица соответствий была бы длиннее самой функции
+func show_page(which: String) -> void:
+	if _page_main != null: _page_main.visible = (which == "main")
+	if _page_load != null: _page_load.visible = (which == "load")
+	if _page_opts != null: _page_opts.visible = (which == "options")
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ГЛАВНАЯ СТРАНИЦА: РОВНО ЧЕТЫРЕ КНОПКИ
+# ═════════════════════════════════════════════════════════════════════════════
+func _build_main_page(vbox: VBoxContainer) -> void:
+	# START — КВАДРАТНАЯ, БЕЗ СТРЕЛОК. Чёрные треугольники по бокам («▶ НАЧАТЬ ▶»)
+	# читались как кнопки перемотки, а не как акцент
+	var start := Button.new()
+	start.name = "StartButton"
+	start.text = "START"
+	start.custom_minimum_size = Vector2(BTN_W, 64)
+	start.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	start.add_theme_font_size_override("font_size", 22)
+	start.add_theme_color_override("font_color", Color(0.06, 0.10, 0.04))
+	start.add_theme_color_override("font_hover_color", Color(0.06, 0.10, 0.04))
+	_style_btn(start, Color(0.30, 0.82, 0.22), Color(0.42, 0.95, 0.32), Color(0.65, 1.0, 0.55))
+	start.pressed.connect(_on_start)
+	vbox.add_child(start)
+
+	var load_btn := _menu_button("Загрузить", Color(0.10, 0.20, 0.32),
+		Color(0.16, 0.30, 0.46), Color(0.28, 0.50, 0.72))
+	load_btn.name = "LoadButton"
+	load_btn.pressed.connect(func(): show_page("load"))
+	vbox.add_child(load_btn)
+
+	var opt_btn := _menu_button("Опции", Color(0.10, 0.20, 0.32),
+		Color(0.16, 0.30, 0.46), Color(0.28, 0.50, 0.72))
+	opt_btn.name = "OptionsButton"
+	opt_btn.pressed.connect(func(): show_page("options"))
+	vbox.add_child(opt_btn)
+
+	var quit_btn := _menu_button("Выход", Color(0.28, 0.08, 0.08),
+		Color(0.42, 0.12, 0.12), Color(0.60, 0.22, 0.22))
+	quit_btn.name = "QuitButton"
+	quit_btn.pressed.connect(func(): get_tree().quit())
+	vbox.add_child(quit_btn)
+
+func _menu_button(text: String, normal: Color, hover: Color, border: Color) -> Button:
+	var b := Button.new()
+	b.text = text
+	b.custom_minimum_size = Vector2(BTN_W, BTN_H)
+	b.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	b.add_theme_font_size_override("font_size", 17)
+	_style_btn(b, normal, hover, border)
+	return b
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ПОДМЕНЮ «ЗАГРУЗИТЬ»
+# ═════════════════════════════════════════════════════════════════════════════
+## СЛОТЫ ВИДНЫ ВСЕГДА, ПУСТЫЕ — НЕ НАЖИМАЮТСЯ. Прежде ряд слотов пропадал с
+## главного экрана целиком, если сохранений нет, — и игрок не знал, есть ли
+## тут вообще загрузка. В отдельном подменю пустой слот сообщает ровно то, что
+## нужно: место есть, партии в нём нет
+func _build_load_page(vbox: VBoxContainer) -> void:
+	vbox.add_child(_caption("Загрузить партию"))
+	var err_lbl := Label.new()
+	err_lbl.name = "LoadError"
+	err_lbl.add_theme_font_size_override("font_size", 11)
+	err_lbl.add_theme_color_override("font_color", Color(0.92, 0.66, 0.60))
+	err_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	err_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	err_lbl.custom_minimum_size = Vector2(420, 0)
+
+	for i in range(_SaveLoad.SLOT_COUNT):
+		var slot: int = i + 1
+		var has: bool = _SaveLoad.has_save(slot)
+		var btn := Button.new()
+		btn.name = "Slot%d" % slot
+		btn.text = _SaveLoad.slot_label(slot) if has else "Слот %d — пусто" % slot
+		btn.custom_minimum_size = Vector2(420, 32)
+		btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+		btn.focus_mode = Control.FOCUS_NONE
+		btn.disabled = not has
+		btn.add_theme_font_size_override("font_size", 13)
+		_style_btn(btn, Color(0.12, 0.22, 0.32), Color(0.18, 0.32, 0.46),
+			Color(0.30, 0.50, 0.70))
+		vbox.add_child(btn)
+		if not has:
+			continue
+		btn.pressed.connect(func():
+			# Кэш листов сбрасывается ровно как при обычном старте: цвета
+			# сторон приедут из сохранения, и набор прошлой партии тут не при чём
+			_SSParser.clear_cache()
+			var err: String = _SaveLoad.request_load(get_tree(), slot)
+			if not err.is_empty():
+				err_lbl.text = err)
+	vbox.add_child(err_lbl)
+	_add_spacer(vbox, 10)
+	vbox.add_child(_back_button())
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ПОДМЕНЮ «ОПЦИИ»
+# ═════════════════════════════════════════════════════════════════════════════
+func _build_options_page(vbox: VBoxContainer) -> void:
+	# ── ПАРТИЯ: РАСЫ И ЦВЕТА ────────────────────────────────────────────────
+	vbox.add_child(_caption("Партия"))
 	var grid := GridContainer.new()
 	grid.columns = 2
 	grid.add_theme_constant_override("h_separation", 18)
@@ -91,150 +227,89 @@ func _build_ui() -> void:
 	grid.add_child(_make_option_row("Раса Игрока:", _player_opt))
 	_player_color_opt = _make_color_option(_GS.DEFAULT_PLAYER_COLOR)
 	grid.add_child(_make_option_row("Цвет Игрока:", _player_color_opt))
-
 	_ai_opt = _make_option()
 	grid.add_child(_make_option_row("Раса ИИ:", _ai_opt))
 	_ai_color_opt = _make_color_option(_GS.DEFAULT_AI_COLOR)
 	grid.add_child(_make_option_row("Цвет ИИ:", _ai_color_opt))
 
-	_add_spacer(vbox, 10)
-	_build_difficulty_row(vbox)
-	_add_spacer(vbox, 14)
-
-	# Кнопка старт — заметная, но КОМПАКТНАЯ и соразмерная соседним.
-	# Была 360×56 во всю ширину плашки; ширина ополовинена (180), а
-	# SHRINK_CENTER не даёт VBoxContainer растянуть её по ширине сетки 2×2
-	var btn := Button.new()
-	btn.text = "▶  НАЧАТЬ  ▶"
-	btn.custom_minimum_size = Vector2(180, 44)
-	btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-	btn.add_theme_font_size_override("font_size", 18)
-	btn.add_theme_color_override("font_color", Color(0.06, 0.10, 0.04))
-	btn.add_theme_color_override("font_hover_color", Color(0.06, 0.10, 0.04))
-	_style_btn(btn, Color(0.30, 0.82, 0.22), Color(0.42, 0.95, 0.32), Color(0.65, 1.0, 0.55))
-	btn.pressed.connect(_on_start)
-	vbox.add_child(btn)
-
+	# ── СЛОЖНОСТЬ — ВЫПАДАЮЩИМ СПИСКОМ (заказ владельца) ────────────────────
+	# Был ряд из трёх кнопок с подсветкой выбранной: он занимал полосу в треть
+	# экрана и требовал строки-подсказки под собой. В опциях сложность — такой
+	# же список, как раса, а подсказка выбранного уровня осталась строкой ПОД
+	# списком: в пункт списка её не положить, а объяснять выбор словами надо
 	_add_spacer(vbox, 6)
-	_build_load_row(vbox)
-	_add_spacer(vbox, 10)
-
-	# ─── ОПЦИИ ЗВУКА ПРЯМО В ГЛАВНОМ МЕНЮ ────────────────────────────────────
-	# Раньше громкость крутилась только внутри партии через Escape: игрок,
-	# которому меню грянуло слишком громко, не мог сделать тише, не начав игру.
-	# Кнопка разворачивает три ползунка на месте, не уводя на отдельный экран
-	var opt_btn := Button.new()
-	opt_btn.text = "  Опции звука  "
-	opt_btn.custom_minimum_size = Vector2(180, 34)
-	opt_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-	opt_btn.add_theme_font_size_override("font_size", 15)
-	_style_btn(opt_btn, Color(0.10, 0.20, 0.32), Color(0.16, 0.30, 0.46), Color(0.28, 0.50, 0.72))
-	vbox.add_child(opt_btn)
-
-	_audio_box = VBoxContainer.new()
-	_audio_box.add_theme_constant_override("separation", 4)
-	_audio_box.visible = false
-	vbox.add_child(_audio_box)
-	_build_audio_sliders(_audio_box)
-	opt_btn.pressed.connect(func():
-		_audio_box.visible = not _audio_box.visible
-		opt_btn.text = "  Опции звука ▲  " if _audio_box.visible else "  Опции звука  ")
-
-	_add_spacer(vbox, 8)
-
-	var quit_btn := Button.new()
-	quit_btn.text = "  Выход  "
-	quit_btn.custom_minimum_size = Vector2(180, 34)
-	quit_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-	quit_btn.add_theme_font_size_override("font_size", 15)
-	_style_btn(quit_btn, Color(0.28, 0.08, 0.08), Color(0.42, 0.12, 0.12), Color(0.60, 0.22, 0.22))
-	quit_btn.pressed.connect(func(): get_tree().quit())
-	vbox.add_child(quit_btn)
-	_add_spacer(vbox, 4)
-
-## Панель ползунков громкости в главном меню
-var _audio_box: VBoxContainer = null
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ВЫБОР СЛОЖНОСТИ
-#
-# РЯД КНОПОК, А НЕ ВЫПАДАЮЩИЙ СПИСОК, и это не вкусовщина. Сложность —
-# единственная настройка на этом экране, которая меняет саму партию, а не
-# картинку: её видно должно быть сразу, без раскрытия списка. Плюс под рядом
-# стоит СТРОКА-ПОДСКАЗКА, объясняющая выбранное словами, — в пункт списка её
-# не положить.
-#
-# Кнопки строятся из _Diff.ORDER, а подписи берутся из пресета: добавление
-# четвёртого уровня сложности в конфиг доезжает сюда само.
-# ─────────────────────────────────────────────────────────────────────────────
-var _diff_buttons: Dictionary = {}
-var _diff_hint: Label = null
-
-## Цвет выбранной кнопки: от спокойного зелёного к тревожному красному.
-## Ключи — те же, что в конфиге; незнакомый уровень получит серый
-const DIFF_TINTS := {
-	"easy":   Color(0.18, 0.42, 0.20),
-	"normal": Color(0.20, 0.34, 0.52),
-	"hard":   Color(0.46, 0.16, 0.14),
-}
-
-func _build_difficulty_row(vbox: VBoxContainer) -> void:
-	var cap := Label.new()
-	cap.text = "Сложность"
-	cap.add_theme_font_size_override("font_size", 14)
-	cap.add_theme_color_override("font_color", Color(0.82, 0.84, 0.90))
-	cap.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	vbox.add_child(cap)
-
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 8)
-	row.alignment = BoxContainer.ALIGNMENT_CENTER
-	vbox.add_child(row)
-
-	_diff_buttons.clear()
+	_diff_opt = OptionButton.new()
+	_diff_opt.name = "DifficultyOption"
+	_diff_opt.custom_minimum_size = Vector2(170, 36)
+	_diff_opt.add_theme_font_size_override("font_size", 16)
 	for id in _Diff.ORDER:
-		var key: String = String(id)
-		var btn := Button.new()
-		btn.text = _Diff.label(key)
-		btn.custom_minimum_size = Vector2(118, 32)
-		btn.focus_mode = Control.FOCUS_NONE
-		btn.add_theme_font_size_override("font_size", 14)
-		row.add_child(btn)
-		_diff_buttons[key] = btn
-		btn.pressed.connect(func(): _on_difficulty(key))
-
+		_diff_opt.add_item(_Diff.label(String(id)))
+	var cur: String = _Diff.current()
+	for i in range(_Diff.ORDER.size()):
+		if String(_Diff.ORDER[i]) == cur:
+			_diff_opt.select(i)
+	vbox.add_child(_make_option_row("Сложность:", _diff_opt))
 	_diff_hint = Label.new()
 	_diff_hint.add_theme_font_size_override("font_size", 12)
 	_diff_hint.add_theme_color_override("font_color", Color(0.62, 0.66, 0.76))
 	_diff_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_diff_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	_diff_hint.custom_minimum_size = Vector2(380, 0)
+	_diff_hint.custom_minimum_size = Vector2(420, 0)
+	_diff_hint.text = _Diff.hint(cur)
 	vbox.add_child(_diff_hint)
-	_refresh_difficulty()
+	# НА ДИСК ПИШЕМ СРАЗУ: файл крошечный, а отдельная кнопка «применить» —
+	# лишний шаг для игрока
+	_diff_opt.item_selected.connect(func(idx: int):
+		var key: String = String(_Diff.ORDER[idx])
+		_Diff.set_current(key)
+		_Diff.save()
+		_diff_hint.text = _Diff.hint(key))
 
-## Клик по кнопке. НА ДИСК ПИШЕМ СРАЗУ, тем же приёмом, что и громкость:
-## файл крошечный, а отдельная кнопка «применить» — лишний шаг для игрока
-func _on_difficulty(id: String) -> void:
-	_Diff.set_current(id)
-	_Diff.save()
-	_refresh_difficulty()
+	# ── ЗВУК ────────────────────────────────────────────────────────────────
+	_add_spacer(vbox, 10)
+	vbox.add_child(_caption("Звук"))
+	_build_audio_sliders(vbox)
 
-## Подсветить выбранное и обновить строку-подсказку
-func _refresh_difficulty() -> void:
-	var cur: String = _Diff.current()
-	for key in _diff_buttons:
-		var k: String = String(key)
-		var btn: Button = _diff_buttons[k]
-		var on: bool = (k == cur)
-		var tint: Color = DIFF_TINTS.get(k, Color(0.24, 0.26, 0.32)) as Color
-		# Невыбранные — приглушены до трети яркости: ряд читается с одного
-		# взгляда, а не «какая из трёх кнопок чуть светлее»
-		var base: Color = tint if on else tint.darkened(0.55)
-		_style_btn(btn, base, base.lightened(0.18), tint.lightened(0.35))
-		btn.add_theme_color_override("font_color",
-			Color(0.98, 0.98, 0.98) if on else Color(0.66, 0.68, 0.74))
-	if _diff_hint != null:
-		_diff_hint.text = _Diff.hint(cur)
+	# ── ОТОБРАЖЕНИЕ ─────────────────────────────────────────────────────────
+	_add_spacer(vbox, 10)
+	vbox.add_child(_caption("Отображение"))
+	var fps_box := CheckBox.new()
+	fps_box.name = "FpsCheck"
+	fps_box.text = "Отображать FPS"
+	fps_box.button_pressed = _GS.show_fps()
+	fps_box.add_theme_font_size_override("font_size", 15)
+	fps_box.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	vbox.add_child(fps_box)
+	fps_box.toggled.connect(func(on: bool):
+		_GS.set_show_fps(on))
+
+	var cam_box := CheckBox.new()
+	cam_box.name = "EdgePanCheck"
+	cam_box.text = "Камера едет от края экрана"
+	cam_box.button_pressed = _GS.edge_pan()
+	cam_box.add_theme_font_size_override("font_size", 15)
+	cam_box.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	vbox.add_child(cam_box)
+	cam_box.toggled.connect(func(on: bool):
+		_GS.set_edge_pan(on))
+
+	_add_spacer(vbox, 10)
+	vbox.add_child(_back_button())
+
+func _back_button() -> Button:
+	var b := _menu_button("Назад", Color(0.14, 0.16, 0.22),
+		Color(0.20, 0.24, 0.32), Color(0.34, 0.38, 0.48))
+	b.name = "BackButton"
+	b.pressed.connect(func(): show_page("main"))
+	return b
+
+func _caption(text: String) -> Label:
+	var cap := Label.new()
+	cap.text = text
+	cap.add_theme_font_size_override("font_size", 15)
+	cap.add_theme_color_override("font_color", Color(0.82, 0.84, 0.90))
+	cap.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	return cap
 
 ## Те же три шины, что и в меню паузы. Значения берутся и пишутся через
 ## AudioManager, поэтому выставленное здесь сразу действует и переживает
@@ -251,6 +326,7 @@ func _build_audio_sliders(box: VBoxContainer) -> void:
 		var bus: String = String(e["bus"])
 		var row := HBoxContainer.new()
 		row.add_theme_constant_override("separation", 10)
+		row.alignment = BoxContainer.ALIGNMENT_CENTER
 		box.add_child(row)
 		var cap := Label.new()
 		cap.text = String(e["name"])
@@ -276,61 +352,6 @@ func _build_audio_sliders(box: VBoxContainer) -> void:
 			pct.text = "%d%%" % int(v * 100.0)
 			AudioManager.save_settings())
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ЗАГРУЗКА ПАРТИИ СО СТАРТОВОГО ЭКРАНА
-#
-# КНОПКА ПОЯВЛЯЕТСЯ, ТОЛЬКО ЕСЛИ ЕСТЬ ЧТО ГРУЗИТЬ. Пустой ряд «Слот 1 — пусто,
-# Слот 2 — пусто» на первом запуске игры не сообщает ничего, кроме того, что
-# игрок ещё не играл, — и занимает треть экрана.
-#
-# Выбор расы и цвета при загрузке НЕ читается: они лежат в самом сохранении
-# (см. SaveLoadManager.request_load) — иначе загруженная армия сменила бы цвет
-# посреди партии.
-# ─────────────────────────────────────────────────────────────────────────────
-func _build_load_row(vbox: VBoxContainer) -> void:
-	var any := false
-	for i in range(_SaveLoad.SLOT_COUNT):
-		if _SaveLoad.has_save(i + 1):
-			any = true
-			break
-	if not any:
-		return
-	var cap := Label.new()
-	cap.text = "Загрузить партию"
-	cap.add_theme_font_size_override("font_size", 14)
-	cap.add_theme_color_override("font_color", Color(0.82, 0.84, 0.90))
-	cap.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	vbox.add_child(cap)
-
-	var err_lbl := Label.new()
-	err_lbl.add_theme_font_size_override("font_size", 11)
-	err_lbl.add_theme_color_override("font_color", Color(0.92, 0.66, 0.60))
-	err_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	err_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	err_lbl.custom_minimum_size = Vector2(380, 0)
-
-	for i in range(_SaveLoad.SLOT_COUNT):
-		var slot: int = i + 1
-		if not _SaveLoad.has_save(slot):
-			continue
-		var btn := Button.new()
-		btn.text = _SaveLoad.slot_label(slot)
-		btn.custom_minimum_size = Vector2(380, 28)
-		btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-		btn.focus_mode = Control.FOCUS_NONE
-		btn.add_theme_font_size_override("font_size", 12)
-		_style_btn(btn, Color(0.12, 0.22, 0.32), Color(0.18, 0.32, 0.46),
-			Color(0.30, 0.50, 0.70))
-		vbox.add_child(btn)
-		btn.pressed.connect(func():
-			# Кэш листов сбрасывается ровно как при обычном старте: цвета сторон
-			# приедут из сохранения, и набор прошлой партии тут не при чём
-			_SSParser.clear_cache()
-			var err: String = _SaveLoad.request_load(get_tree(), slot)
-			if not err.is_empty():
-				err_lbl.text = err)
-	vbox.add_child(err_lbl)
-
 func _make_label(text: String) -> Label:
 	var lbl := Label.new()
 	lbl.text = text
@@ -338,11 +359,11 @@ func _make_label(text: String) -> Label:
 	lbl.add_theme_color_override("font_color", Color(0.82, 0.84, 0.90))
 	return lbl
 
-## Подпись + выпадающий список в одной строке (вместо подписи НАД списком) —
-## вдвое компактнее по высоте; используется в сетке 2×2 расы/цвета
-func _make_option_row(text: String, opt: OptionButton) -> HBoxContainer:
+## Подпись + выпадающий список в одной строке (вместо подписи НАД списком)
+func _make_option_row(text: String, opt: Control) -> HBoxContainer:
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 8)
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
 	var lbl := Label.new()
 	lbl.text = text
 	lbl.custom_minimum_size = Vector2(112, 0)
@@ -401,15 +422,19 @@ func _style_btn(btn: Button, normal: Color, hover: Color, border: Color) -> void
 	var sp := StyleBoxFlat.new()
 	sp.bg_color = normal.darkened(0.2); sp.set_corner_radius_all(8)
 	btn.add_theme_stylebox_override("pressed", sp)
+	var sd := StyleBoxFlat.new()
+	sd.bg_color = normal.darkened(0.55); sd.border_color = border.darkened(0.5)
+	sd.set_border_width_all(2); sd.set_corner_radius_all(8)
+	btn.add_theme_stylebox_override("disabled", sd)
 
 func _on_start() -> void:
-	var pi: int = _player_opt.selected
-	var ai: int = _ai_opt.selected
+	var pi: int = maxi(_player_opt.selected, 0)
+	var ai: int = maxi(_ai_opt.selected, 0)
 	GameManager.player_faction_name = FACTION_KEYS[pi]
 	GameManager.ai_faction_name     = FACTION_KEYS[ai]
 
-	var pc: int = _player_color_opt.selected
-	var ac: int = _ai_color_opt.selected
+	var pc: int = maxi(_player_color_opt.selected, 0)
+	var ac: int = maxi(_ai_color_opt.selected, 0)
 	GameManager.player_color = String(_GS.COLORS[pc])
 	GameManager.ai_color     = String(_GS.COLORS[ac])
 	# Одинаковый цвет у сторон = неразличимые армии. Разводим принудительно

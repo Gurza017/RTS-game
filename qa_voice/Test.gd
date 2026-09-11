@@ -67,7 +67,13 @@ func _squad(kind: String, at: Vector3, n: int) -> Array:
 ## слушателем — иначе стенд проверял бы не раздачу голосов, а работу отсечки.
 ## Слушателя может не быть вовсе (сцена без камеры) — тогда отсечки нет тоже,
 ## и годится любая точка
+## ПЛОЩАДКА У ФОКУСА КАМЕРЫ, А НЕ У СЛУШАТЕЛЯ (09.09.2026): окно марша
+## меряется от центра экрана (AudioManager.march_focus), а слушатель стоит на
+## камере, позади фокуса на десятки метров — площадка у него лежала бы за
+## окном, и блок D проверял бы отсечку вместо раздачи
 func _near_listener() -> Vector3:
+	if GameManager.has_view_point():
+		return AudioManager.march_focus()
 	var lis = get_viewport().call("get_audio_listener_3d")
 	if lis != null and is_instance_valid(lis):
 		return (lis as Node3D).global_position
@@ -466,7 +472,8 @@ func _d_march() -> void:
 	# марш отсекается до раздачи голосов, и на дальней площадке этот блок
 	# проверял бы отсечку вместо раздачи
 	var base: Vector3 = _near_listener()
-	var span: float = AudioManager.MARCH_MAX_DISTANCE * 0.5
+	# Площадка укладывается в ЗОНУ ПОЛНОЙ ГРОМКОСТИ окна (MARCH_FULL_RADIUS)
+	var span: float = AudioManager.MARCH_FULL_RADIUS
 	var entries: Array = []
 	for i in range(20):
 		entries.append({
@@ -516,16 +523,20 @@ func _d_march() -> void:
 	# Проверять надо ровно это, а не «единицу везде»: ЛИЧНОЙ расстройки по
 	# отрядам быть по-прежнему не должно — она и была «поломанным звуком», —
 	# поэтому допустимых значений ровно два, по одному на состояние
+	# Шаг ускорен на MARCH_WALK_PITCH (заказ 09.09.2026), бег — на свой;
+	# ЛИЧНОЙ расстройки по отрядам по-прежнему быть не должно
 	var pitch_ok := not pitches.is_empty()
 	for pv2 in pitches:
-		var dp1: float = absf(float(pv2) - 1.0)
+		var dp1: float = absf(float(pv2) - AudioManager.MARCH_WALK_PITCH)
 		var dp2: float = absf(float(pv2) - AudioManager.MARCH_RUN_PITCH)
 		if dp1 >= 0.001 and dp2 >= 0.001:
 			pitch_ok = false
-	verdict("D2 питч только по СОСТОЯНИЮ: шаг 1.0, бег MARCH_RUN_PITCH",
-		pitch_ok, "от %.3f до %.3f (бег %.3f)"
-			% [p_lo, p_hi, AudioManager.MARCH_RUN_PITCH])
-	verdict("D3 луп играет с начала, без сдвига старта", ph_hi < 0.001,
+	verdict("D2 питч только по СОСТОЯНИЮ: шаг MARCH_WALK_PITCH, бег MARCH_RUN_PITCH",
+		pitch_ok, "от %.3f до %.3f (шаг %.3f, бег %.3f)"
+			% [p_lo, p_hi, AudioManager.MARCH_WALK_PITCH, AudioManager.MARCH_RUN_PITCH])
+	# У шагающих старт с нуля; сдвиг есть только у БЕГА (вырезана тишина в
+	# начале файла, MARCH_RUN_START_SEC) — здесь все двадцать шагают
+	verdict("D3 шаговый луп играет с начала, без сдвига старта", ph_hi < 0.001,
 		"самый поздний старт %.3f с" % ph_hi)
 	# ── D4: ГОЛОС ОДИН ─────────────────────────────────────────────────────
 	# Именно множественность голосов и требовала расстройки. Проверяем её, а не
@@ -934,9 +945,13 @@ func _f_headroom() -> void:
 	# прежние децибелы при одном голосе — и получишь 0.112, то есть ровно ту
 	# жалобу «тихо», с которой правка начиналась. Проверяем СВОЙСТВО: марш не
 	# тише прежнего суммарного уровня и не громче бюджета
+	# 10.09.2026: заказ «шаги на 30 % тише» — нижняя планка опущена на те же
+	# 30 % (×0.7), а не снята: ниже неё возвращается жалоба «тихо»
 	var prev_sum: float = 0.275
-	verdict("F1в один голос звучит не тише прежних шести",
-		one >= prev_sum, "%.3f при прежней сумме %.3f" % [one, prev_sum])
+	var floor_sum: float = prev_sum * 0.7
+	verdict("F1в один голос не тише прежних шести минус 30 %",
+		one >= floor_sum and one <= prev_sum,
+		"%.3f при планке %.3f (прежняя сумма %.3f)" % [one, floor_sum, prev_sum])
 
 	# ── ЛИМИТЕРА НА МАСТЕРЕ БОЛЬШЕ НЕТ, И ЭТО ТРЕБОВАНИЕ ────────────────────
 	# ТРЕБОВАНИЕ РАЗВЁРНУТО ВЛАДЕЛЬЦЕМ. Хард-лимитер ставился как «страховка от

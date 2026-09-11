@@ -29,66 +29,45 @@ extends RefCounted
 ## переданный world_root.
 
 const _Vis := preload("res://scripts/units/UnitVisuals.gd")
+const _Opt := preload("res://scripts/perf_config.gd")
 
 const GROW_STEP := 128
 
+## ── БУФЕР СЛОЯ ЖИВЁТ В ЯДРЕ (этап E2, 09.09.2026) ─────────────────────────
+## Тот же Rb, что у бакетов бойцов (ArmyCore.RbCreate): запись по событию
+## отсюда, покадровое ведение позиции — BatchVisual из нарисованной точки
+## строки, подача — RbFlush одним вызовом на грязный слой (зовёт
+## FarUnitRenderer.flush). У MultiMesh включены цвета: раскладка Rb — 16 float
+## (трансформ + цвет), материалы колец и теней instance-цвет не читают.
+## Прежний PackedFloat32Array здесь и set_buffer на каждый кадр с движением
+## сняты: две тысячи выделенных стоили 14 мс кадра
 class Layer:
-	## Только трансформ, без цвета: 3×4 матрица построчно
-	const STRIDE := 12
+	const STRIDE := 16
 
 	var mmi: MultiMeshInstance3D
 	var mm: MultiMesh
 	var free: Array = []
 	var capacity: int = 0
-	var buf: PackedFloat32Array = PackedFloat32Array()
-	var dirty: bool = false
+	var core_id: int = -1
 
-	## Все записи в буфер — внутри класса-владельца: снаружи `l.buf[i] = x`
-	## копировал бы весь массив на каждый float (Packed-массивы — значения
-	## с копированием при записи). См. ту же оговорку в FarUnitRenderer
 	func grow(step: int) -> void:
 		var new_cap: int = capacity + step
-		buf.resize(new_cap * STRIDE)   # нули = спрятанный слот
+		GameManager.army.rb_ensure(core_id, new_cap)
 		mm.instance_count = new_cap
 		capacity = new_cap
-		dirty = true
 
-	## basis задаётся построчно: b0/b1/b2 — строки матрицы 3×3
 	func write(idx: int, b0: Vector3, b1: Vector3, b2: Vector3, pos: Vector3) -> void:
-		var o: int = idx * STRIDE
-		buf[o]      = b0.x
-		buf[o + 1]  = b0.y
-		buf[o + 2]  = b0.z
-		buf[o + 3]  = pos.x
-		buf[o + 4]  = b1.x
-		buf[o + 5]  = b1.y
-		buf[o + 6]  = b1.z
-		buf[o + 7]  = pos.y
-		buf[o + 8]  = b2.x
-		buf[o + 9]  = b2.y
-		buf[o + 10] = b2.z
-		buf[o + 11] = pos.z
-		dirty = true
+		GameManager.army.rb_write_xform(core_id, idx, b0, b1, b2, pos)
 
-	## Спрятать слот — нулевая матрица (вырожденный треугольник растеризатор
-	## отбрасывает сразу; MultiMesh не умеет «скрыть экземпляр»)
 	func hide_slot(idx: int) -> void:
-		var o: int = idx * STRIDE
-		for i in range(STRIDE):
-			buf[o + i] = 0.0
-		dirty = true
+		GameManager.army.rb_hide_slot(core_id, idx)
 
 	func hide_all() -> void:
-		for i in range(buf.size()):
-			buf[i] = 0.0
-		dirty = true
+		GameManager.army.rb_hide_all(core_id)
 
+	## Подаёт ядро (RbFlush)
 	func flush() -> void:
-		if not dirty:
-			return
-		dirty = false
-		if capacity > 0:
-			mm.set_buffer(buf)
+		pass
 
 var _rings: Layer = null
 var _shadows: Layer = null
@@ -124,8 +103,10 @@ func _make_layer(mesh: Mesh, world_root: Node3D) -> Layer:
 	var l := Layer.new()
 	l.mm = MultiMesh.new()
 	l.mm.transform_format = MultiMesh.TRANSFORM_3D
+	l.mm.use_colors = true
 	l.mm.mesh = mesh
 	l.mm.instance_count = 0
+	l.core_id = GameManager.army.rb_create(l.mm.get_rid())
 	l.mmi = MultiMeshInstance3D.new()
 	l.mmi.multimesh = l.mm
 	# Метки лежат на земле и не должны исчезать, когда центр строя уехал за
@@ -139,6 +120,7 @@ func _ensure(world_root: Node3D) -> void:
 		_rings = _make_layer(_Vis.ring_mesh(), world_root)
 	if _shadows == null:
 		_shadows = _make_layer(_Vis.shadow_mesh(), world_root)
+	GameManager.army.decal_config(_Vis.RING_Y, _Vis.SHADOW_Y, Unit.HP_BAR_HEIGHT)
 
 func _grow() -> void:
 	var new_cap: int = _rings.capacity + GROW_STEP
@@ -161,8 +143,12 @@ func register(unit: Unit, world_root: Node3D) -> void:
 	# ТОЧКА — НАРИСОВАННАЯ, А НЕ ЛОГИЧЕСКАЯ (см. Unit.draw_position): метка лежит
 	# под ногами спрайта, а спрайт сглаживается между физическими шагами
 	var dp: Vector3 = unit.draw_position()
-	_write(idx, dp)
+	_write(idx, dp, unit.ring_scale(), unit.ring_oval(), unit.shadow_scale())
 	_last_pos[unit] = dp
+	# Привязка строки к слоту: дальше позицию ведёт ядро (этап E2). Боец без
+	# строки в ядре остаётся на GDScript-обходе update_all
+	if unit._soa >= 0:
+		GameManager.army.decal_bind(unit._soa, _rings.core_id, _shadows.core_id, idx)
 
 ## Убрать метки. Идемпотентно
 func unregister(unit: Unit) -> void:
@@ -182,6 +168,10 @@ func _drop_slot(unit) -> void:
 	_rings.hide_slot(idx)
 	_shadows.hide_slot(idx)
 	_rings.free.append(idx)
+	# Живость — на сырой ссылке (правило 5): сюда приходят и из _exit_tree.
+	# Освобождённой строке отвязка не нужна: Release чистит привязку сам
+	if is_instance_valid(unit) and unit._soa >= 0:
+		GameManager.army.decal_unbind(unit._soa)
 	_slot.erase(unit)
 	_last_pos.erase(unit)
 
@@ -203,10 +193,15 @@ const _SH2 := Vector3(0.0, -1.0, 0.0)
 
 ## Смещения по высоте те же, что были у отдельных узлов (UnitVisuals.RING_Y /
 ## SHADOW_Y), и тень так же положена плашмя поворотом на -90° по X
-func _write(idx: int, pos: Vector3) -> void:
-	_rings.write(idx, _ID0, _ID1, _ID2,
+## k — масштаб кольца и тени по бойцу (Unit.ring_scale: у тролля крупнее).
+## Ядро (BatchVisual) переписывает только ТОЧКУ слота, базис остаётся этим
+## ov — овальность кольца (X и Z поверх k), sh — масштаб ТЕНИ (0 — тени нет)
+func _write(idx: int, pos: Vector3, k: float = 1.0,
+		ov: Vector2 = Vector2.ONE, sh: float = -1.0) -> void:
+	var shk: float = k if sh < 0.0 else sh
+	_rings.write(idx, _ID0 * (k * ov.x), _ID1, _ID2 * (k * ov.y),
 		Vector3(pos.x, pos.y + _Vis.RING_Y, pos.z))
-	_shadows.write(idx, _SH0, _SH1, _SH2,
+	_shadows.write(idx, _SH0 * shk, _SH1, _SH2 * shk,
 		Vector3(pos.x, pos.y + _Vis.SHADOW_Y, pos.z))
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -236,7 +231,9 @@ func set_hover_units(units: Array, world_root: Node3D) -> void:
 	for u in keep:
 		if _hover_slot.has(u):
 			continue
-		var is_b: bool = u is Building
+		# «is_b» здесь означает «тонкий меш», а не «это здание»: крупный боец
+		# обводится тем же мешем и по той же причине (см. wants_fine_ring)
+		var is_b: bool = wants_fine_ring(u)
 		var lay: Layer = _hover_b if is_b else _hover
 		if lay == null:
 			lay = _make_layer(_Vis.building_ring_mesh() if is_b
@@ -257,9 +254,10 @@ func set_hover_units(units: Array, world_root: Node3D) -> void:
 		# начало координат узла: у спрайта под стенами есть прозрачное поле, и
 		# кольцо, положенное честно на грунт, оказывалось ПОД домом на траве
 		# (см. Building.ring_center)
-		var hp3: Vector3 = (u as Building).ring_center() if is_b 			else (u as Node3D).global_position
+		var hp3: Vector3 = (u as Building).ring_center() if u is Building 			else (u as Node3D).global_position
 		_hover_write(idx, hp3,
-			building_ring_scale(u) if is_b else 1.0, is_b)
+			fine_ring_scale(u) if is_b else (u as Unit).ring_scale(), is_b,
+			fine_ring_oval(u) if is_b else (u as Unit).ring_oval())
 		_hover_last[u] = hp3
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -300,11 +298,13 @@ func set_order_targets(units: Array, world_root: Node3D) -> void:
 	if keep.is_empty():
 		return
 	for u in keep:
-		var is_b: bool = u is Building
+		# Тот же разбор, что у наведения: «is_b» — это «тонкий меш»
+		var is_b: bool = wants_fine_ring(u)
 		# У здания — середина нарисованного основания (см. Building.ring_center),
 		# у бойца — его точка. Причина та же, что у колец наведения выше
-		var pos: Vector3 = (u as Building).ring_center() if is_b else (u as Node3D).global_position
-		var k: float = building_ring_scale(u) if is_b else 1.0
+		var pos: Vector3 = (u as Building).ring_center() if u is Building else (u as Node3D).global_position
+		var k: float = fine_ring_scale(u) if is_b else (u as Unit).ring_scale()
+		var ov: Vector2 = fine_ring_oval(u) if is_b else (u as Unit).ring_oval()
 		var lay: Layer = _order_ring_b if is_b else _order_ring
 		if lay == null:
 			lay = _make_layer(_Vis.building_ring_mesh() if is_b
@@ -316,8 +316,8 @@ func set_order_targets(units: Array, world_root: Node3D) -> void:
 		if _order_slot.has(u):
 			# Цель ЖИВАЯ и ходит: кольцо обязано ехать за ней, иначе оно
 			# остаётся лежать там, где враг был в момент приказа
-			lay.write(int(_order_slot[u]), Vector3(k, 0.0, 0.0), _ID1,
-				Vector3(0.0, 0.0, k), Vector3(pos.x, pos.y + _Vis.RING_Y, pos.z))
+			lay.write(int(_order_slot[u]), Vector3(k * ov.x, 0.0, 0.0), _ID1,
+				Vector3(0.0, 0.0, k * ov.y), Vector3(pos.x, pos.y + _Vis.RING_Y, pos.z))
 			continue
 		if lay.free.is_empty():
 			var new_cap: int = lay.capacity + GROW_STEP
@@ -327,8 +327,8 @@ func set_order_targets(units: Array, world_root: Node3D) -> void:
 		var idx: int = lay.free.pop_back()
 		_order_slot[u] = idx
 		_order_in_b[u] = is_b
-		lay.write(idx, Vector3(k, 0.0, 0.0), _ID1,
-			Vector3(0.0, 0.0, k), Vector3(pos.x, pos.y + _Vis.RING_Y, pos.z))
+		lay.write(idx, Vector3(k * ov.x, 0.0, 0.0), _ID1,
+			Vector3(0.0, 0.0, k * ov.y), Vector3(pos.x, pos.y + _Vis.RING_Y, pos.z))
 
 func drop_order_target(u) -> void:
 	_order_drop(u)
@@ -405,11 +405,11 @@ func _hover_drop(u) -> void:
 	_hover_last.erase(u)
 
 func _hover_write(idx: int, pos: Vector3, k: float = 1.0,
-		in_b: bool = false) -> void:
+		in_b: bool = false, ov: Vector2 = Vector2.ONE) -> void:
 	var lay: Layer = _hover_b if in_b else _hover
 	if lay == null:
 		return
-	lay.write(idx, Vector3(k, 0.0, 0.0), _ID1, Vector3(0.0, 0.0, k),
+	lay.write(idx, Vector3(k * ov.x, 0.0, 0.0), _ID1, Vector3(0.0, 0.0, k * ov.y),
 		Vector3(pos.x, pos.y + _Vis.RING_Y, pos.z))
 
 ## ── КОНТУР ПОД ЗДАНИЕМ: РАДИУС ПО ЕГО ОСНОВАНИЮ ───────────────────────────
@@ -425,6 +425,32 @@ func _hover_write(idx: int, pos: Vector3, k: float = 1.0,
 ##
 ## Масштабируются ТОЛЬКО оси X и Z: тор лежит в горизонтальной плоскости, и
 ## общий масштаб поднял бы его над землёй колесом
+## ── КАКИМ МЕШЕМ ОБВОДИТЬ ЭТУ ЦЕЛЬ ─────────────────────────────────────────
+## true — тонким 64-сегментным (здание и КРУПНЫЙ боец), false — обычным
+## кольцом бойца. Разбор, почему у крупного он обязан быть свой, — в
+## Unit.fine_ring_radius и в шапке UnitVisuals.building_ring_mesh
+static func wants_fine_ring(n) -> bool:
+	if n is Building:
+		return true
+	var u := n as Unit
+	return u != null and u.fine_ring_radius() > 0.0
+
+## Масштаб для ТОНКОГО меша: у него тор единичного радиуса, поэтому масштаб —
+## это прямо радиус обвода в метрах
+static func fine_ring_scale(n) -> float:
+	if n is Building:
+		return building_ring_scale(n)
+	var u := n as Unit
+	return u.fine_ring_radius() if u != null else 1.0
+
+## Овал обвода. У здания — круг (его основание и так описано радиусом), у
+## крупного бойца — его собственное растяжение по осям
+static func fine_ring_oval(n) -> Vector2:
+	if n is Building:
+		return Vector2.ONE
+	var u := n as Unit
+	return u.ring_oval() if u != null else Vector2.ONE
+
 static func building_ring_scale(n) -> float:
 	var b := n as Building
 	if b == null:
@@ -488,18 +514,23 @@ func update_all() -> void:
 	if _slot.is_empty():
 		return
 	var stale: Array = []
+	var core: bool = _Opt.decal_core
 	for unit in _slot:
 		if not is_instance_valid(unit):
 			stale.append(unit)
 			continue
 		var u: Unit = unit
+		# Привязанного к общей отрисовке ведёт ядро (этап E2); здесь остаются
+		# те, у кого слота в ней сейчас нет (туман, гарнизон, запасной режим)
+		if core and u._rb_bound:
+			continue
 		var p: Vector3 = u.draw_position()
 		var was: Vector3 = _last_pos.get(u, Vector3.INF)
 		var dx: float = p.x - was.x
 		var dz: float = p.z - was.z
 		if dx * dx + dz * dz < 0.0004:      # сдвиг меньше 2 см — метка и так на месте
 			continue
-		_write(_slot[u], p)
+		_write(_slot[u], p, u.ring_scale(), u.ring_oval(), u.shadow_scale())
 		_last_pos[u] = p
 	# Словарь правится ПОСЛЕ обхода: Dictionary в GDScript не допускает удаления
 	# ключей во время итерации по себе
@@ -533,7 +564,7 @@ func _update_hover_positions() -> void:
 		var dz: float = p.z - was.z
 		if dx * dx + dz * dz < 0.0004:
 			continue
-		_hover_write(_hover_slot[uu], p)
+		_hover_write(_hover_slot[uu], p, uu.ring_scale(), false, uu.ring_oval())
 		_hover_last[uu] = p
 	for k in stale:
 		_hover_drop(k)

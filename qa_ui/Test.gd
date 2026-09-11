@@ -499,10 +499,10 @@ func _test_queue_order() -> void:
 	hud.show_selection([b])
 	await frames(3)
 
-	var t_arch: float = _UCfg.train_cfg("barracks", "archer").get("time", 0.0)
-	var n_arch: int   = int(_UCfg.train_cfg("barracks", "archer").get("squad", 1))
-	b.train_from_config("archer")
-	b.train_from_config("archer")
+	var t_arch: float = _UCfg.train_cfg("barracks", "warrior").get("time", 0.0)
+	var n_arch: int   = int(_UCfg.train_cfg("barracks", "warrior").get("squad", 1))
+	b.train_from_config("warrior")
+	b.train_from_config("warrior")
 	b.train_from_config("spearman")
 	await frames(3)
 	print("  заказано: лучник ×2 + копейщик ×1 (время лучника по конфигу %.1f c, отряд %d)" % [

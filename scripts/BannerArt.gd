@@ -174,6 +174,25 @@ static func white_flag_texture() -> Texture2D:
 # ═════════════════════════════════════════════════════════════════════════════
 # РИСОВАНИЕ
 # ═════════════════════════════════════════════════════════════════════════════
+## ── ФЛАЖОК ВЛАДЕЛЬЦА (золотой рудник, 10.09.2026) ──────────────────────────
+## Вымпел цвета стороны без лычек и наконечника — «как знамя ветерана, но без
+## шевронов». Ключ кэша — цвет целым числом: с уровнями 1-7 и −1 не
+## пересекается (у непрозрачного цвета старший байт 255)
+static func faction_flag_texture(cloth: Color) -> Texture2D:
+	var key: int = int(cloth.to_rgba32())
+	if _cache.has(key):
+		return _cache[key]
+	var tier: Dictionary = {
+		"shape": _UCfg.BANNER_PENNANT,
+		"cloth": cloth,
+		"chevrons": 0,
+		"chevron_dir": 1,
+		"tip": false,
+	}
+	var tex := _render(tier)
+	_cache[key] = tex
+	return tex
+
 static func _render(tier: Dictionary) -> ImageTexture:
 	var img := Image.create_empty(W, H, false, Image.FORMAT_RGBA8)
 	# Прозрачный холст: create_empty не обещает очистку

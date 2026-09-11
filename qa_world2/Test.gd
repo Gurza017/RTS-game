@@ -757,14 +757,17 @@ func _e_no_lake() -> void:
 		var z: float = rng.randf_range(-lim, lim)
 		var p: Vector2 = main.nearest_land(x, z)
 		if absf(p.x - x) > 1e-4 or absf(p.y - z) > 1e-4:
-			moved += 1
+			# С 09.09.2026 вода есть — река по центру. Сдвиг законен только из
+			# её русла; озера по-прежнему нет, и вне русла точка не двигается
+			if not main.is_water(x, z):
+				moved += 1
 	var us1: int = Time.get_ticks_usec() - t0
 	# Центр бывшего озера — самая опасная точка: раньше отсюда шёл поиск берега
 	var lc: Vector2 = main.nearest_land(main.LAKE_CENTER.x, main.LAKE_CENTER.z)
 	print("  20000 вызовов nearest_land за %.1f мс; сдвинуто точек %d; центр бывшего озера (%.2f, %.2f) → (%.2f, %.2f)" % [
 		float(us1) / 1000.0, moved, main.LAKE_CENTER.x, main.LAKE_CENTER.z, lc.x, lc.y])
 	_perf.append("nearest_land ×20000: %.1f мс" % (float(us1) / 1000.0))
-	verdict("E1 nearest_land без озера возвращает ту же точку и не ищет берег",
+	verdict("E1 nearest_land вне русла возвращает ту же точку и не ищет берег (озера нет)",
 		moved == 0 and absf(lc.x - main.LAKE_CENTER.x) < 1e-4
 			and absf(lc.y - main.LAKE_CENTER.z) < 1e-4,
 		"сдвинуто %d, центр озера → (%.2f, %.2f)" % [moved, lc.x, lc.y])
@@ -779,12 +782,15 @@ func _e_no_lake() -> void:
 			step = Vector3.ZERO
 		var got: Vector3 = main.slide_around_water(from, step)
 		if not got.is_equal_approx(step):
-			changed += 1
+			# Шаг меняется только у реки (сам стоишь в воде или шагаешь в неё)
+			var to := from + step
+			if not main.is_water(from.x, from.z) and not main.is_water(to.x, to.z):
+				changed += 1
 	var us2: int = Time.get_ticks_usec() - t1
 	print("  20000 вызовов slide_around_water за %.1f мс; изменённых шагов %d (включая нулевые)" % [
 		float(us2) / 1000.0, changed])
 	_perf.append("slide_around_water ×20000: %.1f мс" % (float(us2) / 1000.0))
-	verdict("E2 slide_around_water без озера отдаёт шаг без изменений и не виснет",
+	verdict("E2 slide_around_water вне реки отдаёт шаг без изменений и не виснет",
 		changed == 0, "изменено %d из 20000" % changed)
 
 	# ── E3. ВЫХОД ИЗ ГАРНИЗОНА У САМОГО КРАЯ ────────────────────────────────

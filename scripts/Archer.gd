@@ -231,7 +231,10 @@ func _on_attack_fired(target: Node3D, damage: float) -> void:
 	# Не при постановке анимации замаха и не при открытии окна залпа: между
 	# этими моментами проходит до кадра анимации, и на бегущем строе выстрел
 	# уходил в точку, которую цель уже покинула
-	var tbase: Vector3 = target.global_position + Vector3(0, 0.8, 0)
+	# ВЫСОТА ПРИЦЕЛА — У ЦЕЛИ, А НЕ ЧИСЛОМ ЗДЕСЬ (заказ 10.09.2026): у тролля
+	# 0.8 м это ступни, и весь залп уходил в землю под ним
+	var aim_h: float = (target as Unit).aim_height() if target is Unit else 0.8
+	var tbase: Vector3 = target.global_position + Vector3(0, aim_h, 0)
 	var aim := tbase
 	var lead_k: float = _UStats.ARCHER_LEAD_FACTOR
 	if lead_k > 0.0 and tvel.length_squared() > 1e-4:
@@ -288,6 +291,20 @@ func _on_attack_fired(target: Node3D, damage: float) -> void:
 		var ang := randf() * TAU
 		var off := sqrt(randf()) * scatter          # равномерно по диску
 		aim += Vector3(cos(ang) * off, 0.0, sin(ang) * off)
+		# ── ПРОМАХ ПО КРУПНОЙ ТУШЕ УХОДИТ В ЗЕМЛЮ (заказ спринта 14) ────────
+		# Разброс выше — ГОРИЗОНТАЛЬНЫЙ, и по цели ростом с человека этого
+		# довольно: стрела мимо всё равно кончается у земли. По туше в шесть
+		# метров КАЖДЫЙ выстрел кончался на высоте живота, то есть промахов на
+		# экране не было вовсе — вокруг тролля не появлялось ни одной стрелы в
+		# траве. Доля выстрелов теперь намеренно идёт В ЗЕМЛЮ рядом с ним, и
+		# там же втыкается штатным путём (Arrow._stick_into_ground).
+		# Числа — свойство ЦЕЛИ, а не стрелка: у пехоты они нулевые, и ветка
+		# стоит одно сравнение с нулём
+		var miss_p: float = tu.aim_miss_chance() if tu != null else 0.0
+		if miss_p > 0.0 and randf() < miss_p:
+			var mang := randf() * TAU
+			var moff := sqrt(randf()) * tu.aim_miss_spread()
+			aim = Vector3(tbase.x + cos(mang) * moff, 0.0, tbase.z + sin(mang) * moff)
 
 	var dist: float = from_pos.distance_to(aim)
 	# СТРЕЛА БЕРЁТСЯ ИЗ ПУЛА, а не создаётся заново (см. GameManager.spawn_arrow):

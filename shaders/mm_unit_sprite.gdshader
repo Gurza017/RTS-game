@@ -199,6 +199,21 @@ uniform vec3  wound_blood : source_color = vec3(0.17, 0.02, 0.02);
 uniform float pulse_amp : hint_range(0.0, 1.0) = 0.12;
 uniform float pulse_hz = 4.0;
 
+// ── ПЯТНА И БРЫЗГИ КРОВИ (заказ 09.09.2026, тролль) ─────────────────────────
+// Сплошная подкраска на огромном спрайте читается как «посерел», а не как
+// «изранен». Поверх неё — пятна: кадр режется на blood_cells×blood_cells
+// клеток, в клетке по хэшу решается, есть ли пятно, где его центр и радиус;
+// плотность растёт с потерей запаса (blood_spots × (1 − hp)). Ноль у бакета —
+// ветка не заходит вовсе, и пехота платит одно сравнение. Хэш — от клетки
+// КАДРА, а не экрана: пятно сидит на теле и едет с ним, а не мерцает
+uniform float blood_spots : hint_range(0.0, 1.0) = 0.0;
+uniform float blood_cells = 11.0;
+uniform vec3  blood_spot_color : source_color = vec3(0.42, 0.03, 0.03);
+
+float bhash(vec2 p) {
+	return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
 void fragment() {
 	float fidx = floor(COLOR.r * 255.0 + 0.5);
 	fidx = clamp(fidx, 0.0, max(frame_count - 1.0, 0.0));
@@ -266,6 +281,24 @@ void fragment() {
 			float lum = dot(rgb, vec3(0.299, 0.587, 0.114));
 			float w = k * mix(1.0, wound_bright_keep, lum);
 			rgb = rgb * mix(vec3(1.0), mul_now, w) + blood_now * w;
+			if (blood_spots > 0.0) {
+				vec2 fuv = vec2(u, UV.y) * blood_cells;
+				vec2 cell = floor(fuv);
+				vec2 f = fract(fuv);
+				float density = blood_spots * (1.0 - hp) * 1.25;
+				if (bhash(cell) < density) {
+					vec2 c = vec2(bhash(cell + 7.1), bhash(cell + 3.3)) * 0.6 + 0.2;
+					float r = 0.14 + 0.22 * bhash(cell + 11.7);
+					// Капля вытянута вниз: ниже центра пятно уже, но длиннее
+					vec2 q = f - c;
+					q.y = (q.y > 0.0) ? q.y * 0.55 : q.y;
+					float dd = length(q);
+					if (dd < r) {
+						float edge = smoothstep(r, r * 0.6, dd);
+						rgb = mix(rgb, blood_spot_color * mix(0.7, 1.0, bhash(cell + 5.5)), 0.9 * edge);
+					}
+				}
+			}
 		}
 		// ── ВСПЫШКА ОТ УДАРА ──────────────────────────────────────────────
 		// ПОСЛЕДНЕЙ и поверх всего: это засветка попадания, а не состояние

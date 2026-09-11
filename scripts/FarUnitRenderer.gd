@@ -106,6 +106,17 @@ class Bucket:
 		if mat != null:
 			mat.set_shader_parameter("foot_drop", base_y)
 
+	## Плотность пятен крови (см. Unit.blood_spots, шейдер blood_spots).
+	## Свойство ЛЕНТЫ, как и привязка ног: бакет заведён по ленте, а тролль
+	## один на свою. Запись только на изменение — обращение в сервер отрисовки
+	var _blood: float = -1.0
+	func set_blood(v: float) -> void:
+		if absf(v - _blood) < 0.0005:
+			return
+		_blood = v
+		if mat != null:
+			mat.set_shader_parameter("blood_spots", v)
+
 	## Полная запись: позиция + кадр + зеркало + состояние урона.
 	## Кадр и зеркало едут в цвете (r — кадр/255, g — зеркало); состояние
 	## урона переписывается ВМЕСТЕ с остальным — полная запись идёт при смене
@@ -334,6 +345,7 @@ func register(unit: Unit, world_root: Node3D, mirror: bool) -> Slot:
 	# подошву на грунте
 	s.base_y = base_y * _BB.V_STRETCH
 	b.set_foot(s.base_y)
+	b.set_blood(unit.blood_spots())
 	s.frame  = sf[1]
 	s.mirror = mirror
 	s.pos    = unit.global_position + Vector3(0.0, s.base_y, 0.0)
@@ -354,6 +366,8 @@ func register(unit: Unit, world_root: Node3D, mirror: bool) -> Slot:
 			unit._draw_pos if unit._draw_init else unit.global_position,
 			unit._draw_init)
 		unit._rb_bound = true
+		# Лента — в строку СРАЗУ: _set_anim мог пройти до привязки (этап E1)
+		unit._push_row_anim()
 	return s
 
 ## Слот бойца или null (для тех, кто держит на него прямую ссылку)

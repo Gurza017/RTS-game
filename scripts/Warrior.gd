@@ -18,8 +18,75 @@ func _ready() -> void:
 func _sfx_swing() -> String:
 	return "sword_attack"
 
-# Каждый 4-й удар — мощный: другой урон и другая анимация
+# ═════════════════════════════════════════════════════════════════════════════
+# ЯРОСТНЫЙ НАБЕГ (способность отряда warrior_1d, двойной ПКМ)
+# ═════════════════════════════════════════════════════════════════════════════
+# ЧТО ЭТО. Рывок к точке приказа с ЗАФИКСИРОВАННЫМИ ЩИТАМИ и серия из
+# RAGE_HITS ударов подряд с ротацией «обычный → мощный → обычный → мощный →
+# обычный». Серия ФИКСИРОВАННАЯ, а не «каждый четвёртый»: заказ описывает её
+# по шагам, и она обязана быть одинаковой каждый раз.
+#
+# ПОЧЕМУ ЭТО НЕ НОВОЕ СОСТОЯНИЕ. Ровно та же причина, что у щита абзацем ниже:
+# набег не отвечает на вопрос «какой приказ выполняет боец» — приказ у него
+# обычный марш, — он меняет скорость, кулдаун, ротацию и щит. Признак поверх
+# состояния, а не внутри него.
+#
+# ПОТОЛОК ПО ВРЕМЕНИ ОБЯЗАТЕЛЕН. Серия тратится только в бою, а до врага можно
+# и не добежать (его убили, приказ сменили): без RAGE_SEC мечник ходил бы
+# ускоренным под щитом до конца партии.
+const RAGE_HITS := 5
+const RAGE_SPEED_MULT := 1.45
+## Удары в серии БЫСТРЫЕ: доля обычной перезарядки
+const RAGE_COOLDOWN_MULT := 0.45
+const RAGE_SEC := 9.0
+## ── ТОЛЧОК В НАБЕГЕ (заказ спринта 14: «увеличить силу отталкивания») ─────
+## Множитель идёт ПОСЛЕ потолка шага, как charge_push_mult у конницы: сам
+## `push_force` потолком съедается (разбор — Unit._apply_push), и поднимать
+## надо именно множитель. Толчок и так идёт НА КАЖДЫЙ удар (Unit.PUSH_EVERY
+## = 1), поэтому пять быстрых ударов серии дают пять толчков подряд — на
+## экране это читается одним длинным навалом, ради которого приём и заведён
+const RAGE_PUSH_MULT := 2.6
+## Шаг ротации: true — мощный удар. Пять шагов, как в заказе
+const RAGE_STRONG := [false, true, false, true, false]
+
+var _rage_left: int = 0
+var _rage_until_ms: int = 0
+var _rage_step: int = 0
+## Стенды: сколько ударов серии уже нанесено и сколько из них мощных
+var rage_hits_done: int = 0
+var rage_strong_done: int = 0
+
+## Включить набег. Зовёт SelectionManager по двойному ПКМ, один раз на бойца
+func start_rage_dash() -> void:
+	if state == State.DEAD:
+		return
+	_rage_left = RAGE_HITS
+	_rage_step = 0
+	_rage_until_ms = Time.get_ticks_msec() + int(RAGE_SEC * 1000.0)
+	# Щит фиксируется НЕ флагом _guard_active напрямую: его каждый кадр
+	# переписывает _update_guard, и прямая запись погасла бы в тот же тик
+	mark_pose_dirty()
+
+func rage_active() -> bool:
+	return _rage_left > 0 and Time.get_ticks_msec() < _rage_until_ms
+
+func rage_left() -> int:
+	return _rage_left if rage_active() else 0
+
+# Каждый 4-й удар — мощный: другой урон и другая анимация.
+# В НАБЕГЕ ротация другая — фиксированная пятёрка (см. RAGE_STRONG)
 func _strike_damage() -> float:
+	if rage_active():
+		var strong: bool = bool(RAGE_STRONG[_rage_step % RAGE_STRONG.size()])
+		_rage_step += 1
+		_rage_left -= 1
+		rage_hits_done += 1
+		if strong:
+			rage_strong_done += 1
+			_play_attack_anim("attack2", 380)
+			return _attack_2_damage
+		_play_attack_anim("attack1", 300)
+		return attack_damage
 	_combo_step += 1
 	if _combo_step >= 4:
 		_combo_step = 0
@@ -27,6 +94,37 @@ func _strike_damage() -> float:
 		return _attack_2_damage
 	_play_attack_anim("attack1", 450)
 	return attack_damage
+
+## Удары серии быстрые: доля обычной перезарядки
+func _effective_cooldown() -> float:
+	var c: float = super._effective_cooldown()
+	if rage_active():
+		c *= RAGE_COOLDOWN_MULT
+	return c
+
+## ── НАПОР В НАБЕГЕ ────────────────────────────────────────────────────────
+## Напор решает, СДВИНЕТСЯ ли жертва вообще (_apply_push выходит на
+## неположительной разнице): в набеге мечник продавливает и тех, кто упёрся
+func _push_power() -> float:
+	var p: float = super._push_power()
+	if rage_active():
+		p *= RAGE_PUSH_MULT
+	return p
+
+## ── А ВОТ НАСКОЛЬКО СДВИНЕТСЯ — РЕШАЕТ МНОЖИТЕЛЬ ПОСЛЕ ПОТОЛКА ────────────
+## И ЭТО НЕ ПРИДИРКА, А ЗАМЕР. Первая версия приёма поднимала ТОЛЬКО напор —
+## и жертву отодвигало ровно на столько же, сколько без набега (стенд
+## qa_knights_push D4: 0.70 против 0.68 м). Причина записана в шапке
+## _apply_push: шаг зажат потолком 0.4 м, а потолок срабатывает уже при
+## разнице напора в три единицы, то есть весь избыток напора в него и упёрся.
+## Работает ровно то же, что у конницы, — множитель ПОСЛЕ clampf. Побочно это
+## включает жертве плавный канал (push_smooth), то есть отлёт виден движением,
+## а не телепортом: заказ дословно просил, чтобы «врагов заметно раскидывало»
+func _push_after_cap() -> float:
+	var m: float = super._push_after_cap()
+	if rage_active():
+		m *= RAGE_PUSH_MULT
+	return m
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ЗАЩИТА ЩИТОМ (AUTO-GUARD)
@@ -151,10 +249,10 @@ func _is_front_attack(attacker: Node3D) -> bool:
 func tick_visual(delta: float, frame: int = -1, anim_every: int = ANIM_EVERY,
 		view_x: float = 0.0, view_z: float = 0.0, view_r2: float = INF,
 		lerp_k: float = 1.0, mm_all: bool = true, prof: bool = false,
-		fog_on: bool = true) -> void:
+		fog_on: bool = true, cam_epoch: int = 0) -> void:
 	_update_guard()
 	super.tick_visual(delta, frame, anim_every, view_x, view_z, view_r2,
-		lerp_k, mm_all, prof, fog_on)
+		lerp_k, mm_all, prof, fog_on, cam_epoch)
 
 ## Пересчёт признака «щит поднят». Поводов закрыться ДВА:
 ##   1) в юнита летит стрела или его только что ударили (_threatened);
@@ -171,7 +269,10 @@ func tick_visual(delta: float, frame: int = -1, anim_every: int = ANIM_EVERY,
 func _update_guard() -> void:
 	var want := false
 	if auto_guard and state != State.DEAD and Time.get_ticks_msec() >= _anim_lock_until_ms:
-		want = _threatened() or _stance_holds_ground()
+		# ЩИТ В НАБЕГЕ ПОДНЯТ БЕЗУСЛОВНО (заказ: «рывок с зафиксированными
+		# щитами»), и требование auto_guard тут не при чём — режим включил сам
+		# игрок двойным ПКМ
+		want = _threatened() or _stance_holds_ground() or rage_active()
 	if want != _guard_active:
 		# Щит поднялся или опустился — поза обязана смениться В ЭТОМ ЖЕ КАДРЕ.
 		# Обычный пересчёт идёт раз в ANIM_EVERY кадров, и стрела вполне
@@ -199,6 +300,11 @@ func _update_sprite_anim() -> void:
 # наибольший штраф из двух, а не их произведение.
 func _effective_speed() -> float:
 	var s: float = super._effective_speed()
+	# РЫВОК БЫСТРЕЕ ОБЫЧНОГО ХОДА, И ШТРАФ ЩИТА ЕГО НЕ СЪЕДАЕТ: множитель
+	# ставится ПОСЛЕ ветки щита (ниже), иначе 1.45 × 0.65 дало бы 0.94 — то
+	# есть «рывок» медленнее обычного марша
+	if rage_active():
+		return s * RAGE_SPEED_MULT
 	if _guard_active:
 		var stance_mult: float = _UStats.stance_stat(stance, "move_speed_mult", 1.0)
 		if stance_mult > GUARD_SPEED_FACTOR:
@@ -216,7 +322,7 @@ func _effective_speed() -> float:
 func _process_can_sleep() -> bool:
 	if Time.get_ticks_msec() < _anim_lock_until_ms:
 		return false
-	if _threatened():
+	if _threatened() or rage_active():
 		return false
 	if _anim_name != &"" and _anim_name != &"idle" and _anim_name != GUARD_ANIM:
 		return false

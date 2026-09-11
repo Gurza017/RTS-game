@@ -127,8 +127,17 @@ func _sample(warm: int = 30, n: int = 45) -> Dictionary:
 	var fps := 0.0
 	var draws := 0
 	var t0: int = Time.get_ticks_usec()
+	# ── ПИКИ КАДРА, А НЕ ТОЛЬКО СРЕДНЕЕ (09.09.2026) ─────────────────────
+	# Жалоба «фризы и микролаги» средним FPS не ловится вовсе: кадр в 40 мс
+	# раз в секунду тонет в шестидесяти кадрах по 14. Стенные часы между
+	# соседними кадрами дают распределение; печатаются худший и p95
+	var deltas: PackedFloat32Array = PackedFloat32Array()
+	var t_prev: int = t0
 	for _i in range(n):
 		await get_tree().process_frame
+		var now: int = Time.get_ticks_usec()
+		deltas.append(float(now - t_prev) * 0.001)
+		t_prev = now
 		fps += Performance.get_monitor(Performance.TIME_FPS)
 		draws = maxi(draws, int(Performance.get_monitor(
 			Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME)))
@@ -136,12 +145,19 @@ func _sample(warm: int = 30, n: int = 45) -> Dictionary:
 	# В headless TIME_FPS — темп главного цикла; честнее стенные часы
 	if _headless:
 		f = float(n) * 1.0e6 / maxf(float(Time.get_ticks_usec() - t0), 1.0)
+	var sorted: Array = Array(deltas)
+	sorted.sort()
+	var worst: float = float(sorted[sorted.size() - 1]) if not sorted.is_empty() else 0.0
+	var p95: float = float(sorted[int(float(sorted.size() - 1) * 0.95)]) \
+		if not sorted.is_empty() else 0.0
 	return {
 		"fps": f,
 		"ms": 1000.0 / maxf(f, 0.001),
 		"tick": _Opt.tick_ms(),
 		"vis": _Opt.vis_ms(),
 		"draws": draws,
+		"worst": worst,
+		"p95": p95,
 	}
 
 func _cost(label: String, off: Callable, on: Callable,
@@ -169,6 +185,8 @@ func _print_frame(s: Dictionary) -> void:
 	print("  %.1f FPS (%.2f мс на кадр) | физтик %.2f мс x %.2f = %.2f мс/кадр | кадр логики %.2f мс | логика итого %.2f мс"
 		% [fps, float(s["ms"]), float(s["tick"]), phys_hz / maxf(fps, 1.0), per_frame,
 			float(s["vis"]), per_frame + float(s["vis"])])
+	print("  пики кадра: худший %.1f мс, p95 %.1f мс" % [
+		float(s.get("worst", 0.0)), float(s.get("p95", 0.0))])
 
 # ─────────────────────────────────────────────────────────────────────────────
 # СТРЕЛЫ: ЖИЗНЕННЫЙ ЦИКЛ ПО ЧИСЛАМ

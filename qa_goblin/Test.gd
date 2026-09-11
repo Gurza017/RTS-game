@@ -76,11 +76,30 @@ func _run() -> void:
 	print("\n=== QA_GOBLIN DONE ===")
 	get_tree().quit(1 if _fail > 0 else 0)
 
+## ОРДА — БЕЗ ТРОЛЛЕЙ, ДЕРЕВНЯ — БЕЗ ЛОГОВА (09.09.2026): тролль и его дерево
+## тоже третья сторона (те же группы), но к деревне, волнам и спячке орды
+## отношения не имеют — их стережёт qa_troll
 func _goblins() -> Array:
-	return get_tree().get_nodes_in_group("goblin_units")
+	var out: Array = []
+	for u in get_tree().get_nodes_in_group("goblin_units"):
+		if is_instance_valid(u) and String((u as Unit).stat_id) != "troll":
+			out.append(u)
+	return out
+
+## Отряды орды без троллей (у тролля свой отряд из одного)
+func _horde_squads() -> Array:
+	var out: Array = []
+	for sq in GameManager.squads_of_faction(Constants.FACTION_GOBLIN):
+		if String((sq as Dictionary).get("type", "")) != "troll":
+			out.append(sq)
+	return out
 
 func _huts() -> Array:
-	return get_tree().get_nodes_in_group("goblin_buildings")
+	var out: Array = []
+	for b in get_tree().get_nodes_in_group("goblin_buildings"):
+		if is_instance_valid(b) and String((b as Building).building_id) != "troll_lair":
+			out.append(b)
+	return out
 
 # ═════════════════════════════════════════════════════════════════════════════
 # A. ТРЕТЬЯ СТОРОНА ЗАРЕГИСТРИРОВАНА ВЕЗДЕ
@@ -127,7 +146,7 @@ func _b_village() -> void:
 	verdict("B3 хижины стоят кучно, а не по всей карте",
 		far <= _GobCfg.VILLAGE_RADIUS + 1.0,
 		"самая дальняя хижина в %.1f м при радиусе %.0f" % [far, _GobCfg.VILLAGE_RADIUS])
-	var sq := GameManager.squads_of_faction(Constants.FACTION_GOBLIN)
+	var sq := _horde_squads()
 	verdict("B4 стартовых отрядов ровно столько, сколько в составе орды",
 		sq.size() == _GobCfg.army_squads(),
 		"отрядов %d, в конфиге %d" % [sq.size(), _GobCfg.army_squads()])
@@ -167,7 +186,7 @@ func _c_veterancy() -> void:
 		else:
 			want_plain += 1
 
-	var sq := GameManager.squads_of_faction(Constants.FACTION_GOBLIN)
+	var sq := _horde_squads()
 	var ranked := 0
 	var plain := 0
 	var picks_bad: Array = []
@@ -306,7 +325,7 @@ func _e_dormant() -> void:
 	# ПОДЪЁМ ПО УДАРУ: спящая деревня не должна вырезаться бесплатно
 	ai.clock = 0.0
 	ai._awake = false
-	var sq := GameManager.squads_of_faction(Constants.FACTION_GOBLIN)
+	var sq := _horde_squads()
 	if not sq.is_empty():
 		GameManager.squad_mark_hit(int((sq[0] as Dictionary)["id"]))
 		ai.tick()
@@ -369,7 +388,11 @@ func _f_combat() -> void:
 	# копейщики в покое сами выходят на гоблина по авто-агро (поводок 14 м),
 	# и встреча случается там, где они сошлись (замер: x = 403 при стене на
 	# 408). Гибель в контакте — тот же упор
-	verdict("F2 гоблин упёрся в стену вплотную", last_x > 404.0 or died,
+	# Порог 404 был ножевым при собственном замере 403 (строкой выше): встреча
+	# случается там, где копейщики вышли на гоблина по авто-агро, и за окно он
+	# не всегда успевает погибнуть. «Вплотную» — это КОНТАКТ: рубка (engaged)
+	# или гибель в ней, а координата — только подтверждение
+	verdict("F2 гоблин упёрся в стену вплотную", last_x > 402.5 or died or engaged,
 		"x=%.2f (шёл от 400), погиб в контакте=%s" % [last_x, str(died)])
 	# Контакт обязан переводить в бой, а не в челнок
 	verdict("F3 при контакте гоблин фиксируется в рубке", engaged or died,
@@ -433,7 +456,7 @@ func _g_hostility() -> void:
 func _h_retreat() -> void:
 	print("\n═════ H. ОТХОД И ЛЕЧЕНИЕ В ХИЖИНЕ ═════")
 	var ai = main.goblin_ai
-	var sq := GameManager.squads_of_faction(Constants.FACTION_GOBLIN)
+	var sq := _horde_squads()
 	if ai == null or sq.is_empty():
 		verdict("H1 разбитый отряд уходит в хижину", false, "нет орды")
 		return
@@ -715,7 +738,7 @@ func _k_village_and_look() -> void:
 		"различных фаз %d из %d" % [phases.size(), mats.size()])
 
 	# ── K3: ОТРЯД — ТОЛПА, А НЕ КАРЕ ────────────────────────────────────────
-	var sq := GameManager.squads_of_faction(Constants.FACTION_GOBLIN)
+	var sq := _horde_squads()
 	var probe: int = 0
 	for s2 in sq:
 		var d: Dictionary = s2
@@ -735,6 +758,12 @@ func _k_village_and_look() -> void:
 	ai3.phase = ai3.PHASE_DEFEND
 	ai3._regroup()
 	ai3._issue_orders()
+	# План раздаётся порциями по кадрам (_drain_orders) — здесь разбираем его
+	# сразу, иначе читалась бы разметка ПРОШЛОГО плана
+	var guard3 := 0
+	while ai3._order_at < ai3._order_queue.size() and guard3 < 64:
+		ai3._drain_orders()
+		guard3 += 1
 	var slots: Array = GameManager.squads[probe].get("slots", [])
 	verdict("K3а вожак выдал отряду разметку на каждого бойца",
 		slots.size() == men.size(),

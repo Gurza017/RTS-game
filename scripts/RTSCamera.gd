@@ -1,6 +1,9 @@
 extends Camera3D
 class_name RTSCamera
 
+## Настройки отображения: прокрутка камеры краем экрана (меню «Опции»)
+const _GSCam := preload("res://scripts/game_settings.gd")
+
 ## КАМЕРА В СТИЛЕ «КАЗАКИ 3»: РАКУРС ЗАФИКСИРОВАН НАМЕРТВО.
 ##
 ## АРХИТЕКТУРНОЕ ПРАВИЛО: мир (World/Main) НИКОГДА не вращается. Камера —
@@ -137,7 +140,7 @@ func _process(delta: float) -> void:
 	# «игрок держит курсор у края» — карта уезжала сама по себе. Проверка
 	# фокуса решает это, не отнимая у игрока полосу заголовка Windows
 	if not _mmb_pressed and get_viewport().gui_get_hovered_control() == null \
-			and _window_focused():
+			and _window_focused() and _GSCam.edge_pan():
 		var viewport      := get_viewport()
 		var mouse_pos     := viewport.get_mouse_position()
 		var viewport_size := viewport.get_visible_rect().size
@@ -169,7 +172,14 @@ func _process(delta: float) -> void:
 	# на земле две-три сотни метров, и постоянные девяносто метров LOD-радиуса
 	# объявляли «невидимыми» бойцов, стоящих посреди экрана (разбор — в
 	# GameManager.update_view_point)
-	GameManager.update_view_point(_focus, _lod_ground_radius())
+	# И ДОЛЯ ЗУМА — по ней гаснет марш на дальнем плане (AudioManager,
+	# MARCH_ZOOM_POW): 0 вплотную, 1 на пределе отдаления
+	GameManager.update_view_point(_focus, _lod_ground_radius(), zoom_fraction())
+
+## Где камера между пределами зума: 0 — min_height, 1 — max_height
+func zoom_fraction() -> float:
+	var span: float = maxf(max_height - min_height, 0.001)
+	return clampf((_height - min_height) / span, 0.0, 1.0)
 
 ## Окно сейчас в фокусе? В headless-прогонах DisplayServer отвечать не обязан,
 ## поэтому там всегда true — стенды не должны зависеть от фокуса

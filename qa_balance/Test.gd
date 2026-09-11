@@ -452,11 +452,13 @@ func _block_economy() -> void:
 
 	# E2 — ТРИ УЛУЧШЕНИЯ ПОДРЯД КУПИТЬ НЕЛЬЗЯ: стартовый запас меньше цены
 	# даже одного узла плюс обязательных построек
-	var start: Dictionary = _UCfg.starting_resources(Constants.FACTION_PLAYER)
+	# СТАРТОВЫЙ ЗАПАС ИГРОКА ЗАФИКСИРОВАН ВЛАДЕЛЬЦЕМ (20 000, 10.09.2026) и
+	# не трогается; расчётная экономика судится по запасу ИИ (450/350)
+	var start: Dictionary = _UCfg.starting_resources(Constants.FACTION_ENEMY)
 	var s_wood: float = float(start.get(Constants.RESOURCE_WOOD, 0.0))
 	var s_gold: float = float(start.get(Constants.RESOURCE_GOLD, 0.0))
-	print("  стартовый запас: %.0f дерева, %.0f золота" % [s_wood, s_gold])
-	verdict("E2 стартового запаса не хватает и на одно исследование",
+	print("  стартовый запас ИИ: %.0f дерева, %.0f золота" % [s_wood, s_gold])
+	verdict("E2 расчётного стартового запаса (ИИ) не хватает и на одно исследование",
 		s_wood < w * 3.0 and s_gold < g * 3.0,
 		"хватило бы на %.1f узла по дереву" % (s_wood / maxf(w, 1.0)))
 

@@ -536,9 +536,19 @@ func _i_menus() -> void:
 	# Клик по кнопке сложности обязан менять текущий выбор, а не только вид
 	var was: String = _Diff.current()
 	var other: String = _Diff.HARD if was != _Diff.HARD else _Diff.EASY
-	menu._on_difficulty(other)
+	var oi: int = 0
+	for k in range(_Diff.ORDER.size()):
+		if String(_Diff.ORDER[k]) == other:
+			oi = k
+	menu._diff_opt.select(oi)
+	menu._diff_opt.item_selected.emit(oi)
 	verdict("I5 клик по кнопке сложности меняет выбор",
 		_Diff.current() == other, "%s → %s" % [was, _Diff.current()])
-	menu._on_difficulty(was)
+	var wi: int = 0
+	for k2 in range(_Diff.ORDER.size()):
+		if String(_Diff.ORDER[k2]) == was:
+			wi = k2
+	menu._diff_opt.select(wi)
+	menu._diff_opt.item_selected.emit(wi)
 	get_tree().root.remove_child(menu)
 	menu.queue_free()

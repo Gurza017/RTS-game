@@ -316,6 +316,8 @@ class Corpse:
 	## Где тело лежит. Нужно стрелам: они втыкаются В ТУЛОВИЩЕ, а не туда, где
 	## их застало попадание, — иначе они висят рядом с телом или под ним
 	var pos: Vector3 = Vector3.ZERO
+	## Кадр ленты, которым тело записано (перезапись при переносе лежащего)
+	var frame: int = 0
 	## Место в слое теней и поперечник круглого пятна
 	var shadow_index: int = -1
 	var shadow_size: float = 0.0
@@ -572,6 +574,7 @@ func spawn(unit: Unit, world_root: Node3D, ground_y: float) -> Corpse:
 	# Размер — из того же числа, что угол и зеркало: два прогона одного боя
 	# обязаны дать одно поле
 	c.scl = 1.0 + (fposmod(float(id) * 0.31830988618, 1.0) - 0.5) * 2.0 * SIZE_JITTER
+	c.frame = int(sf[1])
 	b.write(c.index, at, yaw, int(sf[1]), mirror, 1.0, c.tint, c.scl)
 
 	# ── ТЕНЬ ПОД ТУЛОВИЩЕМ ─────────────────────────────────────────────────
@@ -758,6 +761,36 @@ func update(delta: float) -> void:
 	if _dead_slots >= COMPACT_MIN:
 		_compact()
 
+
+## ── ВРЕМЕННОЕ ТЕЛО ЛЕЖАЩЕГО БОЙЦА (Unit.knock_down) ─────────────────────────
+## Снять сразу, без растворения: боец встал. Место в очереди помечается
+## снятым и уплотняется пачкой, как у догоревшего
+func remove_now(c) -> void:
+	var cc := c as Corpse
+	if cc == null or cc.index < 0:
+		return
+	cc.bucket.hide_slot(cc.index)
+	cc.bucket.free.append(cc.index)
+	if _shadows != null and cc.shadow_index >= 0:
+		_shadows.hide_slot(cc.shadow_index)
+		_shadows.free.append(cc.shadow_index)
+		cc.shadow_index = -1
+	_drop_arrows(cc)
+	if cc.fade_left >= 0.0:
+		_fading.erase(cc)
+	cc.index = -1
+	_dead_slots += 1
+
+## Подвинуть тело вслед за бойцом, которого ещё несёт разлётом
+func move_now(c, at: Vector3) -> void:
+	var cc := c as Corpse
+	if cc == null or cc.index < 0:
+		return
+	var p := Vector3(at.x, GameManager.get_terrain_height(at.x, at.z) + cc.lift, at.z)
+	cc.pos = p
+	cc.bucket.write(cc.index, p, cc.yaw, cc.frame, cc.mirror, 1.0, cc.tint, cc.scl)
+	if _shadows != null and cc.shadow_index >= 0:
+		_shadows.write(cc.shadow_index, Vector3(p.x, p.y - cc.lift + SHADOW_DROP, p.z), cc.shadow_size)
 
 ## Выбросить снятые места из очереди одним проходом. Указатель срока жизни
 ## переносится вместе с ними: он считает МЕСТА, а не тела

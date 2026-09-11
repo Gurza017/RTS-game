@@ -287,11 +287,22 @@ func _run() -> void:
 			continue
 		var unit: Unit = u
 		var slot = GameManager.far_units._slot.get(unit, null)
-		var ring: Vector3 = GameManager.sel_decals._last_pos.get(unit, Vector3.INF)
-		if slot == null or ring.x == INF:
+		# Кольцо ведёт ядро (этап E2): его точка — в буфере слоя, а не в
+		# GDScript-словаре _last_pos (тот остался для запасной дороги)
+		var ridx: Variant = GameManager.sel_decals._slot.get(unit)
+		if slot == null or ridx == null:
+			continue
+		var rb: PackedFloat32Array = GameManager.army.rb_slot(
+			GameManager.sel_decals._rings.core_id, int(ridx))
+		if rb.size() < 12:
+			continue
+		var ring := Vector3(rb[3], rb[7], rb[11])
+		# Спрайт тоже ведёт ядро: его точка — в буфере бакета
+		var sb: PackedFloat32Array = GameManager.army.rb_slot(slot.bucket.core_id, slot.index)
+		if sb.size() < 12:
 			continue
 		checked += 1
-		gap = maxf(gap, Vector2(slot.pos.x - ring.x, slot.pos.z - ring.z).length())
+		gap = maxf(gap, Vector2(sb[3] - ring.x, sb[11] - ring.z).length())
 		lag = maxf(lag, Vector2(unit.draw_position().x - unit.global_position.x,
 			unit.draw_position().z - unit.global_position.z).length())
 	var marching: Dictionary = await _sample()

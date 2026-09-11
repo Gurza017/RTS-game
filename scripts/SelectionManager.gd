@@ -824,6 +824,9 @@ const PICK_TIE := 0.01
 const UNIT_BODY_H := 1.0
 ## Потолок поправки: при совсем пологой камере боец не должен «расползаться»
 const UNIT_PICK_MAX := 2.5
+## Запас радиуса сбора кандидатов под КРУПНОГО бойца (тролль): его якорь
+## уезжает от ног на lean × pick_body_h, и круг у ног шире пехотного
+const BIG_PICK_EXTRA := 4.0
 
 ## Габарит объекта в плане: на столько «прощается» промах по земле.
 ## unit_slack — габарит бойца с поправкой на наклон камеры (см. _pick_at)
@@ -867,6 +870,8 @@ func _pick_radius(node, unit_slack: float = 0.35) -> float:
 func _pick_rank(node) -> int:
 	if node is Unit:
 		return 0
+	if node is Node and (node as Node).is_in_group("sheep"):
+		return 1
 	if node is ResourceNode:
 		return 1 if (node as ResourceNode).resource_type != Constants.RESOURCE_WOOD else 2
 	return 3
@@ -950,7 +955,7 @@ func _pick_at(screen_pos: Vector2, mask: int) -> Dictionary:
 	# за спину бойца больше чем на метр
 	if want_units and ground.x != INF:
 		var gp3 := Vector3(ground.x, 0.0, ground.y)
-		for n in GameManager.unit_grid.query_radius(gp3, unit_slack + 1.0):
+		for n in GameManager.unit_grid.query_radius(gp3, unit_slack + 1.0 + BIG_PICK_EXTRA):
 			var u := n as Unit
 			if u != null and not u.is_dead():
 				cands.append(u)
@@ -981,6 +986,13 @@ func _pick_at(screen_pos: Vector2, mask: int) -> Dictionary:
 			var bh: float = (node as ResourceNode).pick_body_h()
 			if bh > 0.0:
 				anchor += lean * bh
+		elif node is Unit:
+			# КРУПНЫЙ БОЕЦ (тролль): зона клика — весь спрайт плюс круг у ног.
+			# Якорь уходит под середину рисунка, радиус покрывает ноги и макушку
+			var ubh: float = (node as Unit).pick_body_h()
+			if ubh > 0.0:
+				anchor += lean * ubh
+				radius = (node as Unit).pick_radius() + ubh * lean.length()
 		var score: float
 		if ground.x == INF:
 			# Луч смотрит горизонтально — сравниваем по расстоянию до основания
@@ -1056,6 +1068,8 @@ func _resolve_node(collider: Node):
 		# но по ней отдаётся приказ «отстроить заново», поэтому кликом она
 		# обязана распознаваться. Ловим по группе — типа у неё нет
 		if n.is_in_group("ruins"):
+			return n
+		if n.is_in_group("sheep"):
 			return n
 		n = n.get_parent()
 	return null
@@ -1774,6 +1788,12 @@ func _handle_right_click(screen_pos: Vector2, run: bool = false) -> void:
 		return
 	_purge_invalid()
 	if selected_units.is_empty():
+		# ПКМ ПО СВОЕЙ БАШНЕ БЕЗ ВЫДЕЛЕНИЯ — выпустить лучников наружу
+		# (заказ 09.09.2026). Единственный приказ, который отдаётся пустым
+		# выделением: адресат — само здание, а не отряд
+		var lone = _pick_at(screen_pos, order_pick_mask())["target"]
+		if not _try_release_tower(lone):
+			_try_release_mine(lone)
 		return
 	# Маска — общая с подсветкой наведения (см. order_pick_mask): то, что
 	# подсвечено зелёным, обязано быть тем же самым узлом, что придёт сюда
@@ -1793,13 +1813,32 @@ func _handle_right_click(screen_pos: Vector2, run: bool = false) -> void:
 			target = zone
 
 	# ПКМ ОТРЯДОМ ПО СВОЕМУ ЗАМКУ — завести отряд в гарнизон: там его лечат
-	# и доукомплектовывают. Рабочих это не касается — им замок нужен как склад
+	# и доукомплектовывают. Рабочих это не касается — им замок нужен как склад.
+	# ПО БАШНЕ — то же самое для лучников; всем остальным ПКМ по башне
+	# ВЫПУСКАЕТ её гарнизон (заказ 09.09.2026)
+	# ОВЦА (10.09.2026): рабочие крадут её и ведут к складу; бойцам она не
+	# цель — приказ по ней читается как марш в точку
+	if target != null and target is Node and (target as Node).is_in_group("sheep"):
+		var thieves := 0
+		for u in selected_units:
+			if is_instance_valid(u) and u is Worker and not (u as Unit).garrisoned:
+				(u as Worker).command_steal_sheep(target as Node3D)
+				thieves += 1
+		if thieves > 0:
+			return
+		target = null
+
 	if target is Castle and target.faction == Constants.FACTION_PLAYER:
 		if _try_garrison(target as Castle):
+			return
+		if _try_release_tower(target):
 			return
 
 	# ПКМ ПО РУИНЕ — отстроить заново: на её месте сразу встаёт стройплощадка,
 	# и вся выделенная артель бежит туда с молотками
+	if _try_enter_mine(target):
+		return
+
 	if _try_rebuild_ruin(target):
 		return
 
@@ -1824,6 +1863,10 @@ func _handle_right_click(screen_pos: Vector2, run: bool = false) -> void:
 			target = ore
 
 	var is_gather_cmd: bool = target != null and target is ResourceNode
+	# НИЧЕЙНЫЙ РУДНИК — НЕ ЦЕЛЬ ДЛЯ УДАРА (10.09.2026): его берут присутствием,
+	# и приказ по нему — марш к нему
+	if target is Building and target.faction == Constants.FACTION_NEUTRAL:
+		target = null
 	var is_attack_cmd: bool = target != null and (target is Unit or target is Building) and target.faction != Constants.FACTION_PLAYER
 
 	if is_gather_cmd or is_attack_cmd:
@@ -1891,6 +1934,15 @@ func _handle_right_click(screen_pos: Vector2, run: bool = false) -> void:
 		# Приказ АТАКИ горячей группе — такой же повод крикнуть, как и марш
 		# (см. _order_battle_cry). Сбор ресурсов поводом не является
 		if is_attack_cmd:
+			# ── ДВОЙНОЙ ПКМ ПО ВРАГУ ТОЖЕ ВКЛЮЧАЕТ ПРИЁМ (заказ спринта 14) ──
+			# Заказ спринта 13 был исполнен только для клика ПО ЗЕМЛЕ: раздача
+			# висела в _issue_formation_move, а приказ атаки идёт другой веткой
+			# и до неё не доходит вовсе. А просят ровно обратного — «двойной
+			# клик ПКМ ПО ВРАГУ: включается бег с ускорением». Точка одна и та
+			# же (_trigger_double_rmb_abilities), поэтому два описания приёма
+			# не заводятся
+			if run:
+				_trigger_double_rmb_abilities()
 			_order_battle_cry(selected_units)
 			# РОГ К АТАКЕ: пять и больше отрядов брошены на противника.
 			# Только на атаку — приказ собирать ресурсы поводом трубить не
@@ -1947,6 +1999,14 @@ func _issue_formation_move(center: Vector3, run: bool = false) -> void:
 	if movable.is_empty():
 		return
 	_order_battle_cry(movable)
+	# ── ДВОЙНОЙ ПКМ: СПЕЦПРИЁМ, ЕСЛИ ОН КУПЛЕН, ИНАЧЕ БЕГ ─────────────────
+	# Заказ спринта 13 отдаёт двойной ПКМ двум способностям: «Яростный Набег»
+	# мечника и «Натиск Фаланги» копейщика. Бег двойным ПКМ при этом НЕ
+	# отменён — он остаётся у всех, у кого спецприёма нет вовсе (и у тех, кто
+	# его выключил). Точка подключения та же, что у клича и у массового марша:
+	# сюда сходятся ВСЕ ветки приказа на движение
+	if run:
+		_trigger_double_rmb_abilities()
 	# МАССОВЫЙ МАРШ: пять и больше отрядов получили приказ идти.
 	# Здесь, а не в _handle_right_click, и это важно: сюда сходятся ВСЕ ветки
 	# приказа на движение (сетка блоков, марш строем, россыпь), и любая из них
@@ -2364,6 +2424,18 @@ func current_group_index() -> int:
 			return idx
 	return -1
 
+## ПКМ по своей башне с гарнизоном — лучники выходят. false — это не башня,
+## не своя или внутри пусто
+func _try_release_tower(target) -> bool:
+	if target == null or not is_instance_valid(target) or not (target is Castle):
+		return false
+	var c := target as Castle
+	if c.is_stronghold() or c.faction != Constants.FACTION_PLAYER:
+		return false
+	if not c.has_method("release_all"):
+		return false
+	return bool(c.call("release_all"))
+
 ## Завести выделенные БОЕВЫЕ отряды в гарнизон замка.
 ## false — ни один отряд не годится (одни рабочие) или гарнизон полон,
 ## тогда правый клик отрабатывает как обычный приказ движения
@@ -2388,12 +2460,42 @@ func _try_garrison(castle: Castle) -> bool:
 ## false — цель не руина, не своя, рабочих в выделении нет или не хватило
 ## ресурсов. В последнем случае приказ намеренно ПРОВАЛИВАЕТСЯ ДАЛЬШЕ и
 ## становится обычным «идти туда»: молча съесть клик хуже, чем сходить на место
+## ── ЗОЛОТОЙ РУДНИК: РАБОЧИЕ ВНУТРЬ И НАРУЖУ (10.09.2026) ────────────────────
+## ПКМ по СВОЕМУ руднику выделенными рабочими — внутрь (не больше свободных
+## мест, идут тем же путём, что на стройку); ПКМ пустым выделением — все
+## наружу (как у башни). Ничейный и чужой рудник рабочих не принимает
+func _try_enter_mine(target) -> bool:
+	if target == null or not is_instance_valid(target) or not (target is Mine):
+		return false
+	var m := target as Mine
+	if m.faction != Constants.FACTION_PLAYER or m.is_dead():
+		return false
+	var room: int = m.WORKER_CAP - m.workers.size()
+	var sent := 0
+	for u in selected_units:
+		if sent >= room:
+			break
+		if is_instance_valid(u) and u is Worker and not (u as Unit).garrisoned:
+			(u as Worker).command_build(m as Node3D)
+			sent += 1
+	return sent > 0
+
+func _try_release_mine(target) -> bool:
+	if target == null or not is_instance_valid(target) or not (target is Mine):
+		return false
+	var m := target as Mine
+	if m.faction != Constants.FACTION_PLAYER:
+		return false
+	return m.release_all()
+
 func _try_rebuild_ruin(target) -> bool:
 	if target == null or not is_instance_valid(target):
 		return false
 	if not (target is Node) or not (target as Node).is_in_group("ruins"):
 		return false
-	if int((target as Node).get_meta("ruin_faction", -1)) != Constants.FACTION_PLAYER:
+	# Руина рудника общая: отстроить может любой, и рудник достаётся ему
+	var any_side: bool = bool((target as Node).get_meta("ruin_any_faction", false))
+	if int((target as Node).get_meta("ruin_faction", -1)) != Constants.FACTION_PLAYER and not any_side:
 		return false
 	var crew: Array = []
 	for u in selected_units:
@@ -2401,7 +2503,7 @@ func _try_rebuild_ruin(target) -> bool:
 			crew.append(u)
 	if crew.is_empty():
 		return false
-	var site = GameManager.rebuild_ruin(target as Node)
+	var site = GameManager.rebuild_ruin(target as Node, Constants.FACTION_PLAYER)
 	if site == null:
 		return false
 	for w in crew:
@@ -2476,6 +2578,59 @@ func _order_battle_cry(movable: Array) -> int:
 
 ## Сколько РАЗНЫХ отрядов в текущем выделении. Одиночки вне реестра
 ## (squad_id = 0: рабочие, гарнизонные) не считаются вовсе
+# ═════════════════════════════════════════════════════════════════════════════
+# СПЕЦПРИЁМЫ ПО ДВОЙНОМУ ПКМ (заказ спринта 13)
+# ═════════════════════════════════════════════════════════════════════════════
+# ЧТО ЗДЕСЬ ЕСТЬ И ЧЕГО НЕТ. Здесь только РАЗДАЧА: какие отряды выделены, есть
+# ли у них купленная и включённая способность, и вызов её у каждого бойца.
+# Само поведение живёт у рода войск (Warrior.start_rage_dash,
+# Spearman.start_phalanx_push) — второго описания приёма в проекте быть не
+# должно.
+#
+# ПРИЁМ ИЩЕТСЯ ПО ТИПУ ОТРЯДА, А НЕ ПО ТИПУ БОЙЦА. Способности куплены на
+# ОТРЯД (GameManager.squad_has_ability), и спрашивать их надо один раз на
+# отряд, а не по разу на каждого из шестидесяти копейщиков.
+#
+# ВЫКЛЮЧЕННЫЙ ПРИЁМ НЕ СРАБАТЫВАЕТ: squad_ability_on — тот же переключатель,
+# каким игрок гасит залп лучников.
+
+## unit_id → [id узла способности, имя метода у бойца]
+const DOUBLE_RMB_ABILITIES := {
+	"warrior":  ["warrior_1d",  "start_rage_dash"],
+	"spearman": ["spearman_4d", "start_phalanx_push"],
+}
+
+## Сколько бойцов получили приём (стенды)
+var double_rmb_triggered: int = 0
+
+func _trigger_double_rmb_abilities() -> void:
+	double_rmb_triggered = 0
+	for sid in selected_squad_ids():
+		var id: int = int(sid)
+		if id <= 0:
+			continue
+		var utype: String = GameManager.squad_type(id)
+		var rec: Variant = DOUBLE_RMB_ABILITIES.get(utype)
+		if rec == null:
+			continue
+		var node_id: String = String((rec as Array)[0])
+		var method: String = String((rec as Array)[1])
+		if not GameManager.squad_has_ability(id, node_id):
+			continue
+		if not GameManager.squad_ability_on(id, node_id):
+			continue
+		# СТРОЙ СМЫКАЕТСЯ ОДНИМ ОТРЯДНЫМ ДЕЙСТВИЕМ (заказ: «сомкнуть ряды»).
+		# Поштучного возврата в проекте нет и не будет — разбор в CLAUDE.md
+		if utype == "spearman":
+			GameManager.squad_close_ranks(id, true)
+		for u in GameManager.squad_members(id):
+			if u == null or not is_instance_valid(u):
+				continue
+			if not u.has_method(method):
+				continue
+			u.call(method)
+			double_rmb_triggered += 1
+
 func selected_squad_count() -> int:
 	var seen: Dictionary = {}
 	for u in selected_units:

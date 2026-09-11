@@ -36,6 +36,8 @@ const KNOB_BATCH_COMBAT := 1
 const KNOB_D1 := 7
 const KNOB_PRESS := 8
 const KNOB_AUTO := 9
+## Потолок хака №2: проверка чужих тел в ядре выключена целиком
+const KNOB_BODYSCAN := 10
 
 ## Сколько физических кадров держится одна фаза замера
 const PHASE_FRAMES := 90
@@ -116,6 +118,8 @@ func _set_knob(knob: int, on: bool) -> void:
 		_Opt.rear_press = on
 	elif knob == KNOB_AUTO:
 		_Opt.approach_autopilot = on
+	elif knob == KNOB_BODYSCAN:
+		GameManager.army.set_skip_body_scan(on)
 	else:
 		_Opt.squad_combat_cache = on
 
@@ -205,6 +209,12 @@ func _run() -> void:
 		KNOB_COMBAT_CACHE)
 	await _ab_block("C. ПАКЕТНЫЙ ПРОХОД БОЯ (batch_combat) — в рубке",
 		KNOB_BATCH_COMBAT)
+	# ── ПОТОЛОК ХАКА №2 (стена-отрезок вместо проверки тел) ────────────────
+	# «Вкл» здесь = проверка тел ВЫКЛЮЧЕНА вовсе: никакая замена её на
+	# отрезки не выиграет больше, чем полное её отсутствие
+	await _ab_block("F. ПОТОЛОК ХАКА №2: проверка чужих тел ВЫКЛЮЧЕНА — в рубке",
+		KNOB_BODYSCAN)
+	GameManager.army.set_skip_body_scan(false)
 
 	# ── ФАЗА СБЛИЖЕНИЯ: ТО, РАДИ ЧЕГО ПАКЕТНЫЙ БОЙ И ЗАВЕДЁН ──────────────
 	# BatchCombat считает по колонкам шаг ПОДТЯГИВАНИЯ — то есть работает ровно
@@ -227,6 +237,9 @@ func _run() -> void:
 	_snapshot_positions()
 	await _ab_block("D. ПАКЕТНЫЙ ПРОХОД БОЯ (batch_combat) — фаза сближения",
 		KNOB_BATCH_COMBAT, true)
+	await _ab_block("F2. ПОТОЛОК ХАКА №2: проверка чужих тел ВЫКЛЮЧЕНА — сближение",
+		KNOB_BODYSCAN, true)
+	GameManager.army.set_skip_body_scan(false)
 
 	# ── E. ЭТАП D1 (напор + автопилот) НА ТОЙ ЖЕ ФАЗЕ СБЛИЖЕНИЯ ────────────
 	# Ровно сцена, под которую D1 писан: цели видны, дотянуться нельзя — тыл

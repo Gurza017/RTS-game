@@ -464,6 +464,19 @@ func _clear_spot() -> Vector3:
 				continue
 			if main.is_water(p.x, p.z):
 				continue
+			# РЕКА В НИЗИНЕ (10.09.2026): зеркало воды на метр выше дна, и ряд,
+			# поставленный в русло или на откос, уходит под воду. Все три ряда
+			# (z ± 30) и их ширина (x ± 12) обязаны лежать вне откосов
+			var wet := false
+			for dz in [-30.0, 0.0, 30.0]:
+				for dx in [-12.0, 0.0, 12.0]:
+					if main.near_river(p.x + dx, p.z + dz, main.RIVER_BANK + 2.0):
+						wet = true
+					# …и вне склонов плато: на обрыве часть силуэта прячет грунт
+					if main.plateau_height(p.x + dx, p.z + dz) > 0.05:
+						wet = true
+			if wet:
+				continue
 			return p
 	return Vector3.ZERO
 
@@ -496,6 +509,16 @@ func _run() -> void:
 	if GameManager.fog != null:
 		GameManager.fog.enabled = false
 		(GameManager.fog as Node3D).visible = false
+	# ── АНИМИРОВАННЫЕ КАМНИ БРОДА ПРЯЧЕМ (09.09.2026) ──────────────────────
+	# Площадка стенда стоит в центре карты, а с новой картой центр — это брод
+	# с камнями, которые листают ленту (8 кадров, 6 к/с). Метрика — РАЗНОСТЬ
+	# двух снимков; всё, что сменило кадр между ними, засчитывается объекту,
+	# в чей экранный прямоугольник попало. Камень под квадом копейщика (у
+	# того 122 px пустого поля под ступнями) давал «кромка опущена на 1.93 м»
+	# на целом бойце. Стенд обязан задавать окружение сам (правило стендов)
+	var rocks := main.world_root().get_node_or_null("FordRocks") as Node3D
+	if rocks != null:
+		rocks.visible = false
 	main.set_process(false)
 	cam = main.get("_camera") as RTSCamera
 	if cam == null:
@@ -532,9 +555,13 @@ func _run() -> void:
 		var row: Array = human_paths[i]
 		humans.append(_spawn_unit(String(row[0]),
 			spot + Vector3(float(i) * step - 11.0, 0.0, 0.0), Constants.FACTION_PLAYER))
+	# ГНОЛЛ ДОБАВЛЕН СПРИНТОМ 13: свой размер пикселя (GNOLL_PIXEL_SIZE) и
+	# своя привязка ног по ленте — то есть ровно тот случай, который здешняя
+	# метрика и ловит («низ рисунка на месте, в метрах»)
 	var horde_paths := [
 		["res://scenes/units/GoblinSpearman.tscn", "Гоблин"],
-		["res://scenes/units/GoblinPigRider.tscn", "Кабан"]]
+		["res://scenes/units/GoblinPigRider.tscn", "Кабан"],
+		["res://scenes/units/Gnoll.tscn", "Гнолл"]]
 	for i in range(horde_paths.size()):
 		var row2: Array = horde_paths[i]
 		horde.append(_spawn_unit(String(row2[0]),

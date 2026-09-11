@@ -118,7 +118,8 @@ func _test_config() -> void:
 		print("    %-14s «%s»: %s" % [String(d["id"]), String(d["name"]), ", ".join(parts)])
 	# Сверка: заказ найма реально берёт размер из SQUAD_SIZE_*
 	var cfg_ok := Building.MAX_SQUAD_SIZE == _UCfg.SQUAD_SIZE_HARD_CAP
-	for pair in [["barracks", "spearman"], ["barracks", "archer"], ["castle", "warrior"]]:
+	# Лучники нанимаются в СТРЕЛКОВОЙ (09.09.2026), в бараках — пехота
+	for pair in [["barracks", "spearman"], ["archery", "archer"], ["castle", "warrior"]]:
 		var b: String = String(pair[0])
 		var u: String = String(pair[1])
 		var c: Dictionary = _UCfg.train_cfg(b, u)
@@ -214,6 +215,15 @@ func _enemy_barracks() -> Building:
 			return b as Building
 	return null
 
+## Стрелковая ИИ (09.09.2026): лучники нанимаются в ней, и её очередь стенд
+## обязан проматывать наравне с бараком и замком — иначе лучники честно
+## строятся тридцать секунд каждый, и «найм до лимитов» их не дожидается
+func _enemy_archery() -> Building:
+	for b in get_tree().get_nodes_in_group("enemy_buildings"):
+		if is_instance_valid(b) and b is Building and (b as Building).building_id == "archery":
+			return b as Building
+	return null
+
 func _count_enemy(kind: String) -> int:
 	var n := 0
 	for u in get_tree().get_nodes_in_group("enemy_units"):
@@ -294,6 +304,7 @@ func _test_training_to_limits() -> void:
 		max_queue = maxi(max_queue, castle.production_queue.size())
 		await flush(barracks, 80)
 		await flush(castle, 80)
+		await flush(_enemy_archery(), 80)
 		_snap_surplus()
 		if ai.army_ready():
 			break
@@ -305,6 +316,7 @@ func _test_training_to_limits() -> void:
 	# ловить недособранный отряд (замер: 10 лучников из 20)
 	await flush(barracks, 400)
 	await flush(castle, 400)
+	await flush(_enemy_archery(), 400)
 	await ai_tick()
 	print("  ИТОГ: %s" % ai.report())
 	print("  максимум заказов в одной очереди: %d (лимит MAX_QUEUED_ORDERS=%d)" % [
@@ -795,6 +807,7 @@ func _test_recovery() -> void:
 		await ai_tick()
 		await flush(_enemy_barracks(), 60)
 		await flush(castle, 60)
+		await flush(_enemy_archery(), 60)
 		if ai.army_size() > 0:
 			break
 	print("  ИИ снова набирает: %s" % ai.report())

@@ -113,10 +113,31 @@ func _b_fog() -> void:
 			and float(fog.rows) * fog.MASK_CELL >= 2.0 * main.MAP_HALF_Z - fog.MASK_CELL,
 		"сетка %d×%d по %.1f м" % [fog.cols, fog.rows, fog.MASK_CELL])
 
-	# B3 — стартовая площадка раскрыта ЗАРАНЕЕ, до всякой постройки
+	# ── ИСТОЧНИК ОБЗОРА СТЕНД СТАВИТ САМ ──────────────────────────
+	# Заранее туман больше не раскрывается вовсе (заказ 10.09.2026), а этот
+	# стенд поднимает Main без стартовой бригады партии: без своего юнита на
+	# карте нет ни одного источника обзора
+	var pa0: Vector3 = main.PLAYER_BASE_ANCHOR
+	var probe := Worker.new()
+	probe.faction = Constants.FACTION_PLAYER
+	main.world_add(probe)
+	probe.global_position = Vector3(pa0.x,
+		GameManager.get_terrain_height(pa0.x, pa0.z), pa0.z)
+	probe.sync_row()
+	await pframes(2)
+	fog.refresh()
+
+	# ── B3: НА СТАРТЕ ВИДНО ТОЛЬКО КРУГ ВОКРУГ БРИГАДЫ (заказ 10.09.2026) ───
+	# Прежде здесь раскрывалась НАВСЕГДА вся стартовая площадка под замок —
+	# светлый прямоугольник в пол-карты ещё до появления рабочего. Требование
+	# развёрнуто: заранее не раскрывается ничего, круг дают сами рабочие, а
+	# крепость расширяет его до CASTLE_VISION. Постоянных засветов при этом
+	# быть не должно вовсе
 	var a: Vector3 = main.PLAYER_BASE_ANCHOR
-	verdict("B3 площадка под замок раскрыта заранее", fog.is_lit(a.x, a.z),
-		"центр площадки просматривается=%s" % str(fog.is_lit(a.x, a.z)))
+	verdict("B3 у стартовой бригады видно, постоянных засветов нет",
+		fog.is_lit(a.x, a.z) and fog._permanent.is_empty(),
+		"у бригады видно=%s, постоянных засветов %d" % [str(fog.is_lit(a.x, a.z)),
+			fog._permanent.size()])
 
 	# B4 — раскрыто ВСЁ, куда игрок реально может ткнуть замок, включая углы:
 	# круг, вписанный в квадрат зоны, оставил бы их в темноте.
@@ -126,6 +147,10 @@ func _b_fog() -> void:
 	# зоны вылезает ЗА карту (при якоре −106 и полуширине 30 это −136 при
 	# половине карты 130). Такая точка недостижима для игрока — зажим сам
 	# приведёт её на край, — и требовать её раскрытия бессмысленно
+	# ── B4: КРАЯ СТАРТОВОЙ ПЛОЩАДКИ ТЕПЕРЬ В ТУМАНЕ, И ЭТО ПРАВИЛО ──────────
+	# Круг обзора рабочего — VISION_MIN (15 м), а полуширина прежней зоны под
+	# замок — 30 м: её углы обязаны быть тёмными. Строить там нельзя, пока
+	# кто-то не подойдёт (Main.can_build_at), — ровно этого заказ и просил
 	var h: float = main.PLAYER_PLACE_HALF
 	var dark: Array = []
 	for sx in [-1.0, -0.5, 0.0, 0.5, 1.0]:
@@ -133,7 +158,9 @@ func _b_fog() -> void:
 			var p: Vector2 = main.clamp_to_player_start(a.x + sx * h, a.z + sz * h)
 			if not fog.is_lit(p.x, p.y):
 				dark.append("(%.0f,%.0f)" % [p.x, p.y])
-	verdict("B4 раскрыта вся достижимая зона размещения", dark.is_empty(),
+	verdict("B4 края стартовой площадки в тумане: заранее не раскрыто ничего",
+		dark.size() >= 8 and not main.can_build_at(float(dark[0].split(",")[0].substr(1)),
+			float(dark[0].split(",")[1].trim_suffix(")"))),
 		"тёмных точек: %d %s" % [dark.size(), str(dark.slice(0, 4))])
 
 	# B5 — дальний угол карты в тумане: раскрыто не всё подряд
@@ -144,7 +171,7 @@ func _b_fog() -> void:
 	# B6 — раскрыта заметная, но небольшая доля карты
 	var frac: float = fog.lit_fraction()
 	verdict("B6 раскрыт стартовый пятачок, а не половина карты",
-		frac > 0.005 and frac < 0.35, "раскрыто %.1f%% карты" % (frac * 100.0))
+		frac > 0.0005 and frac < 0.10, "раскрыто %.2f%% карты" % (frac * 100.0))
 
 	# B7 — за краем карты обзора нет (индекс не находится)
 	verdict("B7 точка за картой не считается раскрытой",
@@ -271,7 +298,16 @@ func _d_hiding() -> void:
 		GameManager.far_units.is_registered(foe),
 		"в отрисовке=%s (задержка %.2f с)" % [
 			str(GameManager.far_units.is_registered(foe)), Unit.FOG_HIDE_GRACE])
-	await frames(int(Unit.FOG_HIDE_GRACE * 60.0) + 40)
+	# ── ЖДЁМ САМУ ЗАДЕРЖКУ, А НЕ ЧИСЛО КАДРОВ (правило 11 и 12) ────────────
+	# FOG_HIDE_GRACE считается СТЕННЫМИ ЧАСАМИ, а «столько-то кадров
+	# отрисовки» при Engine.max_fps = 0 значит разное время на разной
+	# загрузке: одиночно стенд был зелёным, а в шлюзе рядом с другими
+	# прогонами D6б краснел — задержка не успевала истечь. Ждём СВОЙСТВО
+	# (боец снят) с потолком по часам плюс запас
+	var t_grace: int = Time.get_ticks_msec()
+	var grace_ms: int = int(Unit.FOG_HIDE_GRACE * 1000.0) + 1500
+	while Time.get_ticks_msec() - t_grace < grace_ms 			and GameManager.far_units.is_registered(foe):
+		await get_tree().physics_frame
 	verdict("D6б спустя задержку враг снят с отрисовки",
 		not GameManager.far_units.is_registered(foe),
 		"в отрисовке=%s" % str(GameManager.far_units.is_registered(foe)))
@@ -343,14 +379,18 @@ func _e_castle() -> void:
 	verdict("E2 на карте стройплощадка замка", site != null,
 		"площадок: %d" % sites.size())
 
-	# E3 — ровно столько рабочих, сколько задано в конфиге бригады
+	# ── E3: СЧИТАЕМ БРИГАДУ ЭТОЙ СТРОЙКИ, А НЕ ВСЕХ РАБОЧИХ НА КАРТЕ ────────
+	# С 10.09.2026 партия открывается пятью рабочими БЕЗ крепости (заказ
+	# владельца), и к моменту этой проверки на карте уже есть стартовая
+	# бригада самой партии. Список бригады, вышедшей на ЭТУ стройку, ведёт
+	# сам Main (_start_crew) — по нему и судим
 	var crew: Array = []
-	for u in get_tree().get_nodes_in_group("player_units"):
-		if u is Worker and is_instance_valid(u):
+	for u in main._start_crew:
+		if u != null and is_instance_valid(u):
 			crew.append(u)
 	var want: int = main.START_WORKER_RESOURCES.size()
 	verdict("E3 стартовая бригада заданного размера", crew.size() == want,
-		"рабочих %d, в конфиге %d" % [crew.size(), want])
+		"рабочих в бригаде %d, в конфиге %d" % [crew.size(), want])
 
 	# E4 — ВСЕ они строят, а не разбежались по ресурсам
 	var building := 0

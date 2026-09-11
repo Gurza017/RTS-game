@@ -239,14 +239,27 @@ func _test_exit() -> void:
 	print("  ворота здания: %s, SQUAD_EXIT_DISTANCE=%.1f" % [str(gate), barracks.SQUAD_EXIT_DISTANCE])
 	print("  сразу после спавна отряд №2: ближний боец %.2f м, дальний %.2f м от центра здания" % [
 		d_spawn, d_spawn_max])
-	verdict("2 бойцы появляются ВПЛОТНУЮ к зданию (≤ ворот + строй)",
-		d_spawn < barracks.spawn_offset.length() + 2.0,
-		"ближний при спавне=%.2f м, ворота на %.2f м" % [d_spawn, barracks.spawn_offset.length()])
+	# ПЛОЩАДКА СБОРА (хак №3, 09.09.2026): второй заказ появляется на СВОЁМ
+	# ряду площадки (первый ряд занят отрядом №1), а не в проёме ворот
+	var on_zone := 0
+	var total2 := 0
+	for m in _members(squad_a2):
+		total2 += 1
+		if barracks.in_rally_zone((m as Node3D).global_position, 0.6):
+			on_zone += 1
+	verdict("2 бойцы появляются НА ПЛОЩАДКЕ СБОРА здания, не в проёме ворот",
+		total2 > 0 and on_zone == total2,
+		"на площадке %d из %d; ближний при спавне=%.2f м, ворота на %.2f м" % [
+			on_zone, total2, d_spawn, barracks.spawn_offset.length()])
 
 	# Дать обоим отрядам отойти
 	await frames(600)
 
 	var report: Array = []
+	# ПЛОЩАДКА ВПЛОТНУЮ К ЗДАНИЮ (10.09.2026): «освободили ворота» — это ЗА
+	# проёмом, а проём кончается за полшага до первой шеренги площадки; прежние
+	# круглые «5 м» и «ворота + 2 м» были прежним отступом в четыре метра
+	var door_r: float = barracks.spawn_offset.length() + barracks.SQUAD_EXIT_DISTANCE - barracks.squad_spacing * 0.5 - 0.05
 	for pair in [[squad_a, "A (копейщики №1)"], [squad_a2, "A2 (копейщики №2)"]]:
 		var row: Array = pair
 		var sid: int = int(row[0])
@@ -258,10 +271,10 @@ func _test_exit() -> void:
 			var d: float = (m as Node3D).global_position.distance_to(bpos)
 			dmin = minf(dmin, d)
 			dmax = maxf(dmax, d)
-			if d < 5.0:
+			if d < door_r:
 				near_gate += 1
-		print("  отряд %-22s: ближний %.2f м, дальний %.2f м, в 5 м от здания: %d бойцов" % [
-			label, dmin, dmax, near_gate])
+		print("  отряд %-22s: ближний %.2f м, дальний %.2f м, в проёме (<%.2f м от центра): %d бойцов" % [
+			label, dmin, dmax, door_r, near_gate])
 		report.append({"sid": sid, "min": dmin, "max": dmax, "near": near_gate})
 
 	var all_clear := true
@@ -271,9 +284,9 @@ func _test_exit() -> void:
 		var d: Dictionary = e
 		worst_min = minf(worst_min, float(d["min"]))
 		stuck += int(d["near"])
-		if float(d["min"]) <= 5.0:
+		if float(d["min"]) <= door_r:
 			all_clear = false
-	verdict("2 все отряды освободили ворота (>5 м от здания)", all_clear,
+	verdict("2 все отряды освободили проём ворот (дальше первой шеренги площадки)", all_clear,
 		"худший ближний=%.2f м, застряло у дверей=%d" % [worst_min, stuck])
 
 	# Дошли ли до точки сбора (SQUAD_EXIT_DISTANCE от ворот)
@@ -288,11 +301,11 @@ func _test_exit() -> void:
 			var dist: float = (m as Node3D).global_position.distance_to(bpos)
 			if dist > target_d * 0.6:
 				reached += 1
-			if dist > barracks.spawn_offset.length() + 2.0:
+			if dist > door_r:
 				far += 1
 	print("  расчётная точка сбора в %.1f м от центра здания" % target_d)
-	print("  отошли за габарит ворот (>%.1f м): %d из %d; дошли на 60%%+ до точки сбора: %d из %d" % [
-		barracks.spawn_offset.length() + 2.0, far, total, reached, total])
+	print("  отошли за проём ворот (>%.1f м): %d из %d; дошли на 60%%+ до точки сбора: %d из %d" % [
+		door_r, far, total, reached, total])
 	verdict("2 отряды отошли от ворот на SQUAD_EXIT_DISTANCE", far == total,
 		"отошло=%d из %d" % [far, total])
 
@@ -330,8 +343,14 @@ func _test_exit() -> void:
 
 	# ── ТРЕТИЙ ОТРЯД ДЛЯ ДАЛЬНЕЙШИХ ТЕСТОВ: ЛУЧНИКИ (другой squad_size) ──────
 	var before3: Array = GameManager.squads.keys().duplicate()
-	barracks.train_archer()
-	await flush(barracks)
+	# ЛУЧНИКИ НАНИМАЮТСЯ В СТРЕЛКОВОЙ (09.09.2026), в бараках — пехота
+	var archery: Building = load("res://scripts/Archery.gd").new()
+	archery.faction = Constants.FACTION_PLAYER
+	main.world_add(archery)
+	archery.global_position = barracks.global_position + Vector3(14.0, 0.0, 0.0)
+	await frames(2)
+	archery.train_archer()
+	await flush(archery)
 	await frames(3)
 	var new3: Array = _new_squad_ids(before3)
 	squad_b = int(new3[0]) if not new3.is_empty() else 0
@@ -1222,7 +1241,11 @@ func _test_mass_and_reset() -> void:
 	# Сколько отрядов ЗАВОДИТ сама start_game — считаем по конфигам, а не по
 	# памяти: стартовые рабочие ИИ (у каждого свой отряд из одного) плюс орда
 	# гоблинов в правом верхнем углу
-	var want_after: int = _AICfg.START_WORKERS + _GobCfg.army_squads()
+	# И стражи логова тролля (09.09.2026): у каждого свой отряд из одного
+	# И БРИГАДА ИГРОКА (10.09.2026): партия начинается пятью рабочими БЕЗ
+	# крепости, у каждого свой отряд из одного.
+	# И СТАЯ ГНОЛЛОВ У ПНЯ (спринт 13): GNOLL_START_SQUADS отрядов сразу
+	var want_after: int = _AICfg.START_WORKERS + _GobCfg.army_squads() 		+ _GobCfg.LAIR_START_TROLLS 		+ main.START_WORKER_RESOURCES.size() 		+ _GobCfg.GNOLL_START_SQUADS
 	var max_id := 0
 	for k in GameManager.squads.keys():
 		max_id = maxi(max_id, int(k))

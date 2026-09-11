@@ -6,6 +6,14 @@ var dropoffs: Dictionary = {}
 var unit_grid = load("res://scripts/SpatialGrid.gd").new()
 ## Общий MultiMesh стрел (этап D3): картинка всех стрел одним вызовом отрисовки
 var arrows_mm = load("res://scripts/ArrowRenderer.gd").new()
+## ── КОСТЬ ГНОЛЛА — ВТОРОЙ ЭКЗЕМПЛЯР ТОГО ЖЕ СЛОЯ ──────────────────────────
+## ArrowRenderer держит ОДНУ текстуру на весь свой MultiMesh (материал общий
+## на бакет), поэтому кость нельзя подмешать в слой стрел ни модуляцией, ни
+## подменой картинки: у первой же стрелы изменился бы вид. Второй экземпляр
+## слоя стоит ровно один дополнительный вызов отрисовки на все кости в воздухе
+## и достаёт из ядра тот же пакетный проход полёта (у него свой rb_create и
+## свой core_id, а arrow_launch принимает его номером аргумента)
+var bones_mm = load("res://scripts/ArrowRenderer.gd").new()
 # Реестр отрисовки дальних юнитов общим MultiMesh (см. FarUnitRenderer.gd)
 var far_units = load("res://scripts/FarUnitRenderer.gd").new()
 # Кольца и тени выделения — тоже общим MultiMesh (см. SelectionDecalRenderer.gd)
@@ -166,6 +174,12 @@ func _process(_delta: float) -> void:
 	# Такт пересчёта позы тоже считается ОДИН раз на всю армию и раздаётся
 	# аргументом (см. perf_config.anim_every_for и шапку Unit.tick_visual)
 	var anim_every: int = _Opt.anim_every_for(live_n)
+	# Событийная поза (этап E3): расписание остаётся страховкой, в разы реже
+	if _Opt.pose_events:
+		anim_every *= maxi(_Opt.pose_safety_mult, 1)
+	# Поворот камеры — событие на всю армию: оси снимаются раз в кадр
+	_refresh_camera_axes()
+	var cam_ep: int = _cam_epoch
 	# ── ОБЩЕЕ НА АРМИЮ СНИМАЕТСЯ ЗДЕСЬ, ОДИН РАЗ (см. шапку Unit.tick_visual) ─
 	# Точка обзора и четыре настройки одинаковы для всех и менялись бы не чаще
 	# раза в кадр, а читались из КАЖДОГО бойца в КАЖДОМ кадре — семь обращений
@@ -188,7 +202,7 @@ func _process(_delta: float) -> void:
 		for u in _live_units:
 			if is_instance_valid(u) and u.draw_on:
 				u.tick_visual(_delta, frame, anim_every, vx0, vz0, vr2,
-					lerpk, mm_all, vprof, fog_on)
+					lerpk, mm_all, vprof, fog_on, cam_ep)
 	else:
 		var i: int = frame % vshards
 		var d: float = _delta * float(vshards)
@@ -196,7 +210,7 @@ func _process(_delta: float) -> void:
 			var u = _live_units[i]
 			if is_instance_valid(u) and u.draw_on:
 				u.tick_visual(d, frame, anim_every, vx0, vz0, vr2,
-					lerpk, mm_all, vprof, fog_on)
+					lerpk, mm_all, vprof, fog_on, cam_ep)
 			i += vshards
 	# ── ДОВЕДЕНИЕ КАРТИНКИ — БЕЗ ШАРДИРОВАНИЯ ───────────────────────────────
 	# Цикл выше идёт по одному шарду за кадр: при трёх шардах боец получает
@@ -238,8 +252,20 @@ func _process(_delta: float) -> void:
 		if _Opt.visual_smoothing else 1.0
 	if _Opt.vis_core_path:
 		army.batch_visual(_delta, core_k, Unit.VIS_SNAP_SQ,
-			Unit.BOB_AMPLITUDE * Unit.UNIT_SCALE, Unit.BOB_SPRINT_MULT)
+			Unit.BOB_AMPLITUDE * Unit.UNIT_SCALE, Unit.BOB_SPRINT_MULT,
+			_Opt.anim_core, _Opt.decal_core)
 	if vprof: _Opt.prof_add("vis_core", Time.get_ticks_usec() - _t1)
+	# ── ПОЛЁТ СТРЕЛ — ОДИН ПРОХОД ЯДРА (хак физтика №1) ────────────────────
+	# В кадре отрисовки, как и прежний Arrow._process: на паузе стрелы стоят
+	if vprof: _t1 = Time.get_ticks_usec()
+	if _Opt.arrow_core and (arrows_mm.flight_count() > 0 or bones_mm.flight_count() > 0):
+		# ПРОХОД ЯДРА ОДИН НА ОБА СЛОЯ: полёты лежат в общем реестре ядра, а
+		# слои различаются только тем, в чей буфер писать. Второй вызов
+		# batch_arrows посчитал бы кадр полёта дважды
+		army.batch_arrows(_delta, _ArrowScript.HIT_RADIUS)
+		arrows_mm.drain_events()
+		bones_mm.drain_events()
+	if vprof: _Opt.prof_add("arrow_core", Time.get_ticks_usec() - _t1)
 	if vprof: _t1 = Time.get_ticks_usec()
 	sel_decals.update_all()
 	hp_bars.update_all()
@@ -502,7 +528,8 @@ func _physics_process(delta: float) -> void:
 	if _Opt.batch_move:
 		if _prof: _t0 = Time.get_ticks_usec()
 		army.batch_move_queued(_stq_row, _stq_x, _stq_z, _stq_fl,
-			map_lim_x, map_lim_z, world_bounds_enabled, water_active,
+			map_lim_x, map_lim_z, world_bounds_enabled,
+			water_active and world_bounds_enabled,
 			Unit.BLOCK_RADIUS, Unit.TRUNK_CLEARANCE, _relief_amp_now(), self)
 		_stq_row.resize(0)
 		_stq_x.resize(0)
@@ -529,7 +556,7 @@ func _physics_process(delta: float) -> void:
 	if _prof: _t0 = Time.get_ticks_usec()
 	army.batch_separation(delta, Unit.SEP_MIN_DIST, Unit.SEP_MAX_STEP,
 		Unit.SEP_INTERVAL, map_lim_x, map_lim_z,
-		Unit.State.MOVING, Unit.State.ATTACKING, water_active, self,
+		Unit.State.MOVING, Unit.State.ATTACKING, water_active and world_bounds_enabled, self,
 		Unit.SEP_DEADZONE, _relief_amp_now(), Unit.SEP_CROSS_SQUAD,
 		# Последним — зазор до ствола: этот проход единственный обходит ВСЕХ
 		# живых, включая стоящих, и потому единственный, кто может вытолкнуть
@@ -550,6 +577,7 @@ func _physics_process(delta: float) -> void:
 	# Мораль и паника — тоже вопрос ОТРЯДА (см. _sweep_morale), и такт у них
 	# свой, редкий: отрядов десятки
 	_sweep_morale(delta)
+	_sweep_food(delta)
 	# Топот марширующих отрядов (см. _sweep_march_audio) — там же и по той же
 	# причине: вопрос задаётся ОТРЯДУ, а не бойцу
 	_sweep_march_audio(delta)
@@ -3063,6 +3091,40 @@ func squad_pursuit_anchor_set(sid: int, at: Vector3) -> void:
 func squad_pursuit_release(sid: int) -> void:
 	if sid > 0:
 		_pursuit_anchor.erase(sid)
+		_ranged_engaged.erase(sid)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ОТРЯД СТРЕЛКОВ ВСТАЁТ ЦЕЛИКОМ, КАК ТОЛЬКО ДОСТРЕЛИЛ ПЕРВЫЙ
+#
+# ЗАКАЗ ДОСЛОВНО: «как только первая модель выходит на дистанцию атаки — весь
+# отряд останавливается и начинает вести огонь».
+#
+# ПОЧЕМУ ЭТО ОТРЯДНАЯ ВЕЛИЧИНА, А НЕ ЛИЧНАЯ. Признак «я уже дострелил»
+# (Unit._engaged_once) у каждого свой, и это верно для него самого: передний
+# стрелок встаёт, задний в трёх метрах позади — ещё нет, и продолжает идти.
+# На экране отряд втягивается в противника ниткой по одному, теряя залп и
+# подставляя головных. Ответ на вопрос «дострелили ли МЫ» — один на отряд, и
+# живёт он здесь, рядом с якорем погони: у них общий жизненный цикл (оба
+# снимаются новым приказом и обоими правит первый дотянувшийся).
+#
+# ХРАНИТСЯ ОТДЕЛЬНО ОТ ЯКОРЯ, А НЕ ЕГО НАЛИЧИЕМ: якорь ставится и рукопашной
+# пехоте, а «встать и стрелять» — правило ТОЛЬКО дальнобойных. Одно поле на
+# два смысла разошлось бы на первой же правке
+var _ranged_engaged: Dictionary = {}
+
+## Первый стрелок отряда вышел на дистанцию. Идемпотентно
+func squad_ranged_engaged_set(sid: int) -> void:
+	if sid > 0:
+		_ranged_engaged[sid] = true
+
+## Дострелил ли отряд (для всех его бойцов)
+func squad_ranged_engaged(sid: int) -> bool:
+	return sid > 0 and bool(_ranged_engaged.get(sid, false))
+
+## Новый приказ — отметка снимается: отряду снова можно подходить
+func squad_ranged_release(sid: int) -> void:
+	if sid > 0:
+		_ranged_engaged.erase(sid)
 
 ## ── ПО КАКОЙ ТОЧКЕ ВЫБИРАТЬ ЗНАМЕНОСЦА ────────────────────────────────────
 ## ПО МЕСТУ В РАЗМЕТКЕ, а не по тому, где боец стоит сию секунду. Разница
@@ -4079,10 +4141,23 @@ func squad_type(squad_id: int) -> String:
 # ─────────────────────────────────────────────────────────────────────────────
 
 ## Куплена ли способность ЭТИМ отрядом
+## ── ИССЛЕДОВАНО В КУЗНИЦЕ = ЕСТЬ У ВСЕХ ОТРЯДОВ ЭТОГО РОДА ────────────────
+## Заказ владельца (10.09.2026): «спец-бонус открывается сразу для всех юнитов
+## соответствующего типа, повторную оплату убрать». Прежде способность
+## считалась своей ТОЛЬКО после покупки её этим отрядом (словарь `abilities`),
+## и панель показывала кнопку «купить» у каждого нового отряда. Теперь право
+## даёт САМО ИССЛЕДОВАНИЕ, а словарь остался: по нему читаются старые
+## сохранения и он же годится для будущих «личных» способностей
 func squad_has_ability(sid: int, node_id: String) -> bool:
 	if sid <= 0 or not squads.has(sid):
 		return false
-	return bool((squads[sid].get("abilities", {}) as Dictionary).get(node_id, false))
+	if bool((squads[sid].get("abilities", {}) as Dictionary).get(node_id, false)):
+		return true
+	var sq: Dictionary = squads[sid]
+	var node: Dictionary = _Forge.get_node(node_id)
+	if node.is_empty() or String(sq.get("type", "")) != String(node.get("unit", "")):
+		return false
+	return is_researched(int(sq.get("faction", Constants.FACTION_PLAYER)), node_id)
 
 ## Все купленные отрядом способности (копия — список наружу не редактируется)
 func squad_abilities(sid: int) -> Array:
@@ -4162,14 +4237,22 @@ const VOLLEY_COOLDOWN_MS := 900
 const VOLLEY_READY_FRACTION := 0.7
 
 ## Включён ли режим у отряда (куплен и не выключен игроком)
+## ── РЕЖИМ ВКЛЮЧЁН ПО УМОЛЧАНИЮ (заказ владельца 10.09.2026) ──────────────
+## «Бонус сразу активен, горит жёлтая рамка на иконке; можно выключить
+## вручную». Раньше умолчанием было ВЫКЛЮЧЕНО, и залп лучников после
+## исследования приходилось включать каждому отряду руками. Отсутствие ключа
+## означает «игрок не трогал» — то есть включено; выключение пишет false
 func squad_ability_on(sid: int, node_id: String) -> bool:
 	if not squad_has_ability(sid, node_id):
 		return false
-	return bool((squads[sid].get("ability_on", {}) as Dictionary).get(node_id, false))
+	var d: Dictionary = squads[sid].get("ability_on", {})
+	if not d.has(node_id):
+		return true
+	return bool(d[node_id])
 
 ## Включить/выключить купленный режим. Некупленный не включается
 func squad_set_ability(sid: int, node_id: String, on: bool) -> bool:
-	if not squad_has_ability(sid, node_id):
+	if sid <= 0 or not squads.has(sid) or not squad_has_ability(sid, node_id):
 		return false
 	var sq: Dictionary = squads[sid]
 	if not sq.has("ability_on"):
@@ -4427,6 +4510,41 @@ func credit_kill(killer: Node, victim: Node = null) -> void:
 	sq["pending"] = int(sq["pending"]) + (lvl - int(sq["level"]))
 	sq["level"]   = lvl
 	refresh_squad_banner(sid)
+
+## ЗАСЧИТАТЬ ОТРЯДУ СРАЗУ n УБИЙСТВ — цена смерти босса (Troll._award_kills).
+## Тот же учёт, что у credit_kill: счёт, мораль и пороги ветеранства, только
+## одним вызовом, а не n обходами. Лечение «кровь за кровь» не идёт: некому —
+## убийца здесь не боец, а отряд целиком
+func credit_kills(sid: int, n: int, victim: Node = null) -> void:
+	if n <= 0 or sid <= 0 or not squads.has(sid):
+		return
+	var sq: Dictionary = squads[sid]
+	if victim != null and is_instance_valid(victim) and victim.get("faction") != null:
+		if int(victim.faction) == int(sq["faction"]):
+			return
+	sq["kills"] = int(sq["kills"]) + n
+	squad_add_morale(sid, _UCfg.MORALE_GAIN_PER_KILL * float(n))
+	var lvl: int = _UCfg.veteran_level_for_kills(String(sq["type"]), int(sq["kills"]))
+	if lvl <= int(sq["level"]):
+		return
+	sq["pending"] = int(sq["pending"]) + (lvl - int(sq["level"]))
+	sq["level"]   = lvl
+	refresh_squad_banner(sid)
+
+## Логово тролля (TrollLair) текущей партии; null — не заведено
+var troll_lair: Node = null
+
+## Живых троллей логова
+func trolls_alive() -> int:
+	if troll_lair == null or not is_instance_valid(troll_lair):
+		return 0
+	return int(troll_lair.call("trolls_alive"))
+
+## Логово зачищено (тролли были и все пали)
+func troll_lair_cleared() -> bool:
+	if troll_lair == null or not is_instance_valid(troll_lair):
+		return false
+	return bool(troll_lair.call("is_cleared"))
 
 func squad_kills(squad_id: int) -> int:
 	if not squads.has(squad_id):
@@ -4912,6 +5030,54 @@ func _legend_morale_mult(sid: int) -> float:
 ## вернуть мораль тем, кто вышел из боя; сорвать в панику тех, кто дошёл до
 ## порога. Порядок именно такой: отряд, только что вышедший из ступора, не
 ## должен в тот же такт сорваться обратно (за это отвечает PANIC_RECOVER_MORALE)
+## ── СОДЕРЖАНИЕ ЕДОЙ (заказ владельца, 10.09.2026) ────────────────────────────
+## Раз в FOOD_UPKEEP_TICK: живые рабочие (отряды-одиночки) и боевые отряды
+## стороны едят по unit_stats_config.FOOD_UPKEEP_*; списание — из склада не
+## ниже нуля, недостача = голод (food_starving), его читает обход морали.
+## Расход в секунду отдаётся складу (ResourceManager.set_upkeep) — HUD
+## показывает его рядом с притоком еды
+var _food_timer: float = 0.0
+var food_starving: Dictionary = {}
+var food_upkeep_rate: Dictionary = {}
+var food_upkeep_workers: Dictionary = {}
+var food_upkeep_squads: Dictionary = {}
+
+func _sweep_food(delta: float) -> void:
+	_food_timer -= delta
+	if _food_timer > 0.0:
+		return
+	_food_timer = _UCfg.FOOD_UPKEEP_TICK
+	for f0 in _UCfg.FOOD_UPKEEP_FACTIONS:
+		var f: int = int(f0)
+		var workers := 0
+		var combat := 0
+		for key in squads.keys():
+			var sq: Dictionary = squads[key]
+			if int(sq["faction"]) != f:
+				continue
+			var alive := 0
+			for m in (sq["members"] as Array):
+				if m != null and is_instance_valid(m) and not (m as Unit).is_dead():
+					alive += 1
+			if alive == 0:
+				continue
+			var sid: int = int(key)
+			if squad_is_single_agent(sid):
+				workers += alive
+			elif squad_is_combat(sid):
+				combat += 1
+		var rate: float = float(workers) * _UCfg.FOOD_UPKEEP_WORKER_PER_SEC \
+			+ float(combat) * _UCfg.FOOD_UPKEEP_SQUAD_PER_SEC
+		food_upkeep_rate[f] = rate
+		food_upkeep_workers[f] = workers
+		food_upkeep_squads[f] = combat
+		ResourceManager.set_upkeep(f, Constants.RESOURCE_FOOD, rate)
+		var short: float = ResourceManager.consume(f, Constants.RESOURCE_FOOD, rate * _UCfg.FOOD_UPKEEP_TICK)
+		food_starving[f] = short > 0.0
+
+func is_starving(faction: int) -> bool:
+	return bool(food_starving.get(faction, false))
+
 func _sweep_morale(delta: float) -> void:
 	_morale_timer -= delta
 	if _morale_timer > 0.0:
@@ -4935,6 +5101,12 @@ func _sweep_morale(delta: float) -> void:
 			continue                     # паникующему остальное не считаем
 		# 2. ВНЕ БОЯ МОРАЛЬ ВОЗВРАЩАЕТСЯ
 		if not squad_in_combat(sid):
+			# ГОЛОД (10.09.2026): склад еды пуст — мораль вне боя не
+			# восстанавливается, а тает до пола (выше порога паники)
+			if bool(food_starving.get(int(sq["faction"]), false)):
+				if squad_morale_frac(sid) > _UCfg.STARVE_MORALE_FLOOR:
+					squad_add_morale(sid, -_UCfg.STARVE_MORALE_PER_SEC * MORALE_SWEEP_SEC)
+				continue
 			squad_add_morale(sid, _UCfg.MORALE_REGEN_PER_SEC * MORALE_SWEEP_SEC)
 			continue
 		# 3. ПОРОГ ПАНИКИ. Аура легенды входит МНОЖИТЕЛЕМ В ПОРОГ, а не в саму
@@ -5309,6 +5481,139 @@ func worker_build_cost(build_id: String) -> Dictionary:
 	var d: Dictionary = worker_buildings().get(build_id, {})
 	return d.get("cost", {})
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ЛИМИТ НАСЕЛЕНИЯ ИГРОКА (дома, заказ 09.09.2026)
+#
+# Каждый дом даёт слоты рабочих и боевых отрядов (unit_stats_config.POP_* /
+# HOUSE_*_SLOTS). Ворота — Building.queue_unit: заказ сверх лимита не
+# принимается и не оплачивается. Считаются ЖИВЫЕ плюс ЗАКАЗАННЫЕ, иначе
+# десять заказов подряд обходили бы лимит.
+#
+# ВКЛЮЧАЕТ ПАРТИЯ, А НЕ КОНФИГ САМ ПО СЕБЕ (см. Main.start_game): стенды
+# собирают сцену руками и нанимают так, как ни один игрок не нанимает —
+# семь отрядов из одного барака без единого дома. Правило партии, а не
+# бойца, поэтому и живёт оно у партии. Стенд лимита включает его явно.
+# На ИИ не действует: у красного свои потолки (ai_start_army_limit), орда
+# домов не строит
+# ─────────────────────────────────────────────────────────────────────────────
+var pop_limit_enabled: bool = false
+
+## Сколько ДОСТРОЕННЫХ домов у фракции
+func house_count(p_faction: int) -> int:
+	var n := 0
+	for b in nodes_in_group_cached(Constants.building_group(p_faction)):
+		# Правило 5: снесённый дом в кэше группы ещё лежит, а приводить
+		# освобождённый объект к типу нельзя — сначала is_instance_valid
+		if b == null or not is_instance_valid(b):
+			continue
+		var bl := b as Building
+		if bl == null or bl.is_dead():
+			continue
+		if _UCfg.is_house(bl.building_id):
+			n += 1
+	return n
+
+## Сколько живых КРЕПОСТЕЙ у стороны. Башня — тоже Castle (ради гарнизона), но
+## столицей не является и лимита не даёт: спрашиваем is_stronghold()
+func castle_count(p_faction: int) -> int:
+	var n := 0
+	for b in nodes_in_group_cached(Constants.building_group(p_faction)):
+		# Правило 5: снесённая крепость в кэше группы ещё лежит
+		if b == null or not is_instance_valid(b):
+			continue
+		var c := b as Castle
+		if c == null or c.is_dead():
+			continue
+		if c.is_stronghold():
+			n += 1
+	return n
+
+func pop_worker_cap(p_faction: int) -> int:
+	return _UCfg.pop_worker_cap(house_count(p_faction), castle_count(p_faction))
+
+func pop_squad_cap(p_faction: int) -> int:
+	return _UCfg.pop_squad_cap(house_count(p_faction), castle_count(p_faction))
+
+## Живые монахи плюс заказанные
+func monks_used(p_faction: int) -> int:
+	var n := 0
+	for u in nodes_in_group_cached(Constants.unit_group(p_faction)):
+		if u == null or not is_instance_valid(u):
+			continue
+		if u is Monk and not (u as Unit).is_dead():
+			n += 1
+	for b in nodes_in_group_cached(Constants.building_group(p_faction)):
+		if b == null or not is_instance_valid(b):
+			continue
+		var bl := b as Building
+		if bl == null:
+			continue
+		n += bl.in_progress_count("monk")
+	return n
+
+## Живые рабочие плюс заказанные
+func pop_workers_used(p_faction: int) -> int:
+	var n := 0
+	for u in nodes_in_group_cached(Constants.unit_group(p_faction)):
+		if u == null or not is_instance_valid(u):
+			continue
+		if u is Worker and not (u as Unit).is_dead():
+			n += 1
+	for b in nodes_in_group_cached(Constants.building_group(p_faction)):
+		if b == null or not is_instance_valid(b):
+			continue
+		var bl := b as Building
+		if bl == null:
+			continue
+		n += bl.in_progress_count("worker")
+	return n
+
+## Живые боевые отряды (с хотя бы одним живым бойцом) плюс заказанные.
+## Состав читается напрямую, а не через squad_members(): тот распускает
+## опустевший отряд прямо в геттере (см. CLAUDE.md, раздел про марш)
+## ── ОТРЯД МОЖЕТ ЗАНИМАТЬ БОЛЬШЕ ОДНОГО СЛОТА ─────────────────────────────
+## Заказ владельца (10.09.2026): отряд рыцарей стоит двух пехотных
+## (unit_stats_config.squad_slots). Считается это И у живых, И у заказанных:
+## иначе десять заказов рыцарей обошли бы лимит, как когда-то обходили его
+## десять заказов подряд вообще
+func pop_squads_used(p_faction: int) -> int:
+	var n := 0
+	for key in squads.keys():
+		var sq: Dictionary = squads[key]
+		if int(sq["faction"]) != p_faction or String(sq["type"]) == "worker":
+			continue
+		for m in (sq["members"] as Array):
+			if m != null and is_instance_valid(m) and not (m as Unit).is_dead():
+				n += _UCfg.squad_slots(String(sq["type"]))
+				break
+	for b in nodes_in_group_cached(Constants.building_group(p_faction)):
+		if b == null or not is_instance_valid(b):
+			continue
+		var bl := b as Building
+		if bl == null:
+			continue
+		for order in bl.production_queue:
+			var oname: String = String((order as Dictionary).get("name", ""))
+			if oname != "worker":
+				n += _UCfg.squad_slots(oname)
+	return n
+
+## Можно ли ещё заказать такого бойца. Ворота найма (Building.queue_unit)
+func pop_allows(p_faction: int, unit_name: String) -> bool:
+	if p_faction != Constants.FACTION_PLAYER:
+		return true
+	# МОНАХ — ОДИН НА ИГРОКА (unit_stats_config.MONK_LIMIT), и это правило
+	# бойца, а не партии: действует и в стендах, в отличие от лимита домов
+	if unit_name == "monk":
+		return monks_used(p_faction) < _UCfg.MONK_LIMIT
+	if not pop_limit_enabled:
+		return true
+	if unit_name == "worker":
+		return pop_workers_used(p_faction) < pop_worker_cap(p_faction)
+	# МЕСТО НУЖНО ПОД ВЕСЬ ОТРЯД: рыцарям — два слота, остальным один
+	return pop_squads_used(p_faction) + _UCfg.squad_slots(unit_name) \
+		<= pop_squad_cap(p_faction)
+
 ## Заказ постройки. worker — заказчик (по нему берётся фракция), crew —
 ## ВСЯ выделенная артель: на фундамент отправляются все, и каждый следующий
 ## рабочий ускоряет стройку (см. ConstructionSite.BUILDER_SPEEDUP).
@@ -5343,8 +5648,23 @@ func try_worker_build(worker: Node, build_id: String, crew: Array = []) -> void:
 		if c.faction != f:
 			continue
 		team.append(c)
+	# ── ЗДАНИЕ БЕЗ СТАДИИ СТРОЙКИ (unit_stats_config `instant_build`) ──────
+	# Ресурсы уже списаны выше, в момент заказа: постановка отличается только
+	# тем, что на карту встаёт ГОТОВАЯ постройка, а не площадка с артелью.
+	# Фабрику зовём ТУ ЖЕ, что достраивает обычные здания
+	# (ConstructionSite._make_target) — второго списка «id → класс» в проекте
+	# быть не должно, забытая там строка означала бы вечный фундамент
+	var instant: bool = bool(_UCfg.building_cfg(build_id).get("instant_build", false))
 	main.enter_building_placement(cost, size,
 		func(pos: Vector3):
+			if instant:
+				var made: Building = _CSite.make_building(build_id)
+				if made == null:
+					return
+				made.faction = f
+				main.world_add(made)
+				made.global_position = pos
+				return
 			var site: Building = _CSite.new()
 			site.faction     = f
 			site.target_id   = build_id
@@ -5374,7 +5694,7 @@ func try_worker_build(worker: Node, build_id: String, crew: Array = []) -> void:
 # ─────────────────────────────────────────────────────────────────────────────
 
 ## Заменить руину стройплощадкой. Возвращает узел площадки или null.
-func rebuild_ruin(ruin: Node) -> Node:
+func rebuild_ruin(ruin: Node, faction_override: int = -1) -> Node:
 	if main == null or ruin == null or not is_instance_valid(ruin):
 		return null
 	if not ruin.is_in_group("ruins"):
@@ -5383,6 +5703,9 @@ func rebuild_ruin(ruin: Node) -> Node:
 	if build_id.is_empty():
 		return null
 	var f: int = int(ruin.get_meta("ruin_faction", Constants.FACTION_PLAYER))
+	# Общая руина (золотой рудник): достаётся тому, кто отстраивает
+	if faction_override >= 0 and bool(ruin.get_meta("ruin_any_faction", false)):
+		f = faction_override
 	var cfg: Dictionary = _UCfg.building_cfg(build_id)
 	if cfg.is_empty():
 		return null
@@ -5561,6 +5884,12 @@ func get_terrain_height(x: float, z: float) -> float:
 func is_water(x: float, z: float) -> bool:
 	if main == null:
 		return false
+	# ВОДА — ПРАВИЛО ПАРТИИ, КАК И ГРАНИЦЫ МИРА (09.09.2026). Стенды снимают
+	# границы, когда собирают сцену руками в любой точке поля; река по центру
+	# карты обратила бы половину их площадок в воду (qa_panic: отряд на оси
+	# русла разлетался по берегам). Снят world_bounds_enabled — снята и вода
+	if not world_bounds_enabled:
+		return false
 	return main.is_water(x, z)
 
 ## Разрешённый шаг с обходом озера по берегу (Vector3.ZERO — пути нет)
@@ -5609,15 +5938,22 @@ func slide_around_water(from: Vector3, step: Vector3) -> Vector3:
 const ARROW_POOL_MAX := 3000
 
 var _arrow_pool: Array = []
+## ── КОСТИ В СВОЁМ ПУЛЕ, И ЭТО НЕ ПРИДИРКА ─────────────────────────────────
+## Слот общего MultiMesh стрела берёт ОДИН РАЗ, в _build_visual, и держит его
+## всю жизнь узла (см. Arrow._slot_i). Значит, узел навсегда принадлежит своему
+## слою: выдай стрелу из общего пула под кость — и кость нарисуется стрелой
+var _bone_pool: Array = []
 
 ## Выдать стрелу под выстрел. Возвращает узел, уже стоящий в дереве под
 ## `parent` и взведённый на полёт
 ## Сколько стрел выпущено за партию. Монотонный, только растёт (см. spawn_arrow)
 var arrows_fired: int = 0
 
+## p_bone — снаряд ГНОЛЛА (кость): свой слой отрисовки и свой пул, всё
+## остальное (полёт, попадание, урон, срок) в точности как у стрелы
 func spawn_arrow(parent: Node, start: Vector3, end_pos: Vector3, dist: float,
 		speed: float, arc_factor: float, dmg: float, who: Node3D,
-		p_faction: int) -> Node3D:
+		p_faction: int, p_bone: bool = false) -> Node3D:
 	if parent == null or not is_instance_valid(parent):
 		return null
 	# СЧЁТЧИК ВЫСТРЕЛОВ, монотонный. Стрелы живут в пуле и не состоят ни в одной
@@ -5627,14 +5963,18 @@ func spawn_arrow(parent: Node, start: Vector3, end_pos: Vector3, dist: float,
 	arrows_fired += 1
 	var a: Node3D = null
 	# Пул мог пережить смену сцены: узлы из прошлой партии уже освобождены
-	while not _arrow_pool.is_empty():
-		var cand = _arrow_pool.pop_back()
+	var pool: Array = _bone_pool if p_bone else _arrow_pool
+	while not pool.is_empty():
+		var cand = pool.pop_back()
 		if is_instance_valid(cand):
 			a = cand
 			break
 	var fresh: bool = a == null
 	if fresh:
 		a = _ArrowScript.new()
+		# ВИД РЕШАЕТСЯ ДО _ready(): картинку и слой берёт _build_visual, а он
+		# идёт из _ready — поставь признак позже, и кость улетит стрелой
+		a.set("bone", p_bone)
 	a.set("_start_pos",  start)
 	a.set("_end_pos",    end_pos)
 	a.set("_dist",       dist)
@@ -5753,12 +6093,14 @@ func _sweep_stuck_arrows(delta: float) -> void:
 func stuck_arrow_count() -> int:
 	return _stuck_arrows.size()
 
-## Принять погасшую стрелу обратно (зовёт Arrow._despawn)
+## Принять погасшую стрелу обратно (зовёт Arrow._despawn).
+## Кость возвращается в СВОЙ пул: слот слоя отрисовки у узла пожизненный
 func recycle_arrow(a: Node3D) -> void:
-	if _arrow_pool.size() >= ARROW_POOL_MAX:
+	var pool: Array = _bone_pool if bool(a.get("bone")) else _arrow_pool
+	if pool.size() >= ARROW_POOL_MAX:
 		a.queue_free()
 		return
-	_arrow_pool.append(a)
+	pool.append(a)
 
 ## Новая партия: узлы прошлой сцены уже недействительны
 func clear_arrow_pool() -> void:
@@ -5766,12 +6108,20 @@ func clear_arrow_pool() -> void:
 		if is_instance_valid(a):
 			a.queue_free()
 	_arrow_pool.clear()
+	for b in _bone_pool:
+		if is_instance_valid(b):
+			b.queue_free()
+	_bone_pool.clear()
 	# Реестр торчащих держит узлы прошлой сцены — та же оговорка, что у пула
 	_stuck_arrows.clear()
 
 ## Сколько стрел лежит наготове (стенды)
 func arrow_pool_size() -> int:
 	return _arrow_pool.size()
+
+## Сколько костей лежит наготове (стенды)
+func bone_pool_size() -> int:
+	return _bone_pool.size()
 
 # ═══════════════════════════════════════════════════════════════════════════
 # РЕЕСТР СТВОЛОВ ПЕРЕЕХАЛ В СОЛВЕР (csharp/ArmyCore.cs)
@@ -5815,7 +6165,7 @@ func land_target(pos: Vector3) -> Vector3:
 	# в воду — юнит упрётся в стену, а дистанция до цели не упадёт ниже порога
 	# прибытия, и отряд «повиснет»
 	var c: Vector2 = clamp_to_map(pos.x, pos.z)
-	if not main.is_water(c.x, c.y):
+	if not is_water(c.x, c.y):
 		return Vector3(c.x, main.get_terrain_height(c.x, c.y), c.y)
 	var p: Vector2 = main.nearest_land(c.x, c.y)
 	return Vector3(p.x, main.get_terrain_height(p.x, p.y), p.y)
@@ -5871,11 +6221,31 @@ var _view_r2: float = 1e18
 func view_radius() -> float:
 	return sqrt(_view_r2) if _view_r2 < INF else 0.0
 
-func update_view_point(pos: Vector3, ground_radius: float = 0.0) -> void:
+## Доля зума камеры: 0 — вплотную (min_height), 1 — предел отдаления.
+## Докладывает RTSCamera раз в кадр; читает окно марша (AudioManager)
+var _view_zoom: float = 0.0
+var _view_reported: bool = false
+
+func view_zoom() -> float:
+	return _view_zoom
+
+## Точка фокуса камеры — центр экрана на земле
+func view_point() -> Vector3:
+	return Vector3(_view_x, 0.0, _view_z)
+
+## Докладывала ли камера о себе хоть раз (стенды без сцены — нет)
+func has_view_point() -> bool:
+	return _view_reported
+
+func update_view_point(pos: Vector3, ground_radius: float = 0.0,
+		zoom_t: float = -1.0) -> void:
 	_view_x = pos.x
 	_view_z = pos.z
 	var r: float = maxf(_Opt.lod_radius, ground_radius)
 	_view_r2 = r * r
+	if zoom_t >= 0.0:
+		_view_zoom = clampf(zoom_t, 0.0, 1.0)
+	_view_reported = true
 
 ## ── ОСИ КАМЕРЫ, СНЯТЫЕ РАЗ В КАДР ───────────────────────────────────────────
 ## Спрайты — билборды, поэтому «влево/вправо» и выбор ракурса из 8 секторов
@@ -5889,6 +6259,8 @@ func update_view_point(pos: Vector3, ground_radius: float = 0.0) -> void:
 ## Обновление ленивое (по номеру кадра), поэтому стенды и сцены без RTSCamera
 ## работают без единой правки: первый спросивший в кадре и обновит кэш.
 var _cam_right: Vector3 = Vector3.RIGHT
+## Сколько раз ось экрана менялась (этап E3, событийная поза)
+var _cam_epoch: int = 0
 var _cam_fwd:   Vector3 = Vector3.FORWARD
 var _cam_ok:    bool    = false
 var _cam_frame: int     = -1
@@ -5913,7 +6285,12 @@ func _refresh_camera_axes() -> void:
 	if right.length_squared() < 1e-6 or fwd.length_squared() < 1e-6:
 		_cam_ok = false
 		return
-	_cam_right = right.normalized()
+	var nr: Vector3 = right.normalized()
+	# Ракурс сменился — поза всех бойцов устарела (зеркало и направленные
+	# листы считаются от оси экрана). Эпоху читает Unit.tick_visual
+	if (nr - _cam_right).length_squared() > 1.0e-6:
+		_cam_epoch += 1
+	_cam_right = nr
 	_cam_fwd   = fwd.normalized()
 	_cam_ok    = true
 
@@ -6143,7 +6520,21 @@ func refresh_map_bounds() -> void:
 		return
 	map_lim_x = float(main.MAP_HALF_X) - float(main.MAP_EDGE_MARGIN)
 	map_lim_z = float(main.MAP_HALF_Z) - float(main.MAP_EDGE_MARGIN)
-	water_active = bool(main.LAKE_ENABLED)
+	# Вода есть, если есть озеро ИЛИ река (09.09.2026)
+	water_active = bool(main.LAKE_ENABLED) or bool(main.RIVER_ENABLED)
+	# ГОРА И РЕКА — В ЯДРО: высота и вода считаются там же, где шаг (см.
+	# ArmyCore.Height / RiverWater), иначе боец на холме уходил бы под землю,
+	# а каждый шаг платил бы за is_water межъязыковым вызовом
+	if army != null:
+		var hc: Vector2 = main.hill_center()
+		army.set_hill(hc.x, hc.y, float(main.HILL_HEIGHT), float(main.HILL_RADIUS))
+		army.set_river(bool(main.RIVER_ENABLED), float(main.RIVER_HALF_W),
+			float(main.RIVER_MEANDER), float(main.RIVER_MEANDER_K), float(main.FORD_Z),
+			float(main.FORD_HALF), float(main.RIVER_DEPTH), float(main.FORD_DEPTH),
+			float(main.RIVER_BANK), float(main.LAKE_MARGIN), float(main.MAP_HALF_Z))
+		# Плато — теми же числами (10.09.2026)
+		army.set_plateaus(main.plateau_params(), float(main.PLATEAU_RAMP_GENTLE),
+			float(main.PLATEAU_RAMP_STEEP), float(main.PLATEAU_RAMP_CONE))
 
 ## Точка, зажатая в границы карты (Vector2 = x/z). Через неё проходит каждое
 ## перемещение юнита: за край мира не выходит никто и никогда.

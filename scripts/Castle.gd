@@ -123,13 +123,44 @@ func _enter_radius(squad_id: int) -> float:
 		return door
 	return _UCfg.GARRISON_ENTER_RADIUS
 
+## ── РУЧКИ ГАРНИЗОНА, КОТОРЫЕ ПЕРЕОПРЕДЕЛЯЕТ НАСЛЕДНИК ──────────────────────
+## Башня (Tower.gd) принимает только лучников, один отряд и не выпускает
+## вылеченных сама. Развилок `if building_id == "tower"` внутри замка нет
+## намеренно: у каждого наследника свой ответ, а замок о них не знает
+
+## Сколько отрядов помещается внутрь
+func garrison_limit() -> int:
+	return _UCfg.GARRISON_SQUAD_LIMIT
+
+## Годится ли отряд этого рода войск
+func garrison_accepts(_unit_type: String) -> bool:
+	return true
+
+## Выходит ли вылеченный и полный отряд сам
+func _auto_release() -> bool:
+	return _UCfg.GARRISON_AUTO_RELEASE
+
+## КРЕПОСТЬ ЛИ ЭТО. Замок и хижина орды — да; башня — нет. Спрашивают все,
+## кому «замок» значит «столица»: зона застройки, кнопка «в замок», условие
+## поражения, точка базы у ИИ. Проверка `is Castle` там больше не годится
+func is_stronghold() -> bool:
+	return true
+
+## ── ОБЗОР КРЕПОСТИ ШИРЕ ОБЫЧНОГО ДОМА (заказ владельца 10.09.2026) ────────
+## Башня переопределяет это своим TOWER_VISION, хижина орды — наследует
+## крепостной: у неё та же роль центра базы
+func vision_radius() -> float:
+	return _UCfg.CASTLE_VISION
+
 ## Отправить отряд в Замок. false — гарнизон полон или отряд не годится
 func request_garrison(squad_id: int) -> bool:
 	if squad_id <= 0:
 		return false
 	if _slot_of(squad_id) >= 0 or _incoming.has(squad_id):
 		return true                        # уже идёт или уже внутри
-	if garrison.size() + _incoming.size() >= _UCfg.GARRISON_SQUAD_LIMIT:
+	if garrison.size() + _incoming.size() >= garrison_limit():
+		return false
+	if not garrison_accepts(GameManager.squad_type(squad_id)):
 		return false
 	var members := GameManager.squad_members(squad_id)
 	if members.is_empty():
@@ -187,12 +218,20 @@ func absorb_unit(u: Unit) -> void:
 		u.remove_from_group(String(g))
 	u.state = Unit.State.IDLE
 	u.global_position = global_position
+	# ВНЕ КАРТЫ И ДЛЯ ЯДРА ТОЖЕ. GameManager.unit_grid — сетка GDScript, а цели
+	# и стрелы ищут по СЕТКЕ ЯДРА (ArmyCore.FillGrid по живым строкам): без
+	# снятия признака координаты вошедший оставался в ней на точке у ворот —
+	# невидимый, но обстреливаемый (qa_tower B8в). Хозяин запоминается ради
+	# переадресации урона (Unit.take_damage → absorb_damage_for)
+	u.garrison_host = self
+	u.set_off_map(true)
 
 ## Вернуть бойца на карту у ворот
 func release_unit(u: Unit, at: Vector3) -> void:
 	if u == null or not is_instance_valid(u) or not u.garrisoned:
 		return
 	u.garrisoned = false
+	u.garrison_host = null
 	u.visible = true
 	# СТРОЙ НА ВЫХОДЕ НЕ ДОЛЖЕН ЛЕЧЬ В ОЗЕРО. Бойцы раскладываются по колоннам
 	# и рядам от ворот (см. _release_members), и у замка на берегу часть слотов
@@ -211,6 +250,14 @@ func release_unit(u: Unit, at: Vector3) -> void:
 	# Строку ядра армии тоже надо поправить руками: бойца перенесли В ОБХОД тика
 	# (см. Unit.sync_row), а по ней теперь считается и сетка соседей, и картинка
 	u.sync_row()
+
+## УДАР ПО УКРЫТОМУ БОЙЦУ ПРИНИМАЕТ ЗДАНИЕ (заказ владельца, 09.09.2026):
+## запас жизни стен — единственное, что можно снести, пока гарнизон внутри.
+## Броня бойца здесь не считается: здание её не имеет, а урон уже посчитан
+## стрелком по своей формуле. Наследники (башня, хижина) получают то же
+## правило без единой развилки
+func absorb_damage_for(_u: Unit, amount: float, attacker: Node3D = null) -> void:
+	take_damage(amount, attacker)
 
 ## Вытряхнуть наружу тех членов отряда, кто уже успел зайти внутрь, не трогая
 ## приказов тех, кто остался снаружи. Нужно при ОТМЕНЕ похода в замок: иначе
@@ -463,7 +510,7 @@ func _process_garrison(delta: float) -> void:
 		# АВТО-ВЫХОД: состав полон и все здоровы — отряду в замке делать нечего,
 		# он сам выкатывается наружу. Иначе игрок обязан помнить про каждый
 		# заведённый отряд и вручную щёлкать по слоту гарнизона
-		if _UCfg.GARRISON_AUTO_RELEASE and missing <= 0 and healed:
+		if _auto_release() and missing <= 0 and healed:
 			release.append(sid)
 			continue
 		keep.append(rec)

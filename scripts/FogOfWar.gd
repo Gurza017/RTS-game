@@ -217,12 +217,20 @@ func refresh() -> void:
 	if cols <= 0:
 		return
 	var sources: Dictionary = {}
-	_collect_unit_sources(sources)
+	# ── ИСТОЧНИКИ ПО БОЙЦАМ СОБИРАЕТ ЯДРО (09.09.2026) ─────────────────────
+	# Обход _live_units в GDScript стоил 3.4 мс из 4.6 мс пересчёта на 4000
+	# бойцах (зонд qa_fogperf) — и ложился в ОДИН кадр раз в UPDATE_INTERVAL,
+	# то есть читался глазом как микролаг. Ядро знает и позиции, и дальность
+	# оружия (колонка _atkRange), и правило «гарнизон — не источник»
+	# (FPosValid снят у бойца вне карты). GDScript здесь собирает только
+	# постройки и постоянные засветы — их десятки, а не тысячи
+	if not _Opt.fog_core:
+		_collect_unit_sources(sources)
 	_collect_building_sources(sources)
 	# ── ПОПИКСЕЛЬНАЯ ЧАСТЬ — В ЯДРЕ (этап D3) ───────────────────────────────
-	# GDScript собирает ИСТОЧНИКИ (группы, слияние по ячейкам) и хранит копии
-	# lit/seen для чтения (is_lit каждого бойца — без границы языков); штампы,
-	# накопление «разведано» и сборка RGBA идут одним вызовом в C#
+	# GDScript хранит копии lit/seen для чтения (is_lit каждого бойца — без
+	# границы языков); штампы, накопление «разведано» и сборка RGBA идут
+	# одним вызовом в C#
 	if _Opt.fog_core:
 		var src := PackedFloat32Array()
 		src.resize((sources.size() + _permanent.size()) * 3)
@@ -235,7 +243,9 @@ func refresh() -> void:
 			var sa: Array = sources[key]
 			src[w] = float(sa[0]); src[w + 1] = float(sa[1])
 			src[w + 2] = float(sa[2]); w += 3
-		var res: Array = GameManager.army.fog_refresh(src)
+		var res: Array = GameManager.army.fog_refresh_rows(
+			Constants.FACTION_PLAYER, _UCfg.VISION_MULT, _UCfg.VISION_MIN,
+			SRC_CELL, SRC_CELL * 0.71, src)
 		_lit = res[0]
 		_seen = res[1]
 		_apply_enemy_building_visibility()
@@ -312,7 +322,11 @@ func _collect_building_sources(out: Dictionary) -> void:
 		if bl == null or not is_instance_valid(bl):
 			continue
 		var gp := bl.global_position
-		_add_source(out, gp.x, gp.z, _UCfg.BUILDING_VISION + pad)
+		# Обзор — у самой постройки (Building.vision_radius): башня видит на
+		# TOWER_VISION, остальные на BUILDING_VISION
+		var vr: float = (bl as Building).vision_radius() if bl is Building \
+			else _UCfg.BUILDING_VISION
+		_add_source(out, gp.x, gp.z, vr + pad)
 	# Стройплощадки — тоже свои глаза: пока замок строится, вокруг него должно
 	# быть видно, иначе бригада работает в темноте.
 	#

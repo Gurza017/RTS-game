@@ -167,6 +167,10 @@ func set_state(i: int, s: int) -> void:
 ## пропускает: он неподвижен, и разводить его не с кем и незачем
 const F_DORMANT := 1 << 15
 
+## Боец вне карты (гарнизон): координата «ненастоящая», в сетку не попадает
+func set_off_map(i: int, on: bool) -> void:
+	_c.SetOffMap(i, on)
+
 func set_dormant(i: int, on: bool) -> void:
 	_c.SetFlag(i, F_DORMANT, on)
 
@@ -184,6 +188,22 @@ func set_squad(i: int, s: int) -> void:
 ## ЛИЧНЫЙ РАДИУС РАСТАЛКИВАНИЯ строки. Ноль — «как у всех», то есть общая
 ## дистанция из аргумента batch_separation. Ставится ОДИН РАЗ при рождении
 ## бойца: в покадровый путь этот вызов не входит и границу не греет
+## Гора и река — в формулу высоты и проверку воды ядра (см. ArmyCore.SetHill)
+func set_hill(cx: float, cz: float, h: float, radius: float) -> void:
+	_c.SetHill(cx, cz, h, radius)
+
+func set_plateaus(data: PackedFloat32Array, gentle: float, steep: float, cone: float) -> void:
+	_c.SetPlateaus(data, gentle, steep, cone)
+
+## Высота по формуле ядра (стенды сверяют с Main.get_terrain_height)
+func height_at(x: float, z: float, relief_amp: float) -> float:
+	return _c.HeightAt(x, z, relief_amp)
+
+func set_river(on: bool, half_w: float, meander: float, k: float, ford_z: float,
+		ford_half: float, depth: float, ford_depth: float, bank: float, margin: float,
+		half_z: float) -> void:
+	_c.SetRiver(on, half_w, meander, k, ford_z, ford_half, depth, ford_depth, bank, margin, half_z)
+
 func set_sep_radius(i: int, r: float) -> void:
 	_c.SetSepRadius(i, r)
 
@@ -264,6 +284,16 @@ func fog_reset() -> void:
 ## Источники плоскими тройками [x, z, r]; возвращает [lit, seen, rgba]
 func fog_refresh(src: PackedFloat32Array) -> Array:
 	return _c.FogRefresh(src)
+
+## Источники по бойцам собирает ядро (живые строки фракции с настоящей
+## координатой, радиус обзора от attack_range, слияние по ячейке src_cell);
+## extra — дополнительные тройки [x, z, r] (постройки, постоянные засветы)
+func fog_refresh_rows(faction: int, vis_mult: float, vis_min: float,
+		src_cell: float, pad: float, extra: PackedFloat32Array) -> Array:
+	return _c.FogRefreshRows(faction, vis_mult, vis_min, src_cell, pad, extra)
+
+func fog_source_count() -> int:
+	return _c.FogSourceCount()
 
 ## Число потоков пакетных проходов ядра (этап D2). Потокам разрешена только
 ## чистая математика по колонкам; вода/узлы/подача — главный поток
@@ -352,8 +382,57 @@ func row_sync_draw(i: int, p: Vector3) -> void:
 	_c.RowSyncDraw(i, p.x, p.y, p.z)
 
 func batch_visual(delta: float, lerp_k: float, snap_sq: float,
-		bob_amp: float, bob_sprint: float) -> void:
-	_c.BatchVisual(delta, lerp_k, snap_sq, bob_amp, bob_sprint)
+		bob_amp: float, bob_sprint: float, anim_core: bool = false,
+		decal_core: bool = false) -> void:
+	_c.BatchVisual(delta, lerp_k, snap_sq, bob_amp, bob_sprint, anim_core, decal_core)
+
+## ── ДЕКЛАРАТИВНЫЕ СТРЕЛЫ (хак физтика №1) ─────────────────────────────────
+## Измерительная ручка: проверка чужих тел на шаге выключена (потолок хака №2)
+func set_skip_body_scan(on: bool) -> void:
+	_c.SkipBodyScan = on
+
+func arrow_launch(id: int, b: int, slot: int, s: Vector3, e: Vector3,
+		arc_h: float, rate: float, fac: int) -> void:
+	_c.ArrowLaunch(id, b, slot, s, e, arc_h, rate, fac)
+
+func arrow_cancel(id: int) -> void:
+	_c.ArrowCancel(id)
+
+func arrow_flights() -> int:
+	return _c.ArrowFlights()
+
+func batch_arrows(delta: float, hit_radius: float) -> void:
+	_c.BatchArrows(delta, hit_radius)
+
+## [id, жертва|null, точка, ось] × N
+func take_arrow_events() -> Array:
+	return _c.TakeArrowEvents()
+
+## Лента строки: кадров, к/с, зацикленность, стартовая фаза (в кадрах). Кадр
+## дальше листает BatchVisual (этап E1)
+func row_anim(i: int, frames: int, fps: float, loop: bool, phase: float) -> void:
+	_c.RowAnim(i, frames, fps, loop, phase)
+
+## Смещения по высоте колец, теней и полосок — один раз
+func decal_config(ring_y: float, shadow_y: float, hp_y: float) -> void:
+	_c.DecalConfig(ring_y, shadow_y, hp_y)
+
+func decal_bind(i: int, ring_b: int, sh_b: int, idx: int) -> void:
+	_c.DecalBind(i, ring_b, sh_b, idx)
+
+func decal_unbind(i: int) -> void:
+	_c.DecalUnbind(i)
+
+func hp_bind(i: int, b: int, idx: int) -> void:
+	_c.HpBind(i, b, idx)
+
+func hp_unbind(i: int) -> void:
+	_c.HpUnbind(i)
+
+## Полный трансформ слота (базис + точка), цвет не трогается
+func rb_write_xform(b: int, idx: int, b0: Vector3, b1: Vector3, b2: Vector3,
+		pos: Vector3) -> void:
+	_c.RbWriteXform(b, idx, b0, b1, b2, pos)
 
 ## Направление, посчитанное пакетным боем
 func facing_x(i: int) -> float:

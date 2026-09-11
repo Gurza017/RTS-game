@@ -328,6 +328,7 @@ const AI_FORGE_WEIGHTS := {
 	"bonus_morale": 0.4,
 	"bonus_carry":  2.0,
 	"bonus_gather": 25.0,
+	"bonus_build":  6.0,
 }
 
 ## Рода войск, чьи ветки ИИ качает В ДОПОЛНЕНИЕ к тем, что реально нанимает

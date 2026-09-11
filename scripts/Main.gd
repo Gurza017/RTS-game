@@ -23,7 +23,12 @@ const VICTORY_CHECK_INTERVAL := 3.0
 # рассыпана литералами по десятку мест — трогать размер было нельзя.
 # ─────────────────────────────────────────────────────────────────────────────
 const MAP_HALF_LEGACY := 75.0          # как было (квадрат 150×150)
-const MAP_GROWTH      := 1.30          # +30% по ширине и длине
+## ── КАРТА ВТРОЕ БОЛЬШЕ (заказ владельца, 09.09.2026) ────────────────────────
+## «В 3 раза» читается ПО ПЛОЩАДИ: 2.25² = 5.06 против прежних 1.3² = 1.69, то
+## есть ровно ×3.0 к площади поля. Линейное ×3 (карта 780 × 440 м, ×9 по
+## площади) утроило бы стоимость тумана, леса и куч ресурсов сверх всякого
+## запаса кадра — и марш через такую карту занимал бы шесть минут
+const MAP_GROWTH      := 2.25          # ×2.25 по ширине и длине = ×3 по площади
 ## Половина стороны РАВНОВЕЛИКОГО КВАДРАТА. Прямая ссылка на прежний размер:
 ## прямоугольник ниже подобран так, чтобы площадь осталась ровно такой же
 const MAP_HALF_EQUIV := MAP_HALF_LEGACY * MAP_GROWTH   # 97.5 → квадрат 195×195
@@ -35,9 +40,109 @@ const MAP_HALF_EQUIV := MAP_HALF_LEGACY * MAP_GROWTH   # 97.5 → квадрат
 # Обе полуоси считаются из одного числа: MAP_HALF_EQUIV × √(16/9) и ÷ √(16/9).
 const MAP_ASPECT := 16.0 / 9.0
 ## Половина ШИРИНЫ поля (ось X, длинная сторона)
-const MAP_HALF_X := 130.0        # MAP_HALF_EQUIV * sqrt(MAP_ASPECT)
+const MAP_HALF_X := 225.0        # MAP_HALF_EQUIV * sqrt(MAP_ASPECT) = 168.75 × 1.3333
 ## Половина ВЫСОТЫ поля (ось Z, короткая сторона)
-const MAP_HALF_Z := 73.125       # MAP_HALF_EQUIV / sqrt(MAP_ASPECT)
+const MAP_HALF_Z := 126.5625     # MAP_HALF_EQUIV / sqrt(MAP_ASPECT) = 168.75 × 0.75
+
+# ─────────────────────────────────────────────────────────────────────────────
+# РЕКА, БРОД, ГОРА (заказ владельца, 09.09.2026)
+#
+# Река идёт по центру карты ВДОЛЬ Z (между базами: игрок в −X, ИИ в +X) с
+# лёгким меандром; вода непроходима. Посередине — ШИРОКИЙ БРОД: мелководье,
+# по которому ходят, а в воде стоят камни (Tileset/Rocks). Поиска пути в игре
+# нет, поэтому берег ВЕДЁТ К БРОДУ сам: шаг в воду скользит вдоль реки в ту
+# сторону, где брод (см. slide_around_water). Гора — гауссов холм у замка
+# игрока; за ней, «ниже» по экрану, логово тролля (goblin_config.LAIR_OFFSET)
+# ─────────────────────────────────────────────────────────────────────────────
+const RIVER_ENABLED := true
+const RIVER_HALF_W := 9.0          # полуширина русла, м
+const RIVER_MEANDER := 10.0        # амплитуда изгиба русла, м
+const RIVER_MEANDER_K := 0.025     # частота изгиба, 1/м
+## РЕКА В НИЗИНЕ (заказ 10.09.2026 по референсу): русло просажено на полтора
+## метра, берег — крутой откос в 3.5 м (уклон 0.43 > HILL_CLIFF_SLOPE, то есть
+## рисуется СТЕНОЙ обрыва), зеркало воды стоит на WATER_DROP глубины ниже
+## кромки берега (water_surface_y). Брод по-прежнему по щиколотку
+const RIVER_DEPTH := 1.5           # просадка дна глубокой воды, м (было 0.45)
+const RIVER_BANK := 3.5            # полоса откоса берега, м (было 2.0)
+const WATER_DROP := 0.2            # зеркало воды: доля глубины ниже кромки берега
+const FORD_Z := 0.0                # середина брода по Z
+const FORD_HALF := 18.0            # полуширина брода по Z, м (проходимая полоса)
+const FORD_DEPTH := 0.14           # просадка брода: по щиколотку
+const FORD_ROCKS := 26             # камней в воде брода
+## Гора: гауссов холм, высота и радиус (σ = радиус / 2)
+const HILL_HEIGHT := 7.0
+const HILL_RADIUS := 30.0
+## ── ПЛАТО (заказ 10.09.2026 по референсу тайлсета) ─────────────────────────
+## Плоские террасы с обрывами и ПЛАВНЫМИ проходимыми спусками. Высота сходит
+## с плоской вершины (r_flat) к подножию smoothstep-ом за ширину склона, а
+## ширина зависит от направления: в секторе спуска (±PLATEAU_RAMP_CONE от
+## ramp_dir) она PLATEAU_RAMP_GENTLE — уклон ниже HILL_CLIFF_SLOPE, трава;
+## в остальных направлениях PLATEAU_RAMP_STEEP — обрыв, тайл стены. Ступеней
+## нет нигде: и обрыв — гладкая поверхность, боец пройдёт везде (поиска пути
+## в игре нет, и непроходимых склонов быть не может), но обрыв РИСУЕТСЯ
+## стеной, а спуск — травой. Список плато считается один раз (plateau_list)
+## и теми же числами уезжает в ядро: высота живёт в двух языках
+## (ArmyCore.Height), обе копии обязаны совпадать — сторожит qa_map F4
+const PLATEAU_RAMP_GENTLE := 14.0
+const PLATEAU_RAMP_STEEP := 4.5
+const PLATEAU_RAMP_CONE := 0.75      # полуугол сектора спуска, рад
+const PLATEAU_TILE_MIN := 0.55       # от этой высоты плато квад берёт тайлы плато
+## Порог «стена» для тайлов ПЛАТО: спуск (уклон ~0.23 + гармоники до 0.36)
+## обязан остаться травой, обрыв (0.71) — стеной; общий HILL_CLIFF_SLOPE 0.30
+## лежит между ними слишком близко к спуску (qa_map F3: худший уклон 0.36)
+const PLATEAU_WALL_SLOPE := 0.45
+## Плато под ничейными рудниками: плоская вершина и высота
+const PLATEAU_MINE_R := 15.0
+const PLATEAU_MINE_H := 3.2
+## Прочие плато: [x, z, r_flat, h]; спуск — к середине карты
+const PLATEAU_SPECS := [
+	[70.0, -80.0, 12.0, 2.6],
+	[-75.0, 80.0, 12.0, 2.6],
+]
+var _plateaus: Array = []
+## С какой доли высоты холма клетка земли считается «вершиной» (тайлы Elevation)
+const HILL_TOP_FRAC := 0.35
+## Крутизна, выше которой клетка холма рисуется тайлом обрыва
+const HILL_CLIFF_SLOPE := 0.30
+
+## ── ТАЙЛСЕТ ЗЕМЛИ (res://assets/environment/terrain/Tileset) ───────────────
+const TILESET_DIR := "res://assets/environment/terrain/Tileset/"
+const TILE_FLAT_PATH := TILESET_DIR + "Tilemap_Flat.png"
+const TILE_ELEV_PATH := TILESET_DIR + "Tilemap_Elevation.png"
+const TILE_WATER_PATH := TILESET_DIR + "Water.png"
+const TILE_FOAM_PATH := TILESET_DIR + "Water Foam.png"
+const TILE_ROCKS_DIR := TILESET_DIR + "Rocks/"
+## Сетка атласов: Flat 640×256 = 10×4 тайла по 64 px, Elevation 256×512 = 4×8
+const TILE_PX := 64
+const FLAT_COLS := 10
+const FLAT_ROWS := 4
+const ELEV_COLS := 4
+const ELEV_ROWS := 8
+## Какие тайлы — внутренние (без кромки): трава (1,1), песок (6,1) в Flat;
+## площадка вершины (1,1) и стена обрыва (1,3) в Elevation
+const TILE_GRASS := Vector2i(1, 1)
+const TILE_SAND := Vector2i(6, 1)
+const TILE_ELEV_TOP := Vector2i(1, 1)
+const TILE_ELEV_WALL := Vector2i(1, 3)
+## ── ОТТЕНКИ ТРАВЫ: Tilemap_colorN (9×6 тайлов) ────────────────────────────
+## Пять листов одного рисунка в пяти оттенках: левый блок — трава над водой
+## (внутренний тайл (1,1)), правый — трава на обрыве: вершина (6,1), кромка
+## (6,3), стена (6,4). Плато — насыщенно-зелёный лист 3, берег реки — лист 2,
+## пятна травы в низине — оливковый 4 и лист 2 поверх основного Tilemap_Flat
+const TILE_COLOR_PATH := TILESET_DIR + "Tilemap_color%d.png"
+const COLOR_COLS := 9
+const COLOR_ROWS := 6
+const TILE_COLOR_LOW := Vector2i(1, 1)
+const TILE_COLOR_TOP := Vector2i(6, 1)
+const TILE_COLOR_WALL := Vector2i(6, 4)
+const COLOR_PLATEAU := 3
+const COLOR_BANK := 2
+const COLOR_PATCH_A := 4
+const COLOR_PATCH_B := 2
+## Сколько метров земли на один тайл воды (Water.png 64×64 тянется повтором)
+const WATER_TILE_M := 2.0
+## Пена вдоль берегов: шаг по Z, м
+const FOAM_STEP := 6.0
 
 ## Полоса у самой границы, в которую юнит уже не заходит (упор в стену)
 const MAP_EDGE_MARGIN := 1.5
@@ -84,6 +189,7 @@ var goblin_ai: Node            = null     # см. scripts/goblin/GoblinAI.gd
 const _GoblinAI  := preload("res://scripts/goblin/GoblinAI.gd")
 const _VoiceControl := preload("res://scripts/VoiceControl.gd")
 const _GoblinHut := preload("res://scripts/goblin/GoblinHut.gd")
+const _TrollLair := preload("res://scripts/goblin/TrollLair.gd")
 const _GobCfg    := preload("res://scripts/goblin/goblin_config.gd")
 const _Diff := preload("res://scripts/game_difficulty_config.gd")
 ## Сохранение и загрузка партии (см. start_game — применение слепка)
@@ -111,8 +217,15 @@ const GOBLIN_VILLAGE_CLEAR := 34.0
 # зона базы (BASE_CLEAR_RADIUS = 11) и кольцо своих ресурсов (15 м) целиком
 # помещались внутрь поля и не упирались в бортик.
 const BASE_CORNER_INSET := 24.0
+## ── СТАРТ ИГРОКА СДВИНУТ ОТ УГЛА (заказ владельца 10.09.2026) ──────────────
+## Игрок начинал ВПЛОТНУЮ к верхнему левому углу поля: камера упиралась в
+## границы карты (зажим CAM_BOUND), и половина стартового круга обзора уходила
+## в черноту за краем. Прибавка идёт к отступу ОБЕИХ осей — «правее и ниже» в
+## экранных терминах и есть +X и +Z в мировых
+const PLAYER_START_SHIFT := 20.0
 const PLAYER_BASE_ANCHOR := Vector3(
-	-MAP_HALF_X + BASE_CORNER_INSET, 0.0, -MAP_HALF_Z + BASE_CORNER_INSET)
+	-MAP_HALF_X + BASE_CORNER_INSET + PLAYER_START_SHIFT, 0.0,
+	-MAP_HALF_Z + BASE_CORNER_INSET + PLAYER_START_SHIFT)
 const ENEMY_BASE_ANCHOR  := Vector3(
 	 MAP_HALF_X - BASE_CORNER_INSET, 0.0,  MAP_HALF_Z - BASE_CORNER_INSET)
 # Кольцо, на котором у базы стоят своя жила золота и своя каменоломня
@@ -277,6 +390,11 @@ func start_game() -> void:
 	GameManager.reset_squads()
 	_victory_timer       = 0.0
 	_castle_placed       = false
+	# ЛИМИТ НАСЕЛЕНИЯ — ПРАВИЛО ПАРТИИ (см. GameManager.pop_limit_enabled):
+	# включается, когда Main и есть текущая сцена, то есть в настоящей игре.
+	# Стенды поднимают Main под своим узлом и нанимают как никто не нанимает
+	GameManager.pop_limit_enabled = _UCfg.POP_LIMIT_ENABLED \
+		and get_tree().current_scene == self
 	_spawn_resource_nodes()
 	# Своя жила и своя каменоломня рядом с каждой базой — на расчищенной
 	# площадке, вне коллизии замка и не пересекаясь друг с другом
@@ -298,15 +416,18 @@ func start_game() -> void:
 	# Лес заводится на весь бой; основная тема будет подмешиваться раз в 10 минут
 	AudioManager.start_game_audio()
 	hud.show_hud()
-	# СТАРТОВЫЙ ЗАМОК СТАВИТ ИГРОК, А НЕ ГЕНЕРАТОР. Сразу после старта под
-	# курсором появляется синий фантом крепости: ЛКМ — поставить, ПКМ или
-	# Escape — отменить. Место ограничено нижним левым углом (см.
-	# clamp_to_player_start), поэтому «замок посреди карты» невозможен
-	if not _castle_placed:
-		enter_castle_placement(true)
+	# ── ПАРТИЯ НАЧИНАЕТСЯ С ПЯТИ РАБОЧИХ, БЕЗ КРЕПОСТИ (заказ 10.09.2026) ──
+	# Прежде тут открывался фантом стартового замока, зажатый в угол игрока
+	# (enter_castle_placement + clamp_to_player_start). Теперь на карту выходит
+	# бригада, а крепость игрок закладывает КНОПКОЙ РАБОЧЕГО в любом месте, где
+	# нет тумана (см. can_build_at). Механизм постановки замка фантомом оставлен
+	# и работает для второй и следующих крепостей
+	_spawn_starting_workers(PLAYER_BASE_ANCHOR)
 	if enemy_ai != null:
 		enemy_ai.setup(self)
 	_spawn_goblin_village()
+	_spawn_troll_lair()
+	_spawn_gold_mines()
 	# ── ЗАГРУЗКА ПАРТИИ: ПОСЛЕДНИМ ДЕЛОМ ────────────────────────────────────
 	# Слепок применяется, когда карта уже готова и стартовая расстановка уже
 	# сделана: apply() сносит живое (замки, рабочих, орду) и ставит сохранённое.
@@ -384,6 +505,8 @@ func _setup_reserved_zones() -> void:
 	# здесь же, до посадки леса. Радиус — вся застройка плюс кольцо отрядов
 	if _Opt.goblin_village:
 		_reserve(goblin_village_center(), GOBLIN_VILLAGE_CLEAR)
+		# Логово тролля — тоже площадка: дерево и кольцо кольев без леса
+		_reserve(troll_lair_center(), _GobCfg.LAIR_CLEAR)
 	# Пятачки под СВОИ кучи руды резервируются ЗДЕСЬ, а не после их спавна.
 	# Порядок вызовов: _ready() → _setup_terrain() сажает лес подковы, и только
 	# потом start_game() ставит кучи. Резерв, выставленный вместе с кучей,
@@ -392,6 +515,8 @@ func _setup_reserved_zones() -> void:
 	for anchor in [PLAYER_BASE_ANCHOR, ENEMY_BASE_ANCHOR]:
 		for spot in _base_resource_spots(anchor):
 			_reserve(spot, BASE_ORE_CLEAR)
+	for gm in gold_mine_spots():
+		_reserve(gm, GOLD_MINE_CLEAR)
 
 func _reserve(center: Vector3, radius: float) -> void:
 	_reserved.append({"c": center, "r": radius})
@@ -457,21 +582,32 @@ func _setup_fog() -> void:
 	fog.setup(MAP_HALF_X, MAP_HALF_Z)
 	GameManager.fog = fog
 
-## Раскрыть стартовую площадку НАВСЕГДА — ещё до того, как поставлен замок и
-## появились свои юниты. Без этого игрок в первые секунды выбирает место под
-## крепость в сплошной серой пелене
+## ── НА СТАРТЕ ВИДНО ТОЛЬКО КРУГ ВОКРУГ РАБОЧИХ (заказ 10.09.2026) ──────────
+## Здесь раскрывалась НАВСЕГДА вся стартовая площадка (полудиагональ квадрата
+## под замок плюс запас) — на экране это был светлый прямоугольник в пол-карты
+## ещё до появления первого рабочего. Теперь туман не раскрывается заранее
+## вовсе: круг игроку дают сами рабочие (FogOfWar._collect_unit_sources,
+## радиус vision_radius ≈ VISION_MIN), а крепость расширяет его до
+## CASTLE_VISION, когда встанет
 func _reveal_start_area() -> void:
 	if fog == null:
 		return
 	fog.reset()
-	var r: float = PLAYER_PLACE_HALF * sqrt(2.0) + START_REVEAL_PAD
-	fog.add_permanent_reveal(PLAYER_BASE_ANCHOR, r)
 
 ## Зелёная плашка на земле: внутри неё можно ставить стартовый замок.
 ## Ровно тот же квадрат, что зажимает clamp_to_player_start, — подсказка не
 ## должна расходиться с правилом, которое она показывает
+## ── ЗЕЛЁНОЙ ПЛАШКИ БОЛЬШЕ НЕТ (заказ владельца 10.09.2026) ────────────────
+## Стартовый квадрат «здесь можно поставить замок» отменён вместе с самим
+## правилом: строить теперь можно везде, где нет тумана (can_build_at), и
+## подсвечивать нечего. Функция оставлена пустой, чтобы не разбирать вызовы в
+## двух ветках постановки; ручка START_ZONE_SHOWN включает прежний вид
+const START_ZONE_SHOWN := false
+
 func _show_start_zone() -> void:
 	_hide_start_zone()
+	if not START_ZONE_SHOWN:
+		return
 	var quad := QuadMesh.new()
 	quad.size = Vector2(PLAYER_PLACE_HALF * 2.0, PLAYER_PLACE_HALF * 2.0)
 	var mat := StandardMaterial3D.new()
@@ -694,7 +830,10 @@ func enter_building_placement(cost: Dictionary, ghost_size: Vector3, build_fn: C
 # расползается кляксами по всей карте. Фантом сам показывает, можно ли здесь
 # ставить — красный значит нельзя, и клик в этом месте не сработает.
 # ─────────────────────────────────────────────────────────────────────────────
-## Радиус застройки вокруг замка, метры
+## Радиус застройки вокруг замка, метры. ИСТОРИЯ: правило «только рядом со
+## своим замком» отменено заказом 10.09.2026 — строить можно везде, где открыт
+## туман (см. can_build_at). Число оставлено: по нему по-прежнему считает свои
+## площадки красный ИИ
 const BUILD_RADIUS := 50.0
 ## Цвета фантома: разрешено / запрещено
 const GHOST_OK   := Color(0.35, 0.65, 1.0, 0.55)
@@ -705,15 +844,23 @@ var _ghost_mats: Array = []
 ## Разрешено ли строить в текущей точке под курсором
 var _ghost_ok: bool = true
 
-## Точка в зоне застройки хоть одного своего замка?
+## ── СТРОИТЬ МОЖНО ВЕЗДЕ, ГДЕ НЕТ ТУМАНА (заказ владельца 10.09.2026) ──────
+## Прежнее правило («только в BUILD_RADIUS от своей крепости») отменено вместе
+## со стартовым замком: партия открывается пятью рабочими в чистом поле, и
+## первую крепость ставить было бы негде. Новое правило одно и для крепости, и
+## для башни, и для любого дома: точка обязана быть ОТКРЫТА — то есть её видит
+## кто-то из своих прямо сейчас (fog.is_lit). Туман выключен (стенды, отладка)
+## — разрешено всё поле.
+##
+## Имя in_build_radius сохранено: его зовут фантом (перекраска) и клик
+## постановки, а смысл у него всё тот же — «здесь ставить можно»
+func can_build_at(x: float, z: float) -> bool:
+	if fog == null or not fog.enabled:
+		return true
+	return fog.is_lit(x, z)
+
 func in_build_radius(x: float, z: float) -> bool:
-	for b in get_tree().get_nodes_in_group("player_buildings"):
-		var c := b as Castle
-		if c == null or c.is_dead():
-			continue
-		if Vector2(x - c.global_position.x, z - c.global_position.z).length() <= BUILD_RADIUS:
-			return true
-	return false
+	return can_build_at(x, z)
 
 ## Перекрасить фантом под текущее место: синий — можно, красный — нельзя
 func _tint_ghost(ok: bool) -> void:
@@ -768,8 +915,8 @@ func _try_place_building(screen_pos: Vector2) -> void:
 	# ВНЕ ЗОНЫ СТРОИТЬ НЕЛЬЗЯ. Режим постройки при этом НЕ сбрасывается: игрок
 	# просто промахнулся мимо зоны, и отбирать у него фантом за это незачем —
 	# пусть подведёт курсор ближе к замку и кликнет ещё раз
-	if not in_build_radius(world_pos.x, world_pos.z):
-		hud.show_placement_hint("Слишком далеко от Замка!")
+	if not can_build_at(world_pos.x, world_pos.z):
+		hud.show_placement_hint("Здесь туман войны — место не разведано!")
 		return
 	if _ghost:
 		_ghost.queue_free(); _ghost = null
@@ -801,10 +948,19 @@ func _try_place_castle(screen_pos: Vector2) -> void:
 		return
 	var t         := -from.y / dir.y
 	var world_pos := from + dir * t
-	var ps: Vector2 = clamp_to_player_start(world_pos.x, world_pos.z)
-	world_pos.x   = ps.x
-	world_pos.z   = ps.y
+	# ── ЗАМОК ЗАЖИМАЕТСЯ ТЕМ ЖЕ КРАЕМ, ЧТО И ЛЮБАЯ ДРУГАЯ ПОСТРОЙКА ─────────
+	# Здесь стоял GameManager.clamp_to_map, а он держит предел ХОДЬБЫ БОЙЦА
+	# (map_lim = MAP_HALF − MAP_EDGE_MARGIN). У построек край свой и ближе к
+	# центру (MAP_CLAMP = MAP_HALF − 5), и клик далеко за краем ставил замок
+	# на 223.5 м при строительном пределе 220 — то есть крайняя стена уезжала
+	# в черноту. Поймал qa_world3 С10 («далеко за краем → МИМО»)
+	world_pos.x = clampf(world_pos.x, -MAP_CLAMP_X, MAP_CLAMP_X)
+	world_pos.z = clampf(world_pos.z, -MAP_CLAMP_Z, MAP_CLAMP_Z)
 	world_pos.y   = get_terrain_height(world_pos.x, world_pos.z)
+	# В ТУМАН СТАВИТЬ НЕЛЬЗЯ — то же правило, что у остальных построек
+	if not can_build_at(world_pos.x, world_pos.z):
+		hud.show_placement_hint("Здесь туман войны — место не разведано!")
+		return
 
 	if _ghost:
 		_ghost.queue_free(); _ghost = null
@@ -846,7 +1002,66 @@ func _try_place_castle(screen_pos: Vector2) -> void:
 		# здесь читался как «щелчок из ниоткуда» при закладке крепости
 		GameManager.on_selection_changed(selection_manager.selected_units, true)
 
-	_spawn_starting_workers(world_pos, site)
+	# ── БРИГАДУ НЕ РОЖДАЕМ ЗАНОВО, А СТАВИМ НА СТРОЙКУ ТУ, ЧТО ЕСТЬ ────────
+	# До заказа 10.09.2026 партия начиналась ФАНТОМОМ ЗАМКА, и бригаду выдавал
+	# именно этот путь — постановка первой крепости. Теперь пятеро выходят
+	# сразу, в start_game(), а крепость игрок закладывает кнопкой рабочего, — и
+	# прежний вызов оказался ВТОРЫМ: на карте было ДЕСЯТЬ рабочих вместо пяти,
+	# из них пять взявшихся из ниоткуда и не считанных лимитом населения
+	# (поймал qa_world3 С8: «рабочих 10, дальний 14.3 м»).
+	#
+	# ПРОСТО СНЯТЬ ВЫЗОВ НЕЛЬЗЯ: вместе с рождением он делал ВТОРУЮ вещь —
+	# отправлял бригаду СТРОИТЬ ЗАМОК, и без неё пятеро продолжали рубить лес,
+	# пока крепость поднималась сама (поймал qa_fog E4-E6). Это отдельное
+	# свойство, и заказ его не отменял. Поэтому здесь теперь ровно оно:
+	# существующая бригада получает приказ на стройку, а рождение остаётся
+	# запасной дорогой для случая, когда рабочих у игрока нет вовсе
+	# (стенды, ставящие замок первым действием, и загрузка старых слепков)
+	_crew_to_first_castle(world_pos, site)
+
+## Кого отправить на первую крепость. Если бригада ещё жива — ЕЁ; если у
+## игрока рабочих нет вовсе — рождаем стартовую пятёрку, как раньше
+func _crew_to_first_castle(origin: Vector3, site: Node3D) -> void:
+	# ── ТОЛЬКО ПЕРВАЯ КРЕПОСТЬ, И ЭТО ВАЖНО ────────────────────────────────
+	# Механизм постановки замка фантомом работает и для второй, и для третьей
+	# крепости. Снимать с добычи пятерых рабочих КАЖДЫЙ раз нельзя: игрок,
+	# закладывающий второй замок на другом конце карты, лишался бы бригады у
+	# первого. Признак — живая крепость у игрока уже есть
+	for b in get_tree().get_nodes_in_group(Constants.building_group(
+			Constants.FACTION_PLAYER)):
+		if b == null or not is_instance_valid(b):
+			continue
+		var c := b as Castle
+		if c != null and not c.is_dead() and c.is_stronghold():
+			return
+	var crew: Array = _living_workers(Constants.FACTION_PLAYER,
+		START_WORKER_RESOURCES.size())
+	if crew.is_empty():
+		_spawn_starting_workers(origin, site)
+		return
+	# Список бригады переписывается на найденных: по нему _on_castle_built
+	# разошлёт их по ресурсам, когда крепость встанет
+	_start_crew = crew
+	if site == null or not is_instance_valid(site):
+		return
+	for w in crew:
+		if w != null and is_instance_valid(w) and w.has_method("command_build"):
+			w.command_build(site)
+
+## До limit живых рабочих стороны. Живых считаем проверкой is_dead(), а не
+## размером группы: павший уходит из неё лишь в конце кадра
+func _living_workers(faction: int, limit: int) -> Array:
+	var out: Array = []
+	for u in get_tree().get_nodes_in_group(Constants.unit_group(faction)):
+		if u == null or not is_instance_valid(u):
+			continue
+		var w := u as Worker
+		if w == null or w.is_dead():
+			continue
+		out.append(w)
+		if out.size() >= limit:
+			break
+	return out
 
 ## Замок достроился: выделяем его вместо исчезнувшей площадки, иначе игрок
 ## остаётся с пустой панелью команд и без кнопок найма.
@@ -877,11 +1092,14 @@ func _on_castle_built(made) -> void:
 
 ## Сколько рабочих даётся на старте и в каком порядке они потом расходятся по
 ## ресурсам. Длина массива И ЕСТЬ число рабочих — менять здесь, а не в range()
+## ПЯТЬ РАБОЧИХ И НИ ОДНОЙ КРЕПОСТИ (заказ владельца 10.09.2026): партия
+## открывается бригадой в чистом поле, замок ставит сам игрок кнопкой рабочего
 const START_WORKER_RESOURCES := [
 	Constants.RESOURCE_WOOD,
 	Constants.RESOURCE_WOOD,
 	Constants.RESOURCE_STONE,
 	Constants.RESOURCE_GOLD,
+	Constants.RESOURCE_WOOD,
 ]
 
 ## Стартовая бригада, пока строит замок. Список нужен, чтобы по готовности
@@ -1172,18 +1390,17 @@ func _update_ghost(_delta: float) -> void:
 		# СТАРТОВЫЙ ЗАМОК зажимается в угол игрока, ОБЫЧНОЕ здание — только в
 		# границы карты: его зону ограничивает не зажим, а радиус от замка,
 		# и игрок должен видеть красный фантом там, куда ставить нельзя
-		var gs: Vector2
-		if _phase == Phase.PLACING_CASTLE:
-			gs = clamp_to_player_start(wp.x, wp.z)
-		else:
-			gs = clamp_to_map(wp.x, wp.z)
+		# ЗАЖИМ ТОЛЬКО В ГРАНИЦЫ КАРТЫ. Стартовый квадрат под замок отменён
+		# (заказ 10.09.2026): крепость ставится там, где открыт туман, и
+		# зажимать её в угол игрока больше нечем. clamp_to_player_start
+		# оставлен — по нему считают стартовую площадку камера и стенды
+		var gs: Vector2 = clamp_to_map(wp.x, wp.z)
 		wp.x   = gs.x
 		wp.z   = gs.y
 		_ghost.global_position = Vector3(wp.x, get_terrain_height(wp.x, wp.z), wp.z)
-		# Цвет фантома обычного здания — по зоне застройки. Стартовый замок
-		# ставится ДО появления замков вообще, поэтому его не красим
-		if _phase == Phase.PLACING_BUILDING:
-			_tint_ghost(in_build_radius(wp.x, wp.z))
+		# Фантом красится по ОДНОМУ правилу для всех построек, включая замок:
+		# синий там, где разведано, красный в тумане
+		_tint_ghost(can_build_at(wp.x, wp.z))
 
 # Системный курсор заменяется ассетом Cursor_01 из menu UI.
 # HOTSPOT — НАСТОЯЩЕЕ ОСТРИЁ, а не угол кадра: точку считает
@@ -1286,12 +1503,56 @@ func _toggle_fullscreen() -> void:
 ## неё лишь в конце кадра (queue_free отложен), и «группа пуста» на кадр
 ## запаздывает
 func _check_victory() -> void:
+	# ── «КРЕПОСТЬ У ИГРОКА БЫЛА» — ПО ФАКТУ, А НЕ ПО СТАРТОВОМУ ФЛОУ ────────
+	# Флаг гейтит проверку поражения (без него первые секунды партии, когда
+	# крепости ещё нет, читались бы как разгром). Раньше его ставил стартовый
+	# фантом замка; теперь замок ставит рабочий, и признак снимается с карты
+	if not _castle_placed:
+		for b in get_tree().get_nodes_in_group("player_buildings"):
+			if not is_instance_valid(b) or not (b is Castle):
+				continue
+			var cc := b as Castle
+			if not cc.is_dead() and cc.is_stronghold():
+				_castle_placed = true
+				break
 	if _faction_beaten("enemy_units", "enemy_buildings"):
 		_phase = Phase.VICTORY
 		hud.show_victory()
-	elif _castle_placed and _faction_beaten("player_units", "player_buildings"):
+	elif _castle_placed and _player_defeated():
 		_phase = Phase.DEFEAT
 		hud.show_defeat()
+
+## ── ПОРАЖЕНИЕ ИГРОКА: ДВА ПРАВИЛА (заказ 10.09.2026) ────────────────────────
+## 1) крепость снесена И отстроить её нельзя — не хватает цены замка или
+##    некому строить (нет живого рабочего и нет уже заложенной крепости);
+## 2) не осталось НИ ОДНОЙ постройки и НИ ОДНОГО бойца — сразу.
+## Пока крепость стоит — поражения нет; пока её можно отстроить — тоже
+func _player_defeated() -> bool:
+	var units := 0
+	var workers := 0
+	for n in get_tree().get_nodes_in_group("player_units"):
+		if is_instance_valid(n) and n is Unit and not (n as Unit).is_dead():
+			units += 1
+			if n is Worker:
+				workers += 1
+	var buildings := 0
+	var has_castle := false
+	var castle_site := false
+	for b in get_tree().get_nodes_in_group("player_buildings"):
+		if not is_instance_valid(b) or not (b is Building) or (b as Building).is_dead():
+			continue
+		buildings += 1
+		if b is Castle and (b as Castle).is_stronghold():
+			has_castle = true
+		if (b as Node).is_in_group("construction_sites") and String((b as Node).get("target_id")) == "castle":
+			castle_site = true
+	if units == 0 and buildings == 0:
+		return true
+	if has_castle or castle_site:
+		return false
+	var cost: Dictionary = _UCfg.building_cost("castle")
+	var can_pay: bool = ResourceManager.can_afford(Constants.FACTION_PLAYER, cost)
+	return not (can_pay and workers > 0)
 
 ## Разбита ли фракция: не осталось живых бойцов И (нет замка ИЛИ нет зданий)
 func _faction_beaten(units_group: String, buildings_group: String) -> bool:
@@ -1306,7 +1567,8 @@ func _faction_beaten(units_group: String, buildings_group: String) -> bool:
 		if (b as Building).is_dead():
 			continue
 		has_any = true
-		if b is Castle:
+		# Крепость — это столица, а не башня (та тоже Castle ради гарнизона)
+		if b is Castle and (b as Castle).is_stronghold():
 			has_castle = true
 	return not has_castle or not has_any
 
@@ -1456,6 +1718,8 @@ func _scatter_clusters(res_type: int, count: int) -> void:
 		if LAKE_ENABLED and Vector2(cx - LAKE_CENTER.x, cz - LAKE_CENTER.z).length() \
 				< LAKE_RADIUS * 1.4 + 5.0:
 			continue
+		if near_river(cx, cz, 10.0):
+			continue                      # руда не в воде и не на берегу
 		if _is_reserved(cx, cz, 8.0):
 			continue                      # пятачок базы — не занимать
 		var too_close := false
@@ -1965,31 +2229,15 @@ func _spawn_goblin_village() -> void:
 		var row: Dictionary = roster[i]
 		var uid: String = String(row["unit"])
 		var n: int = int(row["count"])
-		var sid: int = GameManager.new_squad(Constants.FACTION_GOBLIN, uid)
 		# Отряды стоят КОЛЬЦОМ ВОКРУГ деревни, за околицей: внутри стоят хижины,
 		# и толпа в сто человек влезла бы прямо в них
 		var ang2: float = TAU * float(i) / float(maxi(roster.size(), 1))
 		var ring_r: float = _GobCfg.VILLAGE_RADIUS + _GobCfg.horde_radius(n) + 2.0
-		var base := Vector2(center.x + cos(ang2) * ring_r,
+		var base := Vector3(center.x + cos(ang2) * ring_r, 0.0,
 			center.z + sin(ang2) * ring_r)
-		var scene: PackedScene = Building.PRELOAD_SCENES.get(uid)
-		if scene == null:
+		var sid: int = spawn_goblin_squad(uid, n, base)
+		if sid <= 0:
 			continue
-		for k in range(n):
-			var u: Unit = scene.instantiate()
-			u.faction = Constants.FACTION_GOBLIN
-			_world.add_child(u)
-			# ── ТОЛПА, А НЕ ПРЯМОУГОЛЬНИК ───────────────────────────────────
-			# Гоблины не держат шеренгу: места раздаются по диску (спираль
-			# золотого угла + детерминированный сдвиг), см.
-			# goblin_config.horde_offset. Прежняя раскладка по колонкам давала
-			# ту самую «фалангу людской пехоты», которой у орды быть не должно
-			var ho: Vector2 = _GobCfg.horde_offset(k, n, sid)
-			var ux: float = base.x + ho.x
-			var uz: float = base.y + ho.y
-			u.global_position = Vector3(ux, get_terrain_height(ux, uz), uz)
-			u.sync_row()
-			GameManager.add_to_squad(sid, u)
 		# ── РАНГ ПРИ РОЖДЕНИИ ───────────────────────────────────────────────
 		# Уровень ставится напрямую, а не «накапливается убийствами»: отряд
 		# обязан ВЫЙТИ ветераном. Награды раздаются тем же путём, каким их
@@ -2000,6 +2248,81 @@ func _spawn_goblin_village() -> void:
 				_GobCfg.VETERAN_PREFERENCE)
 	if goblin_ai != null:
 		goblin_ai.setup(self, center)
+
+## ВЫПУСТИТЬ ОТРЯД ОРДЫ ТОЛПОЙ ВОКРУГ ТОЧКИ. Один путь на стартовую орду и на
+## «месть гоблинов» (GoblinAI): раскладка по диску (goblin_config.horde_offset),
+## строка ядра, реестр отряда. Возвращает id отряда, 0 — сцены такого нет
+func spawn_goblin_squad(uid: String, n: int, base: Vector3) -> int:
+	var scene: PackedScene = Building.PRELOAD_SCENES.get(uid)
+	if scene == null or n <= 0:
+		return 0
+	var sid: int = GameManager.new_squad(Constants.FACTION_GOBLIN, uid)
+	for k in range(n):
+		var u: Unit = scene.instantiate()
+		u.faction = Constants.FACTION_GOBLIN
+		_world.add_child(u)
+		# ── ТОЛПА, А НЕ ПРЯМОУГОЛЬНИК ───────────────────────────────────────
+		# Гоблины не держат шеренгу: места раздаются по диску (спираль
+		# золотого угла + детерминированный сдвиг), см.
+		# goblin_config.horde_offset. Прежняя раскладка по колонкам давала
+		# ту самую «фалангу людской пехоты», которой у орды быть не должно
+		var ho: Vector2 = _GobCfg.horde_offset(k, n, sid)
+		var ux: float = base.x + ho.x
+		var uz: float = base.z + ho.y
+		u.global_position = Vector3(ux, get_terrain_height(ux, uz), uz)
+		u.sync_row()
+		GameManager.add_to_squad(sid, u)
+	return sid
+
+## ═════════════════════════════════════════════════════════════════════════════
+## ЛОГОВО ТРОЛЛЯ (заказ владельца, 09.09.2026)
+## ═════════════════════════════════════════════════════════════════════════════
+## За горой от замка игрока, «ниже» его по экрану (+Z): Замок → Гора → Логово.
+## Смещения — goblin_config.LAIR_OFFSET / HILL_OFFSET от якоря базы игрока
+func troll_lair_center() -> Vector3:
+	var o: Vector2 = _GobCfg.LAIR_OFFSET
+	var x: float = clampf(PLAYER_BASE_ANCHOR.x + o.x, -GEN_HALF_X, GEN_HALF_X)
+	var z: float = clampf(PLAYER_BASE_ANCHOR.z + o.y, -GEN_HALF_Z, GEN_HALF_Z)
+	return Vector3(x, get_terrain_height(x, z), z)
+
+## ── НИЧЕЙНЫЕ ЗОЛОТЫЕ РУДНИКИ (заказ 10.09.2026) ─────────────────────────────
+## Два рудника на пути между замками (доли GOLD_MINE_T), сдвинуты поперёк
+## на GOLD_MINE_SIDE — вверх по экрану, прочь от логова тролля. Ничьи до
+## захвата пехотой (Mine). Площадки зарезервированы от леса и руды
+## (_setup_reserved_zones), точка уводится с воды land_target
+const GOLD_MINE_T := [0.34, 0.66]
+const GOLD_MINE_SIDE := -34.0
+const GOLD_MINE_CLEAR := 9.0
+
+func gold_mine_spots() -> Array:
+	var out: Array = []
+	for t in GOLD_MINE_T:
+		var p: Vector3 = PLAYER_BASE_ANCHOR.lerp(ENEMY_BASE_ANCHOR, float(t))
+		p.z += GOLD_MINE_SIDE
+		p.x = clampf(p.x, -GEN_HALF_X, GEN_HALF_X)
+		p.z = clampf(p.z, -GEN_HALF_Z, GEN_HALF_Z)
+		out.append(Vector3(p.x, 0.0, p.z))
+	return out
+
+func _spawn_gold_mines() -> void:
+	for p in gold_mine_spots():
+		var spot: Vector3 = GameManager.land_target(p)
+		_clear_area_of_resources(spot, GOLD_MINE_CLEAR)
+		var m := Mine.new()
+		m.faction = Constants.FACTION_NEUTRAL
+		_world.add_child(m)
+		m.global_position = Vector3(spot.x, get_terrain_height(spot.x, spot.z), spot.z)
+
+func _spawn_troll_lair() -> void:
+	if not _Opt.goblin_village:
+		return
+	var c := troll_lair_center()
+	var lair: Building = _TrollLair.new()
+	lair.faction = Constants.FACTION_GOBLIN
+	_world.add_child(lair)
+	lair.global_position = c
+	GameManager.troll_lair = lair
+	lair.call("spawn_guards", _GobCfg.LAIR_START_TROLLS)
 
 ## ВЫДАТЬ ОТРЯДУ РАНГ ПРИ РОЖДЕНИИ И РАЗДАТЬ ЗА НЕГО НАГРАДЫ.
 ##
@@ -2214,8 +2537,185 @@ func _setup_terrain() -> void:
 	_setup_reserved_zones()
 	_add_forest_clusters()
 	_spawn_water_body()
+	_spawn_river()
 	_spawn_bushes()
+	_scatter_deco()
 	_spawn_clouds()
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ДЕКОРАЦИИ Deco 01-18 (заказ спринта 13)
+# ═════════════════════════════════════════════════════════════════════════════
+# ЧТО ЭТО. `assets/environment/resources/Deco/` — восемнадцать картинок:
+# 01-15 — мелочь (грибы, камушки, кустики, тыквы, кости), 64×64; 16-17 —
+# указатели, 64×128; 18 — пугало, 192×192.
+#
+# ── КАЖДЫЙ ФАЙЛ — ОДИН БАКЕТ ОБЩЕЙ ОТРИСОВКИ, А НЕ УЗЕЛ НА ШТУКУ ───────────
+# Сажаются они тем же `VegetationRenderer.plant`, что и лес с кустами: бакет
+# заводится ПО ТЕКСТУРЕ, поэтому тысяча грибов стоит РОВНО ОДИН вызов
+# отрисовки, и туман войны с подсветкой достаются даром. Узел на каждую
+# декорацию дал бы полторы тысячи вызовов — ровно та ошибка, из-за которой
+# однажды пришлось переносить пену брода и камни в MultiMesh.
+#
+# ── КОСТИ И КАМНИ НЕ КАЧАЮТСЯ ──────────────────────────────────────────────
+# Ветер у растительности — это ЛИСТАНИЕ ЛЕНТЫ (shaders/veg_multimesh), а не
+# наклон геометрии, а у всех Deco по одному кадру. Значит, качаться им нечем
+# по построению, и отдельного «статичного» материала заводить не надо.
+#
+# ── УКАЗАТЕЛИ ВДОЛЬ ДОРОГИ, ПУГАЛА У ЗОН ──────────────────────────────────
+# Дорог на карте нет как объектов, но есть ГЛАВНЫЙ МАРШРУТ партии — прямая
+# между базой игрока и базой ИИ, по которой ходят все волны. Указатели (16-17)
+# ставятся вдоль неё с отступом в сторону, пугала (18) — по периметру
+# зарезервированных зон баз, то есть на «краю поля». Точки, попавшие в воду,
+# в резерв или за край карты, просто пропускаются.
+
+## Мелочь: сколько всего штук на карту (масштабируется вместе с её площадью)
+const DECO_SMALL_PER_UNIT := 150
+## Высота квада мелочи, метры. Кадр 64×64, рисунок занимает его частью —
+## поэтому это ВЕРХНЯЯ оценка размера самой вещи
+const DECO_SMALL_H := Vector2(0.65, 1.05)
+## Указатели вдоль маршрута: шаг по дороге и отступ в сторону от неё
+const DECO_SIGN_STEP := 46.0
+const DECO_SIGN_SIDE := Vector2(5.0, 11.0)
+const DECO_SIGN_H := 2.0
+## Пугала по периметру зон
+const DECO_CROW_PER_ZONE := 3
+const DECO_CROW_RIM := Vector2(1.05, 1.28)
+## Ниже этого радиуса зона пугала не получает (см. _scatter_deco_scarecrows)
+const DECO_CROW_MIN_ZONE := 18.0
+const DECO_CROW_H := 3.1
+
+## Кэш загруженных лент: второй список load() по тем же путям завёл бы вторые
+## бакеты (та же оговорка, что у кустов)
+var _deco_cache: Dictionary = {}
+
+func _deco_tex(n: int) -> Texture2D:
+	if _deco_cache.has(n):
+		return _deco_cache[n]
+	var path: String = "res://assets/environment/resources/Deco/%02d.png" % n
+	var tex: Texture2D = null
+	if ResourceLoader.exists(path):
+		tex = load(path) as Texture2D
+	_deco_cache[n] = tex
+	return tex
+
+## Годится ли точка под декорацию: в карте, не в воде, не на пятачке базы
+func _deco_spot_ok(x: float, z: float, margin: float = 0.0) -> bool:
+	if not _fits_in_map(x, z):
+		return false
+	if is_water(x, z):
+		return false
+	if _is_reserved(x, z, margin):
+		return false
+	return true
+
+## Посадить одну декорацию высотой h метров (ширина считается по пропорции)
+func _deco_plant(tex: Texture2D, x: float, z: float, h: float) -> bool:
+	if tex == null or GameManager.veg == null:
+		return false
+	var fa: float = _BBUtil.frame_aspect(tex)
+	if fa <= 0.01:
+		fa = 1.0
+	# plant() принимает ВЫСОТУ квада: ширина выходит из пропорции сама
+	GameManager.veg.plant(tex, Vector3(x, 0.0, z), h, _world)
+	return true
+
+func _scatter_deco() -> void:
+	if GameManager.veg == null:
+		return
+	_scatter_deco_small()
+	_scatter_deco_signs()
+	_scatter_deco_scarecrows()
+
+## 01-15 — мелочь по всей карте
+func _scatter_deco_small() -> void:
+	var texs: Array = []
+	for n in range(1, 16):
+		var t: Texture2D = _deco_tex(n)
+		if t != null:
+			texs.append(t)
+	if texs.is_empty():
+		return
+	var want: int = int(float(DECO_SMALL_PER_UNIT) * MAP_GROWTH * MAP_GROWTH)
+	var placed := 0
+	var tries := 0
+	while placed < want and tries < want * 6:
+		tries += 1
+		var x: float = randf_range(-GEN_HALF_X, GEN_HALF_X)
+		var z: float = randf_range(-GEN_HALF_Z, GEN_HALF_Z)
+		if not _deco_spot_ok(x, z, 1.5):
+			continue
+		var tex: Texture2D = texs[randi() % texs.size()]
+		if _deco_plant(tex, x, z, randf_range(DECO_SMALL_H.x, DECO_SMALL_H.y)):
+			placed += 1
+	deco_small_placed = placed
+
+## 16-17 — указатели вдоль главного маршрута (база игрока → база ИИ)
+func _scatter_deco_signs() -> void:
+	var texs: Array = []
+	for n in [16, 17]:
+		var t: Texture2D = _deco_tex(n)
+		if t != null:
+			texs.append(t)
+	if texs.is_empty():
+		return
+	var a: Vector2 = Vector2(PLAYER_BASE_ANCHOR.x, PLAYER_BASE_ANCHOR.z)
+	var b: Vector2 = Vector2(ENEMY_BASE_ANCHOR.x, ENEMY_BASE_ANCHOR.z)
+	var road: Vector2 = b - a
+	var road_len: float = road.length()
+	if road_len < 1.0:
+		return
+	var dir: Vector2 = road / road_len
+	var side: Vector2 = Vector2(-dir.y, dir.x)
+	var placed := 0
+	var t_along: float = DECO_SIGN_STEP
+	var flip := 1.0
+	while t_along < road_len - DECO_SIGN_STEP * 0.5:
+		var off: float = randf_range(DECO_SIGN_SIDE.x, DECO_SIGN_SIDE.y) * flip
+		var p: Vector2 = a + dir * t_along + side * off
+		t_along += DECO_SIGN_STEP
+		flip = -flip
+		if not _deco_spot_ok(p.x, p.y, 3.0):
+			continue
+		var tex: Texture2D = texs[randi() % texs.size()]
+		if _deco_plant(tex, p.x, p.y, DECO_SIGN_H):
+			placed += 1
+	deco_signs_placed = placed
+
+## 18 — пугала по периметру зарезервированных зон («край поля»)
+func _scatter_deco_scarecrows() -> void:
+	var tex: Texture2D = _deco_tex(18)
+	if tex == null:
+		return
+	var placed := 0
+	for z in _reserved:
+		var zone: Dictionary = z
+		var cz: Vector3 = zone["c"]
+		var c: Vector2 = Vector2(cz.x, cz.z)
+		var r: float = float(zone["r"])
+		# ТОЛЬКО КРУПНЫЕ ЗОНЫ (базы, деревня, логово): в _reserved лежат ещё и
+		# пятачки под кучи руды радиусом в пару метров, и пугало у каждого
+		# камня читалось бы как мусор, а не как край поля
+		if r < DECO_CROW_MIN_ZONE:
+			continue
+		var base_a: float = randf() * TAU
+		for i in range(DECO_CROW_PER_ZONE):
+			var ang: float = base_a + TAU * (float(i) + randf_range(-0.15, 0.15)) \
+				/ float(DECO_CROW_PER_ZONE)
+			var k: float = randf_range(DECO_CROW_RIM.x, DECO_CROW_RIM.y)
+			var px: float = c.x + cos(ang) * r * k
+			var pz: float = c.y + sin(ang) * r * k
+			# Пугало стоит СНАРУЖИ зоны, поэтому _is_reserved его и не должен
+			# отвергать — проверяем только карту и воду
+			if not _fits_in_map(px, pz) or is_water(px, pz):
+				continue
+			if _deco_plant(tex, px, pz, DECO_CROW_H):
+				placed += 1
+	deco_crows_placed = placed
+
+## Счётчики для стендов: сколько чего реально село
+var deco_small_placed: int = 0
+var deco_signs_placed: int = 0
+var deco_crows_placed: int = 0
 
 func _add_forest_clusters() -> void:
 	# Естественные рощи: случайные центры по карте, деревья рассыпаны в диске,
@@ -2237,6 +2737,9 @@ func _add_forest_clusters() -> void:
 		# Не заслонять озеро (радиус берега + запас на разброс рощи)
 		if LAKE_ENABLED and Vector2(cx - LAKE_CENTER.x, cz - LAKE_CENTER.z).length() \
 				< LAKE_RADIUS * 1.35 + 4.0:
+			continue
+		# Роща не садится на русло (деревья проверяются ещё и поштучно)
+		if near_river(cx, cz, 6.0):
 			continue
 		# Не застраивать базу врага
 		if cx > ENEMY_BASE_ANCHOR.x - 17.0 and cz > ENEMY_BASE_ANCHOR.z - 17.0:
@@ -2323,6 +2826,10 @@ func _spawn_tree_cluster(center: Vector3, count: int, radius: float = 5.5, min_g
 		# выплёскивались наружу, и стволы висели в черноте
 		if not _fits_in_map(center.x + pt.x, center.z + pt.y):
 			continue
+		# И не в реку, и не на самую кромку: ствол в воде — не роща, а преграда
+		if is_water(center.x + pt.x, center.z + pt.y) \
+				or near_river(center.x + pt.x, center.z + pt.y, 1.5):
+			continue
 		var tree := ResourceNode.new()
 		tree.resource_type = Constants.RESOURCE_WOOD
 		tree.remaining     = randf_range(480.0, 720.0)   # 3x ёмкость
@@ -2383,6 +2890,18 @@ const TERRAIN_RELIEF := true
 const RELIEF_AMP := 0.85
 ## Шаг сетки вершин, метры. Мельче — плавнее свет, но больше треугольников
 const RELIEF_STEP := 2.5
+## ── МАСШТАБ ТАЙЛА ТРАВЫ (заказ владельца 10.09.2026) ──────────────────────
+## Клетка рельефа — 2.5 м, и на неё ложился РОВНО ОДИН тайл травы: рисунок
+## читался как «гигантские пиксели». Клетка делится на GRASS_SUBDIV² подквадов,
+## каждый со своим полным тайлом, — узор вдвое мельче при той же геометрии
+## рельефа. Гора, песок брода и вода не дробятся: там тайл крупный по замыслу
+const GRASS_SUBDIV := 2
+## ── ЦВЕТ ТРАВЫ (заказ владельца 10.09.2026: «чисто зелёный насыщенный») ───
+## Множитель поверх текстуры тайлсета: у Tiny Swords трава жёлто-оливковая, и
+## на карте это читалось как выгоревшее поле. Красный и синий каналы срезаны,
+## зелёный оставлен полным — палитра пиксель-арта сохраняется, оттенок уходит
+## в чистую зелень
+const GRASS_TINT := Color(0.62, 1.0, 0.52)
 
 ## ЕДИНСТВЕННЫЙ ИСТОЧНИК ВЫСОТЫ: и для меша земли, и для всего, что на ней стоит
 func get_terrain_height(x: float, z: float) -> float:
@@ -2393,7 +2912,123 @@ func get_terrain_height(x: float, z: float) -> float:
 	return RELIEF_AMP * (
 		  0.55 * sin(x * 0.031 + z * 0.017)
 		+ 0.30 * sin(x * 0.013 - z * 0.041 + 1.7)
-		+ 0.15 * sin(x * 0.077 + z * 0.059 + 3.1))
+		+ 0.15 * sin(x * 0.077 + z * 0.059 + 3.1)) \
+		+ hill_height(x, z) + plateau_height(x, z) - river_depth(x, z)
+
+## ── ПЛАТО ──────────────────────────────────────────────────────────────────
+## [cx, cz, r_flat, h, ramp_dir] на каждое; первые — под ничейными рудниками,
+## спуск повёрнут к ближнему замку (рудник берут пехотой — к нему должна
+## вести дорога), остальные — к середине карты
+func plateau_list() -> Array:
+	if not _plateaus.is_empty():
+		return _plateaus
+	var spots: Array = gold_mine_spots()
+	var toward: Array = [PLAYER_BASE_ANCHOR, ENEMY_BASE_ANCHOR]
+	for i in range(spots.size()):
+		var p: Vector3 = spots[i]
+		var b: Vector3 = toward[i % 2]
+		_plateaus.append([p.x, p.z, PLATEAU_MINE_R, PLATEAU_MINE_H, atan2(b.z - p.z, b.x - p.x)])
+	for s in PLATEAU_SPECS:
+		var sx: float = float(s[0])
+		var sz: float = float(s[1])
+		_plateaus.append([sx, sz, float(s[2]), float(s[3]), atan2(-sz, -sx)])
+	return _plateaus
+
+## Те же числа плоским массивом — для ядра (ArmyCore.SetPlateaus), по 5 на плато
+func plateau_params() -> PackedFloat32Array:
+	var out := PackedFloat32Array()
+	for p in plateau_list():
+		for v in p:
+			out.append(float(v))
+	return out
+
+func plateau_height(x: float, z: float) -> float:
+	var total := 0.0
+	for p in plateau_list():
+		var dx: float = x - float(p[0])
+		var dz: float = z - float(p[1])
+		var r_flat: float = float(p[2])
+		var reach: float = r_flat + PLATEAU_RAMP_GENTLE
+		if absf(dx) > reach or absf(dz) > reach:
+			continue
+		var h: float = float(p[3])
+		var d: float = sqrt(dx * dx + dz * dz)
+		if d <= r_flat:
+			total += h
+			continue
+		var da: float = absf(wrapf(atan2(dz, dx) - float(p[4]), -PI, PI))
+		var k: float = 1.0 - smoothstep(PLATEAU_RAMP_CONE, PLATEAU_RAMP_CONE + 0.6, da)
+		var w: float = PLATEAU_RAMP_STEEP + (PLATEAU_RAMP_GENTLE - PLATEAU_RAMP_STEEP) * k
+		var t: float = clampf((d - r_flat) / w, 0.0, 1.0)
+		total += h * (1.0 - t * t * (3.0 - 2.0 * t))
+	return total
+
+## Зеркало воды: ровное поперёк русла, на WATER_DROP глубины ниже кромки
+## берега; в броду — по щиколотку над дном
+func water_surface_y(x: float, z: float) -> float:
+	var full: float = FORD_DEPTH if in_ford(z) else RIVER_DEPTH
+	return get_terrain_height(x, z) + river_depth(x, z) - full * WATER_DROP + 0.02
+
+## Оттенок травы в низине: 0 — основной лист, 1 — оливковое пятно, 2 — тёмное
+func grass_shade(x: float, z: float) -> int:
+	var n: float = sin(x * 0.037 + z * 0.023) + 0.6 * sin(x * 0.011 - z * 0.049 + 2.0) \
+		+ 0.4 * sin(x * 0.09 + z * 0.07)
+	if n > 0.75:
+		return 1
+	if n < -0.95:
+		return 2
+	return 0
+
+## Центр горы — от якоря базы игрока (goblin_config.HILL_OFFSET)
+func hill_center() -> Vector2:
+	var o: Vector2 = _GobCfg.HILL_OFFSET
+	return Vector2(PLAYER_BASE_ANCHOR.x + o.x, PLAYER_BASE_ANCHOR.z + o.y)
+
+## Подъём горы в точке: гауссов колокол, σ = HILL_RADIUS / 2
+func hill_height(x: float, z: float) -> float:
+	if HILL_HEIGHT <= 0.0:
+		return 0.0
+	var c := hill_center()
+	var dx: float = x - c.x
+	var dz: float = z - c.y
+	var s: float = HILL_RADIUS * 0.5
+	var q: float = (dx * dx + dz * dz) / (2.0 * s * s)
+	if q > 12.0:
+		return 0.0
+	return HILL_HEIGHT * exp(-q)
+
+## Ось русла: x середины реки на данной широте z
+func river_x(z: float) -> float:
+	return RIVER_MEANDER * sin(z * RIVER_MEANDER_K)
+
+## В полосе брода (по Z)? Брод — мелководье, по нему ходят
+func in_ford(z: float) -> bool:
+	return absf(z - FORD_Z) < FORD_HALF
+
+## Просадка дна: глубокая вода — RIVER_DEPTH, брод — FORD_DEPTH, берег
+## сходит на нет за RIVER_BANK метров
+## РУСЛО СУЩЕСТВУЕТ ТОЛЬКО В ПОЛЕ КАРТЫ. Формула по z бесконечна, а стенды
+## ставят бойцов далеко за краем (z = ±400 при x ≈ 0 — обычный приём), и без
+## этой оговорки они оказывались «в воде» и уезжали вдоль берега
+func river_in_field(z: float) -> bool:
+	return absf(z) <= MAP_HALF_Z
+
+func river_depth(x: float, z: float) -> float:
+	if not RIVER_ENABLED or not river_in_field(z):
+		return 0.0
+	var d: float = absf(x - river_x(z))
+	var edge: float = RIVER_HALF_W + RIVER_BANK
+	if d >= edge:
+		return 0.0
+	var depth: float = FORD_DEPTH if in_ford(z) else RIVER_DEPTH
+	var t: float = clampf((edge - d) / RIVER_BANK, 0.0, 1.0)
+	return depth * t
+
+## Точка ближе margin к руслу (включая само русло и брод)
+func near_river(x: float, z: float, margin: float = 0.0) -> bool:
+	if not RIVER_ENABLED or not river_in_field(z):
+		return false
+	return absf(x - river_x(z)) < RIVER_HALF_W + margin
 
 # ─────────────────────────────────────────────────────────────────────────────
 # НОРМАЛЬ ЗЕМЛИ — АНАЛИТИЧЕСКАЯ, А НЕ ПО ТРЕУГОЛЬНИКАМ
@@ -2414,18 +3049,14 @@ func get_terrain_height(x: float, z: float) -> float:
 func terrain_normal(x: float, z: float) -> Vector3:
 	if not TERRAIN_RELIEF:
 		return Vector3.UP
-	# Производные тех же трёх гармоник, что и в get_terrain_height
-	var a := x * 0.031 + z * 0.017
-	var b := x * 0.013 - z * 0.041 + 1.7
-	var c := x * 0.077 + z * 0.059 + 3.1
-	var dhdx: float = RELIEF_AMP * (
-		  0.55 * 0.031 * cos(a)
-		+ 0.30 * 0.013 * cos(b)
-		+ 0.15 * 0.077 * cos(c))
-	var dhdz: float = RELIEF_AMP * (
-		  0.55 *  0.017 * cos(a)
-		+ 0.30 * -0.041 * cos(b)
-		+ 0.15 *  0.059 * cos(c))
+	# Высота стала СОСТАВНОЙ (гармоники + гора + русло, 09.09.2026), и
+	# аналитическая производная перестала быть одной формулой. Берём наклон
+	# центральной разностью с малым шагом: это по-прежнему ЕДИНЫЙ источник
+	# правды (та же get_terrain_height), гладкость та же — шаг много меньше
+	# клетки сетки, а зовётся это только при сборке меша
+	var e: float = 0.25
+	var dhdx: float = (get_terrain_height(x + e, z) - get_terrain_height(x - e, z)) / (2.0 * e)
+	var dhdz: float = (get_terrain_height(x, z + e) - get_terrain_height(x, z - e)) / (2.0 * e)
 	return Vector3(-dhdx, 1.0, -dhdz).normalized()
 
 func _build_flat_terrain() -> void:
@@ -2446,42 +3077,180 @@ func _build_flat_terrain() -> void:
 		add_child(mi)
 		return
 
+	# ── ЗЕМЛЯ ИЗ ТАЙЛОВ (заказ владельца, 09.09.2026) ───────────────────────
+	# Та же сетка клеток RELIEF_STEP по рельефу, но каждая клетка получает
+	# UV одного тайла атласа: трава (Tilemap_Flat), песок у брода, площадка
+	# и стена обрыва на горе (Tilemap_Elevation), а вода — отдельным мешем с
+	# Water.png повтором (см. _spawn_river). Три поверхности — три текстуры;
+	# один вызов отрисовки на каждую. Пиксель-арт фильтруется NEAREST.
+	# Без текстур на диске остаётся прежняя зелёная земля: визуал игру не роняет
+	var grass_tex: Texture2D = load(TILE_FLAT_PATH) as Texture2D \
+		if ResourceLoader.exists(TILE_FLAT_PATH) else null
+	var elev_tex: Texture2D = load(TILE_ELEV_PATH) as Texture2D \
+		if ResourceLoader.exists(TILE_ELEV_PATH) else null
+	# Листы оттенков: свой SurfaceTool на каждый (материал — одна текстура)
+	var color_tex: Dictionary = {}
+	var color_st: Dictionary = {}
+	for k in [COLOR_PLATEAU, COLOR_BANK, COLOR_PATCH_A, COLOR_PATCH_B]:
+		var cp: String = TILE_COLOR_PATH % k
+		if color_tex.has(k) or not ResourceLoader.exists(cp):
+			continue
+		var ct := load(cp) as Texture2D
+		if ct == null:
+			continue
+		color_tex[k] = ct
+		var cst := SurfaceTool.new()
+		cst.begin(Mesh.PRIMITIVE_TRIANGLES)
+		color_st[k] = cst
 	var nx: int = int(ceil(MAP_HALF_X * 2.0 / RELIEF_STEP))
 	var nz: int = int(ceil(MAP_HALF_Z * 2.0 / RELIEF_STEP))
 	var dx: float = MAP_HALF_X * 2.0 / float(nx)
 	var dz: float = MAP_HALF_Z * 2.0 / float(nz)
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var st_hill := SurfaceTool.new()
+	st_hill.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var hill_quads := 0
 	for iz in range(nz):
 		for ix in range(nx):
 			var x0: float = -MAP_HALF_X + float(ix) * dx
 			var x1: float = x0 + dx
 			var z0: float = -MAP_HALF_Z + float(iz) * dz
 			var z1: float = z0 + dz
+			var cx: float = (x0 + x1) * 0.5
+			var cz: float = (z0 + z1) * 0.5
+			# Вода — своим мешем (см. _spawn_river): дно здесь не рисуем
+			if RIVER_ENABLED and is_water(cx, cz):
+				continue
 			var a := Vector3(x0, get_terrain_height(x0, z0), z0)
 			var b := Vector3(x1, get_terrain_height(x1, z0), z0)
 			var c := Vector3(x1, get_terrain_height(x1, z1), z1)
 			var d := Vector3(x0, get_terrain_height(x0, z1), z1)
-			for v in [a, b, c, a, c, d]:
-				var p: Vector3 = v
-				# Пятнистость привязана к координатам, а не к randf(): узор
-				# одинаков при каждом запуске и не мерцает между кадрами
-				var tint: float = 0.94 + 0.06 * sin(p.x * 0.21 + p.z * 0.33)
-				st.set_color(Color(tint, tint, tint))
-				# НОРМАЛЬ СТАВИТСЯ ЯВНО, ПО ФОРМУЛЕ РЕЛЬЕФА. generate_normals()
-				# на неиндексированной сетке даёт по одной нормали на треугольник,
-				# и поле распадалось на тысячи плоских граней — см. terrain_normal
-				st.set_normal(terrain_normal(p.x, p.z))
-				st.add_vertex(p)
+			# ── КАКОЙ ТАЙЛ ───────────────────────────────────────────────
+			var hill_h: float = hill_height(cx, cz)
+			var target: SurfaceTool = st
+			var tile: Vector2i = TILE_GRASS
+			var cols: int = FLAT_COLS
+			var rows: int = FLAT_ROWS
+			var nrm: Vector3 = terrain_normal(cx, cz)
+			var slope: float = sqrt(nrm.x * nrm.x + nrm.z * nrm.z)
+			var ph: float = plateau_height(cx, cz)
+			var ford_here: bool = RIVER_ENABLED and in_ford(cz)
+			var bank_here: bool = RIVER_ENABLED and not ford_here and river_depth(cx, cz) > 0.001
+			if elev_tex != null and hill_h >= HILL_HEIGHT * HILL_TOP_FRAC:
+				# Гора — камень (Tilemap_Elevation): площадка или стена по крутизне
+				target = st_hill
+				cols = ELEV_COLS
+				rows = ELEV_ROWS
+				tile = TILE_ELEV_WALL if slope > HILL_CLIFF_SLOPE else TILE_ELEV_TOP
+				hill_quads += 1
+			elif color_st.has(COLOR_PLATEAU) and ph >= PLATEAU_TILE_MIN:
+				# Плато — трава на обрыве: спуск (пологий) травой, обрыв стеной
+				target = color_st[COLOR_PLATEAU]
+				cols = COLOR_COLS
+				rows = COLOR_ROWS
+				tile = TILE_COLOR_WALL if slope > PLATEAU_WALL_SLOPE else TILE_COLOR_TOP
+			elif color_st.has(COLOR_BANK) and bank_here:
+				# Откос берега: крутой — стена обрыва, пологий — трава берегового листа
+				target = color_st[COLOR_BANK]
+				cols = COLOR_COLS
+				rows = COLOR_ROWS
+				tile = TILE_COLOR_WALL if slope > HILL_CLIFF_SLOPE else TILE_COLOR_LOW
+			elif ford_here and near_river(cx, cz, 3.0):
+				tile = TILE_SAND
+			else:
+				# Пятна травы другого оттенка поверх основного листа
+				var shade: int = grass_shade(cx, cz)
+				var ck: int = COLOR_PATCH_A if shade == 1 else COLOR_PATCH_B
+				if shade != 0 and color_st.has(ck):
+					target = color_st[ck]
+					cols = COLOR_COLS
+					rows = COLOR_ROWS
+					tile = TILE_COLOR_LOW
+			# Полпикселя внутрь от кромки тайла — иначе фильтрация тянет
+			# соседний тайл атласа тонкой линией по швам
+			var u0: float = (float(tile.x) + 0.5 / float(TILE_PX)) / float(cols)
+			var u1: float = (float(tile.x) + 1.0 - 0.5 / float(TILE_PX)) / float(cols)
+			var v0: float = (float(tile.y) + 0.5 / float(TILE_PX)) / float(rows)
+			var v1: float = (float(tile.y) + 1.0 - 0.5 / float(TILE_PX)) / float(rows)
+			var uvs: Array = [Vector2(u0, v0), Vector2(u1, v0), Vector2(u1, v1),
+				Vector2(u0, v0), Vector2(u1, v1), Vector2(u0, v1)]
+			# ── ТАЙЛ ТРАВЫ МЕЛЬЧЕ КЛЕТКИ РЕЛЬЕФА ───────────────────────────
+			# Клетка режется на sub×sub подквадов, и КАЖДЫЙ получает полный
+			# тайл: рисунок травы становится вдвое мельче, а сетка рельефа и
+			# выбор тайла остаются те же. Гора и песок брода не дробятся
+			var sub: int = 1
+			if target != st_hill and tile != TILE_SAND:
+				sub = GRASS_SUBDIV
+			for sz2 in range(sub):
+				for sx2 in range(sub):
+					var xa: float = x0 + dx * float(sx2) / float(sub)
+					var xb: float = x0 + dx * float(sx2 + 1) / float(sub)
+					var za: float = z0 + dz * float(sz2) / float(sub)
+					var zb: float = z0 + dz * float(sz2 + 1) / float(sub)
+					var verts: Array = [
+						Vector3(xa, get_terrain_height(xa, za), za),
+						Vector3(xb, get_terrain_height(xb, za), za),
+						Vector3(xb, get_terrain_height(xb, zb), zb),
+						Vector3(xa, get_terrain_height(xa, za), za),
+						Vector3(xb, get_terrain_height(xb, zb), zb),
+						Vector3(xa, get_terrain_height(xa, zb), zb),
+					]
+					for k in range(6):
+						var p: Vector3 = verts[k]
+						# Пятнистость привязана к координатам, а не к randf():
+						# узор одинаков при каждом запуске и не мерцает
+						var tint: float = 0.94 + 0.06 * sin(p.x * 0.21 + p.z * 0.33)
+						target.set_color(Color(tint, tint, tint))
+						# НОРМАЛЬ — ПО ФОРМУЛЕ РЕЛЬЕФА (см. terrain_normal):
+						# generate_normals() на неиндексированной сетке даёт по
+						# одной нормали на треугольник, и поле распадается на
+						# тысячи плоских граней
+						target.set_normal(terrain_normal(p.x, p.z))
+						target.set_uv(uvs[k])
+						target.add_vertex(p)
+	if grass_tex != null:
+		mat.albedo_color = GRASS_TINT
+		mat.albedo_texture = grass_tex
+		mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
 	mi.mesh = st.commit()
 	mi.material_override = mat
 	add_child(mi)
+	for k in color_st.keys():
+		var cmi := MeshInstance3D.new()
+		cmi.name = "TerrainColor%d" % int(k)
+		var cmat := StandardMaterial3D.new()
+		cmat.albedo_color = GRASS_TINT
+		cmat.albedo_texture = color_tex[k]
+		cmat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+		cmat.roughness = 0.90
+		cmat.vertex_color_use_as_albedo = true
+		var cmesh: ArrayMesh = (color_st[k] as SurfaceTool).commit()
+		if cmesh == null or cmesh.get_surface_count() == 0:
+			continue
+		cmi.mesh = cmesh
+		cmi.material_override = cmat
+		add_child(cmi)
+	if hill_quads > 0:
+		var hmi := MeshInstance3D.new()
+		hmi.name = "Hill"
+		var hmat := StandardMaterial3D.new()
+		hmat.albedo_texture = elev_tex
+		hmat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+		hmat.roughness = 0.92
+		hmat.vertex_color_use_as_albedo = true
+		hmi.mesh = st_hill.commit()
+		hmi.material_override = hmat
+		add_child(hmi)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # КРАЙ МИРА: ЗЕЛЁНЫЙ БОРТИК + ЧЕРНОТА (как в «Казаках»)
 # Порядок по высоте: зелёное поле (y=0) → фаска, уходящая вниз и наружу →
 # сплошная чёрная плоскость под ней и до горизонта.
 # ─────────────────────────────────────────────────────────────────────────────
+## Зелёный бортик за краем поля. Выключен заказом владельца (10.09.2026)
+const WORLD_BEVEL_SHOWN := false
+
 func _build_world_edge() -> void:
 	# 1. ЧЕРНОТА. Заведомо больше поля, чтобы её край не попал в кадр даже на
 	# максимальном отдалении камеры.
@@ -2503,6 +3272,13 @@ func _build_world_edge() -> void:
 	void_mi.position.y = -MAP_BEVEL_DROP
 	add_child(void_mi)
 
+	# 2. БОРТИК — СНЯТ ЗАКАЗОМ ВЛАДЕЛЬЦА (10.09.2026): «за пределами карты
+	# должна быть просто сплошная чёрная пустота». Зелёная фаска по периметру
+	# читалась как нарисованная граница мира. Геометрия оставлена под ручкой:
+	# она умеет садиться на рельеф и зашивать шов с полем
+	if not WORLD_BEVEL_SHOWN:
+		_build_world_walls()
+		return
 	# 2. БОРТИК: рамка между внутренним прямоугольником (край поля, y=0) и
 	# внешним (край фаски, опущенный в черноту). Четыре трапеции со скошенными
 	# углами. Полуоси РАЗНЫЕ — карта прямоугольная, общий множитель дал бы
@@ -2553,6 +3329,10 @@ func _build_world_edge() -> void:
 	bevel.material_override = bmat
 	add_child(bevel)
 
+	_build_world_walls()
+
+## ФИЗИЧЕСКИЕ СТЕНЫ ПЕРИМЕТРА — своей функцией: бортик отключаем, стены нет
+func _build_world_walls() -> void:
 	# 3. ФИЗИЧЕСКИЕ СТЕНЫ по периметру. Настоящий упор юнитов — зажим в
 	# clamp_to_map() (маски в проекте нулевые, стена сама никого не держит).
 	#
@@ -2608,6 +3388,10 @@ func _lake_point(angle: float) -> Vector2:
 # нулевые (см. README — включённые маски давали дрожание на грунте), а форма
 # берега и так задана функцией, поэтому проверка точная и без узлов физики.
 func is_water(x: float, z: float) -> bool:
+	# ── РЕКА (09.09.2026): русло непроходимо, брод — суша ───────────────────
+	if RIVER_ENABLED and river_in_field(z):
+		if absf(x - river_x(z)) < RIVER_HALF_W + LAKE_MARGIN and not in_ford(z):
+			return true
 	# ОЗЕРО ВРЕМЕННО ОТКЛЮЧЕНО: воды на карте нет вовсе, центр — суша.
 	# Одна проверка на самом верху отключает и обход берега, и поиск суши,
 	# и все оговорки про воду в приказах — они просто перестают срабатывать
@@ -2649,6 +3433,23 @@ func slide_around_water(from: Vector3, step: Vector3) -> Vector3:
 	var to := from + step
 	if not is_water(to.x, to.z):
 		return step
+	# ── БЕРЕГ РЕКИ ВЕДЁТ К БРОДУ ─────────────────────────────────────────────
+	# Поиска пути нет; русло прямое (вдоль Z), значит касательная к берегу —
+	# ось Z, и выбирать нужно ту сторону, где брод. Так отряд, посланный на
+	# другой берег, сам доходит вдоль воды до брода и переходит. Подмес
+	# «прочь от воды» — чтобы не тереться о кромку в изгибе меандра
+	if RIVER_ENABLED and near_river(to.x, to.z, LAKE_MARGIN + 0.5):
+		var len_r: float = step.length()
+		var toward: float = 1.0 if FORD_Z >= from.z else -1.0
+		var away_x: float = 1.0 if from.x >= river_x(from.z) else -1.0
+		var tries: Array = [Vector3(0.0, 0.0, toward), Vector3(away_x * 0.4, 0.0, toward),
+			Vector3(away_x, 0.0, toward * 0.3), Vector3(away_x, 0.0, 0.0)]
+		for t in tries:
+			var dir_r: Vector3 = (t as Vector3).normalized()
+			var cand_r: Vector3 = from + dir_r * len_r
+			if not is_water(cand_r.x, cand_r.z):
+				return dir_r * len_r
+		return Vector3.ZERO
 	# Наружу от центра озера (для вытянутого контура радиали достаточно)
 	var outward := Vector3(from.x - LAKE_CENTER.x, 0.0, from.z - LAKE_CENTER.z)
 	if outward.length_squared() < 1e-6:
@@ -2693,6 +3494,14 @@ const SHORE_TRIES := 60      # максимум шагов (30 м — завед
 func nearest_land(x: float, z: float) -> Vector2:
 	if not is_water(x, z):
 		return Vector2(x, z)
+	# ── РЕКА: ближний берег поперёк русла, ±X ───────────────────────────────
+	if RIVER_ENABLED and near_river(x, z, LAKE_MARGIN + 0.5):
+		var side: float = 1.0 if x >= river_x(z) else -1.0
+		for i in range(1, SHORE_TRIES + 1):
+			var px: float = x + side * float(i) * SHORE_STEP
+			if not is_water(px, z):
+				return Vector2(px + side * SHORE_STEP, z)
+		return Vector2(x, z)
 	var out := Vector2(x - LAKE_CENTER.x, z - LAKE_CENTER.z)
 	if out.length_squared() < 1e-6:
 		out = Vector2(1.0, 0.0)      # ровно в центре — уходим куда угодно
@@ -2703,6 +3512,190 @@ func nearest_land(x: float, z: float) -> Vector2:
 			# Ещё полшага наружу: точно за кромкой, а не впритык к ней
 			return p + out * SHORE_STEP
 	return Vector2(x, z)
+
+## ═════════════════════════════════════════════════════════════════════════════
+## РЕКА: ВОДА, ПЕНА У БЕРЕГОВ, КАМНИ В БРОДЕ (заказ владельца, 09.09.2026)
+## ═════════════════════════════════════════════════════════════════════════════
+## Вода — те же клетки сетки, что у земли (просаженное дно), с Water.png
+## повтором; в броде вода тоже рисуется (это мелководье), но по нему ходят.
+## Пена — статичные лоскуты первого кадра Water Foam вдоль обеих кромок;
+## камни в броде — анимированные листы Rocks_0N (8 кадров), стоят в воде и
+## показывают, где переходить
+func _spawn_river() -> void:
+	if not RIVER_ENABLED:
+		return
+	var water_tex: Texture2D = load(TILE_WATER_PATH) as Texture2D \
+		if ResourceLoader.exists(TILE_WATER_PATH) else null
+	var nx: int = int(ceil(MAP_HALF_X * 2.0 / RELIEF_STEP))
+	var nz: int = int(ceil(MAP_HALF_Z * 2.0 / RELIEF_STEP))
+	var dx: float = MAP_HALF_X * 2.0 / float(nx)
+	var dz: float = MAP_HALF_Z * 2.0 / float(nz)
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var quads := 0
+	for iz in range(nz):
+		for ix in range(nx):
+			var x0: float = -MAP_HALF_X + float(ix) * dx
+			var x1: float = x0 + dx
+			var z0: float = -MAP_HALF_Z + float(iz) * dz
+			var z1: float = z0 + dz
+			var cx: float = (x0 + x1) * 0.5
+			var cz: float = (z0 + z1) * 0.5
+			# Клетка русла: и глубокая вода, и брод (там дно тоже под водой)
+			# ЗЕРКАЛО ВОДЫ НАКРЫВАЕТ И ОТКОС: где грунт выше зеркала, он его
+			# и перекроет (оба непрозрачные, решает буфер глубины); где ниже —
+			# видна вода. Оттенок — по глубине: у берега и в броду светлее
+			if not near_river(cx, cz, RIVER_BANK):
+				continue
+			var a := Vector3(x0, water_surface_y(x0, z0), z0)
+			var b := Vector3(x1, water_surface_y(x1, z0), z0)
+			var c := Vector3(x1, water_surface_y(x1, z1), z1)
+			var d := Vector3(x0, water_surface_y(x0, z1), z1)
+			for v in [a, b, c, a, c, d]:
+				var p: Vector3 = v
+				var full: float = FORD_DEPTH if in_ford(p.z) else RIVER_DEPTH
+				var deep: float = clampf(river_depth(p.x, p.z) / maxf(full, 0.01), 0.0, 1.0)
+				var shade: Color = Color(0.84, 0.94, 1.0).lerp(Color(0.66, 0.82, 0.96), deep)
+				if in_ford(p.z):
+					shade = Color(0.90, 0.97, 1.0)
+				st.set_color(shade)
+				st.set_normal(Vector3.UP)
+				st.set_uv(Vector2(p.x / WATER_TILE_M, p.z / WATER_TILE_M))
+				st.add_vertex(p)
+			quads += 1
+	if quads > 0:
+		var wmat := StandardMaterial3D.new()
+		wmat.albedo_color = Color(0.30, 0.62, 0.86)
+		if water_tex != null:
+			wmat.albedo_texture = water_tex
+			wmat.albedo_color = Color.WHITE
+			wmat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+			wmat.texture_repeat = true
+		wmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		wmat.cull_mode = BaseMaterial3D.CULL_DISABLED
+		wmat.vertex_color_use_as_albedo = true
+		var river := MeshInstance3D.new()
+		river.name = "River"
+		river.mesh = st.commit()
+		river.material_override = wmat
+		_world.add_child(river)
+	_spawn_river_foam()
+	_spawn_ford_rocks()
+
+## Лоскуты пены у кромок воды (первый кадр Water Foam, плашмя)
+func _spawn_river_foam() -> void:
+	if not ResourceLoader.exists(TILE_FOAM_PATH):
+		return
+	var sheet := load(TILE_FOAM_PATH) as Texture2D
+	if sheet == null:
+		return
+	var img: Image = sheet.get_image()
+	if img == null:
+		return
+	var side: int = mini(img.get_height(), img.get_width())
+	var frame := ImageTexture.create_from_image(img.get_region(Rect2i(0, 0, side, side)))
+	var mat := StandardMaterial3D.new()
+	mat.albedo_texture = frame
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+	mat.alpha_scissor_threshold = 0.4
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+	# ── ОДИН МЕШ НА ВСЮ ПЕНУ (09.09.2026) ──────────────────────────────────
+	# Лоскут на узел = вызов отрисовки на лоскут: вдоль русла в 253 м их
+	# выходило около семидесяти. Материал у всех один, лоскуты неподвижны —
+	# значит, это один ArrayMesh: те же квады, те же повороты (Rx −90°, затем
+	# Ry на k·37°, порядок Эйлера YXZ, как у rotation_degrees), тот же UV
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var half := 1.5
+	var corners: Array = [Vector3(-half, half, 0.0), Vector3(half, half, 0.0),
+		Vector3(half, -half, 0.0), Vector3(-half, -half, 0.0)]
+	var uvs: Array = [Vector2(0.0, 0.0), Vector2(1.0, 0.0), Vector2(1.0, 1.0), Vector2(0.0, 1.0)]
+	var order: Array = [0, 1, 2, 0, 2, 3]
+	var z: float = -MAP_HALF_Z + 3.0
+	var k := 0
+	while z < MAP_HALF_Z - 3.0:
+		if not in_ford(z):
+			for side_s in [-1.0, 1.0]:
+				# Пена — на УРЕЗЕ ВОДЫ: там, где откос выходит из-под зеркала
+				# (грунт = зеркало при t = WATER_DROP от кромки берега)
+				var x: float = river_x(z) + float(side_s) * (RIVER_HALF_W + RIVER_BANK * (1.0 - WATER_DROP) - 0.6)
+				var at := Vector3(x, water_surface_y(x, z) + 0.03, z)
+				var basis := Basis.from_euler(Vector3(deg_to_rad(-90.0),
+					deg_to_rad(float(k * 37 % 360)), 0.0))
+				for idx in order:
+					st.set_normal(Vector3.UP)
+					st.set_uv(uvs[idx])
+					st.add_vertex(at + basis * (corners[idx] as Vector3))
+				k += 1
+		z += FOAM_STEP
+	if k > 0:
+		var foam := MeshInstance3D.new()
+		foam.name = "RiverFoam"
+		foam.mesh = st.commit()
+		foam.material_override = mat
+		# Лоскуты разбросаны по всей длине карты, узел один: без запаса
+		# отсечение по AABB роняло бы всю пену, когда центр меша за кадром
+		foam.extra_cull_margin = 4096.0
+		_world.add_child(foam)
+
+## Камни в воде брода — по ним видно, где переходить (анимированные Rocks_0N)
+func _spawn_ford_rocks() -> void:
+	var paths: Array = []
+	for i in range(1, 5):
+		var p: String = TILE_ROCKS_DIR + "Rocks_%02d.png" % i
+		if ResourceLoader.exists(p):
+			paths.append(p)
+	if paths.is_empty():
+		return
+	var root := Node3D.new()
+	root.name = "FordRocks"
+	_world.add_child(root)
+	# ── MultiMesh НА ЛИСТ, А НЕ УЗЕЛ НА КАМЕНЬ (09.09.2026) ────────────────
+	# Двадцать шесть камней были двадцатью шестью вызовами отрисовки. Шейдер
+	# билборда читает начало координат из MODEL_MATRIX, а у экземпляра
+	# MultiMesh она своя — значит, камни одного листа рисуются одним вызовом,
+	# размер уезжает в масштаб экземпляра (квад единичной ширины). Фаза
+	# анимации общая на лист — у четырёх листов она разная
+	var per_tex: Dictionary = {}     # путь → [Texture2D, aspect]
+	var xforms: Dictionary = {}      # путь → Array[Transform3D]
+	for i in range(FORD_ROCKS):
+		var tp: String = String(paths[i % paths.size()])
+		if not per_tex.has(tp):
+			var tex := load(tp) as Texture2D
+			if tex == null:
+				continue
+			per_tex[tp] = [tex, maxf(_BBUtil.frame_aspect(tex), 0.1)]
+			xforms[tp] = []
+		var aspect: float = float((per_tex[tp] as Array)[1])
+		# Детерминированная россыпь по полосе брода
+		var fz: float = FORD_Z + (float(i) / float(FORD_ROCKS) - 0.5) * 2.0 * (FORD_HALF - 2.0)
+		var fx: float = river_x(fz) + sin(float(i) * 2.399) * (RIVER_HALF_W - 1.5)
+		var w: float = 1.4 + 0.5 * absf(sin(float(i) * 1.7))
+		var h: float = w / aspect
+		var xf := Transform3D(Basis.IDENTITY.scaled(Vector3(w, w, w)),
+			Vector3(fx, get_terrain_height(fx, fz) + h * 0.5 - 0.05, fz))
+		(xforms[tp] as Array).append(xf)
+	for tp in per_tex.keys():
+		var rec: Array = per_tex[tp]
+		var list: Array = xforms[tp]
+		if list.is_empty():
+			continue
+		var q := QuadMesh.new()
+		q.size = Vector2(1.0, 1.0 / float(rec[1]))
+		q.material = _BBUtil.make_material(rec[0] as Texture2D, Color.WHITE, 0.5, 6.0)
+		var mm := MultiMesh.new()
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.mesh = q
+		mm.instance_count = list.size()
+		for j in range(list.size()):
+			mm.set_instance_transform(j, list[j] as Transform3D)
+		var mmi := MultiMeshInstance3D.new()
+		mmi.name = "Rocks_" + String(tp).get_file().get_basename()
+		mmi.multimesh = mm
+		mmi.extra_cull_margin = 64.0
+		root.add_child(mmi)
 
 func _spawn_water_body() -> void:
 	# ОЗЕРО И УТКА ВРЕМЕННО ОТКЛЮЧЕНЫ (LAKE_ENABLED). Вместе с водой не
@@ -2898,8 +3891,17 @@ func _spawn_bushes() -> void:
 		if LAKE_ENABLED and Vector2(cx - LAKE_CENTER.x, cz - LAKE_CENTER.z).length() \
 				< LAKE_RADIUS * 1.35 + 2.0:
 			continue                                     # озеро
+		if near_river(cx, cz, 6.0):
+			continue
 		_spawn_bush_cluster(bush_textures, Vector3(cx, 0.0, cz), randi_range(3, 7))
 		placed += 1
+	# Декор плато (референс 10.09.2026): по паре кустов на вершине каждого
+	for p in plateau_list():
+		for _j in range(2):
+			var ang: float = randf() * TAU
+			var rr: float = randf_range(2.0, float(p[2]) * 0.7)
+			_spawn_bush_cluster(bush_textures,
+				Vector3(float(p[0]) + cos(ang) * rr, 0.0, float(p[1]) + sin(ang) * rr), randi_range(2, 4))
 
 # Овальное пятно кустов; каждый куст — отдельный объект, зафиксированный
 # в мировых координатах, billboard только на его собственном спрайте

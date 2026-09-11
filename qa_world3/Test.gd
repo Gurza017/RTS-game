@@ -1,5 +1,10 @@
 extends Node
 
+## Числа отрядов берём из конфига владельца, а не из памяти (правило 10)
+const _UCfgW3 := preload("res://scripts/unit_stats_config.gd")
+## Лимиты и гарнизон ИИ — оттуда же, откуда их читает сам ИИ (правило 10)
+const _AICfgW3 := preload("res://scripts/ai_start_army_limit.gd")
+
 ## ═══════════════════════════════════════════════════════════════════════════
 ## СТЕНД qa_world3 — ДЫРЫ, НЕ ЗАКРЫТЫЕ СТЕНДАМИ qa_world И qa_world2
 ## ═══════════════════════════════════════════════════════════════════════════
@@ -29,6 +34,18 @@ extends Node
 
 var main = null
 var cam: RTSCamera = null
+
+## ── ПРЕДЕЛЫ ФОКУСА КАМЕРЫ БЕРУТСЯ У КАМЕРЫ ────────────────────────────────
+## Здесь стояло main.CAM_BOUND_X / CAM_BOUND_Z — констант с такими именами в
+## Main нет и не было: стенд ронял SCRIPT ERROR на первом же обращении и умирал
+## МОЛЧА целиком (ловушка «ошибка в корутине стенда убивает её без единого
+## признака»). Камера считает пределы сама, из половины карты и текущего зума
+## (RTSCamera._clamp_focus → bounds_min/bounds_max)
+func _cam_bx() -> float:
+	return float(cam.bounds_max.x) if cam != null else 0.0
+
+func _cam_bz() -> float:
+	return float(cam.bounds_max.y) if cam != null else 0.0
 var _pass: int = 0
 var _fail: int = 0
 var _log: Array = []
@@ -39,6 +56,12 @@ var _ai_snap: Dictionary = {}
 
 func _ready() -> void:
 	call_deferred("_run")
+
+## ЖДЁМ ФИЗКАДРЫ, А НЕ КАДРЫ ОТРИСОВКИ (правило 11): при Engine.max_fps = 0
+## отрисовка обгоняет физику, и «шесть кадров» не значат шести шагов мира
+func pframes(n: int) -> void:
+	for _i in range(n):
+		await get_tree().physics_frame
 
 func frames(n: int) -> void:
 	for _i in range(n):
@@ -133,9 +156,12 @@ func _run() -> void:
 	cam.pan_speed = 0.0
 	cam.edge_pan_margin = 0.0
 
+	# ПРЕДЕЛЫ ФОКУСА — У КАМЕРЫ, А НЕ У MAIN: констант CAM_BOUND_* в Main нет
+	# (и не было — стенд ронял здесь SCRIPT ERROR и молча умирал целиком).
+	# Камера считает их сама из половины карты и текущего зума
 	print("карта %.1f × %.1f м; пределы юнитов ±%.2f / ±%.2f; фокус камеры ±%.1f / ±%.1f" % [
 		main.MAP_HALF_X * 2.0, main.MAP_HALF_Z * 2.0,
-		_lim_x(), _lim_z(), main.CAM_BOUND_X, main.CAM_BOUND_Z])
+		_lim_x(), _lim_z(), float(cam.bounds_max.x), float(cam.bounds_max.y)])
 
 	await _g_angle()
 	await _z_zoom()
@@ -189,14 +215,14 @@ func _g_angle() -> void:
 		hs.append(lerpf(cam.min_height, cam.max_height, float(i) / 5.0))
 	var fs: Array = [
 		Vector2(0.0, 0.0),
-		Vector2(main.CAM_BOUND_X, main.CAM_BOUND_Z),
-		Vector2(-main.CAM_BOUND_X, -main.CAM_BOUND_Z),
-		Vector2(main.CAM_BOUND_X, -main.CAM_BOUND_Z),
-		Vector2(-main.CAM_BOUND_X, main.CAM_BOUND_Z),
-		Vector2(main.CAM_BOUND_X, 0.0),
-		Vector2(-main.CAM_BOUND_X, 0.0),
-		Vector2(0.0, main.CAM_BOUND_Z),
-		Vector2(0.0, -main.CAM_BOUND_Z),
+		Vector2(_cam_bx(), _cam_bz()),
+		Vector2(-_cam_bx(), -_cam_bz()),
+		Vector2(_cam_bx(), -_cam_bz()),
+		Vector2(-_cam_bx(), _cam_bz()),
+		Vector2(_cam_bx(), 0.0),
+		Vector2(-_cam_bx(), 0.0),
+		Vector2(0.0, _cam_bz()),
+		Vector2(0.0, -_cam_bz()),
 	]
 	var worst_pitch := 0.0
 	var worst_yaw   := 0.0
@@ -301,7 +327,7 @@ func _g_angle() -> void:
 	# худший кадр в игре — предельное отдаление с фокусом, упёртым в северную
 	# кромку: за ней сразу чернота. Проверка центра карты (Г11) этот случай
 	# не ловит вовсе, а игрок в него попадает одним движением мыши
-	look(0.0, -main.CAM_BOUND_Z, cam.max_height)
+	look(0.0, -_cam_bz(), cam.max_height)
 	var inside2 := 0
 	for i2 in range(101):
 		var g3: Vector3 = ground_under(Vector2(640.0, 7.2 * float(i2)))
@@ -347,21 +373,29 @@ func _z_zoom() -> void:
 	# ── З1. ПРЕДЕЛЫ ФОКУСА РАЗНЫЕ ПО ОСЯМ ───────────────────────────────────
 	print("  bounds камеры: min (%.3f, %.3f), max (%.3f, %.3f)" % [
 		cam.bounds_min.x, cam.bounds_min.y, cam.bounds_max.x, cam.bounds_max.y])
-	verdict("З1 пределы фокуса разведены по осям (не квадрат)",
-		absf(cam.bounds_max.x - main.CAM_BOUND_X) < 0.001
-			and absf(cam.bounds_max.y - main.CAM_BOUND_Z) < 0.001
-			and absf(cam.bounds_max.x - cam.bounds_max.y) > 1.0,
-		"(%.3f, %.3f) при ожидаемых (%.3f, %.3f)" % [
-			cam.bounds_max.x, cam.bounds_max.y, main.CAM_BOUND_X, main.CAM_BOUND_Z])
+	# ЭТАЛОНА ИЗ MAIN БОЛЬШЕ НЕТ (констант CAM_BOUND_* там и не было): предел
+	# считает сама камера, и проверяется СВОЙСТВО — пределы разведены по осям
+	# и оба лежат внутри карты
+	# ЗАПАС ЗА КРАЕМ КАРТЫ НАМЕРЕННЫЙ (RTSCamera.EDGE_OVERSCROLL): без него
+	# угловой замок прижимался к самому краю экрана и частью уезжал под панели
+	# HUD. Проверяется то, что и защищается: пределы РАЗВЕДЕНЫ ПО ОСЯМ и не
+	# выходят за карту БОЛЬШЕ, чем на этот запас
+	var over: float = float(cam.EDGE_OVERSCROLL)
+	verdict("З1 пределы фокуса разведены по осям и не дальше запаса за краем",
+		absf(cam.bounds_max.x - cam.bounds_max.y) > 1.0
+			and cam.bounds_max.x <= main.MAP_HALF_X + over + 0.001
+			and cam.bounds_max.y <= main.MAP_HALF_Z + over + 0.001,
+		"(%.3f, %.3f) при полуосях карты (%.1f, %.1f) и запасе %.1f" % [
+			cam.bounds_max.x, cam.bounds_max.y, main.MAP_HALF_X, main.MAP_HALF_Z, over])
 
 	cam.pan_to(Vector3(9999.0, 0.0, 9999.0))
 	var pz: float = cam._focus.z
 	cam.pan_to(Vector3(-9999.0, 0.0, -9999.0))
 	var nz: float = cam._focus.z
 	print("  увод фокуса по КОРОТКОЙ оси: +∞ → %.3f, −∞ → %.3f (ждали ±%.3f, НЕ ±%.3f)" % [
-		pz, nz, main.CAM_BOUND_Z, main.CAM_BOUND_X])
+		pz, nz, _cam_bz(), _cam_bx()])
 	verdict("З2 по короткой оси фокус упирается в CAM_BOUND_Z, а не в CAM_BOUND_X",
-		absf(pz - main.CAM_BOUND_Z) < 0.001 and absf(nz + main.CAM_BOUND_Z) < 0.001,
+		absf(pz - _cam_bz()) < 0.001 and absf(nz + _cam_bz()) < 0.001,
 		"+%.3f / %.3f" % [pz, nz])
 
 	# ── З3. ПРОЕЗД ЗУМА КАДР ЗА КАДРОМ ──────────────────────────────────────
@@ -418,15 +452,20 @@ func _z_zoom() -> void:
 	# Фокус в углу, камера при этом физически уезжает ЗА край поля по +Z
 	# (фокус 61.1 + вынос 40 = 101 при полуоси 73). Проверяем, что она всё
 	# равно висит над миром, а центр экрана остаётся на карте
-	look(main.CAM_BOUND_X, main.CAM_BOUND_Z, cam.max_height)
+	look(_cam_bx(), _cam_bz(), cam.max_height)
 	var cp: Vector3 = cam.global_position
 	var gc: Vector3 = ground_under(Vector2(640.0, 360.0))
 	print("  потолок зума в углу: камера (%.1f, %.1f, %.1f), под центром экрана (%.1f, %.1f)" % [
 		cp.x, cp.y, cp.z, gc.x, gc.z])
-	verdict("З8 на потолке зума в углу камера цела, а центр экрана — внутри карты",
+	# ЗАПАС ЗА КРАЕМ КАРТЫ НАМЕРЕННЫЙ (RTSCamera.EDGE_OVERSCROLL, см. З1):
+	# в углу центр экрана и обязан выехать за поле, иначе угловой замок не
+	# рассмотреть. Проверяется, что он выехал НЕ БОЛЬШЕ, чем на этот запас
+	var over8: float = float(cam.EDGE_OVERSCROLL)
+	verdict("З8 на потолке зума в углу камера цела, а центр экрана не дальше запаса за краем",
 		_finite3(cp) and cp.y > 0.0 and _finite3(gc)
-			and absf(gc.x) <= main.MAP_HALF_X and absf(gc.z) <= main.MAP_HALF_Z,
-		"камера %s, центр экрана (%.1f, %.1f)" % [str(cp), gc.x, gc.z])
+			and absf(gc.x) <= main.MAP_HALF_X + over8
+			and absf(gc.z) <= main.MAP_HALF_Z + over8,
+		"камера %s, центр экрана (%.1f, %.1f), запас %.1f" % [str(cp), gc.x, gc.z, over8])
 
 	# ── З9. ПОЛ ЗУМА: НИЖНЯЯ КРОМКА КАДРА ЛОЖИТСЯ НА ЗЕМЛЮ ──────────────────
 	# Расстояние меряется ОТ ФОКУСА, а не от камеры: в ортографии камера унесена
@@ -717,8 +756,8 @@ func _p_shape() -> void:
 	# облако во фрустум хоть раз
 	var seen := 0
 	for hh in [cam.min_height, 24.0, cam.max_height]:
-		for f in [Vector2(0.0, 0.0), Vector2(-main.CAM_BOUND_X, -main.CAM_BOUND_Z),
-				Vector2(main.CAM_BOUND_X, main.CAM_BOUND_Z), Vector2(0.0, -main.CAM_BOUND_Z)]:
+		for f in [Vector2(0.0, 0.0), Vector2(-_cam_bx(), -_cam_bz()),
+				Vector2(_cam_bx(), _cam_bz()), Vector2(0.0, -_cam_bz())]:
 			var fv2: Vector2 = f
 			look(fv2.x, fv2.y, float(hh))
 			for cl2 in clouds:
@@ -810,30 +849,52 @@ func _s_spawns() -> void:
 	# уходит далеко. Гоняем камеру по всей карте и каждый раз спрашиваем призрак
 	var ghost_bad := 0
 	var ghost_far := 0.0
-	for f in [Vector2(0.0, 0.0), Vector2(main.CAM_BOUND_X, main.CAM_BOUND_Z),
-			Vector2(-main.CAM_BOUND_X, -main.CAM_BOUND_Z),
-			Vector2(main.CAM_BOUND_X, -main.CAM_BOUND_Z),
-			Vector2(-main.CAM_BOUND_X, main.CAM_BOUND_Z)]:
+	for f in [Vector2(0.0, 0.0), Vector2(_cam_bx(), _cam_bz()),
+			Vector2(-_cam_bx(), -_cam_bz()),
+			Vector2(_cam_bx(), -_cam_bz()),
+			Vector2(-_cam_bx(), _cam_bz())]:
 		var fv: Vector2 = f
 		for hh in [cam.min_height, 28.0, cam.max_height]:
 			look(fv.x, fv.y, float(hh))
 			main._update_ghost(0.016)
 			var gp: Vector3 = main._ghost.global_position
 			ghost_far = maxf(ghost_far, Vector2(gp.x - pa.x, gp.z - pa.z).length())
-			if absf(gp.x - pa.x) > half + 0.01 or absf(gp.z - pa.z) > half + 0.01 \
-					or not _finite3(gp):
+			# ── ПРИЗРАК ЗАЖАТ ПРЕДЕЛАМИ КАРТЫ, А НЕ СТАРТОВЫМ КВАДРАТОМ ──────
+			# Требование развёрнуто владельцем 10.09.2026: зелёной зоны застройки
+			# больше нет вовсе, строить можно где угодно вне тумана, и замок
+			# ставится кликом по любой разведанной точке. Зажим остался один —
+			# GameManager.clamp_to_map, и он же проверяется здесь
+			if absf(gp.x) > main.MAP_HALF_X + 0.01 or absf(gp.z) > main.MAP_HALF_Z + 0.01:
 				ghost_bad += 1
-	print("  призрак замка в 15 положениях камеры: вылазок за стартовый квадрат %d, дальше всего %.1f м от якоря" % [
+	print("  призрак замка в 15 положениях камеры: вылазок за пределы карты %d, дальше всего %.1f м от якоря" % [
 		ghost_bad, ghost_far])
-	verdict("С6 призрак замка не выходит за стартовый квадрат игрока ни при каком ракурсе",
+	verdict("С6 призрак замка не выходит за пределы карты ни при каком ракурсе",
 		ghost_bad == 0, "вылазок %d из 15" % ghost_bad)
 
+	# ── ТУМАН ГЛУШИТСЯ ЯВНО ─────────────────────────────────────────────────
+	# С 10.09.2026 постройка (и замок в том числе) разрешена только на
+	# разведанной земле — Main.can_build_at. В партии эту точку раскрыла бы
+	# стартовая бригада; стенд кликает в неё сразу, а рабочие ещё в пути
+	if GameManager.fog != null:
+		GameManager.fog.enabled = false
 	# Ставим замок кликом по своему углу
 	look(pa.x, pa.z, 28.0)
 	var aim_pt: Vector3 = pa + Vector3(6.0, 0.0, 6.0)
 	var screen: Vector2 = cam.unproject_position(aim_pt)
 	main._try_place_castle(screen)
-	await frames(6)
+	await pframes(6)
+	# ── ЗАМОК НЕ ВСТАЁТ ГОТОВЫМ: ЕГО СТРОИТ САМОСТОЯТЕЛЬНАЯ ПЛОЩАДКА ───────
+	# Прежде клик ставил Castle сразу, и стенд искал его через шесть кадров.
+	# Теперь на карту встаёт ConstructionSite с self_building = true, и
+	# настоящей крепостью он становится через CASTLE_BUILD_SEC. Ждать эти
+	# секунды стенду незачем — доводим площадку до конца событием
+	for b0 in get_tree().get_nodes_in_group("player_buildings"):
+		if not is_instance_valid(b0):
+			continue
+		if String(b0.get("target_id")) == "castle" and b0.has_method("_complete"):
+			b0.progress = b0.build_time
+			b0.call("_complete")
+	await pframes(6)
 	var pc: Castle = null
 	for b in get_tree().get_nodes_in_group("player_buildings"):
 		if b is Castle:
@@ -841,9 +902,13 @@ func _s_spawns() -> void:
 	var err: float = 999.0
 	if pc != null:
 		err = Vector2(pc.global_position.x - aim_pt.x, pc.global_position.z - aim_pt.z).length()
+	# ЧТЕНИЕ ТОЧКИ — ТОЛЬКО У ЖИВОГО ЗАМКА. Тернарник в аргументе print
+	# ВЫЧИСЛЯЕТ ОБЕ ветви (та же ловушка, что у Dictionary.get с умолчанием), и
+	# на непоставленном замке блок падал SCRIPT ERROR, унося с собой С8-С10
+	var pcx: float = pc.global_position.x if pc != null else 0.0
+	var pcz: float = pc.global_position.z if pc != null else 0.0
 	print("  клик в свой угол (%.1f, %.1f) → замок в (%.1f, %.1f), ошибка %.2f м, фаза %d" % [
-		aim_pt.x, aim_pt.z, pc.global_position.x if pc != null else 0.0,
-		pc.global_position.z if pc != null else 0.0, err, main._phase])
+		aim_pt.x, aim_pt.z, pcx, pcz, err, main._phase])
 	verdict("С7 замок игрока встаёт туда, куда кликнули внутри своего угла",
 		pc != null and err < 1.0, "ошибка %.2f м" % err)
 
@@ -855,10 +920,21 @@ func _s_spawns() -> void:
 	var w_far := 0.0
 	var w_idle := 0
 	var w_bad := 0
+	# ЯКОРЬ — ТОЧКА КЛИКА, А НЕ УЗЕЛ ЗАМКА. Если крепость почему-то не встала,
+	# чтение её global_position роняет весь блок SCRIPT ERROR'ом и уносит с
+	# собой С8-С10 (правило 5 на сырой ссылке)
+	# ── ОТСЧЁТ ОТ ЯКОРЯ БАЗЫ, А НЕ ОТ ЗАМКА ────────────────────────────────
+	# Прежде бригаду выдавала САМА постановка первой крепости, и пятеро
+	# появлялись кольцом ВОКРУГ НЕЁ — отсюда «все в 12 м от замка». С заказа
+	# 10.09.2026 бригада выходит у якоря базы ещё в start_game(), а крепость
+	# игрок ставит куда захочет: здесь стенд ткнул в якорь + (6, 6), и до
+	# замка от рабочих законно набегает восемь с половиной метров сверху.
+	# Мерим от того, откуда бригада вышла
+	var base_pt: Vector3 = pa
 	for w2 in pw:
 		var ww := w2 as Worker
-		var d: float = Vector2(ww.global_position.x - pc.global_position.x,
-			ww.global_position.z - pc.global_position.z).length()
+		var d: float = Vector2(ww.global_position.x - base_pt.x,
+			ww.global_position.z - base_pt.z).length()
 		w_far = maxf(w_far, d)
 		if ww.state == Unit.State.IDLE:
 			w_idle += 1
@@ -883,11 +959,20 @@ func _s_spawns() -> void:
 	for pr in probes:
 		var d2: Dictionary = pr
 		var tgt: Vector3 = d2["p"]
-		look(clampf(tgt.x, -main.CAM_BOUND_X, main.CAM_BOUND_X),
-			clampf(tgt.z, -main.CAM_BOUND_Z, main.CAM_BOUND_Z), 28.0)
+		look(clampf(tgt.x, -_cam_bx(), _cam_bx()),
+			clampf(tgt.z, -_cam_bz(), _cam_bz()), 28.0)
 		var sc: Vector2 = cam.unproject_position(Vector3(tgt.x, 0.0, tgt.z))
 		var before: Array = get_tree().get_nodes_in_group("player_buildings")
 		main._try_place_castle(sc)
+		await frames(4)
+		# Крепость строит САМОСТОЯТЕЛЬНАЯ ПЛОЩАДКА (см. С7): доводим её
+		# событием, иначе Castle не появится вовсе
+		for b1 in get_tree().get_nodes_in_group("player_buildings"):
+			if not is_instance_valid(b1) or b1 in before:
+				continue
+			if String(b1.get("target_id")) == "castle" and b1.has_method("_complete"):
+				b1.progress = b1.build_time
+				b1.call("_complete")
 		await frames(4)
 		var fresh: Castle = null
 		for b2 in get_tree().get_nodes_in_group("player_buildings"):
@@ -897,10 +982,14 @@ func _s_spawns() -> void:
 		var pos := Vector3.ZERO
 		if fresh != null:
 			pos = fresh.global_position
-			ok = absf(pos.x - pa.x) <= half + 0.01 and absf(pos.z - pa.z) <= half + 0.01 \
-				and absf(pos.x) <= main.MAP_CLAMP_X + 0.01 \
+			# ── ЗОНЫ ЗАСТРОЙКИ БОЛЬШЕ НЕТ ВОВСЕ (заказ 10.09.2026) ────────
+			# Прежде замок зажимался в стартовый квадрат игрока, и проверка
+			# требовала «остался в своём углу». Теперь строить можно где
+			# угодно вне тумана, и зажим остался ОДИН — пределы карты
+			# (GameManager.clamp_to_map). Именно его и судим
+			ok = absf(pos.x) <= main.MAP_CLAMP_X + 0.01 \
 				and absf(pos.z) <= main.MAP_CLAMP_Z + 0.01 \
-				and pos.x < 0.0 and pos.z < 0.0
+				and _finite3(pos)
 		print("    клик «%s» (%.0f, %.0f) → замок в (%.1f, %.1f) %s" % [
 			String(d2["nm"]), tgt.x, tgt.z, pos.x, pos.z, "ОК" if ok else "МИМО"])
 		if not ok:
@@ -914,7 +1003,7 @@ func _s_spawns() -> void:
 					w3.queue_free()
 			fresh.queue_free()
 		await frames(4)
-	verdict("С10 куда бы игрок ни ткнул, замок остаётся в его стартовом квадрате",
+	verdict("С10 куда бы игрок ни ткнул, замок остаётся В ПРЕДЕЛАХ КАРТЫ",
 		clamp_bad == 0, "промахов %d из 3" % clamp_bad)
 
 	# ── С11. МАССОВАЯ ПРОВЕРКА clamp_to_player_start ─────────────────────────
@@ -973,9 +1062,23 @@ func _s_spawns() -> void:
 	var off_line: float = absf((ea.x - pa.x) * (0.0 - pa.z) - (0.0 - pa.x) * (ea.z - pa.z)) / diag
 	print("  диагональ баз %.1f м; центр карты отстоит от прямой между базами на %.3f м; точка сбора ИИ (%.1f, %.1f)" % [
 		diag, off_line, mid.x, mid.z])
-	verdict("С16 базы стоят по диагонали через центр карты, и точка сбора ИИ — этот центр",
-		off_line < 0.01 and absf(mid.x) < 0.01 and absf(mid.z) < 0.01 and diag > 200.0,
-		"смещение %.3f м, точка сбора (%.1f, %.1f)" % [off_line, mid.x, mid.z])
+	# ── СТАРТ ИГРОКА СДВИНУТ ОТ УГЛА (заказ 10.09.2026, PLAYER_START_SHIFT) ─
+	# Прямая между базами больше НЕ проходит строго через центр: якорь игрока
+	# отъехал внутрь карты на PLAYER_START_SHIFT по обеим осям, а якорь ИИ
+	# остался в своём углу. Смещение при этом ОГРАНИЧЕНО самим сдвигом, и
+	# точка сбора ИИ по-прежнему центр карты — оба свойства и проверяем
+	# ТОЧКА СБОРА ИИ — СЕРЕДИНА МЕЖДУ БАЗАМИ, А НЕ ЦЕНТР КАРТЫ, и совпадали
+	# они только пока базы стояли симметрично. Якорь игрока отъехал внутрь на
+	# PLAYER_START_SHIFT — середина уехала на его половину, то есть на десять
+	# метров. Проверяем СВОЙСТВО: точка сбора и есть середина, а от центра
+	# карты она отстоит не дальше половины сдвига
+	var want_mid: Vector2 = Vector2((pa.x + ea.x) * 0.5, (pa.z + ea.z) * 0.5)
+	verdict("С16 базы по диагонали (со сдвигом старта), точка сбора ИИ — середина между ними",
+		off_line <= main.PLAYER_START_SHIFT + 0.01 and diag > 200.0
+			and absf(mid.x - want_mid.x) < 0.01 and absf(mid.z - want_mid.y) < 0.01
+			and Vector2(mid.x, mid.z).length() <= main.PLAYER_START_SHIFT,
+		"смещение %.3f м при сдвиге старта %.0f м, сбор (%.1f, %.1f), середина (%.1f, %.1f)" % [
+			off_line, main.PLAYER_START_SHIFT, mid.x, mid.z, want_mid.x, want_mid.y])
 
 	main._phase = 3     # PLAYING
 	await frames(3)
@@ -994,15 +1097,29 @@ func _m_march() -> void:
 	# Своя армия у базы ИИ, мир объявляем закончившимся — и смотрим, КУДА ИИ
 	# её ведёт: по диагонали через центр или вдоль границы.
 	#
-	# БОЙЦОВ НУЖНО БОЛЬШЕ ОДНОГО ОТРЯДА. Отряд копейщиков — 50 моделей, а
-	# первый отряд каждого типа ИИ оставляет дома гарнизоном
-	# (HOME_GUARD_PER_TYPE = 1). С 16 бойцами получался ровно один отряд, он
-	# честно вставал на кольцо обороны — и «поход» не начинался вовсе.
-	# Берём 60: первый отряд остаётся дома, излишек уходит в поле
+	# БОЙЦОВ НУЖНО БОЛЬШЕ ОДНОГО ОТРЯДА, И ЧИСЛО БЕРЁТСЯ ИЗ КОНФИГА (правило 10).
+	# Первый отряд каждого типа ИИ оставляет дома гарнизоном
+	# (HOME_GUARD_PER_TYPE = 1), поэтому в поле уходит только ИЗЛИШЕК. Здесь
+	# стояло 60 «на глаз» при уставном отряде из 50 — а SQUAD_SIZE_SPEARMEN с
+	# тех пор стал ровно 60, и все шестьдесят складывались в ОДИН отряд,
+	# который честно вставал на кольцо обороны: «в поле 0 бойцов при 1 отряде»
+	# ГАРНИЗОН ДЕРЖИТ ДО HOME_GUARD_PER_TYPE ОТРЯДОВ НА РОД (семь), а не
+	# один: с тремя отрядами в поле не уходит НИ ОДИН, и это правильно.
+	# Число выводится из обоих конфигов, а не стоит в стенде
+	var _need: int = _UCfgW3.squad_size("spearman") \
+		* (_AICfgW3.HOME_GUARD_PER_TYPE + 2)
 	var army: Array = []
-	for i in range(60):
+	# ── БЛОК КВАДРАТНЫЙ, А НЕ ВОСЕМЬ В РЯД ─────────────────────────────────
+	# Раньше ширина стояла числом 8, и на пятистах сорока бойцах блок уходил
+	# на шестьдесят метров в глубину — то есть ЗА КРАЙ КАРТЫ, и центр «армии»
+	# оказывался у самой границы (проверка М2 «идёт серединой карты» ловила
+	# 1606 кадров у стены на исправном коде). Ширина выводится из численности
+	var _cols: int = maxi(int(ceil(sqrt(float(_need)))), 1)
+	var _halfw: float = float(_cols - 1) * 0.45
+	for i in range(_need):
 		var e := _spawn("spearman", Constants.FACTION_ENEMY,
-			ea + Vector3(float(i % 8) * 0.9 - 3.15, 0.0, float(i / 8) * 0.9 - 3.15))
+			ea + Vector3(float(i % _cols) * 0.9 - _halfw, 0.0,
+				float(i / _cols) * 0.9 - _halfw))
 		army.append(e)
 	await frames(8)
 	var ai = main.enemy_ai

@@ -167,10 +167,15 @@ func _t1_camera() -> void:
 	var fx: float = cam._focus.x
 	cam.pan_to(Vector3(-9999.0, 0.0, -9999.0))
 	var fx2: float = cam._focus.x
-	print("  увод камеры за карту: +∞ → %.1f, −∞ → %.1f (предел ±%.1f)" % [fx, fx2, main.CAM_BOUND_X])
+	# ПРЕДЕЛ БЕРЁТСЯ У КАМЕРЫ, А НЕ У MAIN: константы CAM_BOUND_X в Main нет
+	# (её не было и раньше — стенд ронял SCRIPT ERROR ровно здесь, и весь
+	# остаток блока не печатался). Камера считает границы фокуса сама, из
+	# половины карты и текущего зума (RTSCamera.bounds_min/bounds_max)
+	var lim_x: float = float(cam.bounds_max.x)
+	print("  увод камеры за карту: +∞ → %.1f, −∞ → %.1f (предел ±%.1f)" % [fx, fx2, lim_x])
 	verdict("1h камера не выходит за пределы карты",
-		absf(fx - main.CAM_BOUND_X) < 0.01 and absf(fx2 + main.CAM_BOUND_X) < 0.01,
-		"+%.1f / %.1f" % [fx, fx2])
+		absf(fx - lim_x) < 0.51 and absf(fx2 + lim_x) < 0.51,
+		"+%.1f / %.1f при пределе ±%.1f" % [fx, fx2, lim_x])
 	cam.pan_to(Vector3.ZERO)
 	cam._target_height = 28.0
 	await frames(3)
@@ -251,9 +256,14 @@ func _t2_map() -> void:
 		"(%.1f, %.1f)" % [pa.x, pa.z])
 	verdict("2h ИИ в ВЕРХНЕМ ПРАВОМ углу", ea.x > 0.0 and ea.z > 0.0,
 		"(%.1f, %.1f)" % [ea.x, ea.z])
-	verdict("2i базы симметричны относительно центра",
-		absf(pa.x + ea.x) < 0.01 and absf(pa.z + ea.z) < 0.01,
-		"сумма (%.2f, %.2f)" % [pa.x + ea.x, pa.z + ea.z])
+	# ── СИММЕТРИЯ СО СДВИГОМ СТАРТА ИГРОКА (заказ владельца 10.09.2026) ─────
+	# База игрока намеренно отодвинута от угла на PLAYER_START_SHIFT: камера и
+	# круг обзора упирались в границы карты. Симметрия проверяется С ПОПРАВКОЙ
+	# на этот сдвиг — иначе стенд утверждал бы отменённое требование
+	var shift: float = float(main.PLAYER_START_SHIFT)
+	verdict("2i базы симметричны с поправкой на сдвиг старта игрока",
+		absf(pa.x + ea.x - shift) < 0.01 and absf(pa.z + ea.z - shift) < 0.01,
+		"сумма (%.2f, %.2f) при сдвиге %.0f" % [pa.x + ea.x, pa.z + ea.z, shift])
 	# Якорь обязан сидеть в углу, а не «где-то на своей половине»
 	var inset_x: float = hx - absf(pa.x)
 	var inset_z: float = hz - absf(pa.z)
@@ -303,6 +313,7 @@ func _t3_lake() -> void:
 	var hz: float = main.MAP_HALF_Z
 	var sx: float = hx / 24.0
 	var sz: float = hz / 24.0
+	var stray := 0
 	var x: float = -hx
 	while x <= hx:
 		var z: float = -hz
@@ -310,10 +321,15 @@ func _t3_lake() -> void:
 			probes += 1
 			if GameManager.is_water(x, z):
 				wet += 1
+				# С 09.09.2026 вода на карте ЕСТЬ — река по центру вне брода.
+				# Мокрая проба законна только в полосе русла
+				if not main.near_river(x, z, main.LAKE_MARGIN) or main.in_ford(z):
+					stray += 1
 			z += sz
 		x += sx
-	print("  проб по карте: %d, из них вода: %d" % [probes, wet])
-	verdict("3b воды на карте нет ни в одной точке", wet == 0, "мокрых проб %d из %d" % [wet, probes])
+	print("  проб по карте: %d, из них вода: %d (вне русла %d)" % [probes, wet, stray])
+	verdict("3b вода на карте — только русло реки вне брода (озера нет)",
+		stray == 0 and wet > 0, "мокрых проб %d из %d, вне русла %d" % [wet, probes, stray])
 
 	verdict("3c утка не создана", main._duck_node == null)
 	var lake: Node = _find(main, "Lake")
@@ -445,15 +461,27 @@ func _t4_bounds() -> void:
 		bev_aabb.position.x, bev_aabb.position.x + bev_aabb.size.x,
 		bev_aabb.position.z, bev_aabb.position.z + bev_aabb.size.z,
 		bev_aabb.position.y, bev_aabb.position.y + bev_aabb.size.y])
-	verdict("4i зелёный бортик идёт по краю поля наружу ПО ОБЕИМ ОСЯМ",
-		bv != null and absf(bev_aabb.position.x + hx + main.MAP_BEVEL) < 0.01
-			and absf(bev_aabb.position.z + hz + main.MAP_BEVEL) < 0.01,
-		"внешний край X %.2f (ждали %.2f), Z %.2f (ждали %.2f)" % [
-			bev_aabb.position.x, -(hx + main.MAP_BEVEL),
-			bev_aabb.position.z, -(hz + main.MAP_BEVEL)])
-	verdict("4j бортик опускается в черноту",
-		bv != null and absf(bev_aabb.position.y + main.MAP_BEVEL_DROP) < 0.01,
-		"низ бортика %.2f" % bev_aabb.position.y)
+	# ── ЗЕЛЁНОГО БОРТИКА БОЛЬШЕ НЕТ (заказ владельца 10.09.2026) ────────────
+	# «За пределами карты должна быть просто сплошная чёрная пустота»: рамка по
+	# периметру читалась как нарисованная граница мира. Геометрия оставлена под
+	# ручкой WORLD_BEVEL_SHOWN, и стенд стережёт ОБА берега: пока ручка
+	# выключена — узла нет вовсе, включат — бортик обязан сесть по краю поля
+	if not main.WORLD_BEVEL_SHOWN:
+		verdict("4i зелёной рамки края карты нет, за краем только чернота",
+			bv == null and vd != null, "узел бортика=%s" % str(bv))
+		verdict("4j черноте это не мешает: она ниже поля и больше карты",
+			void_y < -0.1 and void_size.x > hx * 4.0,
+			"y=%.2f, сторона %.0f" % [void_y, void_size.x])
+	else:
+		verdict("4i зелёный бортик идёт по краю поля наружу ПО ОБЕИМ ОСЯМ",
+			bv != null and absf(bev_aabb.position.x + hx + main.MAP_BEVEL) < 0.01
+				and absf(bev_aabb.position.z + hz + main.MAP_BEVEL) < 0.01,
+			"внешний край X %.2f (ждали %.2f), Z %.2f (ждали %.2f)" % [
+				bev_aabb.position.x, -(hx + main.MAP_BEVEL),
+				bev_aabb.position.z, -(hz + main.MAP_BEVEL)])
+		verdict("4j бортик опускается в черноту",
+			bv != null and absf(bev_aabb.position.y + main.MAP_BEVEL_DROP) < 0.01,
+			"низ бортика %.2f" % bev_aabb.position.y)
 
 	var walls := 0
 	if wl != null:

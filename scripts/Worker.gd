@@ -1,6 +1,9 @@
 extends Unit
 class_name Worker
 
+## Потолок выпаса у замка и прочие числа стада — в конфиге владельца
+const _UCfgW := preload("res://scripts/unit_stats_config.gd")
+
 const _SSParser := preload("res://scripts/SpriteSheetParser.gd")
 ## Только ради константы F_WORKING: сами массивы живут полем GameManager.army
 const _Army := preload("res://scripts/army/ArmySoA.gd")
@@ -237,6 +240,7 @@ func _auto_find_resource(res_type: int) -> void:
 
 func command_move(target_pos: Vector3, slow_march: bool = false, face_dir: Vector3 = Vector3.ZERO,
 		keep_retreat: bool = false, player_order: bool = false, run: bool = false) -> void:
+	_drop_sheep_job()
 	_free_slot()
 	gather_target    = null
 	_gather_res_type = -1     # прямой приказ игрока отменяет работу
@@ -263,6 +267,7 @@ var build_target: Node3D = null
 func command_build(site: Node3D) -> void:
 	if site == null or not is_instance_valid(site):
 		return
+	_drop_sheep_job()
 	set_attack_target(null)
 	_free_slot()
 	gather_target    = null
@@ -290,6 +295,7 @@ func command_gather(node: ResourceNode) -> void:
 	# MineCluster.anchor). Без этого цель пропадала бы на каждом косметически
 	# исчезнувшем камушке, и рабочий уходил бы в поиск следующей на ровном месте
 	node = node.gather_anchor()
+	_drop_sheep_job()
 	_leave_construction()
 	set_attack_target(null)
 	# Слот на прежней жиле отдаём: иначе он остался бы забронирован навсегда
@@ -327,7 +333,414 @@ func _leave_construction() -> void:
 func _exit_tree() -> void:
 	_free_slot()
 	_leave_construction()
+	_drop_sheep_job()
 	super._exit_tree()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# КРАЖА ОВЦЫ И РАЗДЕЛКА НА МЯСО (заказ владельца, 10.09.2026)
+# Овца (goblin/Sheep.gd) — не ресурс-узел: у неё нет слотов и запаса, рабочий
+# уносит её ЦЕЛИКОМ. Фазы: идти к овце (MOVING, лента ходьбы) → взять (овца
+# едет над головой, RETURNING с грузом «мясо» — лента Pawn_Run Meat) → у
+# склада опустить рядом и РАЗДЕЛАТЬ (GATHERING с ножом, Pawn_Interact Knife):
+# SHEEP_CUTS надрезов по SHEEP_CUT_SEC, каждый — MEAT_PER_CUT еды в склад
+# (рабочий стоит у стены, относить нечего), последний — овца гибнет и даёт
+# ещё MEAT_FINAL. Куда нести — _sheep_dest(): будущий ЗАГОН (группа
+# sheep_pens с методом accept_sheep, своей стороны) в приоритете, иначе
+# ближайший склад (замок). Любой другой приказ бросает овцу (release_from).
+# ─────────────────────────────────────────────────────────────────────────────
+const SHEEP_GRAB_DIST := 1.4
+## ── СЛЕДУЮЩАЯ ОВЦА БЕРЁТСЯ САМА (заказ спринта 14) ────────────────────────
+## «После полного выноса мяса с одной туши рабочий автоматически переключается
+## на следующую ближайшую овцу — по аналогии с добычей дерева. Команда не
+## должна сбрасываться, а рабочие не должны толпиться у Ратуши.»
+## Радиус поиска щедрый: стадо разбредается по выпасу, и «ближайшая» вполне
+## может стоять в тридцати метрах — но не через всю карту
+const SHEEP_NEXT_RANGE := 40.0
+const SHEEP_CARRY_Y := 1.45
+## ── РАЗДЕЛКА: ДЕСЯТЬ УДАРОВ НА КУСОК, ПЯТЬ ХОДОК (заказ 10.09.2026) ───
+## Было пять надрезов подряд, и всё мясо зачислялось на месте — ходок с грузом
+## на экране не возникало вовсе. Теперь цикл повторяется SHEEP_MEAT_TRIPS раз:
+## SHEEP_CUTS_PER_MEAT ударов ножом у туши → кусок мяса на руки → ходка к
+## складу → возврат к туше. На последней ходке овца выработана и исчезает.
+## Итог за тушу тот же (MEAT_PER_TRIP × SHEEP_MEAT_TRIPS = 60 еды)
+## ── СНАЧАЛА СМЕРТЬ, ПОТОМ ХОДКИ (заказ спринта 13) ────────────────────────
+## «Разделка: 5 ударов ножом → смерть»; «с туши 300 еды за 15-30 ходок, то
+## есть 2-3 минуты». Это ДВЕ разные серии ударов, и путать их нельзя:
+## SHEEP_KILL_CUTS убивают овцу (она валится на бок, Sheep.kill_flip), а
+## дальше идёт цикл «SHEEP_CUTS_PER_MEAT ударов → кусок → ходка на склад →
+## возврат», и таких ходок SHEEP_MEAT_TRIPS.
+## АРИФМЕТИКА ЗАКАЗА: 20 × 15 = 300 еды, а по времени 20 ходок × (10 × 0.45 с
+## ножом + около двух секунд дороги) ≈ 130 с, то есть чуть больше двух минут
+const SHEEP_KILL_CUTS := 5
+const SHEEP_CUTS_PER_MEAT := 10
+const SHEEP_MEAT_TRIPS := 20
+const MEAT_PER_TRIP := 15.0
+## Удар ножом чаще прежнего: десять ударов по 1.2 с — это двенадцать
+## секунд стояния на одну ходку, а таких ходок пять
+const SHEEP_CUT_SEC := 0.45
+const SHEEP_STAND_PAD := 1.4
+## Насколько близко к туше рабочий возвращается за следующим куском
+const SHEEP_BACK_PAD := 0.6
+## GO — идёт к овце, CARRY — несёт её на голове (дикую — домой, в загон),
+## KILL — пять ударов ножом до смерти, BUTCHER — десять ударов на кусок,
+## HAUL — несёт кусок на склад, BACK — возвращается к туше
+enum SheepPhase { NONE, GO, CARRY, KILL, BUTCHER, HAUL, BACK }
+var _sheep: Node3D = null
+var _sheep_phase: int = SheepPhase.NONE
+var _sheep_dest_node: Node3D = null
+var _sheep_cuts: int = 0
+## Ударов за всю разделку и сколько кусков уже отнесено (стенды)
+var _sheep_cuts_total: int = 0
+var _sheep_trips: int = 0
+var _sheep_cut_t: float = 0.0
+## Куда рабочий положил тушу: к ней он и возвращается за следующим куском
+var _sheep_spot: Vector3 = Vector3.ZERO
+## Стенды: сколько мяса сдано этим рабочим
+var meat_delivered: float = 0.0
+
+func command_steal_sheep(s: Node3D) -> void:
+	if s == null or not is_instance_valid(s) or not s.has_method("captured_by"):
+		return
+	if not bool(s.call("is_free")):
+		return
+	# ТУШУ ПОВТОРНО НЕ РЕЖЕМ: она уже мертва, мясо с неё вынесет тот, кто её
+	# убил (у мёртвой овцы `dead` = true и своих ходок больше нет)
+	if bool(s.get("dead")):
+		return
+	_drop_sheep_job()
+	_leave_construction()
+	_free_slot()
+	set_attack_target(null)
+	gather_target = null
+	_gather_res_type = -1
+	_gather_cluster = 0
+	build_target = null
+	_sheep = s
+	_sheep_phase = SheepPhase.GO
+	_sheep_cuts = 0
+	_sheep_cuts_total = 0
+	_sheep_trips = 0
+	move_target = s.global_position
+	state = State.MOVING
+	GameManager.squad_clear_order(squad_id)
+	_wake_process()
+
+func is_stealing_sheep() -> bool:
+	return _sheep_phase != SheepPhase.NONE
+
+func sheep_phase() -> int:
+	return _sheep_phase
+
+func sheep_cuts() -> int:
+	return _sheep_cuts
+
+## Ударов ножом за всю разделку и сколько кусков уже отнесено
+func sheep_cuts_total() -> int:
+	return _sheep_cuts_total
+
+func sheep_trips() -> int:
+	return _sheep_trips
+
+## ── БЛИЖАЙШАЯ СВОБОДНАЯ ОВЦА ПОСЛЕ ВЫРАБОТАННОЙ ТУШИ ──────────────────────
+## Отсчёт от МЕСТА ТУШИ, а не от склада: рабочий стоит там, и «ближайшая» для
+## него считается оттуда. Предпочтение — овце того же рода, что и прошлая
+## (своя из загона или дикая у логова): иначе рабочий, которому велели резать
+## СВОЁ стадо, уходил бы воровать к логову тролля и обратно.
+## Мёртвых и занятых не берём: у первых мясо уже чьё-то, вторых режет сосед
+func _next_sheep(from: Vector3, want_owned: bool) -> Node3D:
+	var best: Node3D = null
+	var best_d: float = SHEEP_NEXT_RANGE
+	var fallback: Node3D = null
+	var fallback_d: float = SHEEP_NEXT_RANGE
+	for s in get_tree().get_nodes_in_group("sheep"):
+		if s == null or not is_instance_valid(s):
+			continue
+		if bool(s.get("eaten")) or bool(s.get("dead")):
+			continue
+		if not bool(s.call("is_free")):
+			continue
+		var d: float = from.distance_to((s as Node3D).global_position)
+		if d >= SHEEP_NEXT_RANGE:
+			continue
+		if bool(s.call("is_owned")) == want_owned:
+			if d < best_d:
+				best_d = d
+				best = s
+		elif d < fallback_d:
+			fallback_d = d
+			fallback = s
+	return best if best != null else fallback
+
+## ── КУДА ВЕСТИ УКРАДЕННУЮ ОВЦУ ────────────────────────────────────────────
+## Приоритет — БЛИЖАЙШИЙ ЗАГОН СВОЕЙ СТОРОНЫ, У КОТОРОГО ЕСТЬ МЕСТО. Полный
+## загон в выборе не участвует вовсе: довести до него овцу и услышать «мест
+## нет» значит потерять всю дорогу. Загонов нет или все полны — ближайший
+## склад (замок): там овца либо встанет на выпас (потолок
+## CASTLE_GRAZE_LIMIT), либо будет разделана на месте (см. SheepPhase.CARRY)
+func _sheep_dest() -> Node3D:
+	var best: Node3D = null
+	var bd := INF
+	for p in get_tree().get_nodes_in_group("sheep_pens"):
+		if p == null or not is_instance_valid(p) or not p.has_method("accept_sheep"):
+			continue
+		if int(p.get("faction")) != faction:
+			continue
+		if p.has_method("has_room") and not bool(p.call("has_room")):
+			continue
+		var d: float = global_position.distance_to((p as Node3D).global_position)
+		if d < bd:
+			bd = d
+			best = p
+	if best != null:
+		return best
+	return GameManager.get_nearest_dropoff(faction, global_position)
+
+## Сколько овец уже пасётся у ЭТОГО замка (потолок CASTLE_GRAZE_LIMIT)
+func _keep_flock(keep: Node3D) -> int:
+	var n := 0
+	for s in get_tree().get_nodes_in_group("sheep"):
+		if s == null or not is_instance_valid(s) or bool(s.get("eaten")):
+			continue
+		if bool(s.get("dead")):
+			continue
+		if s.get("keep") == keep:
+			n += 1
+	return n
+
+## Взять овцу на выпас у замка, если потолок позволяет
+func _keep_accepts(keep: Node3D) -> bool:
+	if keep == null or not is_instance_valid(keep):
+		return false
+	return _keep_flock(keep) < _UCfgW.CASTLE_GRAZE_LIMIT
+
+func _dest_edge(dest: Node3D, _dir: Vector3) -> float:
+	if dest is Building:
+		return (dest as Building).ring_radius()
+	return 1.0
+
+## Бросить овцу (новый приказ, гибель): взятая — снова свободна на месте
+func _drop_sheep_job() -> void:
+	if _sheep != null and is_instance_valid(_sheep) and _sheep_phase != SheepPhase.NONE:
+		_sheep.call("release_from", self)
+	_sheep = null
+	_sheep_dest_node = null
+	_sheep_phase = SheepPhase.NONE
+	if carrying_amount <= 0.0 and carrying_type == Constants.RESOURCE_FOOD:
+		carrying_type = Constants.RESOURCE_WOOD
+
+func _cancel_sheep_job() -> void:
+	_drop_sheep_job()
+	state = State.IDLE
+	_wake_process()
+
+func _process_sheep(delta: float) -> void:
+	if _sheep == null or not is_instance_valid(_sheep) or bool(_sheep.get("eaten")):
+		_sheep = null
+		_cancel_sheep_job()
+		return
+	match _sheep_phase:
+		SheepPhase.GO:
+			if not bool(_sheep.call("is_free")):
+				_cancel_sheep_job()
+				return
+			var d: Vector3 = _sheep.global_position - global_position
+			d.y = 0.0
+			var dist: float = d.length()
+			if dist <= SHEEP_GRAB_DIST:
+				# ── ХОЗЯЙСКУЮ РЕЖЕМ ТАМ, ГДЕ ОНА ПАСЁТСЯ ───────────────────
+				# Приказ один и тот же — ПКМ рабочим по овце, — а смысл у него
+				# два, и различает их ПРИВЯЗКА: дикая у логова крадётся домой,
+				# своя из загона идёт под нож на месте. Тащить свою же овцу к
+				# складу незачем, она и так дома
+				if bool(_sheep.call("is_owned")):
+					_sheep.call("captured_by", self)
+					_sheep_spot = _sheep.global_position
+					_sheep_phase = SheepPhase.KILL
+					_sheep_cut_t = SHEEP_CUT_SEC
+					state = State.GATHERING
+					_wake_process()
+					return
+				_sheep_dest_node = _sheep_dest()
+				if _sheep_dest_node == null:
+					_cancel_sheep_job()
+					return
+				_sheep.call("captured_by", self)
+				carrying_type = Constants.RESOURCE_FOOD
+				carrying_amount = 0.0
+				_sheep_phase = SheepPhase.CARRY
+				state = State.RETURNING
+				_wake_process()
+				return
+			move_target = _sheep.global_position
+			var nd: Vector3 = d / maxf(dist, 0.001)
+			_facing = nd
+			velocity = nd * move_speed
+			_tick_stuck(delta, dist)
+			_move_blocked(velocity * delta)
+		SheepPhase.CARRY:
+			if _sheep_dest_node == null or not is_instance_valid(_sheep_dest_node):
+				_cancel_sheep_job()
+				return
+			var d2: Vector3 = _sheep_dest_node.global_position - global_position
+			d2.y = 0.0
+			var dist2: float = d2.length()
+			var edge: float = _dest_edge(_sheep_dest_node, d2)
+			_sheep.call("carry_to", global_position + Vector3(0.0, SHEEP_CARRY_Y, 0.0))
+			if dist2 <= edge + SHEEP_STAND_PAD + 0.9:
+				velocity = Vector3.ZERO
+				var out: Vector3 = -d2 / maxf(dist2, 0.001)
+				var spot: Vector3 = global_position + Vector3(-out.z, 0.0, out.x) * 1.2
+				_sheep.call("drop_at", spot)
+				_sheep_spot = spot
+				var to_sheep: Vector3 = spot - global_position
+				to_sheep.y = 0.0
+				if to_sheep.length() > 0.01:
+					_facing = to_sheep.normalized()
+				# ── ЖИВАЯ ОВЦА В СТАДО, А НЕ ПОД НОЖ ───────────────────────
+				# Донесли — сперва пробуем ПОСТАВИТЬ НА ВЫПАС: загон принимает
+				# по accept_sheep, замок — по своему потолку. Приняли — работа
+				# кончена, овца пасётся и плодится. Мест нет нигде — режем
+				# здесь же, у склада: иначе украденная овца была бы потеряна
+				var taken := false
+				if _sheep_dest_node.has_method("accept_sheep"):
+					taken = bool(_sheep_dest_node.call("accept_sheep", _sheep))
+				elif _keep_accepts(_sheep_dest_node):
+					_sheep.call("bind_to_keep", _sheep_dest_node, faction)
+					taken = true
+				if taken:
+					_sheep.call("release_from", self)
+					_sheep = null
+					_sheep_phase = SheepPhase.NONE
+					_sheep_dest_node = null
+					carrying_amount = 0.0
+					carrying_type = Constants.RESOURCE_WOOD
+					state = State.IDLE
+					_wake_process()
+					return
+				_sheep_phase = SheepPhase.KILL
+				_sheep_cut_t = SHEEP_CUT_SEC
+				state = State.GATHERING
+				_wake_process()
+				return
+			var nd2: Vector3 = d2 / maxf(dist2, 0.001)
+			_facing = nd2
+			velocity = nd2 * move_speed
+			_tick_stuck(delta, dist2)
+			_move_blocked(velocity * delta)
+		SheepPhase.KILL:
+			# ПЯТЬ УДАРОВ НОЖОМ — И ОВЦА МЕРТВА (прямой заказ спринта 13).
+			# Дальше начинается вынос мяса ходками, и мёртвая туша обязана
+			# ЛЕЖАТЬ на месте всё это время (Sheep.kill_flip кладёт её на бок)
+			velocity = Vector3.ZERO
+			_sheep_cut_t -= delta
+			if _sheep_cut_t > 0.0:
+				return
+			_sheep_cut_t = SHEEP_CUT_SEC
+			_sheep_cuts += 1
+			_sheep_cuts_total += 1
+			_sheep.call("wound_flash")
+			AudioManager.play_3d("chop", global_position)
+			if _sheep_cuts < SHEEP_KILL_CUTS:
+				return
+			_sheep_cuts = 0
+			_sheep.call("kill_flip")
+			# Место туши берём У НЕЁ, а не у себя: убитая на выпасе лежит там,
+			# где паслась, и возвращаться (SheepPhase.BACK) надо именно туда
+			_sheep_spot = _sheep.global_position
+			_sheep_phase = SheepPhase.BUTCHER
+		SheepPhase.BUTCHER:
+			velocity = Vector3.ZERO
+			_sheep_cut_t -= delta
+			if _sheep_cut_t > 0.0:
+				return
+			_sheep_cut_t = SHEEP_CUT_SEC
+			_sheep_cuts += 1
+			_sheep_cuts_total += 1
+			_sheep.call("wound_flash")
+			AudioManager.play_3d("chop", global_position)
+			if _sheep_cuts < SHEEP_CUTS_PER_MEAT:
+				return
+			# ── КУСОК ОТРЕЗАН: НЕСЁМ ЕГО НА СКЛАД ──────────────────────────
+			# Мясо зачисляется НЕ ЗДЕСЬ, а по приходу (SheepPhase.HAUL): это и
+			# есть заказанная ходка, иначе груз на руках был бы декорацией
+			_sheep_cuts = 0
+			carrying_type = Constants.RESOURCE_FOOD
+			carrying_amount = MEAT_PER_TRIP
+			_sheep_phase = SheepPhase.HAUL
+			state = State.RETURNING
+			_wake_process()
+		SheepPhase.HAUL:
+			# МЯСО НЕСЁТСЯ НА СКЛАД, А НЕ В ЗАГОН. Загон — место выпаса, склада
+			# у него нет вовсе; и убить овцу могли прямо в нём, за полкарты от
+			# замка. Цель ходки поэтому пересчитывается один раз, здесь
+			if _sheep_dest_node == null or not is_instance_valid(_sheep_dest_node) \
+					or _sheep_dest_node.has_method("accept_sheep"):
+				_sheep_dest_node = GameManager.get_nearest_dropoff(faction, global_position)
+			if _sheep_dest_node == null or not is_instance_valid(_sheep_dest_node):
+				_cancel_sheep_job()
+				return
+			var dh: Vector3 = _sheep_dest_node.global_position - global_position
+			dh.y = 0.0
+			var disth: float = dh.length()
+			var edgeh: float = _dest_edge(_sheep_dest_node, dh)
+			if disth <= edgeh + SHEEP_STAND_PAD:
+				velocity = Vector3.ZERO
+				ResourceManager.gather_resource(faction, Constants.RESOURCE_FOOD, carrying_amount)
+				meat_delivered += carrying_amount
+				carrying_amount = 0.0
+				_sheep_trips += 1
+				if _sheep_trips >= SHEEP_MEAT_TRIPS:
+					# ПОСЛЕДНЯЯ ХОДКА — ТУША ВЫРАБОТАНА: она исчезает
+					var done_at: Vector3 = _sheep_spot
+					var was_owned := false
+					if _sheep != null and is_instance_valid(_sheep):
+						was_owned = bool(_sheep.call("is_owned"))
+						_sheep.call("consume")
+					_sheep = null
+					_sheep_phase = SheepPhase.NONE
+					_sheep_dest_node = null
+					carrying_type = Constants.RESOURCE_WOOD
+					state = State.IDLE
+					# ── И СРАЗУ ЗА СЛЕДУЮЩУЮ ────────────────────────────────
+					# Приказ «режь овец» не разовый: рабочий, доевший тушу,
+					# сам берётся за ближайшую следующую — ровно как рубщик
+					# переходит на соседнее дерево. Без этого он вставал в
+					# IDLE у склада, и вся бригада копилась там толпой
+					var nxt: Node3D = _next_sheep(done_at, was_owned)
+					if nxt != null:
+						command_steal_sheep(nxt)
+						return
+					_wake_process()
+					return
+				_sheep_phase = SheepPhase.BACK
+				state = State.MOVING
+				_wake_process()
+				return
+			var ndh: Vector3 = dh / maxf(disth, 0.001)
+			_facing = ndh
+			velocity = ndh * move_speed
+			_tick_stuck(delta, disth)
+			_move_blocked(velocity * delta)
+		SheepPhase.BACK:
+			var db: Vector3 = _sheep_spot - global_position
+			db.y = 0.0
+			var distb: float = db.length()
+			if distb <= SHEEP_GRAB_DIST + SHEEP_BACK_PAD:
+				velocity = Vector3.ZERO
+				var to_body: Vector3 = _sheep_spot - global_position
+				to_body.y = 0.0
+				if to_body.length() > 0.01:
+					_facing = to_body.normalized()
+				_sheep_phase = SheepPhase.BUTCHER
+				_sheep_cut_t = SHEEP_CUT_SEC
+				state = State.GATHERING
+				_wake_process()
+				return
+			var ndb: Vector3 = db / maxf(distb, 0.001)
+			_facing = ndb
+			velocity = ndb * move_speed
+			_tick_stuck(delta, distb)
+			_move_blocked(velocity * delta)
 
 # Зовёт ConstructionSite, когда здание достроено
 func on_construction_finished() -> void:
@@ -463,29 +876,50 @@ func _update_sprite_anim() -> void:
 			# НАМЕРЕНИЕ идти, и у рабочего, вставшего вплотную к срубу, оно
 			# остаётся ненулевым. Это и есть жалоба «бегут на месте вместо
 			# анимации молотка» — та же грабля, что уже ловилась у пехоты
-			want = "walk" if moved_recently() else "build"
+			# МОЛОТОК — ТОЛЬКО ПОСЛЕ ПРИХОДА (заказ 10.09.2026): пока рабочий
+			# идёт к площадке, играет ходьба; защёлка _build_settled взводится
+			# у самой стены (_process_build). Прежнее «стоит — значит молоток»
+			# давало удар киянкой на месте в первый кадр приказа («забивает
+			# гвозди в воздух»): окно замера хода ещё пусто
+			want = "build" if _build_settled else "walk"
 		State.GATHERING:
-			match _work_res_type():
-				Constants.RESOURCE_WOOD:
-					want = "chop"      # ТОПОР
-				Constants.RESOURCE_GOLD, Constants.RESOURCE_STONE:
-					want = "mine"      # КИРКА
-				_:
-					want = "harvest"   # нож (еда/вода)
+			# ── РАЗДЕЛКА ОВЦЫ — ВСЕГДА НОЖ, И ЭТО НЕ СОВПАДЕНИЕ ──────────────
+			# Лента выбиралась по РЕСУРСУ (_work_res_type), а он у режущего
+			# овцу совпадал с едой лишь потому, что фаза переноски выставляла
+			# carrying_type = FOOD. Разделка СВОЕЙ овцы на выпасе такой фазы
+			# не проходит вовсе (приказ идёт сразу в KILL), и рабочий махал
+			# ТОПОРОМ. Спрашиваем сам род работы, а не её побочный признак
+			if _sheep_phase == SheepPhase.KILL or _sheep_phase == SheepPhase.BUTCHER:
+				want = "harvest"
+			else:
+				match _work_res_type():
+					Constants.RESOURCE_WOOD:
+						want = "chop"      # ТОПОР
+					Constants.RESOURCE_GOLD, Constants.RESOURCE_STONE:
+						want = "mine"      # КИРКА
+					_:
+						want = "harvest"   # нож (еда/вода)
 		State.RETURNING:
-			match carrying_type:
-				Constants.RESOURCE_WOOD:
-					want = "carry_wood"
-				Constants.RESOURCE_STONE:
-					# Отдельный шит камня есть не во всех цветовых наборах —
-					# где его нет, остаётся прежний «мешок» carry_gold
-					want = "carry_stone" if _has_anim("carry_stone") else "carry_gold"
-				Constants.RESOURCE_GOLD:
-					want = "carry_gold"
-				Constants.RESOURCE_FOOD:
-					want = "carry_meat"
-				_:
-					want = "walk"
+			# ── ОВЦУ НЕСУТ НА ГОЛОВЕ, А НЕ КУСКОМ МЯСА (заказ 10.09.2026) ──
+			# На время переноски самой овцы лента груза не нужна вовсе: овца
+			# едет отдельным спрайтом над головой (Sheep.carry_to), а
+			# «Pawn_Run Meat» рисовал ЕЩЁ и кусок мяса в руках
+			if _sheep_phase == SheepPhase.CARRY:
+				want = "walk"
+			else:
+				match carrying_type:
+					Constants.RESOURCE_WOOD:
+						want = "carry_wood"
+					Constants.RESOURCE_STONE:
+						# Отдельный лист камня есть не во всех цветовых наборах —
+						# где его нет, остаётся прежний «мешок» carry_gold
+						want = "carry_stone" if _has_anim("carry_stone") else "carry_gold"
+					Constants.RESOURCE_GOLD:
+						want = "carry_gold"
+					Constants.RESOURCE_FOOD:
+						want = "carry_meat"
+					_:
+						want = "walk"
 		State.MOVING:
 			want = "walk"
 		_:
@@ -551,10 +985,17 @@ func tick_physics(delta: float, prof: bool = false, bm: bool = true,
 	# рабочий едет ОТ него, — и зеркало честно рисовало его спиной.
 	# Одного вызова хватает на обе беды и на все три ветки
 	_sample_movement()
+	if _sheep_phase != SheepPhase.NONE:
+		_sync_soa_row()
+		_process_sheep(delta)
+		if state == State.GATHERING:
+			_animate_chop(delta)     # нож — тем же замахом
+		return
 	if state == State.BUILDING:
 		_sync_soa_row()
 		_process_build(delta)
-		_animate_chop(delta)     # тот же замах — только молотком
+		if _build_settled:
+			_animate_chop(delta)     # тот же замах — только молотком, и только у стены
 	elif state == State.GATHERING:
 		_sync_soa_row()
 		_process_gather(delta)

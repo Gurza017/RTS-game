@@ -108,6 +108,12 @@ func _test_castle_free_and_built() -> void:
 			Constants.RESOURCE_STONE, Constants.RESOURCE_FOOD]:
 		before[t] = ResourceManager.get_amount(Constants.FACTION_PLAYER, t)
 
+	# ── ТУМАН ГЛУШИТСЯ ЯВНО ─────────────────────────────────────────────────
+	# С 10.09.2026 постройка (включая замок) разрешена только там, где НЕТ
+	# тумана (Main.can_build_at). Стенд ставит замок кликом в центр экрана — в
+	# партии эта точка была бы разведана рабочими, здесь их нет
+	if GameManager.fog != null:
+		GameManager.fog.enabled = false
 	main.enter_castle_placement(false)      # false = «не стартовый», т.е. платный по-старому
 	verdict("B1 переход в режим постановки состоялся",
 		main._phase == main.Phase.PLACING_CASTLE, "фаза %d" % main._phase)

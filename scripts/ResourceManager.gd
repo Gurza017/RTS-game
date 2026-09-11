@@ -79,6 +79,33 @@ func gathered_total(faction: int, type: int) -> float:
 		return 0.0
 	return float((per as Dictionary).get(type, 0.0))
 
+## ── СОДЕРЖАНИЕ: РАСХОД В СЕКУНДУ И СПИСАНИЕ (10.09.2026) ─────────────────────
+## upkeep[faction][type] — единиц в секунду, считает GameManager._sweep_food;
+## HUD показывает его рядом с притоком. consume списывает не ниже нуля и
+## возвращает НЕДОСТАЧУ — по ней объявляется голод
+var upkeep: Dictionary = {}
+
+func set_upkeep(faction: int, type: int, per_sec: float) -> void:
+	if not upkeep.has(faction):
+		upkeep[faction] = {}
+	(upkeep[faction] as Dictionary)[type] = per_sec
+
+func upkeep_rate(faction: int, type: int) -> float:
+	var per: Variant = upkeep.get(faction)
+	if per == null:
+		return 0.0
+	return float((per as Dictionary).get(type, 0.0))
+
+func consume(faction: int, type: int, amount: float) -> float:
+	if not resources.has(faction):
+		_init_faction(faction)
+	var have: float = float((resources[faction] as Dictionary).get(type, 0.0))
+	var take: float = minf(have, maxf(amount, 0.0))
+	(resources[faction] as Dictionary)[type] = have - take
+	if faction == Constants.FACTION_PLAYER and take > 0.0:
+		resources_changed.emit(faction)
+	return amount - take
+
 func can_afford(faction: int, costs: Dictionary) -> bool:
 	if not resources.has(faction):
 		return false

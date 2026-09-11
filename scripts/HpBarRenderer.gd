@@ -22,68 +22,38 @@ extends RefCounted
 ## канале r, а обрезку делает шейдер. Отсюда STRIDE = 16, а не 12.
 
 const _SHADER := preload("res://shaders/mm_hp_bar.gdshader")
+const _Opt := preload("res://scripts/perf_config.gd")
 
 const GROW_STEP := 256
 
+## ── БУФЕР ПОЛОСОК ЖИВЁТ В ЯДРЕ (этап E2, 09.09.2026) ──────────────────────
+## Тот же Rb, что у бакетов бойцов и колец: запись по событию отсюда, позиция
+## и доля жизни — BatchVisual из строки, подача — RbFlush
 class Layer:
-	## 12 float трансформа + 4 float цвета (TRANSFORM_3D + use_colors)
 	const STRIDE := 16
-
 	var mmi: MultiMeshInstance3D
 	var mm: MultiMesh
 	var free: Array = []
 	var capacity: int = 0
-	var buf: PackedFloat32Array = PackedFloat32Array()
-	var dirty: bool = false
-
+	var core_id: int = -1
 	func grow(step: int) -> void:
 		var new_cap: int = capacity + step
-		buf.resize(new_cap * STRIDE)      # нули = спрятанный слот
+		GameManager.army.rb_ensure(core_id, new_cap)
 		for i in range(capacity, new_cap):
 			free.append(i)
 		mm.instance_count = new_cap
 		capacity = new_cap
-		dirty = true
-
-	## Полоска не поворачивается: базис единичный, разворот к камере делает
-	## шейдер. Пишем положение и долю жизни
 	func write(idx: int, pos: Vector3, w: float, h: float, frac: float) -> void:
-		var o: int = idx * STRIDE
-		buf[o]      = w
-		buf[o + 1]  = 0.0
-		buf[o + 2]  = 0.0
-		buf[o + 3]  = pos.x
-		buf[o + 4]  = 0.0
-		buf[o + 5]  = h
-		buf[o + 6]  = 0.0
-		buf[o + 7]  = pos.y
-		buf[o + 8]  = 0.0
-		buf[o + 9]  = 0.0
-		buf[o + 10] = 1.0
-		buf[o + 11] = pos.z
-		buf[o + 12] = frac
-		buf[o + 13] = 0.0
-		buf[o + 14] = 0.0
-		buf[o + 15] = 1.0
-		dirty = true
-
+		GameManager.army.rb_write_xform(core_id, idx, Vector3(w, 0.0, 0.0),
+			Vector3(0.0, h, 0.0), Vector3(0.0, 0.0, 1.0), pos)
+		GameManager.army.rb_write_color(core_id, idx, frac, 0.0, 0.0, 1.0)
 	func hide_slot(idx: int) -> void:
-		var o: int = idx * STRIDE
-		for i in range(STRIDE):
-			buf[o + i] = 0.0
-		dirty = true
-
+		GameManager.army.rb_hide_slot(core_id, idx)
 	func hide_all() -> void:
-		for i in range(buf.size()):
-			buf[i] = 0.0
-		dirty = true
-
+		GameManager.army.rb_hide_all(core_id)
+	## Подаёт ядро (RbFlush)
 	func flush() -> void:
-		if not dirty:
-			return
-		dirty = false
-		if capacity > 0:
-			mm.set_buffer(buf)
+		pass
 
 var _layer: Layer = null
 var _slot: Dictionary = {}       # Unit -> индекс слота
@@ -110,6 +80,7 @@ func _ensure(world_root: Node3D) -> void:
 	l.mm.use_colors = true
 	l.mm.mesh = quad
 	l.mm.instance_count = 0
+	l.core_id = GameManager.army.rb_create(l.mm.get_rid())
 	l.mmi = MultiMeshInstance3D.new()
 	l.mmi.name = "HpBars"
 	l.mmi.multimesh = l.mm
@@ -126,6 +97,9 @@ func register(unit: Unit, world_root: Node3D) -> void:
 		_layer.grow(GROW_STEP)
 	_slot[unit] = _layer.free.pop_back()
 	_write(unit)
+	# Строка ведёт полоску сама (этап E2); без строки — GDScript-обход
+	if unit._soa >= 0:
+		GameManager.army.hp_bind(unit._soa, _layer.core_id, _slot[unit])
 
 ## Убрать полоску. Идемпотентно
 func unregister(unit: Unit) -> void:
@@ -140,6 +114,8 @@ func _drop_slot(unit) -> void:
 	var idx: int = _slot[unit]
 	_layer.hide_slot(idx)
 	_layer.free.append(idx)
+	if is_instance_valid(unit) and unit._soa >= 0:
+		GameManager.army.hp_unbind(unit._soa)
 	_slot.erase(unit)
 	_last.erase(unit)
 
@@ -171,11 +147,14 @@ func update_all() -> void:
 	if _slot.is_empty():
 		return
 	var stale: Array = []
+	var core: bool = _Opt.decal_core
 	for unit in _slot:
 		if not is_instance_valid(unit):
 			stale.append(unit)
 			continue
 		var u: Unit = unit
+		if core and u._rb_bound:
+			continue
 		var p: Vector3 = u.draw_position()
 		var frac: float = 0.0
 		if u.max_health > 0.0:

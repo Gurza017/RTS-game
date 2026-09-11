@@ -284,6 +284,8 @@ func _apply_dir_tex(key: String) -> void:
 	var ref: int  = int(_dir_bottom.get("idle", 0))
 	var mine: int = int(_dir_bottom.get(key, ref))
 	_sprite_base_y = SPRITE_BASE_Y + float(ref - mine) * PIXEL_SIZE
+	# Направленные листы минуют _set_anim — лента в строку ядра отсюда
+	_push_row_anim()
 	if _mm_only:
 		return
 	_dir_sprite.texture = tex
@@ -343,8 +345,9 @@ func _process_can_sleep() -> bool:
 	# шеренги остались бы направленными «в старую сторону экрана»
 	if _cur_kind != KIND_PLAIN:
 		return false
-	# Спать можно, если в ТЕКУЩЕМ шите один кадр — листать нечего
-	return int(_dir_frames.get(_cur_tex_key, 1)) <= 1
+	# Спать можно, если в ТЕКУЩЕМ шите один кадр — листать нечего; ленту,
+	# ведомую ядром, листать не надо вовсе (этап E1)
+	return int(_dir_frames.get(_cur_tex_key, 1)) <= 1 or (_Opt.anim_core and _rb_bound)
 
 # ── ПОЛОЖЕНИЕ КОПЬЯ ──────────────────────────────────────────────────────────
 # ГОРИЗОНТАЛЬНОЕ КОПЬЁ = СТОЙКА «ЗАЩИТА» + ПЕРВЫЕ ДВЕ ШЕРЕНГИ.
@@ -706,3 +709,98 @@ func _add_spear_procedural() -> void:
 ## сторону, обойти строй конница по-прежнему обязана уметь
 func repels_charge() -> bool:
 	return true
+
+# ═════════════════════════════════════════════════════════════════════════════
+# НАТИСК ФАЛАНГИ (способность отряда spearman_4d, двойной ПКМ)
+# ═════════════════════════════════════════════════════════════════════════════
+# ЗАКАЗ ДОСЛОВНО: строй смыкается, идёт МЕДЛЕННО И СЛАЖЕННО, первые десять
+# ударов усилены, после них отряд переходит в ОТТЕСНЕНИЕ со сниженным входящим
+# уроном.
+#
+# ── ДВЕ ФАЗЫ, А НЕ ОДНА ───────────────────────────────────────────────────
+# Пока `_push_left > 0` — фаза НАТИСКА: медленный ход и усиленный удар.
+# Как только серия исчерпана, взводится `_push_wall` — фаза ОТТЕСНЕНИЯ: удар
+# обычный, зато напор выше и входящий урон ниже. Разделение обязательно:
+# «усиленные удары» и «оттеснение» в заказе идут ОДНО ЗА ДРУГИМ, а не вместе.
+#
+# ── СМЫКАНИЕ СТРОЯ ЗДЕСЬ НЕ ЗОВЁТСЯ ──────────────────────────────────────
+# Оно отрядное (GameManager.squad_close_ranks) и живёт у того, кто отдаёт
+# приказ, — SelectionManager. Позвать его из бойца значило бы раздать
+# command_move каждому по числу бойцов в отряде, то есть развалить сам строй.
+#
+# ── ПОТОЛОК ПО ВРЕМЕНИ ОБЯЗАТЕЛЕН ────────────────────────────────────────
+# До врага можно и не дойти; без него отряд полз бы медленным ходом до конца
+# партии (та же оговорка, что у RAGE_SEC у мечника).
+
+## Сколько ударов усилено и насколько
+const PHALANX_PUSH_HITS := 10
+const PHALANX_PUSH_DMG_MULT := 1.5
+## Слаженный ход — МЕДЛЕННЫЙ: доля обычной скорости
+const PHALANX_PUSH_SPEED := 0.6
+## Фаза оттеснения: множитель напора и доля входящего урона
+const PHALANX_WALL_PUSH := 2.2
+const PHALANX_WALL_TAKE := 0.7
+## Потолок обеих фаз, секунды
+const PHALANX_PUSH_SEC := 22.0
+
+var _push_left: int = 0
+var _push_wall: bool = false
+var _push_until_ms: int = 0
+## Стенды: сколько усиленных ударов нанесено
+var push_hits_done: int = 0
+
+## Включить натиск. Зовёт SelectionManager по двойному ПКМ
+func start_phalanx_push() -> void:
+	if state == State.DEAD:
+		return
+	_push_left = PHALANX_PUSH_HITS
+	_push_wall = false
+	_push_until_ms = Time.get_ticks_msec() + int(PHALANX_PUSH_SEC * 1000.0)
+	push_hits_done = 0
+	mark_pose_dirty()
+
+## Натиск идёт (любая из двух фаз)
+func phalanx_push_active() -> bool:
+	return (_push_left > 0 or _push_wall) and Time.get_ticks_msec() < _push_until_ms
+
+## Фаза усиленных ударов
+func phalanx_push_hits_left() -> int:
+	return _push_left if phalanx_push_active() else 0
+
+## Фаза оттеснения (серия исчерпана, строй давит)
+func phalanx_wall_active() -> bool:
+	return _push_wall and Time.get_ticks_msec() < _push_until_ms
+
+func _strike_damage() -> float:
+	var dmg: float = super._strike_damage()
+	if _push_left > 0 and phalanx_push_active():
+		_push_left -= 1
+		push_hits_done += 1
+		if _push_left <= 0:
+			# СЕРИЯ ИСЧЕРПАНА — ПЕРЕХОД В ОТТЕСНЕНИЕ, а не выход из режима
+			_push_wall = true
+		return dmg * PHALANX_PUSH_DMG_MULT
+	return dmg
+
+## Слаженный ход медленнее обычного — весь строй идёт одним темпом
+func _effective_speed() -> float:
+	var sp: float = super._effective_speed()
+	if phalanx_push_active():
+		sp *= PHALANX_PUSH_SPEED
+	return sp
+
+## Напор в оттеснении. Множитель применяется к УЖЕ посчитанному напору: сам
+## `push_force` потолком шага съедается (см. Unit._apply_push), а
+## `charge_push_mult` работает ПОСЛЕ потолка — тем же приёмом и здесь
+func _push_power() -> float:
+	var p: float = super._push_power()
+	if phalanx_wall_active():
+		p *= PHALANX_WALL_PUSH
+	return p
+
+## В оттеснении строй держит удар лучше
+func _incoming_damage_factor(attacker: Node3D) -> float:
+	var f: float = super._incoming_damage_factor(attacker)
+	if phalanx_wall_active():
+		f *= PHALANX_WALL_TAKE
+	return f

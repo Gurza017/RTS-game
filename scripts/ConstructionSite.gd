@@ -45,6 +45,9 @@ var _progress_label: Label3D = null
 
 const _UCfg   := preload("res://scripts/unit_stats_config.gd")
 const _House  := preload("res://scripts/House.gd")
+const _Tower  := preload("res://scripts/Tower.gd")
+const _Archery := preload("res://scripts/Archery.gd")
+const _SheepPen := preload("res://scripts/SheepPen.gd")
 const _BBUtil2 := preload("res://scripts/BillboardUtil.gd")
 
 func _ready() -> void:
@@ -208,7 +211,10 @@ func _build_site_sprite() -> bool:
 	if tex == null:
 		return false
 	var quad := QuadMesh.new()
-	quad.size = sprite_quad_size(tex, build_size)
+	# Картинка стройки общая «домовая»; у узких построек (башня) она рисуется
+	# в долю — BUILDINGS[*].construction_scale, по умолчанию 1.0
+	quad.size = sprite_quad_size(tex, build_size) \
+		* _UCfg.building_stat(target_id, "construction_scale", 1.0)
 	quad.material = _BBUtil2.make_static_material(tex)
 	_site_sprite = MeshInstance3D.new()
 	_site_sprite.name = "ConstructionSprite"
@@ -280,7 +286,10 @@ func _process(delta: float) -> void:
 	# отдачей. 1 рабочий — ×1.0, 2 — ×1.6, 3 — ×2.2, 5 — ×3.4.
 	# Убывание намеренное: иначе выгодно было бы сгонять на фундамент всех
 	# рабочих базы, и экономика на время стройки останавливалась бы
-	progress += delta * (1.0 + float(n - 1) * BUILDER_SPEEDUP)
+	# Улучшение рабочего «темп стройки» (forge bonus_build, доля): та же ставка
+	# на всю артель — стройку ведёт площадка, а не каждый рабочий отдельно
+	progress += delta * (1.0 + float(n - 1) * BUILDER_SPEEDUP) \
+		* (1.0 + GameManager.unit_bonus(faction, "worker", "bonus_build"))
 	_apply_progress_visual()
 	if progress >= build_time:
 		_complete()
@@ -305,11 +314,29 @@ func _complete() -> void:
 	_builders.clear()
 	queue_free()
 
+## ── ФАБРИКА ЗДАНИЙ ОДНА НА ПРОЕКТ ─────────────────────────────────────────
+## Мгновенная постройка (unit_stats_config `instant_build`) обходит стадию
+## стройки, но НЕ фабрику: класс по id знает ровно одно место. Статический
+## вход нужен, чтобы её можно было позвать без площадки
+static func make_building(id: String) -> Building:
+	var tmp := new()
+	tmp.target_id = id
+	var made: Building = tmp._make_target()
+	tmp.free()
+	return made
+
 func _make_target() -> Building:
 	match target_id:
 		"barracks": return Barracks.new()
+		"archery":  return _Archery.new()
+		"tower":    return _Tower.new()
 		"smithy":   return Smithy.new()
 		"mine":     return Mine.new()
-		"house":    return _House.new()
+		"sheep_pen": return _SheepPen.new()
 		"castle":   return Castle.new()
+	# Три дома — один скрипт с разной картинкой (House.variant_id)
+	if _UCfg.is_house(target_id):
+		var h: Building = _House.new()
+		h.variant_id = target_id
+		return h
 	return null

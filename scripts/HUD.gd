@@ -2,6 +2,7 @@ extends CanvasLayer
 class_name HUD
 
 const _UIAssets := preload("res://scripts/UIAssets.gd")
+const _GSHud := preload("res://scripts/game_settings.gd")
 const _UCfg     := preload("res://scripts/unit_stats_config.gd")
 ## Пресеты сложности: подписи и переключение в меню паузы
 const _Diff := preload("res://scripts/game_difficulty_config.gd")
@@ -214,17 +215,39 @@ const UNIT_ICONS := {
 	"spearman": "res://assets/factions/humans/icons/units/Lancer.png",
 	"archer":   "res://assets/factions/humans/icons/units/Archer.png",
 	"warrior":  "res://assets/factions/humans/icons/units/Warrior.png",
-	"monk":     "res://assets/factions/humans/units/Blue Units/Monk/Idle.png",
+	# Аватарка монаха — из набора Human avatar; ПО ЦВЕТУ СТОРОНЫ (см.
+	# MONK_AVATARS), здесь — запасной вариант для цвета без своего портрета
+	"monk":     "res://assets/factions/humans/units/Human avatar/Monk_blue.png",
+	"troll":    "res://assets/factions/orc/Troll/Troll_Idle.png",
 }
+## Портрет монаха по цвету стороны (заказ 09.09.2026: у синих Monk_blue,
+## у жёлтых Avatars_14, у красных Avatars_09; Avatars_04 в паке нет — только
+## его .import). Ключ — цвет в нижнем регистре, как отвечает color_of
+const MONK_AVATARS := {
+	"blue":   "res://assets/factions/humans/units/Human avatar/Monk_blue.png",
+	"yellow": "res://assets/factions/humans/units/Human avatar/Avatars_14.png",
+	"red":    "res://assets/factions/humans/units/Human avatar/Avatars_09.png",
+}
+
+## Путь иконки типа юнита ДЛЯ СТОРОНЫ: у монаха портрет зависит от цвета
+static func unit_icon_path(uid: String, faction: int) -> String:
+	if uid == "monk":
+		var col: String = String(GameManager.color_of(faction)).to_lower()
+		var p: Variant = MONK_AVATARS.get(col)
+		if p != null and ResourceLoader.exists(String(p)):
+			return String(p)
+	return String(UNIT_ICONS.get(uid, ""))
 const UNIT_TITLES := {
 	"worker": "Рабочий", "spearman": "Копейщик",
 	"archer": "Лучник",  "warrior": "Мечник", "monk": "Монах",
+	"troll": "Тролль",
 }
 ## Иконки, которые на деле являются боевым спрайт-листом (несколько кадров в
 ## ряд), а не готовым портретом: путь -> сторона квадратного кадра. Первый
 ## кадр вырезается и обрезается по силуэту в _icon_texture
 const FRAME_SHEET_ICONS := {
 	"res://assets/factions/humans/units/Blue Units/Monk/Idle.png": 192,
+	"res://assets/factions/orc/Troll/Troll_Idle.png": 384,
 }
 
 # Resource labels
@@ -891,6 +914,20 @@ func _build_resource_bar() -> void:
 		if i < RES_DEFS.size() - 1:
 			hbox.add_child(VSeparator.new())
 
+	# ЛИМИТ НАСЕЛЕНИЯ (дома, 09.09.2026): «раб. 4/6 · отр. 2/3». Показывается
+	# только когда лимит действует (GameManager.pop_limit_enabled)
+	_pop_sep = VSeparator.new()
+	hbox.add_child(_pop_sep)
+	_pop_label = Label.new()
+	_pop_label.add_theme_font_size_override("font_size", 13)
+	_pop_label.add_theme_color_override("font_color", Color(0.85, 0.90, 0.95))
+	_pop_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_pop_label.tooltip_text = "Лимит населения: рабочие и боевые отряды. Каждый дом даёт +%d и +%d" % [
+		_UCfg.HOUSE_WORKER_SLOTS, _UCfg.HOUSE_SQUAD_SLOTS]
+	hbox.add_child(_pop_label)
+	_pop_sep.visible = false
+	_pop_label.visible = false
+
 	hbox.add_child(_pad(3, 0))
 
 ## Одна секция ресурсной панели: ИКОНКА, БЕЛОЕ ЧИСЛО и ЗЕЛЁНЫЙ ПРИТОК на
@@ -1176,6 +1213,9 @@ func _build_top_right_widget() -> void:
 	var sep := VSeparator.new(); hbox.add_child(sep)
 
 	_fps_label = Label.new()
+	# ВИДИМОСТЬ — ИЗ НАСТРОЕК МЕНЮ (заказ 10.09.2026, чекбокс «Отображать
+	# FPS»); F3 по-прежнему переключает её на ходу
+	_fps_label.visible = _GSHud.show_fps()
 	_fps_label.text = "FPS: 0"
 	_fps_label.add_theme_font_size_override("font_size", 12)
 	_fps_label.add_theme_color_override("font_color", Color(0.55, 0.95, 0.55))
@@ -1249,7 +1289,37 @@ func _format_match_time(total_seconds: float) -> String:
 	return "%02d:%02d" % [m, sec]
 
 ## Вызывается ПЕРВЫМ делом из _process, до всех ранних return по выделению
+## Счётчик населения в панели ресурсов (см. _build_resource_bar)
+var _pop_label: Label = null
+var _pop_sep: VSeparator = null
+var _pop_timer: float = 0.0
+const POP_REFRESH_SEC := 0.5
+
+func _refresh_pop(delta: float) -> void:
+	if _pop_label == null or not is_instance_valid(_pop_label):
+		return
+	_pop_timer -= delta
+	if _pop_timer > 0.0:
+		return
+	_pop_timer = POP_REFRESH_SEC
+	var on: bool = GameManager.pop_limit_enabled
+	_pop_label.visible = on
+	if _pop_sep != null and is_instance_valid(_pop_sep):
+		_pop_sep.visible = on
+	if not on:
+		return
+	var f: int = Constants.FACTION_PLAYER
+	var wu: int = GameManager.pop_workers_used(f)
+	var wc: int = GameManager.pop_worker_cap(f)
+	var su: int = GameManager.pop_squads_used(f)
+	var sc: int = GameManager.pop_squad_cap(f)
+	_pop_label.text = "раб. %d/%d · отр. %d/%d" % [wu, wc, su, sc]
+	var full: bool = wu >= wc or su >= sc
+	_pop_label.add_theme_color_override("font_color",
+		Color(0.95, 0.60, 0.50) if full else Color(0.85, 0.90, 0.95))
+
 func _update_top_right(delta: float) -> void:
+	_refresh_pop(delta)
 	if _timer_label == null or not is_instance_valid(_timer_label):
 		return
 	if not get_tree().paused:
@@ -1845,7 +1915,7 @@ func _build_recon_panel(members: Array) -> void:
 	# отличаться от своей с одного взгляда, до чтения подписи
 	portrait.color = Color(0.28, 0.10, 0.12)
 	if _portrait_icon != null and is_instance_valid(_portrait_icon):
-		var tex := _icon_texture(String(UNIT_ICONS.get(uid, "")))
+		var tex := _icon_texture(unit_icon_path(uid, Constants.FACTION_ENEMY))
 		_portrait_icon.texture = tex
 		_portrait_icon.visible = tex != null
 	if _portrait_count_lbl != null and is_instance_valid(_portrait_count_lbl):
@@ -1910,6 +1980,7 @@ func _refresh_panel() -> void:
 	_hide_stat_panel()
 	_rebuild_squad_strip()
 	_train_badges.clear()   # кнопки пересобираются — старые ярлыки уже мертвы
+	_afford_watch.clear()   # и реестр живой доступности вместе с ними
 	_last_research_id = ""
 
 	# УКРУПНЕНИЕ ЗАМКА ГАСИТСЯ ЗДЕСЬ, а не в конце: ветка Замка ниже взводит его
@@ -1994,7 +2065,29 @@ func _refresh_panel() -> void:
 		else:
 			info_label.text = u.display_name if "display_name" in u else "Объект"
 
-		if u is Castle and u.faction == Constants.FACTION_PLAYER:
+		# ── БАШНЯ: ХП и гарнизон, без найма (заказ 09.09.2026) ──────────────
+		# Ветка стоит ПЕРЕД замковой: башня — тоже Castle (ради гарнизона), и
+		# без неё получала бы кнопки найма рабочих и рыцарей
+		if u is Castle and not (u as Castle).is_stronghold() \
+				and u.faction == Constants.FACTION_PLAYER:
+			portrait.color = Color(0.16, 0.20, 0.30)
+			_show_garrison(u as Castle)
+			_castle_boost = true
+			_update_castle_caption(info_label.text)
+			info_label.text = _tower_info_text(u as Castle)
+			if _portrait_wrap != null and is_instance_valid(_portrait_wrap):
+				_portrait_wrap.custom_minimum_size = Vector2(
+					CASTLE_PORTRAIT_W, CASTLE_PORTRAIT_W)
+				_portrait_wrap.size_flags_vertical = Control.SIZE_SHRINK_END
+			if u.has_method("has_garrison") and bool(u.call("has_garrison")):
+				_cmd("Выпустить", Color(0.20, 0.28, 0.16),
+					func(): _on_tower_release(u as Castle),
+					String(UNIT_ICONS.get("archer", "")), {"title": "Выпустить лучников",
+					"lines": ["Отряд выходит из башни к воротам",
+						"То же делает ПКМ по башне"]},
+					BTN_SIZE * CASTLE_PANEL_BOOST, CASTLE_ICON_BOOST)
+
+		elif u is Castle and u.faction == Constants.FACTION_PLAYER:
 			portrait.color = Color(0.12, 0.18, 0.30)
 			_show_garrison(u as Castle)
 			# ЗАМОК: ТРИ ЮНИТА (Рабочий, Рыцарь/Мечник, Монах) — постройки
@@ -2036,8 +2129,10 @@ func _refresh_panel() -> void:
 				_portrait_wrap.size_flags_vertical = Control.SIZE_SHRINK_END
 			var tbig: float = BTN_SIZE * CASTLE_PANEL_BOOST
 			_train_cmd(u, "worker", Color(0.18, 0.32, 0.18), tbig, CASTLE_ICON_BOOST)
+			# РУДНИКА В МЕНЮ БОЛЬШЕ НЕТ (заказ спринта 13): ничейные рудники на
+			# плато остались, но ставить свои игрок не может — ни рабочим, ни
+			# отсюда. Механика Mine.gd не тронута
 			_build_cmd("barracks", Color(0.22, 0.20, 0.32), func(): GameManager.try_build_barracks(u))
-			_build_cmd("mine",     Color(0.28, 0.22, 0.14), func(): GameManager.try_build_mine(u))
 
 		elif u is Barracks and u.faction == Constants.FACTION_PLAYER:
 			# ЕДИНЫЙ СТАНДАРТ ПРОИЗВОДСТВЕННЫХ ЗДАНИЙ (заказ владельца: «приведи
@@ -2056,8 +2151,37 @@ func _refresh_panel() -> void:
 					CASTLE_PORTRAIT_W, CASTLE_PORTRAIT_W)
 				_portrait_wrap.size_flags_vertical = Control.SIZE_SHRINK_END
 			var bbig: float = BTN_SIZE * CASTLE_PANEL_BOOST
+			# БАРАКИ — ПЕХОТА (09.09.2026): копейщики и мечники; лучники в стрелковой
 			_train_cmd(u, "spearman", Color(0.14, 0.18, 0.36), bbig, CASTLE_ICON_BOOST)
-			_train_cmd(u, "archer",   Color(0.20, 0.28, 0.16), bbig, CASTLE_ICON_BOOST)
+			_train_cmd(u, "warrior",  Color(0.30, 0.14, 0.28), bbig, CASTLE_ICON_BOOST)
+
+		elif u is Building and u.building_id == "archery" \
+				and u.faction == Constants.FACTION_PLAYER:
+			# СТРЕЛКОВАЯ — тот же стандарт производственного здания, что у бараков
+			portrait.color = Color(0.16, 0.26, 0.14)
+			_castle_boost = true
+			_update_castle_caption(info_label.text)
+			info_label.text = ""
+			if _portrait_wrap != null and is_instance_valid(_portrait_wrap):
+				_portrait_wrap.custom_minimum_size = Vector2(
+					CASTLE_PORTRAIT_W, CASTLE_PORTRAIT_W)
+				_portrait_wrap.size_flags_vertical = Control.SIZE_SHRINK_END
+			var abig: float = BTN_SIZE * CASTLE_PANEL_BOOST
+			_train_cmd(u, "archer", Color(0.20, 0.28, 0.16), abig, CASTLE_ICON_BOOST)
+
+		elif u is Building and _UCfg.is_house(u.building_id) \
+				and u.faction == Constants.FACTION_PLAYER:
+			# ДОМ: что даёт (слоты лимита и еда), заказ 09.09.2026
+			portrait.color = Color(0.26, 0.24, 0.18)
+			info_label.text = _house_info_text(u as Building)
+
+		elif u is Building and String(u.building_id) == "sheep_pen" and u.faction == Constants.FACTION_PLAYER:
+			# ЗАГОН: главное о нём — СКОЛЬКО ОВЕЦ ВЛЕЗЕТ (заказ спринта 13:
+			# «Вместимость: X / 20 овец»). Строку собирает САМ ЗАГОН
+			# (SheepPen.capacity_text): и потолок, и счёт привязанного стада
+			# знает он, а не панель — второго описания вместимости быть не должно
+			portrait.color = Color(0.30, 0.26, 0.16)
+			info_label.text = _pen_info_text(u as Building)
 
 		elif u is Smithy and u.faction == Constants.FACTION_PLAYER:
 			portrait.color = Color(0.24, 0.18, 0.10)
@@ -2148,7 +2272,7 @@ func _build_type_detail(unit_id: String) -> void:
 	portrait.color = Color(0.12, 0.16, 0.28)
 	# Портрет — иконка ТИПА, а не первого попавшегося в выделении юнита
 	if _portrait_icon != null and is_instance_valid(_portrait_icon):
-		var tex := _icon_texture(String(UNIT_ICONS.get(unit_id, "")))
+		var tex := _icon_texture(unit_icon_path(unit_id, Constants.FACTION_PLAYER))
 		_portrait_icon.texture = tex
 		_portrait_icon.visible = tex != null
 	if _portrait_count_lbl != null and is_instance_valid(_portrait_count_lbl):
@@ -2188,12 +2312,19 @@ func _portrait_icon_path(units: Array) -> String:
 	if units.is_empty():
 		return ""
 	var u = units[0]
+	if u is Castle and not (u as Castle).is_stronghold():
+		return _bld_icon("tower")
 	if u is Castle or u is TownCenter:
 		return _bld_icon("castle")
 	if u is Barracks:
 		return _bld_icon("barracks")
 	if u is Smithy:
 		return _bld_icon("smithy")
+	# Остальные постройки (стрелковая, дома, рудник) — иконка из своей записи
+	if u is Building and not (u as Building).building_id.is_empty():
+		var bi: String = _bld_icon((u as Building).building_id)
+		if not bi.is_empty():
+			return bi
 	if u is Worker:
 		return String(UNIT_ICONS.get("worker", ""))
 	if u is Archer:
@@ -2296,8 +2427,15 @@ func _maybe_add_stance_buttons(units: Array) -> void:
 		# ЛЫЧКИ ИЗ ЗАГОЛОВКА УБРАНЫ: звание теперь стоит в самом названии
 		# (см. _squad_title_ranked). Значок остался там, где на слова нет
 		# места, — на портрете и на карточке отряда
-		info_label.text = "%s%s" % [
-			tname, ("  (отряд %d)" % (grp + 1)) if grp >= 0 else ""]
+		# ── ЗНАЧОК ЩИТА, ПОКА ИДЁТ СПЕЦПРИЁМ (заказ спринта 13) ─────────
+		# «На панели отряда виден значок щита» — прямое требование к
+		# «Яростному Набегу». Значок ТЕКСТОВЫЙ, а не картинкой: строка
+		# названия собирается одним Label, и лепить в неё TextureRect
+		# означало бы разбирать её на контейнер ради одного глифа. Тот же
+		# приём, что у лычек ранга в подписи отряда
+		info_label.text = "%s%s%s" % [
+			tname, _squad_ability_mark(units),
+			("  (отряд %d)" % (grp + 1)) if grp >= 0 else ""]
 		_update_xp_bar(sid)
 		_show_squad_stats(sid, units)
 		# Полная раскладка статов с источниками бонусов — отдельной панелью
@@ -2563,14 +2701,21 @@ func _maybe_add_ability_buttons(units: Array) -> void:
 		var title: String = String(node.get("name", nid))
 		var col: Color = Color(0.16, 0.30, 0.42) if not need.is_empty() \
 			else Color(0.20, 0.34, 0.20)
-		var lines: Array = [String(node.get("desc", "")),
-			"Способность отряда — покупается каждому отряду отдельно",
-			"Цена: %d золота за отряд" % int(cost)]
-		if owned > 0:
-			lines.append("Уже есть у отрядов: %d" % owned)
-		if not need.is_empty():
-			lines.append("Купить для отрядов: %d  (итого %d з)" % [
-				need.size(), int(cost) * need.size()])
+		# ── ПОДПИСЬ БОЛЬШЕ НЕ ГОВОРИТ О ПОКУПКЕ (спринт 13, блок 4) ─────────
+		# Плату за доступ убрали: узел кузницы открывает способность СРАЗУ
+		# всем отрядам этого рода. Строки «покупается каждому отряду» и
+		# «Цена: 0 золота» врали бы игроку в глаза. Цена остаётся в конфиге
+		# историей, и если владелец однажды вернёт её, вернётся и строка
+		var lines: Array = [String(node.get("desc", ""))]
+		if cost > 0.0:
+			lines.append("Цена: %d золота за отряд" % int(cost))
+			if owned > 0:
+				lines.append("Уже есть у отрядов: %d" % owned)
+			if not need.is_empty():
+				lines.append("Купить для отрядов: %d  (итого %d з)" % [
+					need.size(), int(cost) * need.size()])
+		else:
+			lines.append("Способность рода войск — открыта в кузнице для всех отрядов")
 		var btn: Button = _cmd(title, col,
 			func(): _on_buy_squad_ability(units, need, nid),
 			String(node.get("icon", "")), {"title": title, "lines": lines})
@@ -2668,6 +2813,10 @@ func _on_send_to_castle(sm: SelectionManager) -> void:
 		var c := b as Castle
 		if c == null or c.is_dead():
 			continue
+		# Башня — тоже Castle, но «в замок» ведёт в крепость: лечить и
+		# пополнять любой отряд умеет только она
+		if not c.is_stronghold():
+			continue
 		var d: float = mid.distance_to(c.global_position)
 		if d < best_d:
 			best_d = d
@@ -2764,7 +2913,7 @@ func _filter_slot(unit_id: String, squads: int, men: int) -> Control:
 	btn.add_theme_stylebox_override("normal", sn)
 	btn.add_theme_stylebox_override("hover",  sh)
 	btn.add_theme_stylebox_override("pressed", sn)
-	var ipath: String = String(UNIT_ICONS.get(unit_id, ""))
+	var ipath: String = unit_icon_path(unit_id, Constants.FACTION_PLAYER)
 	if ipath and ResourceLoader.exists(ipath):
 		var tex := load(ipath) as Texture2D
 		if tex != null:
@@ -2878,7 +3027,7 @@ func _squad_card(sid: int) -> Control:
 	btn.tooltip_text = "%s — %d бойцов (%d%%). Клик — выделить только этот отряд" \
 		% [_squad_title_ranked(uid, GameManager.squad_level(sid)), alive,
 			int(round(frac * 100.0))]
-	var ipath: String = String(UNIT_ICONS.get(uid, ""))
+	var ipath: String = unit_icon_path(uid, Constants.FACTION_PLAYER)
 	if ipath and ResourceLoader.exists(ipath):
 		var tex := load(ipath) as Texture2D
 		if tex != null:
@@ -2979,7 +3128,7 @@ func _show_garrison(castle: Castle) -> void:
 	panel.anchor_left = 0.0; panel.anchor_right = 0.0
 	panel.anchor_top  = 1.0; panel.anchor_bottom = 1.0
 	panel.offset_left   = PANEL_LEFT
-	panel.offset_right  = PANEL_LEFT + float(_UCfg.GARRISON_SQUAD_LIMIT) * (GARRISON_SLOT + 8) + 16
+	panel.offset_right  = PANEL_LEFT + float(castle.garrison_limit()) * (GARRISON_SLOT + 8) + 16
 	panel.offset_bottom = PANEL_TOP - 6
 	panel.offset_top    = PANEL_TOP - 6 - (GARRISON_SLOT + 34)
 	add_child(panel)
@@ -3042,6 +3191,47 @@ func _on_garrison_release(castle: Castle, squad_id: int) -> void:
 		return
 	castle.release_garrison(squad_id)
 	show_selection([castle])
+
+## Кнопка «Выпустить» в панели башни
+func _on_tower_release(tower: Castle) -> void:
+	if tower == null or not is_instance_valid(tower):
+		return
+	if tower.has_method("release_all"):
+		tower.call("release_all")
+	show_selection([tower])
+
+## Строка панели башни: обзор и кто внутри
+func _tower_info_text(tower: Castle) -> String:
+	var s: String = "Обзор %d м" % int(round(tower.vision_radius()))
+	var sid: int = 0
+	if tower.has_method("garrison_squad_id"):
+		sid = int(tower.call("garrison_squad_id"))
+	if sid > 0:
+		var t: String = GameManager.squad_type(sid)
+		var have: int = GameManager.squad_members(sid).size()
+		var want: int = _UCfg.squad_size(t)
+		s += "\nВнутри: %s %d/%d" % [_squad_title(t), have, want]
+	elif not tower._incoming.is_empty():
+		s += "\nОтряд лучников идёт к воротам"
+	else:
+		s += "\nПусто — ПКМ отрядом лучников"
+	return s
+
+## Строка панели дома: слоты лимита и еда (заказ 09.09.2026)
+## Подпись загона для овец: запас жизни и вместимость стада
+func _pen_info_text(p: Building) -> String:
+	var out: String = "%s  %d/%d HP" % [
+		p.display_name, int(p.current_health), int(p.max_health)]
+	if p.has_method("capacity_text"):
+		out += "\n" + String(p.call("capacity_text"))
+	out += "\nразмножение вдвое быстрее, чем у замка"
+	return out
+
+func _house_info_text(h: Building) -> String:
+	var s: String = "%s  %d/%d HP" % [h.display_name, int(h.current_health), int(h.max_health)]
+	s += "\n+%d рабочих · +%d отряда" % [_UCfg.HOUSE_WORKER_SLOTS, _UCfg.HOUSE_SQUAD_SLOTS]
+	s += "\n+%d еды каждые %d c" % [int(_UCfg.HOUSE_FOOD_INCOME), int(_UCfg.HOUSE_FOOD_INTERVAL)]
+	return s
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ВЕТЕРАНСТВО ОТРЯДА
@@ -3124,6 +3314,25 @@ const STAT_ICONS := {
 	"cooldown": "icon_broken_sword.png",
 	"range": "icon_bow.png",
 }
+
+## ── ОТМЕТКА ИДУЩЕГО СПЕЦПРИЁМА В ПОДПИСИ ОТРЯДА ───────────────────────────
+## Пусто, если приём не идёт. Спрашивается СВОЙСТВО у самих бойцов
+## (Warrior.rage_active / Spearman.phalanx_push_active), а не отдельная запись
+## в реестре отрядов: второй источник правды о том, идёт ли приём, неминуемо
+## разошёлся бы с первым. Достаточно ОДНОГО бойца в приёме — приказ раздаётся
+## всему отряду сразу, а погибшие в первые секунды не должны гасить значок
+const ABILITY_MARK_SHIELD := "  ⛨"
+const ABILITY_MARK_SPEARS := "  ⚔"
+
+func _squad_ability_mark(units: Array) -> String:
+	for u in units:
+		if u == null or not is_instance_valid(u):
+			continue
+		if u.has_method("rage_active") and bool(u.call("rage_active")):
+			return ABILITY_MARK_SHIELD
+		if u.has_method("phalanx_push_active") and bool(u.call("phalanx_push_active")):
+			return ABILITY_MARK_SPEARS
+	return ""
 
 func _stat_icon(key: String) -> Texture2D:
 	var nm: String = String(STAT_ICONS.get(key, ""))
@@ -3993,7 +4202,7 @@ const MOD_SHORT_LABELS := {
 	# экране ОДНОВРЕМЕННО, и назвать одно число двумя словами нельзя
 	"bonus_cooldown": "ИНТЕРВАЛ АТАКИ", "bonus_spread": "SPREAD",
 	"bonus_push": "PUSH", "bonus_morale": "MORALE",
-	"bonus_carry": "CARRY", "bonus_gather": "GATHERING",
+	"bonus_carry": "CARRY", "bonus_gather": "GATHERING", "bonus_build": "BUILDING",
 }
 
 var _vet_tip: Control = null
@@ -4173,10 +4382,16 @@ func _on_stance_pressed(sm, stance_id: String) -> void:
 # картинок здесь больше нет: прежний фолбэк указывал руднику на House1.png,
 # то есть на картинку ДОМА, и при отсутствии icon в конфиге дал бы чужой рисунок
 const _WORKER_BUILD_COLORS := {
+	"castle":   Color(0.12, 0.18, 0.30),
 	"barracks": Color(0.22, 0.20, 0.32),
+	"archery":  Color(0.16, 0.26, 0.14),
+	"tower":    Color(0.16, 0.20, 0.30),
 	"smithy":   Color(0.28, 0.20, 0.10),
 	"mine":     Color(0.28, 0.22, 0.14),
+	"sheep_pen": Color(0.30, 0.26, 0.16),
 	"house":    Color(0.26, 0.24, 0.18),
+	"house2":   Color(0.26, 0.24, 0.18),
+	"house3":   Color(0.26, 0.24, 0.18),
 }
 
 ## Все выделенные — рабочие игрока? Тогда это артель, и ей положена
@@ -4244,17 +4459,32 @@ func _train_cmd(bld: Building, unit_id: String, col: Color, size: float = 0.0,
 		return
 	var cost: Dictionary = _UCfg.train_cost(bld.building_id, unit_id)
 	var squad: int = int(c.get("squad", 1))
-	var color: Color = _afford_color(col, ResourceManager.can_afford(bld.faction, cost))
+	# Кнопка краснеет и когда нет денег, и когда упёрлись в лимит населения
+	var pop_ok: bool = GameManager.pop_allows(bld.faction, unit_id)
+	var color: Color = _afford_color(col,
+		ResourceManager.can_afford(bld.faction, cost) and pop_ok)
 	var title: String = String(UNIT_TITLES.get(unit_id, unit_id))
 	if squad > 1:
 		title += " ×%d" % squad
 	var card: Dictionary = _unit_card(unit_id, bld.faction, cost, squad)
 	card["title"] = title
 	var lines: Array = card.get("lines", [])
+	if GameManager.pop_limit_enabled and bld.faction == Constants.FACTION_PLAYER:
+		if unit_id == "worker":
+			lines.append("Лимит рабочих: %d/%d (дом даёт +%d)" % [
+				GameManager.pop_workers_used(bld.faction),
+				GameManager.pop_worker_cap(bld.faction), _UCfg.HOUSE_WORKER_SLOTS])
+		else:
+			lines.append("Лимит отрядов: %d/%d (дом даёт +%d)" % [
+				GameManager.pop_squads_used(bld.faction),
+				GameManager.pop_squad_cap(bld.faction), _UCfg.HOUSE_SQUAD_SLOTS])
+	if unit_id == "monk":
+		lines.append("Одиночный юнит, не больше %d; лечит раненых рядом" % _UCfg.MONK_LIMIT)
 	lines.append("ЛКМ — заказать, ПКМ — отменить (с возвратом)")
 	card["lines"] = lines
 	var btn := _cmd(title, color, func(): bld.train_from_config(unit_id),
 		String(UNIT_ICONS.get(unit_id, "")), card, size, icon_boost)
+	_watch_afford(btn, col, cost, bld.faction, unit_id, bld)
 	# ПКМ по иконке снимает последний заказ этого типа и возвращает ресурсы.
 	# У Button нет сигнала на правую кнопку, поэтому слушаем сырой ввод
 	btn.gui_input.connect(func(e: InputEvent): _on_train_rmb(e, bld, unit_id))
@@ -4266,8 +4496,9 @@ func _build_cmd(build_id: String, col: Color, cb: Callable) -> void:
 	var cost: Dictionary = _UCfg.building_cost(build_id)
 	var color: Color = _afford_color(col,
 		ResourceManager.can_afford(Constants.FACTION_PLAYER, cost))
-	_cmd(String(_UCfg.building_cfg(build_id).get("name", build_id)), color, cb,
+	var btn := _cmd(String(_UCfg.building_cfg(build_id).get("name", build_id)), color, cb,
 		_bld_icon(build_id), _building_card(build_id))
+	_watch_afford(btn, col, cost, Constants.FACTION_PLAYER)
 
 func _bld_icon(build_id: String) -> String:
 	return String(_UCfg.building_cfg(build_id).get("icon", ""))
@@ -4624,6 +4855,8 @@ func _rebuild_forge_tabs() -> void:
 
 func _rebuild_forge_grid() -> void:
 	_forge_nodes.clear()
+	_forge_node_avail.clear()
+	_forge_node_afford.clear()
 	# remove_child перед queue_free — иначе имена узлов уникализируются
 	# (см. тот же разбор в _rebuild_research_queue)
 	for c in _forge_grid.get_children():
@@ -4647,20 +4880,12 @@ func _rebuild_forge_grid() -> void:
 		btn.size = Vector2(FORGE_CELL, FORGE_CELL)
 		btn.custom_minimum_size = btn.size
 		btn.focus_mode = Control.FOCUS_NONE
-		var bs := StyleBoxFlat.new()
-		if done:
-			bs.bg_color = Color(0.20, 0.34, 0.20)
-			bs.border_color = Color(0.36, 0.72, 0.36)
-		elif busy:
-			bs.bg_color = Color(0.12, 0.22, 0.34)
-			bs.border_color = Color(0.36, 0.60, 0.84)
-		elif avail:
-			bs.bg_color = Color(0.22, 0.17, 0.08)
-			bs.border_color = Color(0.62, 0.50, 0.24)
-		else:
-			bs.bg_color = Color(0.09, 0.09, 0.11)
-			bs.border_color = Color(0.22, 0.22, 0.26)
-		_corners(bs, 3); _borders(bs, 2)
+		# Доступный узел без денег — красная рамка, как у кнопок найма;
+		# живёт по сигналу склада (_retint_forge_nodes)
+		var afford: bool = ResourceManager.can_afford(f, _UCfg.upgrade_cost(node))
+		_forge_node_avail[nid] = avail and not done and not busy
+		_forge_node_afford[nid] = afford
+		var bs := _forge_node_style(done, busy, avail, afford)
 		btn.add_theme_stylebox_override("normal", bs)
 		btn.add_theme_stylebox_override("hover", bs)
 		btn.add_theme_stylebox_override("pressed", bs)
@@ -4877,8 +5102,9 @@ func _show_forge_tip(node_id: String) -> void:
 
 	_forge_tip_line(box, "Исследование: %d с" % int(_UCfg.upgrade_research_time(node)),
 		Color(0.86, 0.86, 0.90), 13)
-	_forge_tip_line(box, "Цена: %s" % _forge_cost_text(node),
-		Color(0.98, 0.86, 0.42), 14)
+	# ЦЕНА — ИКОНКАМИ РЕСУРСОВ, как в карточке найма (заказ 10.09.2026):
+	# тот же _build_cost_row, число краснеет, когда ресурса не хватает
+	box.add_child(_build_cost_row(_UCfg.upgrade_cost(node)))
 
 	# ── Спец-способность: сколько будет стоить докупить её отряду
 	if bool(node.get("is_unit_ability", false)):
@@ -4906,6 +5132,7 @@ const _BONUS_TITLES := {
 	# Экономические ключи рабочего. bonus_gather СОКРАЩАЕТ цикл, поэтому подпись
 	# читается как «секунды долой», а не «плюс к чему-то» (см. Worker._cycle_time)
 	"bonus_gather": "с долой из цикла добычи", "bonus_carry": "к грузу за ходку",
+	"bonus_build": "к темпу стройки (доля)",
 }
 
 func _forge_tip_line(box: VBoxContainer, text: String, col: Color, size: int) -> void:
@@ -4933,9 +5160,11 @@ func _forge_cost_text(node: Dictionary) -> String:
 	var g: float = float(node.get("cost_gold", 0.0))
 	var w: float = float(node.get("cost_wood", 0.0))
 	var s: float = float(node.get("cost_stone", 0.0))
+	var f: float = float(node.get("cost_food", 0.0))
 	if g > 0.0: parts.append("%d з" % int(g))
 	if w > 0.0: parts.append("%d л" % int(w))
 	if s > 0.0: parts.append("%d к" % int(s))
+	if f > 0.0: parts.append("%d е" % int(f))
 	return " + ".join(parts) if not parts.is_empty() else "бесплатно"
 
 ## ОКНО ДРЕВА — ИСКЛЮЧЕНИЕ ИЗ ОБЩЕГО ПРАВИЛА «СТРОГО ВВЕРХ», И НАМЕРЕННОЕ.
@@ -5538,6 +5767,14 @@ func _process(_delta: float) -> void:
 			# застынет старое HP. Проверка по Building, а не по Castle: под единый
 			# стандарт попали и Бараки, и у них подпись замирала бы
 			_update_castle_caption(hp_text)
+			# У башни в info_label живёт гарнизон — он меняется, пока отряд
+			# заходит, и обновляется вместе с HP
+			if _selected_node is Castle and not (_selected_node as Castle).is_stronghold():
+				info_label.text = _tower_info_text(_selected_node as Castle)
+		elif _selected_node is Building \
+				and _UCfg.is_house((_selected_node as Building).building_id):
+			# Дом: слоты лимита и еда, а не голое HP (см. _house_info_text)
+			info_label.text = _house_info_text(_selected_node as Building)
 		elif forge_visible() and _selected_node is Smithy:
 			# У кузницы своя панель: строка «Кузница N/N HP» живёт в её левом
 			# блоке, а info_label общей панели сейчас вообще не показан
@@ -6056,6 +6293,115 @@ func show_defeat() -> void:
 func _on_resources_changed(faction: int) -> void:
 	if faction == Constants.FACTION_PLAYER:
 		_refresh_resources()
+		_refresh_afford()
+		_retint_forge_nodes()
+
+## ── ЖИВАЯ ДОСТУПНОСТЬ КНОПОК (заказ 10.09.2026) ──────────────────────────────
+## Цвет кнопки найма/постройки считался ОДИН РАЗ при сборке панели, и иконка
+## оставалась «нет денег», пока игрок не перевыделит здание. Теперь каждая
+## такая кнопка записана в реестр вместе с ценой и правилом лимита, а сигнал
+## resources_changed перекрашивает их тем же _afford_color и тем же стилем,
+## что при сборке (_style_cmd_button — общий с _cmd). Реестр чистится вместе
+## с кнопками (панель пересобирается — старые узлы мертвы, is_instance_valid)
+var _afford_watch: Array = []
+
+func _watch_afford(btn: Button, base: Color, cost: Dictionary, faction: int,
+		unit_id: String = "", bld: Building = null) -> void:
+	_afford_watch.append({"btn": btn, "base": base, "cost": cost, "faction": faction,
+		"unit": unit_id, "bld": bld, "ok": _afford_ok(cost, faction, unit_id, bld)})
+
+func _afford_ok(cost: Dictionary, faction: int, unit_id: String, bld: Building) -> bool:
+	var ok: bool = ResourceManager.can_afford(faction, cost)
+	if ok and unit_id != "" and bld != null and is_instance_valid(bld):
+		ok = GameManager.pop_allows(bld.faction, unit_id)
+	return ok
+
+func _refresh_afford() -> void:
+	if _afford_watch.is_empty():
+		return
+	var keep: Array = []
+	for e in _afford_watch:
+		var d: Dictionary = e
+		var btn = d["btn"]
+		if btn == null or not is_instance_valid(btn):
+			continue
+		keep.append(d)
+		var ok: bool = _afford_ok(d["cost"], int(d["faction"]), String(d["unit"]), d["bld"])
+		if ok == bool(d["ok"]):
+			continue
+		d["ok"] = ok
+		_style_cmd_button(btn as Button, _afford_color(d["base"], ok), false)
+	_afford_watch = keep
+
+## Тот же стиль, что кладёт _cmd при сборке; вынесен, чтобы перекраска не
+## разошлась с первичной покраской
+func _style_cmd_button(btn: Button, icon_color: Color, active: bool) -> void:
+	var sn := StyleBoxFlat.new(); sn.bg_color = icon_color.darkened(0.25)
+	_borders(sn, 1)
+	sn.border_color = icon_color.lightened(0.10); _corners(sn, 5)
+	var sh := StyleBoxFlat.new(); sh.bg_color = icon_color.lightened(0.12)
+	_borders(sh, 1)
+	sh.border_color = Color(0.95, 0.88, 0.55); _corners(sh, 5)
+	if active:
+		sn.bg_color = icon_color.lightened(0.06)
+		_borders(sn, ACTIVE_BORDER_W)
+		sn.border_color = ACTIVE_BORDER_COLOR
+		_corners(sn, ACTIVE_BORDER_RADIUS)
+		_borders(sh, ACTIVE_BORDER_W)
+		sh.border_color = ACTIVE_BORDER_COLOR
+		_corners(sh, ACTIVE_BORDER_RADIUS)
+	btn.add_theme_stylebox_override("normal", sn)
+	btn.add_theme_stylebox_override("hover",  sh)
+	btn.add_theme_stylebox_override("pressed", sn)
+
+## Узлы кузницы: доступный, но неоплатный — красная рамка; перекрашивается по
+## сигналу склада, без пересборки сетки
+const FORGE_LACK_BG := Color(0.26, 0.11, 0.09)
+const FORGE_LACK_BORDER := Color(0.78, 0.34, 0.28)
+var _forge_node_avail: Dictionary = {}
+var _forge_node_afford: Dictionary = {}
+
+func _forge_node_style(done: bool, busy: bool, avail: bool, afford: bool) -> StyleBoxFlat:
+	var bs := StyleBoxFlat.new()
+	if done:
+		bs.bg_color = Color(0.20, 0.34, 0.20)
+		bs.border_color = Color(0.36, 0.72, 0.36)
+	elif busy:
+		bs.bg_color = Color(0.12, 0.22, 0.34)
+		bs.border_color = Color(0.36, 0.60, 0.84)
+	elif avail and not afford:
+		bs.bg_color = FORGE_LACK_BG
+		bs.border_color = FORGE_LACK_BORDER
+	elif avail:
+		bs.bg_color = Color(0.22, 0.17, 0.08)
+		bs.border_color = Color(0.62, 0.50, 0.24)
+	else:
+		bs.bg_color = Color(0.09, 0.09, 0.11)
+		bs.border_color = Color(0.22, 0.22, 0.26)
+	_corners(bs, 3); _borders(bs, 2)
+	return bs
+
+func _retint_forge_nodes() -> void:
+	if _forge_nodes.is_empty() or _forge_smithy == null or not is_instance_valid(_forge_smithy):
+		return
+	var f: int = _forge_smithy.faction
+	for nid in _forge_nodes.keys():
+		var btn = _forge_nodes[nid]
+		if btn == null or not is_instance_valid(btn):
+			continue
+		if not bool(_forge_node_avail.get(nid, false)):
+			continue
+		var node: Dictionary = _Forge.get_node(String(nid))
+		var afford: bool = ResourceManager.can_afford(f, _UCfg.upgrade_cost(node))
+		if afford == bool(_forge_node_afford.get(nid, true)):
+			continue
+		_forge_node_afford[nid] = afford
+		var bs := _forge_node_style(false, false, true, afford)
+		for st in ["normal", "hover", "pressed", "disabled"]:
+			(btn as Button).add_theme_stylebox_override(st, bs)
+
+func forge_node_afford(nid: String) -> bool:
+	return bool(_forge_node_afford.get(nid, true))
 
 func _refresh_resources() -> void:
 	if _res_labels.is_empty():
@@ -6160,6 +6506,19 @@ func _update_resource_income(delta: float) -> void:
 		var inc_lbl: Label = _res_income_labels.get(key)
 		if inc_lbl == null:
 			continue
+		# ЕДА: приток И РАСХОД (содержание армии, 10.09.2026). Красным —
+		# когда расход больше притока: склад тает, и игроку пора строить дома
+		# или красть овец
+		if key == Constants.RESOURCE_FOOD:
+			var upk: float = ResourceManager.upkeep_rate(Constants.FACTION_PLAYER, key) * 60.0
+			if upk > 0.0:
+				inc_lbl.text = "+%d −%d" % [int(round(rate)), int(round(upk))]
+				inc_lbl.add_theme_color_override("font_color",
+					Color(0.35, 0.9, 0.35) if rate >= upk else Color(0.95, 0.4, 0.3))
+				inc_lbl.tooltip_text = "Еда: приток %d в минуту, расход %d в минуту (рабочие и отряды)" % [
+					int(round(rate)), int(round(upk))]
+				inc_lbl.visible = true
+				continue
 		if rate <= 0.0 and workers <= 0:
 			inc_lbl.visible = false
 			continue
@@ -6765,9 +7124,17 @@ func _building_card(build_id: String) -> Dictionary:
 		lines.append("Стройка: %.0f c одним рабочим" % bt)
 	else:
 		lines.append("Ставится сразу, без стройки")
-	if build_id == "house":
+	if _UCfg.is_house(build_id):
 		lines.append("Даёт %d еды каждые %d c" % [
 			int(_UCfg.HOUSE_FOOD_INCOME), int(_UCfg.HOUSE_FOOD_INTERVAL)])
+		lines.append("Лимит: +%d рабочих, +%d отряда" % [
+			_UCfg.HOUSE_WORKER_SLOTS, _UCfg.HOUSE_SQUAD_SLOTS])
+	elif build_id == "tower":
+		lines.append("Обзор %d м, внутрь — отряд лучников" % int(_UCfg.TOWER_VISION))
+	elif build_id == "archery":
+		lines.append("Нанимает лучников")
+	elif build_id == "barracks":
+		lines.append("Нанимает копейщиков и мечников")
 	return {
 		"title": String(cfg.get("name", build_id)),
 		"icon":  String(cfg.get("icon", "")),
@@ -6790,6 +7157,7 @@ func _upgrade_card(slot: Dictionary, faction: int) -> Dictionary:
 		"bonus_cooldown": "с долой с перезарядки", "bonus_spread": "кучности",
 		"bonus_speed": "скорости", "bonus_push": "напору", "bonus_morale": "морали",
 		"bonus_carry": "грузу за ходку", "bonus_gather": "с долой из цикла добычи",
+		"bonus_build": "к темпу стройки",
 	}
 	for key in _UCfg.BONUS_KEYS:
 		var k: String = String(key)

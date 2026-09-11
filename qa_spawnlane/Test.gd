@@ -63,6 +63,10 @@ func _train(b: Building, size: int) -> Array:
 		await get_tree().process_frame
 		if get_tree().get_nodes_in_group("player_units").size() >= before.size() + size:
 			break
+	# Место на площадке ставится отложенным вызовом (_place_spawned): точку
+	# бойца читать только после того, как он туда встал
+	await get_tree().process_frame
+	await get_tree().physics_frame
 	var fresh: Array = []
 	for n in get_tree().get_nodes_in_group("player_units"):
 		if not (n in before):
@@ -120,13 +124,16 @@ func _run() -> void:
 			var u := n as Unit
 			if u == null:
 				continue
-			var d: Vector3 = u.move_target - gate
+			# ПЛОЩАДКА СБОРА (хак №3): боец появляется СРАЗУ на своём месте, и
+			# приказ идти в него исполнен в тот же кадр — move_target уже
+			# погашен. Место заказа читается по самой точке бойца
+			var d: Vector3 = u.global_position - gate
 			d.y = 0.0
 			lat_sum += d.dot(side)
 			fwd_sum += d.dot(exit_dir)
 			cnt += 1
-			if absf(u.move_target.x) > GameManager.map_lim_x + 0.01 \
-					or absf(u.move_target.z) > GameManager.map_lim_z + 0.01:
+			if absf(u.global_position.x) > GameManager.map_lim_x + 0.01 \
+					or absf(u.global_position.z) > GameManager.map_lim_z + 0.01:
 				off_map += 1
 		var lat: float = lat_sum / maxf(float(cnt), 1.0)
 		lat_by_order.append(lat)
@@ -150,7 +157,7 @@ func _run() -> void:
 		per_err = maxf(per_err, absf(a - c))
 		per_n += 1
 	verdict("A2 полосы ходят по кругу, отступ не растёт",
-		per_n > 0 and per_err < 0.01,
+		per_n > 0 and per_err < 0.25,   # по точкам бойцов: разбор наложения даёт сантиметры, а рост отступа — метры
 		"сравнений %d, худшее расхождение периода %.4f м" % [per_n, per_err])
 
 	verdict("A3 ни одна точка сбора не ушла за карту", off_map == 0,
@@ -202,11 +209,12 @@ func _run() -> void:
 			_trash.append(n)
 			seen += 1
 			var p: Vector3 = (n as Node3D).global_position
-			var dist: float = Vector2(p.x - gate2.x, p.z - gate2.z).length()
-			if dist > 3.0:
+			if not b2.in_rally_zone(p, 0.6):
 				far_spawn += 1
-	verdict("C1 все появились вплотную к воротам", far_spawn == 0,
-		"далеко от ворот: %d из %d" % [far_spawn, seen])
+	# ПЛОЩАДКА СБОРА (хак №3, 09.09.2026): бойцы появляются НА ПЛОЩАДКЕ перед
+	# воротами, а не в проёме. Прежнее «вплотную к воротам» развёрнуто
+	verdict("C1 все появились на площадке сбора перед воротами", far_spawn == 0,
+		"вне площадки: %d из %d" % [far_spawn, seen])
 
 	print("\n───── D. ШЕСТЬ БАРАКОВ: КАЖДЫЙ ВЫПУСКАЕТ У СВОИХ ВОРОТ ─────")
 	# Жалоба пришла именно с несколькими бараками. Здания ставим В РАЗНЫХ
@@ -277,7 +285,9 @@ func _run() -> void:
 				spawned += 1
 				var p: Vector3 = (n as Node3D).global_position
 				var dg: float = Vector2(p.x - g.x, p.z - g.z).length()
-				worst_gate = maxf(worst_gate, dg)
+				# Площадка сбора: появился на площадке СВОЕГО барака
+				if not (yard as Building).in_rally_zone(p, 0.6):
+					worst_gate = maxf(worst_gate, dg)
 				# Ближе ли он к чужому бараку, чем к своему
 				for other in yards:
 					if other == yard:
@@ -289,8 +299,8 @@ func _run() -> void:
 
 	verdict("D1 ворота стоят прямо перед фасадом, не сбоку", worst_front < 0.01,
 		"худший боковой снос ворот %.4f м" % worst_front)
-	verdict("D2 каждый боец появился у ворот СВОЕГО барака", worst_gate < 3.0,
-		"бойцов %d, худшее удаление от своих ворот %.2f м" % [spawned, worst_gate])
+	verdict("D2 каждый боец появился на площадке СВОЕГО барака", worst_gate < 0.01,
+		"бойцов %d, худшее удаление от ворот у появившихся вне площадки %.2f м" % [spawned, worst_gate])
 	verdict("D3 никто не появился у чужого барака", wrong_yard == 0,
 		"чужих появлений: %d" % wrong_yard)
 

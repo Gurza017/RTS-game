@@ -364,7 +364,16 @@ func _no_castle() -> void:
 				last_action += "|закладывается новая крепость"
 	# ── 2. ПОСЛЕДНИЙ РУБЕЖ У РУИН ──────────────────────────────────────────
 	last_stand = true
-	_command_last_stand_at(anchor)
+	# ── БИТЬСЯ НЕ С КЕМ — РАССЕИВАЕМСЯ, А НЕ СТОИМ КУЧЕЙ В УГЛУ ───────────
+	# Заказ владельца (10.09.2026): «при уничтожении всех зданий войска не
+	# должны сбиваться в одну плотную точку в углу карты». Последний рубеж
+	# собирает ВСЕ отряды к одному якорю, и без противника рядом это и есть
+	# та самая куча: тысяча бойцов на пятачке в двадцать метров.
+	# Противник рядом — рубеж как прежде (там куча оправдана: это строй)
+	if _player_combat_near(anchor) > 0:
+		_command_last_stand_at(anchor)
+	else:
+		_command_scatter_at(anchor)
 
 ## Насколько в сторону от руин закладывается новая крепость, м
 const CASTLE_REBUILD_OFFSET := 9.0
@@ -479,6 +488,7 @@ func _start_site(build_id: String, at: Vector3, free_build: bool = false) -> boo
 func _construction(castle: Castle) -> void:
 	var barracks: Building = null
 	var smithy: Smithy = null
+	var archery: Building = null
 	for b in main.get_tree().get_nodes_in_group("enemy_buildings"):
 		if not is_instance_valid(b):
 			continue
@@ -486,6 +496,8 @@ func _construction(castle: Castle) -> void:
 			barracks = b as Building
 		elif b is Smithy:
 			smithy = b as Smithy
+		elif b is Building and (b as Building).building_id == "archery":
+			archery = b as Building
 
 	# Одна стройка за раз: иначе ИИ закладывает фундаменты пачкой и снимает
 	# с добычи всю экономику разом
@@ -514,6 +526,18 @@ func _construction(castle: Castle) -> void:
 		var spot2: Vector3 = castle.global_position + fdir2 * 2.0 - side2 * 8.0
 		if _start_site("smithy", spot2):
 			last_action += "|заложена кузница"
+		return
+
+	# СТРЕЛКОВАЯ — ПОСЛЕ КУЗНИЦЫ (09.09.2026): лучники переехали из бараков,
+	# и без неё ИИ нанимал бы их только в замке. Порядок барак → кузница →
+	# стрелковая оставляет темп первых двух построек прежним (его стережёт
+	# qa_ai); до стрелковой лучники идут из замка (см. _train_army)
+	if archery == null:
+		var fdir3 := castle.front_dir()
+		var side3 := Vector3(-fdir3.z, 0.0, fdir3.x)
+		var spot3: Vector3 = castle.global_position + fdir3 * 2.0 + side3 * 16.0
+		if _start_site("archery", spot3):
+			last_action += "|заложена стрелковая"
 		return
 
 	for slot in _UCfg.UPGRADE_SLOTS:
@@ -646,19 +670,30 @@ func _queued_orders(bld: Building) -> int:
 
 func _train_army(castle: Castle) -> void:
 	var barracks: Building = null
+	var archery: Building = null
 	for b in main.get_tree().get_nodes_in_group("enemy_buildings"):
-		if is_instance_valid(b) and b is Barracks:
+		if not is_instance_valid(b):
+			continue
+		if b is Barracks:
 			barracks = b as Building
-			break
+		elif b is Building and (b as Building).building_id == "archery":
+			archery = b as Building
 
-	# Пехота идёт из барака, рыцари — из замка: две очереди работают параллельно
+	# Копейщики идут из барака, лучники — из стрелковой (а до неё — из
+	# замка), рыцари — из замка: очереди работают параллельно
 	if barracks != null and _queued_orders(barracks) < _AICfg.MAX_QUEUED_ORDERS:
-		var need := _most_needed(["spearman", "archer"], barracks)
+		var need := _most_needed(["spearman"], barracks)
 		if need != "" and barracks.train_from_config(need):
 			last_action += "|заказ отряда %s (барак)" % need
 
+	if archery != null and _queued_orders(archery) < _AICfg.MAX_QUEUED_ORDERS:
+		var aneed := _most_needed(["archer"], archery)
+		if aneed != "" and archery.train_from_config(aneed):
+			last_action += "|заказ отряда %s (стрелковая)" % aneed
+
 	if _queued_orders(castle) < _AICfg.MAX_QUEUED_ORDERS:
-		var wneed := _most_needed(["warrior"], castle)
+		var kinds: Array = ["warrior"] if archery != null else ["warrior", "archer"]
+		var wneed := _most_needed(kinds, castle)
 		if wneed != "" and castle.train_from_config(wneed):
 			last_action += "|заказ отряда %s (замок)" % wneed
 
@@ -901,6 +936,30 @@ func _command_last_stand(castle: Castle) -> void:
 
 ## Тот же последний рубеж, но вокруг ПРОИЗВОЛЬНОЙ точки: замка может уже не
 ## быть (см. _no_castle), а рубеж всё равно нужен
+## ── РАССЕИВАНИЕ ПОСЛЕ БОЯ (заказ владельца 10.09.2026) ────────────────────
+## Отряды расходятся ПО МЕСТНОСТИ вокруг якоря сеткой с шагом SCATTER_STEP и
+## встают шеренгами (курс — от якоря наружу), а не сваливаются в одну точку.
+## Точка каждого прогоняется через land_target: в воду и за край карты не
+## уходит. Приказ — обычный марш строем (_issue_squad_move), поэтому дальше
+## работает вся штатная механика: разметка, смыкание рядов, разведение отрядов
+const SCATTER_STEP := 16.0
+const SCATTER_COLS := 5
+
+func _command_scatter_at(anchor: Vector3) -> void:
+	var course := _course_from(anchor)
+	var right := Vector3(-course.z, 0.0, course.x)
+	var i := 0
+	for s in squads:
+		var sq: Dictionary = s
+		var col: int = i % SCATTER_COLS
+		var row: int = i / SCATTER_COLS
+		var lateral: float = (float(col) - float(SCATTER_COLS - 1) * 0.5) * SCATTER_STEP
+		var back: float = float(row) * SCATTER_STEP
+		var spot: Vector3 = GameManager.land_target(
+			anchor + right * lateral - course * back)
+		_set_role(sq, ROLE_PATROL, spot, course)
+		i += 1
+
 func _command_last_stand_at(home: Vector3) -> void:
 	var course := _course_from(home)
 	var right := Vector3(-course.z, 0.0, course.x)
@@ -2248,7 +2307,7 @@ func _enemy_front_normal(center: Vector3, from: Vector3) -> Vector3:
 # ─────────────────────────────────────────────────────────────────────────────
 func _find_castle() -> Castle:
 	for b in main.get_tree().get_nodes_in_group("enemy_buildings"):
-		if is_instance_valid(b) and b is Castle:
+		if is_instance_valid(b) and b is Castle and (b as Castle).is_stronghold():
 			return b as Castle
 	return null
 
@@ -2262,8 +2321,9 @@ func _rally_point() -> Vector3:
 	return _AICfg.RALLY_POINT_OVERRIDE
 
 func _player_base_pos() -> Vector3:
+	# Крепость, а не башня: та тоже Castle ради гарнизона, но базы не задаёт
 	for b in main.get_tree().get_nodes_in_group("player_buildings"):
-		if is_instance_valid(b) and b is Castle:
+		if is_instance_valid(b) and b is Castle and (b as Castle).is_stronghold():
 			return (b as Node3D).global_position
 	for b in main.get_tree().get_nodes_in_group("player_buildings"):
 		if is_instance_valid(b):

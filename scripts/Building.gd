@@ -27,6 +27,8 @@ const PRELOAD_SCENES := {
 	# отсюда, и без записи разбитый отряд выходил бы из хижины прежним
 	"goblin_spearman": preload("res://scenes/units/GoblinSpearman.tscn"),
 	"goblin_rider":    preload("res://scenes/units/GoblinPigRider.tscn"),
+	"troll":           preload("res://scenes/units/Troll.tscn"),
+	"gnoll":           preload("res://scenes/units/Gnoll.tscn"),
 }
 
 ## Есть ли чем исполнить заказ на такого бойца. Спрашивают и очередь найма, и
@@ -476,6 +478,7 @@ func set_selected(value: bool) -> void:
 	# зарастает флажками всех бараков сразу
 	_rally_visible = value
 	_refresh_rally_marker()
+	_refresh_zone_marker()
 
 var _dead := false
 
@@ -549,6 +552,25 @@ func _build_hp_bar() -> void:
 
 func is_dead() -> bool:
 	return _dead
+
+## Обзор постройки в тумане (читает FogOfWar._collect_building_sources).
+## Башня отвечает своим числом (TOWER_VISION), остальные — общим
+func vision_radius() -> float:
+	return _UCfgB.BUILDING_VISION
+
+## Доля общей картинки пепелища (см. spawn_ruin): у башни рисунок узкий, и
+## «домовые» руины в полный размер лежали бы шире самой башни
+func ruin_scale() -> float:
+	return _UCfgB.building_stat(building_id, "ruin_scale", 1.0)
+
+## Своя картинка руины ("" — общая по расе) и «руину может отстроить любая
+## сторона, и достаётся она отстроившему» (золотой рудник) — переопределяют
+## наследники; читает spawn_ruin / GameManager.rebuild_ruin
+func ruin_sprite_override() -> String:
+	return ""
+
+func ruin_any_faction() -> bool:
+	return false
 
 # Жёсткий лимит на один заказ. Берётся из конфига (SQUAD_SIZE_HARD_CAP):
 # размер отряда крутится в SQUAD_SIZE_*, а это только предохранитель
@@ -640,6 +662,12 @@ func queue_unit(unit_name: String, cost: Dictionary, build_time: float) -> bool:
 		if not _missing_warned.has(unit_name):
 			_missing_warned[unit_name] = true
 			push_warning("Building: найм '%s' отклонён — нет сцены юнита" % unit_name)
+		return false
+	# ── ЛИМИТ НАСЕЛЕНИЯ (дома, заказ 09.09.2026) ──────────────────────────
+	# Проверка стоит ДО списания по той же причине, что и can_spawn: за
+	# отклонённый заказ платить нельзя. Считает GameManager.pop_allows —
+	# живые плюс заказанные, только у игрока, только в партии
+	if not GameManager.pop_allows(faction, unit_name):
 		return false
 	if not ResourceManager.spend(faction, cost):
 		return false
@@ -805,7 +833,7 @@ func _drain_pending_spawns(delta: float = 0.0) -> void:
 # ─────────────────────────────────────────────────────────────────────────────
 
 ## Зазор от стены до точки появления: боец не должен возникать внутри текстуры
-const GATE_CLEARANCE := 0.9
+const GATE_CLEARANCE := 0.5    # 0.9 → 0.5: площадка вплотную к стене (заказ 10.09.2026)
 
 ## Сколько колонн даёт КВАДРАТНЫЙ строй на `total` бойцов.
 ## Общая для всех точка: тем же расчётом пользуются пополнение гарнизона и
@@ -934,7 +962,14 @@ func _gate_position() -> Vector3:
 # четырёх метрах от ворот — ровно «у стены», как и просили. Глубину строя
 # убрать нельзя: пятьдесят человек физически занимают место, но растёт она
 # ОТ здания наружу и начинается вплотную к нему.
-const SQUAD_EXIT_DISTANCE := 4.0
+## ── ПЛОЩАДКА ВПЛОТНУЮ К ЗДАНИЮ (заказ 10.09.2026 по скриншотам) ────────────
+## Было 4.0 — отряд отходил от ворот на четыре метра, и между стеной и первой
+## шеренгой лежала пустая трава. Теперь первая шеренга встаёт в метре от
+## ворот; проём при этом свободен (rally_zone начинается за полшага до неё)
+const SQUAD_EXIT_DISTANCE := 1.0
+## Глубина площадки сбора, м: все ряды полос выхода укладываются в неё
+## (exit_lanes / _lane_depth_step), у здания она ОДНА и та же при любом отряде
+const ZONE_DEPTH := 18.0
 
 ## ── ОДИНОЧКА ВЫХОДИТ У САМИХ ВОРОТ ─────────────────────────────────────────
 ## Жалоба владельца со скриншотом: «точка спавна выходящих юнитов у Крепости и
@@ -950,9 +985,11 @@ const SQUAD_EXIT_DISTANCE := 4.0
 ## Число выведено из шага россыпи, а не подобрано: одиночки расходятся
 ## спиралью с шагом SINGLE_AGENT_SPREAD, и полтора шага — это ровно «встал за
 ## порогом, не мешая следующему»
-const SINGLE_AGENT_EXIT_DISTANCE := SINGLE_AGENT_SPREAD * 1.5
-## Запас между полосами выхода соседних отрядов, метры (сверх ширины строя)
-const EXIT_LANE_GAP := 4.0
+## 1.5 → 0.8 шага (10.09.2026): рабочий выходит у самой стены замка
+const SINGLE_AGENT_EXIT_DISTANCE := SINGLE_AGENT_SPREAD * 0.8
+## Запас между рядами площадки соседних отрядов, метры (сверх глубины строя).
+## 4.0 → 1.0 (10.09.2026): ряды идут вплотную, площадка укладывается в ZONE_DEPTH
+const EXIT_LANE_GAP := 1.0
 
 ## СКОЛЬКО ПОЛОС ВЫХОДА СУЩЕСТВУЕТ ВСЕГО — и почему их число обязано быть
 ## конечным. Полосы разводят отряды, выходящие из ОДНИХ ворот ОДНОВРЕМЕННО,
@@ -1004,13 +1041,14 @@ var _exit_lane: int = 0
 ## полоса считается занятой и тогда, когда её держит ещё не вышедшая заявка
 func _free_exit_lane(squad_id: int, total: int, cols: int, spacing: float) -> int:
 	var want: float = sqrt(float(maxi(total, 1))) * 0.5 * spacing + 1.0
-	for lane in range(EXIT_LANES):
+	var n_l: int = exit_lanes(total, cols, spacing)
+	for lane in range(n_l):
 		if not _lane_busy(lane, total, cols, spacing, want):
 			_lane_owner[lane] = squad_id
 			return lane
 	# Все полосы заняты — крутим счётчик по кругу, как и раньше
-	var fallback: int = _exit_lane
-	_exit_lane = (_exit_lane + 1) % EXIT_LANES
+	var fallback: int = _exit_lane % n_l
+	_exit_lane = (_exit_lane + 1) % n_l
 	_lane_owner[fallback] = squad_id
 	return fallback
 
@@ -1152,18 +1190,26 @@ func _lane_shift(lane: int, total: int, cols: int, spacing: float) -> Vector2:
 ## шага. Считается ОДНОЙ функцией с тем местом, где полоса выбирается, — иначе
 ## проверка занятости судила бы об одних полосах, а отряд выходил на другие
 ## (та же причина, что у _lane_step)
+## ── РЯДЫ ПЛОЩАДКИ УКЛАДЫВАЮТСЯ В ZONE_DEPTH (10.09.2026) ───────────────────
+## Прежний шаг «не теснее бокового 7.13 м» уводил пятый заказ на тридцать
+## метров от ворот; владелец попросил площадку в 18 м вплотную к зданию.
+## Сколько рядов помещается — считается от глубины СТРОЯ: сколько отрядов
+## этого размера встанут друг за другом с просветом EXIT_LANE_GAP. Потолок —
+## EXIT_LANES (его читают стенды), пол — два ряда, чтобы одновременные заказы
+## всё ещё расходились. Ряды растягиваются на всю глубину площадки: у мелкого
+## отряда шаг больше просвета, у крупного — ровно просвет
+func exit_lanes(total: int, cols: int, spacing: float) -> int:
+	var rows: int = int(ceil(float(maxi(total, 1)) / float(maxi(cols, 1))))
+	var own: float = float(rows) * spacing
+	var fit: int = int(floor((ZONE_DEPTH - SQUAD_EXIT_DISTANCE - own) / (own + EXIT_LANE_GAP))) + 1
+	return clampi(fit, 2, EXIT_LANES)
+
 func _lane_depth_step(total: int, cols: int, spacing: float) -> float:
 	var rows: int = int(ceil(float(maxi(total, 1)) / float(maxi(cols, 1))))
-	var own: float = float(rows) * spacing + EXIT_LANE_GAP
-	# ── НЕ ТЕСНЕЕ ПРЕЖНЕГО БОКОВОГО ШАГА, И ЭТО ЗАМЕР ──────────────────────
-	# Чистая глубина строя даёт 5.40 м у барака против прежних 7.13 м вбок, и
-	# отряды встают ТЕСНЕЕ, чем стояли: qa_rally2 E7 «центры не ближе 5 м»
-	# упал с 9.37 м до 4.76 м. Требование «перед воротами» к этому отношения
-	# не имеет — его выполняет НАПРАВЛЕНИЕ полосы, а не её шаг, — поэтому
-	# шаг берётся не меньше прежнего. Очередь уходит вперёд дальше, но
-	# вперёд она и должна уходить: раньше четвёртый заказ стоял в 18.4 м
-	# впереди И в 14 м вбок, теперь просто впереди
-	return maxf(own, _lane_step(total, cols, spacing))
+	var own: float = float(rows) * spacing
+	var n_l: int = exit_lanes(total, cols, spacing)
+	var span: float = ZONE_DEPTH - SQUAD_EXIT_DISTANCE - own
+	return maxf(own + EXIT_LANE_GAP, span / float(maxi(n_l - 1, 1)))
 
 ## Куда встанет середина отряда, вышедшего на этой полосе
 func _lane_centre(lane: int, total: int, cols: int, spacing: float) -> Vector3:
@@ -1190,7 +1236,7 @@ const RALLY_POLE_R    := 0.0275
 const RALLY_FLAG_W    := 0.55
 ## Шаг россыпи одиночных агентов (рабочих) при выходе из здания, метры.
 ## Выведен из строевого интервала: плотнее — слипнутся, шире — расползутся
-const SINGLE_AGENT_SPREAD := 0.9
+const SINGLE_AGENT_SPREAD := 0.7    # 0.9 → 0.7 (10.09.2026): россыпь теснее, у стены
 
 const RALLY_FLAG_H    := 0.35
 ## Глубина выреза «ласточкина хвоста» в долях ширины полотнища
@@ -1430,6 +1476,11 @@ func _spawn_one(unit_name: String, idx: int, cols: int = -1, spacing: float = -1
 	var out_dist: float = SINGLE_AGENT_EXIT_DISTANCE if single else SQUAD_EXIT_DISTANCE
 	var rally: Vector3 = gate + exit_dir * (out_dist + lane_sh.x + offset_z) \
 		+ side * (offset_x + lane_sh.y)
+	# Место на ПЛОЩАДКЕ — по рядам полос, независимо от флажка (хак №3)
+	var zone_pos: Vector3 = rally
+	var zxz: Vector2 = GameManager.clamp_to_map(zone_pos.x, zone_pos.z)
+	zone_pos.x = zxz.x
+	zone_pos.z = zxz.y
 	# НАЗНАЧЕННАЯ ИГРОКОМ ТОЧКА СБОРА перебивает место у дверей. Смещение бойца
 	# в строю переносится как есть, а направление взгляда считается от ворот
 	# к точке — отряд приходит туда единым фронтом, а не толпой
@@ -1472,18 +1523,132 @@ func _spawn_one(unit_name: String, idx: int, cols: int = -1, spacing: float = -1
 	# отложенные вызовы выполняются в порядке постановки, так что к моменту
 	# _place_spawned юнит уже в дереве и global_position корректен
 	parent.call_deferred("add_child", unit)
-	call_deferred("_place_spawned", unit, gate, rally, squad_id, exit_dir)
+	call_deferred("_place_spawned", unit, gate, rally, squad_id, exit_dir, zone_pos)
+
+## ── ПЛОЩАДКА СБОРА (хак №3, 09.09.2026) ──────────────────────────────────
+## Боец появляется СРАЗУ НА СВОЁМ МЕСТЕ в прямоугольнике перед воротами, а не
+## в самих воротах с последующим маршем к месту: очередь в проёме, разбор
+## наложения у дверей и толчея двух заказов исчезают по построению. Полосы
+## выхода остались РЯДАМИ площадки (см. _free_exit_lane): каждому заказу —
+## свой свободный ряд, ближний к воротам. С назначенной точкой сбора отряд
+## тоже собирается на площадке и оттуда идёт к флажку строем.
+## Разворот прежнего заказа «бойцы появляются у ворот и выходят шеренгами»
+## (qa_spawnlane C1 переписан на «появляются на площадке»)
+const SPAWN_ON_ZONE := true
 
 func _place_spawned(unit: Unit, gate: Vector3, rally: Vector3,
-		squad_id: int = 0, exit_dir: Vector3 = Vector3.ZERO) -> void:
+		squad_id: int = 0, exit_dir: Vector3 = Vector3.ZERO,
+		zone_pos: Vector3 = Vector3.INF) -> void:
 	if unit == null or not is_instance_valid(unit) or not unit.is_inside_tree():
 		return
-	unit.global_position = gate
+	if SPAWN_ON_ZONE and zone_pos.x != INF:
+		unit.global_position = Vector3(zone_pos.x,
+			GameManager.get_terrain_height(zone_pos.x, zone_pos.z), zone_pos.z)
+		unit.sync_row()
+	else:
+		unit.global_position = gate
 	if squad_id > 0:
 		GameManager.add_to_squad(squad_id, unit)
-	# Весь отряд смотрит в сторону выхода — иначе бойцы разворачиваются
-	# кто куда, пока разбредаются по своим слотам
 	unit.command_move(rally, false, exit_dir)
+
+## Прямоугольник площадки: центр, ось вперёд, ось вбок, полуширина, полуглубина.
+## Считается по уставному отряду здания и покрывает все EXIT_LANES рядов
+func rally_zone() -> Dictionary:
+	var total: int = maxi(squad_size, 1)
+	var cols: int = square_cols(total, squad_cols)
+	var spacing: float = squad_spacing
+	# ВОРОТА — ПЕРВЫМИ: _gate_position() лениво ставит фасад (_face_front) и
+	# переписывает spawn_offset; читать его ДО этого значит взять начальное
+	# (3, 0, 0) и развернуть площадку вбок (поймал qa_rally_zone A4)
+	var gate: Vector3 = _gate_position()
+	var dir: Vector3 = spawn_offset
+	dir.y = 0.0
+	dir = dir.normalized() if dir.length() > 0.01 else Vector3.BACK
+	var side := Vector3(-dir.z, 0.0, dir.x)
+	var rows: int = int(ceil(float(total) / float(cols)))
+	var own: float = float(rows) * spacing
+	var step: float = _lane_depth_step(total, cols, spacing)
+	var near: float = SQUAD_EXIT_DISTANCE - spacing * 0.5
+	var far: float = SQUAD_EXIT_DISTANCE + float(exit_lanes(total, cols, spacing) - 1) * step + own + spacing * 0.5
+	var half_w: float = maxf(float(cols) * spacing * 0.5, _lane_step(total, cols, spacing) * 0.5) + spacing * 0.5
+	return {
+		"centre": gate + dir * ((near + far) * 0.5),
+		"dir": dir, "side": side,
+		"half_w": half_w, "half_d": (far - near) * 0.5,
+	}
+
+## Лежит ли точка на площадке (в плане)
+func in_rally_zone(p: Vector3, slack: float = 0.3) -> bool:
+	var z: Dictionary = rally_zone()
+	var c: Vector3 = z["centre"]
+	var d: Vector3 = p - c
+	var along: float = d.x * (z["dir"] as Vector3).x + d.z * (z["dir"] as Vector3).z
+	var across: float = d.x * (z["side"] as Vector3).x + d.z * (z["side"] as Vector3).z
+	return absf(along) <= float(z["half_d"]) + slack and absf(across) <= float(z["half_w"]) + slack
+
+## Рисунок площадки на земле — только у выделенного здания (как флажок)
+var _zone_marker: MeshInstance3D = null
+const ZONE_COLOR := Color(0.93, 0.80, 0.30, 1.0)
+const ZONE_LINE_W := 0.12
+## РАМКА СКРЫТА (заказ 10.09.2026 по скриншоту: «жёлтую зону убрать совсем»).
+## Геометрия площадки и спавн на ней остались, рисунок на земле — нет.
+## Ручка оставлена: механизм рамки по рельефу проверен и может понадобиться
+const ZONE_MARKER_SHOWN := false
+
+func _refresh_zone_marker() -> void:
+	if not ZONE_MARKER_SHOWN or not _rally_visible or squad_size <= 1 or not SPAWN_ON_ZONE:
+		if _zone_marker != null and is_instance_valid(_zone_marker):
+			_zone_marker.visible = false
+		return
+	var z: Dictionary = rally_zone()
+	if _zone_marker == null or not is_instance_valid(_zone_marker):
+		_zone_marker = MeshInstance3D.new()
+		_zone_marker.name = "RallyZone"
+		var m := StandardMaterial3D.new()
+		m.albedo_color = ZONE_COLOR
+		m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		m.cull_mode = BaseMaterial3D.CULL_DISABLED
+		_zone_marker.material_override = m
+		var host: Node = get_parent()
+		if host == null:
+			host = self
+		host.add_child(_zone_marker)
+	# ── РАМКА, А НЕ ЗАЛИВКА ────────────────────────────────────────────────
+	# Прозрачная заливка в GL Compatibility гасила под собой спрайты бойцов
+	# (снимок qa_rally_zone/Shot: два отряда пропали целиком), а плоский квад
+	# на волнистом рельефе тонул в грунте. Четыре НЕПРОЗРАЧНЫЕ полосы по
+	# краям, вершины — по рельефу: под ногами бойцов рамки нет вовсе
+	var c: Vector3 = z["centre"]
+	var dir: Vector3 = z["dir"]
+	var side: Vector3 = z["side"]
+	var hw: float = float(z["half_w"])
+	var hd: float = float(z["half_d"])
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	# полоса: от a до b вдоль оси u, ширина ZONE_LINE_W поперёк оси v
+	var strips: Array = [
+		[dir, side, -hd, hd, -hw], [dir, side, -hd, hd, hw],
+		[side, dir, -hw, hw, -hd], [side, dir, -hw, hw, hd]]
+	for sdef in strips:
+		var u: Vector3 = sdef[0]
+		var v: Vector3 = sdef[1]
+		var t0: float = float(sdef[2])
+		var t1: float = float(sdef[3])
+		var off: float = float(sdef[4])
+		var n: int = maxi(int(ceil((t1 - t0) / 2.0)), 1)
+		for k in range(n):
+			var a0: float = t0 + (t1 - t0) * float(k) / float(n)
+			var a1: float = t0 + (t1 - t0) * float(k + 1) / float(n)
+			var pts: Array = [
+				c + u * a0 + v * (off - ZONE_LINE_W), c + u * a1 + v * (off - ZONE_LINE_W),
+				c + u * a1 + v * (off + ZONE_LINE_W), c + u * a0 + v * (off + ZONE_LINE_W)]
+			for idx in [0, 1, 2, 0, 2, 3]:
+				var q: Vector3 = pts[idx]
+				st.set_normal(Vector3.UP)
+				st.add_vertex(Vector3(q.x, GameManager.get_terrain_height(q.x, q.z) + 0.05, q.z))
+	_zone_marker.mesh = st.commit()
+	_zone_marker.global_transform = Transform3D.IDENTITY
+	_zone_marker.visible = true
 
 func _die() -> void:
 	if _dead:
@@ -1509,7 +1674,9 @@ func spawn_ruin() -> void:
 	var parent := get_parent()
 	if parent == null or building_id.is_empty():
 		return
-	var path: String = GameManager.ruin_sprite_path(faction, building_id)
+	var path: String = ruin_sprite_override()
+	if path.is_empty():
+		path = GameManager.ruin_sprite_path(faction, building_id)
 	if path.is_empty() or not ResourceLoader.exists(path):
 		return
 	var tex := load(path) as Texture2D
@@ -1531,9 +1698,16 @@ func spawn_ruin() -> void:
 	ruin.set_meta("ruin_building_id", building_id)
 	ruin.set_meta("ruin_faction", faction)
 	ruin.set_meta("ruin_size", build_size)
+	ruin.set_meta("ruin_any_faction", ruin_any_faction())
 	var quad := QuadMesh.new()
-	quad.size = sprite_quad_size(tex, build_size)
-	quad.material = _BBUtil.make_static_material(tex)
+	quad.size = sprite_quad_size(tex, build_size) * ruin_scale()
+	var rmat: ShaderMaterial = _BBUtil.make_static_material(tex)
+	# ── БОЕЦ РИСУЕТСЯ ПОВЕРХ ПЕПЕЛИЩА (заказ владельца 10.09.2026) ────────
+	# Точка сортировки руины уходит от камеры на половину её нарисованной
+	# высоты (см. depth_push в cyl_billboard): пепелище — мусор на земле, и
+	# спрайт тролля (живого или мёртвого) обязан быть выше него
+	rmat.set_shader_parameter("depth_push", quad.size.y * 0.5)
+	quad.material = rmat
 	var mi := MeshInstance3D.new()
 	mi.name = "RuinSprite"
 	mi.mesh = quad

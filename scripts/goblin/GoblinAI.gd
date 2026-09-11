@@ -28,6 +28,13 @@ extends Node
 const _GobCfg := preload("res://scripts/goblin/goblin_config.gd")
 const _Diff := preload("res://scripts/game_difficulty_config.gd")
 const _UCfg   := preload("res://scripts/unit_stats_config.gd")
+const _Commander := preload("res://scripts/goblin/GoblinAttackCommander.gd")
+
+## Командир штурма базы (заказ 10.09.2026): сбор на дистанции, паттерны,
+## отход и лечение. Ведёт полевые отряды в фазе охоты, см. _issue_orders
+var commander = _Commander.new()
+## Стенд: цель охоты вместо _weakest_target (INF — не задана)
+var hunt_target_override: Vector3 = Vector3.INF
 
 # ── РОЛИ ОТРЯДА ─────────────────────────────────────────────────────────────
 const ROLE_DORMANT := "dormant"   # спит в деревне
@@ -35,6 +42,7 @@ const ROLE_CENTER  := "center"    # штурмует центр карты
 const ROLE_HUNT    := "hunt"      # добивает самого слабого игрока
 const ROLE_DEFEND  := "defend"    # держит деревню
 const ROLE_HEAL    := "heal"      # разбит, уходит в хижину лечиться
+const ROLE_REVENGE := "revenge"   # месть: держит дерево тролля
 
 # ── ФАЗА ОРДЫ ───────────────────────────────────────────────────────────────
 const PHASE_DORMANT := "dormant"
@@ -60,6 +68,8 @@ func setup(p_main: Node3D, p_village: Vector3) -> void:
 
 func reset() -> void:
 	squads.clear()
+	commander.reset()
+	hunt_target_override = Vector3.INF
 	phase = PHASE_DORMANT
 	clock = 0.0
 	_think = 0.0
@@ -67,6 +77,54 @@ func reset() -> void:
 	last_action = ""
 	_order_queue.clear()
 	_order_at = 0
+	_revenge_sids.clear()
+	_revenge_last = -1.0e9
+	revenge_waves = 0
+
+# ═════════════════════════════════════════════════════════════════════════════
+# МЕСТЬ ГОБЛИНОВ (заказ владельца, 09.09.2026)
+# ═════════════════════════════════════════════════════════════════════════════
+# Логово тролля зачищено → раз в REVENGE_INTERVAL_SEC из деревни выходят
+# REVENGE_SQUADS отрядов пехоты и маршируют через всю карту окружать и держать
+# дерево тролля. Идут НЕЗАВИСИМО от спячки и волн орды: это не волна, а
+# отдельное расписание, и роль у них своя (ROLE_REVENGE) — раздача целей по
+# фазе их не трогает. Спящими они не засыпают (см. _regroup)
+var _revenge_sids: Dictionary = {}
+var _revenge_last: float = -1.0e9
+## Сколько волн мести вышло (диагностика стенда)
+var revenge_waves: int = 0
+
+func _tick_revenge() -> void:
+	if not GameManager.troll_lair_cleared():
+		return
+	if clock - _revenge_last < _GobCfg.REVENGE_INTERVAL_SEC:
+		return
+	_revenge_last = clock
+	revenge_waves += 1
+	var lair: Node3D = GameManager.troll_lair as Node3D
+	var n_per: int = int(_GobCfg.SQUAD_SIZE.get(_GobCfg.REVENGE_UNIT, 20))
+	for i in range(_GobCfg.REVENGE_SQUADS):
+		var a: float = TAU * float(i) / float(_GobCfg.REVENGE_SQUADS)
+		var r: float = _GobCfg.VILLAGE_RADIUS + _GobCfg.horde_radius(n_per) + 4.0
+		var base := Vector3(village.x + cos(a) * r, 0.0, village.z + sin(a) * r)
+		var sid: int = int(main.call("spawn_goblin_squad", _GobCfg.REVENGE_UNIT, n_per, base))
+		if sid <= 0:
+			continue
+		_revenge_sids[sid] = i
+	last_action += "|месть: %d отрядов идут к дереву тролля" % _GobCfg.REVENGE_SQUADS
+	if lair == null:
+		return
+	# Реестр подхватит их в следующем _regroup; роль ставится там же
+
+## Точка отряда мести на кольце вокруг дерева
+func _revenge_goal(sid: int) -> Vector3:
+	var lair: Node3D = GameManager.troll_lair as Node3D
+	if lair == null or not is_instance_valid(lair):
+		return village
+	var idx: int = int(_revenge_sids.get(sid, 0))
+	var a: float = TAU * float(idx) / float(maxi(_GobCfg.REVENGE_SQUADS, 1))
+	return lair.global_position + Vector3(cos(a) * _GobCfg.REVENGE_RING, 0.0,
+		sin(a) * _GobCfg.REVENGE_RING)
 
 func _process(delta: float) -> void:
 	if main == null:
@@ -86,6 +144,8 @@ func _process(delta: float) -> void:
 func tick() -> void:
 	last_action = ""
 	_regroup()
+	# Месть идёт по своим часам, спячка орды ей не указ
+	_tick_revenge()
 	if not _awake:
 		# ── СПЯЧКА ──────────────────────────────────────────────────────────
 		# Просыпаемся по часам ИЛИ раньше, если орду пришли бить: спящий боец
@@ -95,6 +155,9 @@ func tick() -> void:
 		var wake_at: float = _Diff.goblin_dormant_sec()
 		if clock < wake_at and not _attacked():
 			last_action = "спит (%.0f с до подъёма)" % (wake_at - clock)
+			# Месть не спит: её отрядам приказы раздаются и в спячке орды
+			if not _revenge_sids.is_empty():
+				_issue_orders(true)
 			return
 		_wake_horde()
 	_economy()
@@ -193,18 +256,23 @@ func _regroup() -> void:
 		var u := n as Unit
 		if u == null or u.is_dead() or u.garrisoned or u.squad_id <= 0:
 			continue
+		# ТРОЛЛИ — СТРАЖИ ЛОГОВА, А НЕ ВОЛНА: вожак их не водит и не усыпляет
+		if u.stat_id == "troll":
+			continue
 		var rec: Variant = known.get(u.squad_id)
 		if rec == null:
+			var role: String = ROLE_REVENGE if _revenge_sids.has(u.squad_id) else ROLE_DEFEND
 			rec = {"id": u.squad_id, "type": u.stat_id, "members": [],
-				"role": ROLE_DEFEND, "target": village, "peak": 0}
+				"role": role, "target": village, "peak": 0}
 			known[u.squad_id] = rec
 			squads.append(rec)
 		var arr: Array = (rec as Dictionary)["members"]
 		if not arr.has(u):
 			arr.append(u)
 			# Спящему бойцу сон ставится в момент зачисления: свежий выходит
-			# из хижины уже проснувшимся, стартовый — спящим
-			if not _awake:
+			# из хижины уже проснувшимся, стартовый — спящим. Отряд мести
+			# не спит никогда — он вышел по своим часам
+			if not _awake and not _revenge_sids.has(u.squad_id):
 				_set_dormant(u, true)
 
 	# ПИК СЧИТАЕТСЯ ЧЕТВЁРТЫМ ПРОХОДОМ, после пополнения. Отряд, собранный в
@@ -458,12 +526,12 @@ func _drain_orders() -> void:
 		_order_queue.clear()
 		_order_at = 0
 
-func _issue_orders() -> void:
+func _issue_orders(only_revenge: bool = false) -> void:
 	var aim := village
 	match phase:
 		PHASE_CENTER: aim = Vector3.ZERO           # центр карты
 		PHASE_HUNT:
-			aim = _weakest_target()
+			aim = _weakest_target() if hunt_target_override == Vector3.INF else hunt_target_override
 			if aim == Vector3.ZERO:
 				aim = Vector3.ZERO
 		PHASE_DEFEND: aim = village
@@ -471,6 +539,39 @@ func _issue_orders() -> void:
 	# пересчитана, и выдавать поверх неё вчерашние приказы хуже, чем не выдать
 	_order_queue.clear()
 	_order_at = 0
+	# ── ШТУРМ БАЗЫ ВЕДЁТ КОМАНДИР (заказ 10.09.2026) ─────────────────────────
+	# В фазе охоты полевые отряды (не месть, не лечащиеся) получают план от
+	# GoblinAttackCommander: сбор на дистанции, паттерн, отход и лечение.
+	# Прежняя лавина остаётся для центра карты и обороны деревни
+	# Режимов три (уточнение владельца): охота — штурм базы, центр — марш с
+	# дозором, оборона деревни — рубеж у костров и фланговые уколы конницы
+	var tactical: Dictionary = {}
+	if _GobCfg.ASSAULT_TACTICS and not only_revenge \
+			and (phase == PHASE_HUNT or phase == PHASE_CENTER or phase == PHASE_DEFEND):
+		var field: Array = []
+		var role: String = ROLE_HUNT if phase == PHASE_HUNT else \
+			(ROLE_CENTER if phase == PHASE_CENTER else ROLE_DEFEND)
+		for s0 in squads:
+			var sq0: Dictionary = s0
+			if String(sq0["role"]) == ROLE_HEAL or (sq0["members"] as Array).is_empty():
+				continue
+			if String(sq0["role"]) == ROLE_REVENGE or _revenge_sids.has(int(sq0["id"])):
+				continue
+			sq0["role"] = role
+			sq0["target"] = aim
+			field.append(sq0)
+			tactical[int(sq0["id"])] = true
+		var plans: Array = []
+		match phase:
+			PHASE_HUNT:   plans = commander.plan(field, aim, village, clock)
+			PHASE_CENTER: plans = commander.plan_advance(field, aim, village, clock)
+			_:            plans = commander.plan_defense(field, village, clock)
+		for plan in plans:
+			_order_queue.append(plan)
+		if commander.last_action != "":
+			last_action += "|" + commander.last_action
+	elif commander.is_active():
+		commander.reset()
 	var i := 0
 	for s in squads:
 		var sq: Dictionary = s
@@ -479,17 +580,34 @@ func _issue_orders() -> void:
 		var members: Array = sq["members"]
 		if members.is_empty():
 			continue
+		var sid: int = int(sq["id"])
+		if tactical.has(sid):
+			continue                       # приказы этого отряда уже в плане командира
+		if only_revenge and not (String(sq["role"]) == ROLE_REVENGE or _revenge_sids.has(sid)):
+			continue
 		# Отряды расходятся по фронту, а не лезут в одну точку
 		var spread: float = 8.0 * float(i - squads.size() / 2)
 		var goal := Vector3(aim.x + spread, 0.0, aim.z)
 		i += 1
-		sq["role"] = ROLE_CENTER if phase == PHASE_CENTER else \
-			(ROLE_HUNT if phase == PHASE_HUNT else ROLE_DEFEND)
+		# ОТРЯД МЕСТИ ДЕРЖИТ ДЕРЕВО ТРОЛЛЯ, фазы орды его не касаются
+		if String(sq["role"]) == ROLE_REVENGE or _revenge_sids.has(sid):
+			sq["role"] = ROLE_REVENGE
+			goal = _revenge_goal(sid)
+		else:
+			sq["role"] = ROLE_CENTER if phase == PHASE_CENTER else \
+				(ROLE_HUNT if phase == PHASE_HUNT else ROLE_DEFEND)
 		sq["target"] = goal
-		var sid: int = int(sq["id"])
 		var center := _squad_center(sq)
 		# Цель поблизости — атакуем её; нет — идём к точке
 		var foe: Node3D = _nearest_foe(center, _GobCfg.CENTER_RADIUS)
+		# ── ПОСТРОЙКИ ТОЖЕ ЦЕЛЬ (заказ 10.09.2026) ──────────────────────
+		# Орда доходила до чужой базы и вставала «у стены»: приказ атаки
+		# раздавался только по бойцам, а дома вокруг были не при чём. Нет
+		# бойца в радиусе — ближайший чужой дом в BUILDING_HUNT_RADIUS
+		# получает тот же command_attack (охрана деревни и месть — нет:
+		# у них своя цель)
+		if foe == null and String(sq["role"]) != ROLE_REVENGE and phase != PHASE_DEFEND:
+			foe = _nearest_enemy_building(center, _GobCfg.BUILDING_HUNT_RADIUS)
 		if foe != null:
 			# ОТРЯД УЖЕ ДЕРЁТСЯ — НЕ ТРОГАТЬ. Приказ нужен один раз, на входе
 			# в бой; дальше цели раздают сцепка и авто-агро, а переиздание
@@ -520,11 +638,16 @@ func _issue_squad(plan: Dictionary) -> int:
 		if not is_instance_valid(foe_raw):
 			return 0
 		var foe := foe_raw as Node3D
+		# Приказ командира штурма снимает режим отхода (щуп вернулся к линии
+		# и снова идёт в бой): в отходе боец не берёт целей вовсе
+		var wake: bool = bool(plan.get("wake", false))
 		for m in members:
 			if not is_instance_valid(m):
 				continue
 			var u := m as Unit
 			if u != null and not u.is_dead():
+				if wake and u.retreating:
+					u.end_retreat(true)
 				u.command_attack(foe, true, true)
 				issued += 1
 		return issued
@@ -532,6 +655,30 @@ func _issue_squad(plan: Dictionary) -> int:
 	var center: Vector3 = plan["center"]
 	sq["ordered_goal"] = goal
 	sq["ordered_at"] = clock
+	# ── ОТХОД (командир штурма): режим отхода — сквозь тела, без агро и
+	# ответного удара, разметка снята; в лагере отряд стоит толпой у костров
+	if bool(plan.get("retreat", false)):
+		# Разметка НЕ снимается, а ставится на лагерь: дойдя, отряд стоит у
+		# костров толпой, и смыкание собирает его там же (хижина снимает
+		# разметку потому, что её отряд уходит в ворота — здесь он остаётся)
+		var nr: int = members.size()
+		var rslots: Array = []
+		for kr in range(nr):
+			var hr: Vector2 = _GobCfg.horde_offset(kr, nr, int(sq["id"]))
+			rslots.append(Vector3(goal.x + hr.x, 0.0, goal.z + hr.y))
+		GameManager.squad_set_formation(int(sq["id"]), rslots,
+			(goal - center).normalized() if goal.distance_to(center) > 0.1 else Vector3.FORWARD,
+			false)
+		for kr2 in range(nr):
+			if not is_instance_valid(members[kr2]):
+				continue
+			var ur := members[kr2] as Unit
+			if ur == null or ur.is_dead():
+				continue
+			ur.begin_retreat()
+			ur.command_move(GameManager.land_target(rslots[kr2]), false, Vector3.ZERO, true)
+			issued += 1
+		return issued
 	# ── ТОЛПОЙ, А НЕ В ОДНУ ТОЧКУ ───────────────────────────────────────────
 	# Раньше всем бойцам отряда выдавалась ОДНА цель: сотня гоблинов шла в
 	# один пятачок, упиралась друг в друга и разбиралась расталкиванием уже
@@ -546,18 +693,37 @@ func _issue_squad(plan: Dictionary) -> int:
 	GameManager.squad_set_formation(int(sq["id"]), slots,
 		(goal - center).normalized() if goal.distance_to(center) > 0.1 else Vector3.FORWARD,
 		false)
+	var wake2: bool = bool(plan.get("wake", false))
 	for k2 in range(n):
 		if not is_instance_valid(members[k2]):
 			continue
 		var u2 := members[k2] as Unit
 		if u2 == null or u2.is_dead():
 			continue
+		if wake2 and u2.retreating:
+			u2.end_retreat(true)
 		u2.command_move(GameManager.land_target(slots[k2]))
 		issued += 1
 	return issued
 
 ## Ближайший чужой ЛЮБОЙ стороны. Гоблины враждебны всем, поэтому спрашиваем
 ## обе фракции и берём ближайшего
+## Ближайшая живая чужая постройка (игрока или красного ИИ) не дальше radius
+func _nearest_enemy_building(from: Vector3, radius: float) -> Node3D:
+	var best: Node3D = null
+	var bd: float = radius * radius
+	for b in GameManager.enemy_buildings_snapshot(Constants.FACTION_GOBLIN):
+		if b == null or not is_instance_valid(b):
+			continue
+		var bld := b as Building
+		if bld == null or bld.is_dead():
+			continue
+		var d: float = from.distance_squared_to(bld.global_position)
+		if d < bd:
+			bd = d
+			best = bld
+	return best
+
 func _nearest_foe(from: Vector3, radius: float) -> Node3D:
 	var best: Node3D = null
 	var bd := radius * radius

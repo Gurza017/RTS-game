@@ -22,6 +22,12 @@ const FACTION_GOBLIN = 2
 ## Сколько фракций знает игра. Должно совпадать с ArmyCore.Factions (там 4,
 ## с запасом под нейтралов) — сторожит qa_goblin
 const FACTION_COUNT  = 3
+## НЕЙТРАЛЫ (10.09.2026): ничейные постройки — золотой рудник до захвата.
+## В FACTION_COUNT НЕ входят: в «чужие» никому не попадают (other_factions
+## идёт по FACTION_COUNT), ИИ и орда их не штурмуют, условие победы их не
+## считает. Строк ядра с этой стороной не бывает (ArmyCore.Factions = 4 —
+## запас ровно под них)
+const FACTION_NEUTRAL = 3
 
 ## Группы узлов по фракциям. ЕДИНСТВЕННОЕ место, где сопоставлены номер и имя:
 ## раньше это была развилка `if player then ... else enemy`, и третья сторона
@@ -30,11 +36,13 @@ const UNIT_GROUPS := {
 	FACTION_PLAYER: "player_units",
 	FACTION_ENEMY:  "enemy_units",
 	FACTION_GOBLIN: "goblin_units",
+	FACTION_NEUTRAL: "neutral_units",
 }
 const BUILDING_GROUPS := {
 	FACTION_PLAYER: "player_buildings",
 	FACTION_ENEMY:  "enemy_buildings",
 	FACTION_GOBLIN: "goblin_buildings",
+	FACTION_NEUTRAL: "neutral_buildings",
 }
 
 static func unit_group(faction: int) -> String:

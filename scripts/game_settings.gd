@@ -38,15 +38,19 @@ const UNIT_FOLDERS := {
 
 ## Тип здания → имя PNG внутри «{Цвет} Buildings» (без расширения).
 ## Набор готовых спрайтов: Castle, Barracks, Archery, Monastery, Tower,
-## House1..House3. Кузнице и руднику своих картинок в паке нет, поэтому им
-## подобраны ближайшие по смыслу — поменять можно прямо здесь.
+## House1..House3. Кузнице своей картинки в паке нет — ей отдан монастырь.
+## РУДНИК КАРТИНКИ НЕ ИМЕЕТ ВОВСЕ (09.09.2026): раньше он рисовался как
+## House1 — при трёх домах в меню это был бы четвёртый дом, добывающий
+## золото; теперь у него процедурный вид (Mine._build_visual)
 const BUILDING_SPRITES := {
 	"castle":     "Castle",
 	"barracks":   "Barracks",
 	"archery":    "Archery",
 	"smithy":     "Monastery",
-	"mine":       "House1",
-	"house":      "House2",
+	"mine":       "",
+	"house":      "House1",
+	"house2":     "House2",
+	"house3":     "House3",
 	"towncenter": "House3",
 	"tower":      "Tower",
 }
@@ -57,16 +61,30 @@ const _BUILDINGS_ROOT := "res://assets/factions/%s/buildings/%s Buildings/%s.png
 ## ═══════════════════════════════════════════════════════════════════════════
 ## СТРОЙКА И РУИНЫ
 ## ═══════════════════════════════════════════════════════════════════════════
-## Четыре картинки на все постройки: у Замка свои, у всех остальных — общие.
-## Цвета у них нет (леса и обломки одинаковы у любой стороны), поэтому папка
-## одна, а не «{Цвет} Buildings». Имя папки на диске написано с опечаткой
+## Картинки стройки и руин. У Замка и у БАШНИ свои, у всех остальных — общие
+## «домовые». Цвета у них нет (леса и обломки одинаковы у любой стороны),
+## поэтому папка одна, а не «{Цвет} Buildings». Имя папки с опечаткой
 ## (process_building_destroeyrs) — оставлено как есть, чтобы не ломать пути
 const _PROCESS_ROOT := "res://assets/factions/%s/icons/buildings/process_building_destroeyrs/%s.png"
+## ── ВТОРОЙ КОРЕНЬ: РЯДОМ С САМИМИ ПОСТРОЙКАМИ ─────────────────────────────
+## Спрайты башни (Tower_Construction / Tower_Destroyed) лежат не в папке
+## «процессов», а рядом с остальными постройками. Копировать их во вторую
+## папку ради единообразия НЕЛЬЗЯ: два файла с одной картинкой неминуемо
+## разъедутся при первой же перерисовке, и половина игры покажет старый
+const _BUILDINGS_FLAT_ROOT := "res://assets/factions/%s/buildings/%s.png"
 
-## Ключи: castle → свои картинки, всё остальное → общие «домовые»
+## Ключи — ID постройки; чего нет в таблице, берёт общие «домовые» картинки.
+## `root` называет, в какой из двух папок лежит файл
 const PROCESS_SPRITES := {
 	"castle": {"build": "Castle_Construction", "ruin": "Castle_Destroyed"},
 	"house":  {"build": "House_Construction",  "ruin": "House_Destroyed"},
+	# ── У БАШНИ СВОИ (заказ владельца) ────────────────────────────────────
+	# «Домовая» стройка и «домовое» пепелище — широкие и низкие, а башня
+	# узкая и высокая: общая картинка лежала шире самой постройки, и её
+	# приходилось ужимать долей (construction_scale / ruin_scale 0.6). Со
+	# своими спрайтами (128×256, ровно как сам Tower.png) доля не нужна
+	"tower":  {"build": "Tower_Construction",  "ruin": "Tower_Destroyed",
+		"root": "buildings"},
 }
 
 ## Картинка стройки для здания building_id ("" — такой нет)
@@ -78,12 +96,17 @@ static func ruin_sprite(race: String, building_id: String) -> String:
 	return _process_sprite(race, building_id, "ruin")
 
 static func _process_sprite(race: String, building_id: String, kind: String) -> String:
-	# Замок — единственный со своим набором; для всего прочего берётся «дом»
-	var key: String = "castle" if building_id == "castle" else "house"
-	var row: Dictionary = PROCESS_SPRITES.get(key, {})
+	# СВОЙ НАБОР ИЩЕТСЯ ПО ID ПОСТРОЙКИ, а не списком исключений: заведётся
+	# своя картинка у бараков — хватит строки в таблице. Чего в таблице нет,
+	# берёт общие «домовые»
+	var row: Dictionary = PROCESS_SPRITES.get(building_id, {})
+	if row.is_empty():
+		row = PROCESS_SPRITES.get("house", {})
 	var name: String = String(row.get(kind, ""))
 	if name.is_empty():
 		return ""
+	if String(row.get("root", "")) == "buildings":
+		return _BUILDINGS_FLAT_ROOT % [race, name]
 	return _PROCESS_ROOT % [race, name]
 
 ## Нормализует цвет: неизвестное значение схлопывается в первый доступный,
@@ -109,3 +132,53 @@ static func building_sprite(race: String, color: String, building_id: String) ->
 
 static func color_tint(color: String) -> Color:
 	return COLOR_TINTS.get(normalize_color(color), Color.WHITE)
+
+## ═══════════════════════════════════════════════════════════════════════════
+## НАСТРОЙКИ ОТОБРАЖЕНИЯ (заказ владельца 10.09.2026, меню «Опции»)
+## ═══════════════════════════════════════════════════════════════════════════
+## Две ручки, обе живут на диске и читаются партией при сборке HUD и камеры:
+##   show_fps  — плашка FPS в правом верхнем углу (её же переключает F3)
+##   edge_pan  — камера едет, когда курсор у края экрана
+##
+## ФАЙЛ, А НЕ ПОЛЕ В GameManager: настройка нужна ДО того, как автозагрузка
+## что-либо решит (меню строится первым), и обязана переживать перезапуск —
+## тем же порядком, что сложность (user://difficulty.cfg) и громкость
+const VIEW_CFG := "user://view_settings.cfg"
+
+static var _view_loaded: bool = false
+static var _show_fps: bool = true
+static var _edge_pan: bool = true
+
+static func load_view_settings() -> void:
+	_view_loaded = true
+	var cfg := ConfigFile.new()
+	if cfg.load(VIEW_CFG) != OK:
+		return
+	_show_fps = bool(cfg.get_value("view", "show_fps", _show_fps))
+	_edge_pan = bool(cfg.get_value("view", "edge_pan", _edge_pan))
+
+static func save_view_settings() -> void:
+	var cfg := ConfigFile.new()
+	cfg.set_value("view", "show_fps", _show_fps)
+	cfg.set_value("view", "edge_pan", _edge_pan)
+	cfg.save(VIEW_CFG)
+
+## Читатели ЛЕНИВО подхватывают файл: партия может запуститься и без меню
+## (стенды, --path прямо в Main.tscn), и тогда никто load_view_settings не звал
+static func show_fps() -> bool:
+	if not _view_loaded:
+		load_view_settings()
+	return _show_fps
+
+static func set_show_fps(on: bool) -> void:
+	_show_fps = on
+	save_view_settings()
+
+static func edge_pan() -> bool:
+	if not _view_loaded:
+		load_view_settings()
+	return _edge_pan
+
+static func set_edge_pan(on: bool) -> void:
+	_edge_pan = on
+	save_view_settings()

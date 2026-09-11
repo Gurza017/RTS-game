@@ -98,6 +98,8 @@ func _new_barracks(at: Vector3) -> Barracks:
 # 1. ОТМЕНА ПКМ С ВОЗВРАТОМ
 # ═════════════════════════════════════════════════════════════════════════════
 func _test_cancel_refund() -> void:
+# ВТОРОЙ ТИП В БАРАКАХ — МЕЧНИК (09.09.2026): лучники нанимаются в стрелковой,
+# а здесь проверяется очередь здания с двумя типами, и мечник для неё тот же случай
 	print("\n═════ 1. ОТМЕНА ЗАКАЗА ПКМ: ВОЗВРАТ РЕСУРСОВ ═════")
 	var b := _new_barracks(Vector3(-120.0, 0.0, -120.0))
 	await frames(2)
@@ -111,7 +113,7 @@ func _test_cancel_refund() -> void:
 	for _i in range(3):
 		b.train_from_config("spearman")
 	for _i in range(2):
-		b.train_from_config("archer")
+		b.train_from_config("warrior")
 	await frames(1)
 	var after_queue := _bank()
 	print("  очередь: %d заказов, банк после списания: %s" % [
@@ -121,10 +123,10 @@ func _test_cancel_refund() -> void:
 	# Отменяем всё в обратном порядке — банк обязан вернуться к исходному
 	var cancels := 0
 	while b.production_queue.size() > 0:
-		var uid := "spearman" if cancels % 2 == 0 else "archer"
+		var uid := "spearman" if cancels % 2 == 0 else "warrior"
 		if not b.cancel_order(uid):
 			# этого типа больше нет — снимаем оставшийся
-			uid = "archer" if uid == "spearman" else "spearman"
+			uid = "warrior" if uid == "spearman" else "spearman"
 			if not b.cancel_order(uid):
 				break
 		cancels += 1
@@ -197,11 +199,11 @@ func _test_badges() -> void:
 	print("  ярлыков создано: %d, ключи: %s" % [
 		hud._train_badges.size(), str(hud._train_badges.keys())])
 	verdict("3a ярлык есть у каждого типа найма",
-		hud._train_badges.has("spearman") and hud._train_badges.has("archer"),
+		hud._train_badges.has("spearman") and hud._train_badges.has("warrior"),
 		str(hud._train_badges.keys()))
 
 	var spear_lbl: Label = hud._train_badges.get("spearman")
-	var arch_lbl: Label  = hud._train_badges.get("archer")
+	var arch_lbl: Label  = hud._train_badges.get("warrior")
 	print("  пустая очередь: копейщик видим=%s, лучник видим=%s" % [
 		str(spear_lbl.visible), str(arch_lbl.visible)])
 	verdict("3b при пустой очереди цифры скрыты",
@@ -209,7 +211,7 @@ func _test_badges() -> void:
 
 	for _i in range(3):
 		b.train_from_config("spearman")
-	b.train_from_config("archer")
+	b.train_from_config("warrior")
 	_hold(b)
 	hud._refresh_train_badges(b)
 	await frames(1)
@@ -251,16 +253,16 @@ func _test_badges() -> void:
 	# ЛКМ по самой кнопке всё ещё заказывает
 	# Кнопки без текста (на них только иконка), поэтому берём по порядку:
 	# у бараков это [0] копейщик, [1] лучник
-	var q_before: int = b.queued_count("archer")
+	var q_before: int = b.queued_count("warrior")
 	btn = hud.button_container.get_child(1) as Button
 	if btn != null:
 		btn.emit_signal("pressed")
 		_hold(b)
 		await frames(1)
 		print("  ЛКМ по кнопке лучника: очередь %d → %d" % [
-			q_before, b.queued_count("archer")])
+			q_before, b.queued_count("warrior")])
 		verdict("3g ЛКМ по кнопке по-прежнему заказывает",
-			b.queued_count("archer") == q_before + 1)
+			b.queued_count("warrior") == q_before + 1)
 	else:
 		verdict("3g ЛКМ по кнопке по-прежнему заказывает", false, "кнопка не найдена")
 

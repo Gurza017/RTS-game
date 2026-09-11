@@ -91,9 +91,15 @@ func _run() -> void:
 		_chk("юнит %s" % uid, _SSParser.folder_has(d3, String(probes[uid])), d3)
 
 	# ── 4. ЗДАНИЯ И ЗВУК ────────────────────────────────────────────────────
-	for b in ["castle", "barracks", "smithy", "mine", "house"]:
+	# Все здания цветовой папки (09.09.2026): стрелковая, башня, три дома.
+	# У РУДНИКА КАРТИНКИ НЕТ НАМЕРЕННО — раньше он рисовался домом House1, и при
+	# трёх домах в меню был бы четвёртым домом, добывающим золото; у него
+	# процедурный вид (Mine._build_visual), и пустой путь здесь — свойство
+	for b in ["castle", "barracks", "archery", "tower", "smithy", "house", "house2", "house3"]:
 		var p: String = _GS.building_sprite("humans", "Blue", String(b))
 		_chk("здание %s" % b, ResourceLoader.exists(p), p)
+	_chk("рудник без картинки (процедурный вид, не дом)",
+		_GS.building_sprite("humans", "Blue", "mine").is_empty(), "")
 
 	print("  ── ПРОВАЛОВ: %d ──" % _fail)
 	print("===== ЗОНД ЗАВЕРШЁН =====\n")

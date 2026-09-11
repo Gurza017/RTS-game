@@ -11,12 +11,18 @@ const _UCfg := preload("res://scripts/unit_stats_config.gd")
 
 var _food_timer: float = 0.0
 
+## КАКОЙ ИЗ ТРЁХ ДОМОВ (заказ 09.09.2026): "house" / "house2" / "house3" —
+## ключ BUILDINGS и картинки. Ставит создатель (стройплощадка, сохранение)
+## ДО входа в дерево; пустое значение — первый дом. Баланс у всех трёх один,
+## а лимит населения считает их по _UCfg.is_house(building_id), не по ключу
+var variant_id: String = "house"
+
 func _ready() -> void:
-	building_id  = "house"
+	building_id  = variant_id if _UCfg.is_house(variant_id) else "house"
 	sprite_path  = ""
-	max_health   = _UCfg.building_stat("house", "max_hp", 180.0)
-	build_size   = _UCfg.building_size("house", Vector3(2.6, 2.2, 2.6))
-	display_name = String(_UCfg.building_cfg("house").get("name", "Дом"))
+	max_health   = _UCfg.building_stat(building_id, "max_hp", 180.0)
+	build_size   = _UCfg.building_size(building_id, Vector3(2.6, 2.2, 2.6))
+	display_name = String(_UCfg.building_cfg(building_id).get("name", "Дом"))
 	super._ready()
 
 func _build_visual() -> void:

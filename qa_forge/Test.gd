@@ -141,21 +141,32 @@ func _a_config() -> void:
 	# держит. Проверяем СВОЙСТВА, а не позицию: способность обязана лежать в
 	# колонке D и иметь цену выкупа; вкладка, у которой выкуп объявлен, обязана
 	# иметь его во ВСЕХ пяти ячейках D — «полспособности в ряду» это баг
+	# ── ЦЕНЫ ВЫКУПА БОЛЬШЕ НЕТ (спринт 13, блок 4) ────────────────────────
+	# Заказ владельца: «спец-бонус открывается сразу для всех юнитов
+	# соответствующего типа, плату за применение убрать».
+	# forge_config.squad_unlock_cost теперь ВСЕГДА возвращает ноль, и
+	# требовать её положительности — значит требовать отменённого. Признак
+	# способности остался один и структурный: колонка D. Столбец при этом
+	# по-прежнему либо весь способности, либо весь пассивные улучшения
 	var d_bad: Array = []
 	var d_partial: Array = []
 	for u in _Forge.UNIT_TABS:
 		var uid: String = String(u)
 		for n in _Forge.ability_nodes(uid):
 			var d: Dictionary = n
-			if String(d.get("col", "")) != _Forge.ABILITY_COL \
-					or _Forge.squad_unlock_cost(d) <= 0.0:
+			if String(d.get("col", "")) != _Forge.ABILITY_COL:
 				d_bad.append(String(d.get("id", "")))
 		var cnt: int = _Forge.ability_nodes(uid).size()
 		if cnt != 0 and cnt != _Forge.ROWS:
 			d_partial.append("%s=%d" % [uid, cnt])
-	verdict("A6 способность = колонка D + цена выкупа, и она либо во всём столбце, либо нигде",
+	verdict("A6 способность = колонка D, и она либо во всём столбце, либо нигде",
 		d_bad.is_empty() and d_partial.is_empty(),
 		"брак: %s, неполные столбцы: %s" % [str(d_bad), str(d_partial)])
+	verdict("A6б плата за доступ к способности убрана целиком",
+		is_equal_approx(_Forge.squad_unlock_cost(
+			_Forge.get_node(_Forge.node_id("archer", "1d"))), 0.0),
+		"цена доступа %.0f" % _Forge.squad_unlock_cost(
+			_Forge.get_node(_Forge.node_id("archer", "1d"))))
 
 	# A7 — бонусы копятся ТОЛЬКО своему роду войск
 	var cross: Array = []
@@ -508,28 +519,29 @@ func _e_squad_ability() -> void:
 		_grant(u, String(c))
 	_grant(u, "1d")
 
-	# E2 — теперь может, но она НЕ выдана автоматически
-	verdict("E2 после исследования способность доступна, но не выдана даром",
-		GameManager.squad_can_buy_ability(sid, d_id) \
-			and not GameManager.squad_has_ability(sid, d_id),
-		"можно купить=%s, уже есть=%s" % [
-			GameManager.squad_can_buy_ability(sid, d_id),
-			GameManager.squad_has_ability(sid, d_id)])
+	# ── E2: ИССЛЕДОВАНИЕ ВЫДАЁТ СПОСОБНОСТЬ СРАЗУ (спринт 13, блок 4) ─────
+	# Прежнее требование было ровно обратным — «доступна, но не выдана
+	# даром», — и владелец его отменил: «открывается сразу для всех юнитов
+	# соответствующего типа». Докупать больше нечего
+	verdict("E2 после исследования способность выдана отряду сразу",
+		GameManager.squad_has_ability(sid, d_id),
+		"есть=%s" % GameManager.squad_has_ability(sid, d_id))
 
-	# E3 — покупка списывает ровно squad_unlock_cost золота
+	# E3 — доступ бесплатен: золото не тратится вовсе
 	var before: float = ResourceManager.get_amount(f, Constants.RESOURCE_GOLD)
-	var bought: bool = GameManager.squad_buy_ability(sid, d_id)
+	GameManager.squad_set_ability(sid, d_id, true)
 	var spent: float = before - ResourceManager.get_amount(f, Constants.RESOURCE_GOLD)
-	verdict("E3 покупка списывает цену за отряд из конфига",
-		bought and absf(spent - cost) < 0.01,
-		"списано %.0f, в конфиге %.0f" % [spent, cost])
+	verdict("E3 доступ к способности не стоит ничего",
+		absf(spent) < 0.01 and is_equal_approx(cost, 0.0),
+		"списано %.0f, цена в конфиге %.0f" % [spent, cost])
 
-	# E4 — способность появилась именно у этого отряда
-	verdict("E4 способность записана этому отряду",
+	# E4 — способность включена и работает без записи в реестре отряда:
+	# истина о доступе живёт в ИССЛЕДОВАНИЯХ фракции, а не в списке отряда
+	verdict("E4 способность включена, и её источник — исследование фракции",
 		GameManager.squad_has_ability(sid, d_id)
-			and GameManager.squad_abilities(sid).has(d_id),
-		"есть=%s, список=%s" % [GameManager.squad_has_ability(sid, d_id),
-			str(GameManager.squad_abilities(sid))])
+			and GameManager.is_researched(f, d_id),
+		"есть=%s, изучено=%s" % [GameManager.squad_has_ability(sid, d_id),
+			GameManager.is_researched(f, d_id)])
 
 	# E5 — ВТОРОЙ отряд того же типа её НЕ получил: платит каждый сам
 	var sid2: int = GameManager.new_squad(f, u)
@@ -539,12 +551,11 @@ func _e_squad_ability() -> void:
 	sp2.global_position = Vector3(-140.0, 0.0, 140.0)
 	GameManager.add_to_squad(sid2, sp2)
 	await frames(2)
-	verdict("E5 другому отряду способность не досталась даром",
-		not GameManager.squad_has_ability(sid2, d_id)
-			and GameManager.squad_can_buy_ability(sid2, d_id),
-		"есть у второго=%s, может купить=%s" % [
-			GameManager.squad_has_ability(sid2, d_id),
-			GameManager.squad_can_buy_ability(sid2, d_id)])
+	# РАЗВОРОТ ТОГО ЖЕ ТРЕБОВАНИЯ: раньше платил каждый отряд сам, теперь
+	# способность достаётся ВСЕМ отрядам этого рода одним исследованием
+	verdict("E5 второй отряд того же рода получил способность тем же исследованием",
+		GameManager.squad_has_ability(sid2, d_id),
+		"есть у второго=%s" % GameManager.squad_has_ability(sid2, d_id))
 
 	# E6 — дважды одному отряду не продаётся
 	var before2: float = ResourceManager.get_amount(f, Constants.RESOURCE_GOLD)
@@ -564,11 +575,12 @@ func _e_squad_ability() -> void:
 	await frames(2)
 	ResourceManager.spend(f, {Constants.RESOURCE_GOLD:
 		ResourceManager.get_amount(f, Constants.RESOURCE_GOLD)})
-	var poor: bool = GameManager.squad_buy_ability(sid3, d_id)
-	verdict("E7 без золота способность не покупается",
-		not poor and not GameManager.squad_has_ability(sid3, d_id),
-		"купилось=%s, причина: %s" % [poor,
-			GameManager.squad_ability_blocker(sid3, d_id)])
+	# ЗОЛОТО К ДОСТУПУ ОТНОШЕНИЯ БОЛЬШЕ НЕ ИМЕЕТ: способность даёт
+	# исследование, а оно оплачено один раз в кузнице
+	verdict("E7 на пустой казне способность всё равно доступна — плата отменена",
+		GameManager.squad_has_ability(sid3, d_id),
+		"есть=%s при золоте %.0f" % [GameManager.squad_has_ability(sid3, d_id),
+			ResourceManager.get_amount(f, Constants.RESOURCE_GOLD)])
 
 	# E8 — способность чужого рода войск отряду не продаётся вовсе
 	var alien: String = _Forge.node_id("archer", "1d")

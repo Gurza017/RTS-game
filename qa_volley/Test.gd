@@ -122,9 +122,16 @@ func _a_access() -> void:
 		not GameManager.is_researched(f, nid))
 
 	GameManager.finish_research(f, nid)
-	verdict("A5 после исследования 1D покупка открыта",
-		GameManager.squad_can_buy_ability(sid, nid),
-		"помеха: «%s»" % GameManager.squad_ability_blocker(sid, nid))
+	# ── ТРЕБОВАНИЕ РАЗВЁРНУТО (спринт 13, блок 4) ─────────────────────────
+	# «Спец-бонус открывается сразу для всех юнитов соответствующего типа,
+	# плату за применение убрать». Значит, «покупка открыта» больше не
+	# свойство: способность ЕСТЬ у всякого отряда этого рода, чья фракция
+	# узел изучила, и докупать её нечем и незачем
+	verdict("A5 исследование 1D сразу выдаёт способность ВСЕМ отрядам рода",
+		GameManager.squad_has_ability(sid, nid)
+			and is_equal_approx(_Forge.squad_unlock_cost(_node()), 0.0),
+		"есть=%s, цена доступа %.0f" % [str(GameManager.squad_has_ability(sid, nid)),
+			_Forge.squad_unlock_cost(_node())])
 	_kill_squad(sid)
 
 func _kill_squad(sid: int) -> void:
@@ -140,16 +147,23 @@ func _b_toggle() -> void:
 	var nid: String = String(_node().get("id", ""))
 	var f: int = Constants.FACTION_PLAYER
 	var sid: int = await _make_squad("archer", f, 6, Vector3(0.0, 0.0, -420.0))
-	verdict("B1 некупленный режим не включается",
+	# ── НЕИССЛЕДОВАННЫЙ РЕЖИМ НЕ ВКЛЮЧАЕТСЯ ──────────────────────────────
+	# Прежнее «некупленный» стало «неисследованным»: плату за доступ убрали,
+	# но ворота остались — узел кузницы всё так же надо изучить
+	GameManager.researched.clear()
+	verdict("B1 неисследованный режим не включается",
 		not GameManager.squad_set_ability(sid, nid, true)
 			and not GameManager.squad_ability_on(sid, nid))
 
-	ResourceManager.add_resource(f, Constants.RESOURCE_GOLD, 99999.0)
-	var bought: bool = GameManager.squad_buy_ability(sid, nid)
-	verdict("B2 способность куплена отряду", bought and GameManager.squad_has_ability(sid, nid))
-	verdict("B3 сразу после покупки режим ВЫКЛЮЧЕН",
-		not GameManager.squad_ability_on(sid, nid) and not GameManager.squad_volley_mode(sid),
-		"куплено, но не включено")
+	GameManager.finish_research(f, nid)
+	verdict("B2 после исследования способность есть у отряда даром",
+		GameManager.squad_has_ability(sid, nid))
+	# ── И ВКЛЮЧЕНА СРАЗУ (прямой заказ спринта 13, блок 5) ───────────────
+	# «Активна по умолчанию, при этом её можно отключить». Прежняя проверка
+	# требовала обратного — выключенного режима после покупки
+	verdict("B3 режим ВКЛЮЧЁН по умолчанию, а не ждёт нажатия",
+		GameManager.squad_ability_on(sid, nid) and GameManager.squad_volley_mode(sid),
+		"включено=%s" % str(GameManager.squad_ability_on(sid, nid)))
 
 	GameManager.squad_set_ability(sid, nid, true)
 	verdict("B4 включается", GameManager.squad_ability_on(sid, nid)
@@ -296,8 +310,12 @@ func _e_off() -> void:
 		at + Vector3(9.0, 0.0, 0.0))
 	for m in _members(foe):
 		(m as Unit).set_tick(false)
-	ResourceManager.add_resource(f, Constants.RESOURCE_GOLD, 99999.0)
-	GameManager.squad_buy_ability(sid, nid)   # куплено, но НЕ включено
+	# ── «БЕЗ РЕЖИМА» = ВЫКЛЮЧЕН ВРУЧНУЮ ──────────────────────────────────
+	# Раньше это состояние получалось само: способность куплена, но не
+	# включена. Теперь она включена сразу, и «без режима» надо ЗАДАТЬ —
+	# ровно тем переключателем, которым его гасит игрок
+	GameManager.finish_research(f, nid)
+	GameManager.squad_set_ability(sid, nid, false)
 
 	var burst: Array = await _shot_profile(sid, 240)
 	var peak := 0
@@ -322,22 +340,23 @@ func _f_ai() -> void:
 	var nid: String = String(_node().get("id", ""))
 	var ef: int = Constants.FACTION_ENEMY
 	var sid: int = await _make_squad("archer", ef, 8, Vector3(0.0, 0.0, -640.0))
-	GameManager.finish_research(ef, nid)
-	ResourceManager.add_resource(ef, Constants.RESOURCE_GOLD, 99999.0)
-	verdict("F1 до прохода ИИ режима у отряда нет",
+	# ── У ИИ ТО ЖЕ ПРАВИЛО, ЧТО У ИГРОКА (спринт 13) ─────────────────────
+	# Докупать нечего: исследование выдаёт режим всем отрядам рода. Проверка
+	# «до прохода ИИ режима нет» переписана на ворота ИССЛЕДОВАНИЯ, а
+	# «на пустой казне не покупает» снята вовсе — покупки больше нет, и
+	# золото к доступу отношения не имеет
+	verdict("F1 без исследования режима у отряда ИИ нет",
 		not GameManager.squad_has_ability(sid, nid))
-	main.enemy_ai._buy_squad_abilities()
-	verdict("F2 ИИ докупил режим отряду лучников",
-		GameManager.squad_has_ability(sid, nid))
-	verdict("F3 и сразу его включил", GameManager.squad_volley_mode(sid))
-
-	# Резерв золота соблюдается: на пустой казне покупки нет
-	var sid2: int = await _make_squad("archer", ef, 8, Vector3(0.0, 0.0, -680.0))
-	ResourceManager.reset_resources()
 	GameManager.finish_research(ef, nid)
-	main.enemy_ai._buy_squad_abilities()
-	verdict("F4 при пустой казне ИИ режим не покупает",
-		not GameManager.squad_has_ability(sid2, nid),
-		"золото=%.0f" % ResourceManager.get_amount(ef, Constants.RESOURCE_GOLD))
+	verdict("F2 исследование выдало режим отряду лучников ИИ",
+		GameManager.squad_has_ability(sid, nid))
+	verdict("F3 и он сразу включён", GameManager.squad_volley_mode(sid))
+
+	var sid2: int = await _make_squad("archer", ef, 8, Vector3(0.0, 0.0, -680.0))
+	verdict("F4 свежему отряду ИИ режим достаётся тем же исследованием, без золота",
+		GameManager.squad_has_ability(sid2, nid)
+			and GameManager.squad_volley_mode(sid2),
+		"есть=%s, включено=%s" % [str(GameManager.squad_has_ability(sid2, nid)),
+			str(GameManager.squad_volley_mode(sid2))])
 	_kill_squad(sid); _kill_squad(sid2)
 	await frames(2)

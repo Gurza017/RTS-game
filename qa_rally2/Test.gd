@@ -317,7 +317,10 @@ func _b_flank() -> void:
 	for pair in [[19.0, "широкий"], [12.0, "близкий"]]:
 		var clearance: float = float((pair as Array)[0])
 		var tag: String = String((pair as Array)[1])
-		var wall_x := 0.0
+		# ПЛОЩАДКА В СТОРОНЕ ОТ РЕКИ (09.09.2026): стенд держит границы мира, а
+		# с ними и воду; при x = 0 обходящий отряд стоял в русле и его
+		# выносило на берег прямо к чужой шеренге («залипло 12 из 20»)
+		var wall_x := 60.0
 		var wall_z := 30.0
 		var foes: Array = _mk_wall(Constants.FACTION_ENEMY, wall_x, wall_z, 20, 1.2)
 		await frames(3)
@@ -594,14 +597,16 @@ func _e_big_squad() -> void:
 	print("  внутри коробки здания стоит: %d" % inside)
 
 	verdict("E1 из крепости вышли все 50", men.size() == 50, "вышло %d" % men.size())
-	verdict("E2 первая шеренга в 3–5 м от ворот",
-		near_gate >= 3.0 and near_gate <= 5.0, "%.2f м" % near_gate)
+	# Площадка вплотную к зданию (10.09.2026): первая шеренга — у самых ворот
+	verdict("E2 первая шеренга у ворот (SQUAD_EXIT_DISTANCE − строй … + 2 м)",
+		near_gate >= b.SQUAD_EXIT_DISTANCE - b.squad_spacing and near_gate <= b.SQUAD_EXIT_DISTANCE + 2.0,
+		"%.2f м при SQUAD_EXIT_DISTANCE %.1f" % [near_gate, b.SQUAD_EXIT_DISTANCE])
 	verdict("E3 отряд растёт ОТ здания наружу, а не уходит в поле (<20 м)",
 		far_gate < 20.0, "последняя шеренга %.2f м" % far_gate)
 	verdict("E4 никто не встал внутри габарита здания", inside == 0,
 		"внутри %d" % inside)
-	verdict("E5 сами ворота свободны (никого ближе 2 м)",
-		near_gate >= 2.0, "ближайший %.2f м" % near_gate)
+	verdict("E5 сам проём ворот свободен (никого ближе первой шеренги площадки)",
+		near_gate >= b.SQUAD_EXIT_DISTANCE - b.squad_spacing, "ближайший %.2f м" % near_gate)
 
 	# Следующий заказ: не должен упереться в предыдущий отряд
 	var men2: Array = await _train(b, "spearman", 20, 20000)
@@ -620,8 +625,13 @@ func _e_big_squad() -> void:
 	print("  расстояние между центрами отрядов %.2f м, вплотную к чужим %d из %d" % [
 		gap, jam, men2.size()])
 	verdict("E6 второй заказ вышел целиком", men2.size() == 20, "вышло %d" % men2.size())
-	verdict("E7 отряды не наложились друг на друга (центры > 5 м)",
-		gap > 5.0, "%.2f м" % gap)
+	# СВОЙСТВО, а не круглое число (10.09.2026): ряды площадки идут вплотную,
+	# и «не наложились» значит «центры дальше полусуммы глубин двух строёв»
+	var rows_a: float = ceil(float(men.size()) / float(Building.square_cols(men.size(), b.squad_cols)))
+	var rows_b: float = ceil(float(men2.size()) / float(Building.square_cols(men2.size(), b.squad_cols)))
+	var min_gap: float = (rows_a + rows_b) * 0.5 * b.squad_spacing * 0.9
+	verdict("E7 отряды не наложились друг на друга (центры дальше полусуммы глубин)",
+		gap > min_gap, "%.2f м при минимуме %.2f" % [gap, min_gap])
 	verdict("E8 второй отряд не застрял в первом (<3 вплотную)",
 		jam < 3, "вплотную %d" % jam)
 	await _sweep()
@@ -670,7 +680,7 @@ func _f_edges() -> void:
 	print("  точка сбора за краем (900, −45) → зажата в (%.1f, %.1f), предел карты %.1f" % [
 		b.rally_point.x, b.rally_point.z, lim.x])
 	verdict("F1 точка сбора за краем карты зажата внутрь поля",
-		absf(b.rally_point.x - lim.x) < 0.01 and absf(b.rally_point.x) < 130.0,
+		absf(b.rally_point.x - lim.x) < 0.01 and absf(b.rally_point.x) < main.MAP_HALF_X,
 		"x=%.2f" % b.rally_point.x)
 	var men: Array = await _train(b, "spearman", 10, 20000)
 	var dbg_t: Array = []

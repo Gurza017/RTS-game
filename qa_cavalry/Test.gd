@@ -257,6 +257,11 @@ func _c_dent() -> void:
 
 	var rider := _spawn("res://scenes/units/GoblinPigRider.tscn",
 		Constants.FACTION_GOBLIN, Vector3(-600.0, 0.0, -602.0))
+	# Кабан тут — источник ОДНОГО толчка, а не боец: с тиком он в двух метрах
+	# успевал ударить сам, копейщики отвечали контратакой отряда
+	# (squad_counter_charge), а та стирает разметку — и «after» оказывался
+	# пустым (гонка по фазе таймера удара, ловилась под нагрузкой шлюза)
+	rider.set_tick(false)
 	await frames(4)
 	var hit: Unit = men[5]
 	var dirn := Vector3(0.0, 0.0, 1.0)
