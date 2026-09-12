@@ -313,10 +313,16 @@ func _grab() -> Image:
 	await RenderingServer.frame_post_draw
 	return get_viewport().get_texture().get_image()
 
-func _show_probes(on: bool) -> void:
-	for n in _hidden:
-		if is_instance_valid(n):
-			n.visible = on
+## `units_only` — гасить ТОЛЬКО слои армии, оставив декорации на месте.
+## Это и есть способ померить ПОРЯДОК ОТРИСОВКИ, а не «видно ли объект»: на
+## фоновом снимке куст (или руина) стоит целым, на рабочем поверх него встаёт
+## боец, и разность внутри его прямоугольника — это ровно те его пиксели,
+## которые декорация НЕ съела. Съела бы — силуэт просел бы на её долю
+func _show_probes(on: bool, units_only: bool = false) -> void:
+	if not units_only:
+		for n in _hidden:
+			if is_instance_valid(n):
+				n.visible = on
 	for l in _unit_layers:
 		if is_instance_valid(l):
 			l.visible = on
@@ -418,7 +424,8 @@ func _judge(p: Probe) -> void:
 			"кромка поднята на %+.2f м (допуск %.2f)" % [lift, FOOT_TOL_M])
 
 ## Один кадр: фон, объекты, вердикты
-func _measure(title: String, probes: Array, centre: Vector3, tag: String) -> void:
+func _measure(title: String, probes: Array, centre: Vector3, tag: String,
+		units_only: bool = false) -> void:
 	var lo := INF
 	var hi := -INF
 	var tall := 0.0
@@ -442,10 +449,10 @@ func _measure(title: String, probes: Array, centre: Vector3, tag: String) -> voi
 	await frames(4)
 
 	print("\n── %s (кадр %.0f м по вертикали) ──" % [title, height])
-	_show_probes(false)
+	_show_probes(false, units_only)
 	_img_bg = await _grab()
 	_img_bg.save_png("%s_%s_bg.png" % [_out, tag])
-	_show_probes(true)
+	_show_probes(true, units_only)
 	_img_fg = await _grab()
 	_img_fg.save_png("%s_%s.png" % [_out, tag])
 	for pr in probes:
@@ -567,6 +574,38 @@ func _run() -> void:
 		horde.append(_spawn_unit(String(row2[0]),
 			spot + Vector3(float(i) * step - 3.0, 0.0, -30.0), Constants.FACTION_GOBLIN))
 
+	# ── РЯД «БОЕЦ ПОВЕРХ ДЕКОРА» (спринт 15, блок 5) ───────────────────────
+	# Заказ владельца: «руины, трава, кусты, декор и камни имеют меньший
+	# Z-index, чем юниты». Мерить это можно ТОЛЬКО картинкой: у бойца, которого
+	# накрыл куст, не меняется ни одно число, которое видят headless-стенды.
+	# Декорация ставится РОВНО В ТОЧКУ НОГ бойца — это самый жёсткий случай,
+	# НИЧЬЯ по глубине, и от ориентации камеры он не зависит вовсе
+	var zrow: Array[Unit] = []
+	for i in range(2):
+		zrow.append(_spawn_unit("res://scenes/units/Spearman.tscn",
+			spot + Vector3(float(i) * 9.0 - 4.5, 0.0, 60.0),
+			Constants.FACTION_PLAYER))
+	# Куст — экземпляр общего MultiMesh растительности (шейдер veg_multimesh),
+	# руина — свой квад с cyl_billboard. Шейдера два, и глубина правилась в
+	# обоих: одного объекта на замер тут мало
+	var bush_texs: Array = main._bush_textures()
+	var bush_slot = null
+	if not bush_texs.is_empty():
+		bush_slot = GameManager.veg.plant(bush_texs[0] as Texture2D,
+			zrow[0].global_position, 2.6, main.world_root(), 0.0, 0.0)
+		GameManager.veg.flush()
+	# Руину делает сама постройка своим штатным путём (Building.spawn_ruin):
+	# второй способ её изготовить означал бы второе описание того же объекта
+	# У House НАМЕРЕННО нет class_name (см. шапку скрипта) — только через load
+	var doomed: Building = load("res://scripts/House.gd").new()
+	doomed.faction = Constants.FACTION_PLAYER
+	main.world_add(doomed)
+	doomed.global_position = zrow[1].global_position
+	await pframes(2)
+	doomed.spawn_ruin()
+	doomed.get_parent().remove_child(doomed)
+	doomed.queue_free()
+
 	# Постройка и дерево — обычные жильцы мира, ставятся тем же способом, что и
 	# в партии (см. SaveLoadManager._restore_buildings и Main._spawn_tree_cluster)
 	var keep := Castle.new()
@@ -591,7 +630,7 @@ func _run() -> void:
 		var u := node as Unit
 		if u == null:
 			continue
-		if not humans.has(u) and not horde.has(u):
+		if not humans.has(u) and not horde.has(u) and not zrow.has(u):
 			u.queue_free()
 	await pframes(6)
 	await frames(4)
@@ -614,6 +653,11 @@ func _run() -> void:
 	# Растительность гасим ВСЮ, кроме него: трава стоит на земле и вправе
 	# закрыть ступни, а её пиксели между снимками не меняются — то есть
 	# закрытая ею часть силуэта честно пропала бы из замера
+	# Слой нашего куста тоже обязан остаться видимым: он и есть декорация под
+	# ногами копейщика в ряду «боец поверх декора»
+	var bush_layer: MultiMeshInstance3D = null
+	if bush_slot != null and bush_slot.bucket != null:
+		bush_layer = bush_slot.bucket.mmi
 	var tree_path := "res://assets/environment/resources/Tree%d.png" % tree.tree_variant
 	var tree_layer: MultiMeshInstance3D = null
 	var tree_quad: QuadMesh = null
@@ -636,7 +680,7 @@ func _run() -> void:
 				tree_scale = Vector2(slot.scale, slot.scale)
 				tree_base = Vector3(slot.pos.x,
 					slot.pos.y - tree_quad.size.y * slot.scale * 0.5, slot.pos.z)
-		else:
+		elif l != bush_layer:
 			l.visible = false
 	if tree_layer != null:
 		_hidden.append(tree_layer)
@@ -671,7 +715,23 @@ func _run() -> void:
 	await _measure("ОРДА", p_horde, spot + Vector3(0.0, 0.0, -30.0), "horde")
 	await _measure("ПОСТРОЙКА И ДЕРЕВО", p_props, spot + Vector3(0.0, 0.0, 30.0), "props")
 
+	# ── БОЕЦ ПОВЕРХ ДЕКОРА ─────────────────────────────────────────────────
+	# Гасим ОДНИ слои армии: декорация стоит на обоих снимках, и разность в
+	# прямоугольнике бойца — это его непрожёванная часть. Вердикт тот же, что
+	# у прочих («силуэт цел»), а ловит он другое — порядок отрисовки
+	var p_zrow: Array = []
+	var znames := ["Копейщик в кусте", "Копейщик на руине"]
+	for i in range(zrow.size()):
+		var pz := _probe_unit(zrow[i], String(znames[i]))
+		if pz != null:
+			p_zrow.append(pz)
+	var ruins_n: int = get_tree().get_nodes_in_group("ruins").size()
+	_ok("Стенд: декор под ногами построен", bush_slot != null and ruins_n > 0,
+		"кустов %d, руин %d" % [1 if bush_slot != null else 0, ruins_n])
+	await _measure("БОЕЦ ПОВЕРХ ДЕКОРА", p_zrow,
+		spot + Vector3(0.0, 0.0, 60.0), "zorder", true)
+
 	print("\n=== ВИЗУАЛЬНЫЙ ДЫМ: проверок %d, провалов: %d ===" % [_checks, _fails])
-	print("снимки: %s_{units,horde,props}.png" % _out)
+	print("снимки: %s_{units,horde,props,zorder}.png" % _out)
 	get_tree().paused = false
 	get_tree().quit(1 if _fails > 0 else 0)

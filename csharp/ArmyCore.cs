@@ -57,6 +57,10 @@ public partial class ArmyCore : RefCounted
     private bool _riverOn = false;
     private float _riverHalfW, _riverMeander, _riverK, _fordZ, _fordHalf;
     private float _riverDepth, _fordDepth, _riverBank, _riverMargin;
+    // Просадка дна, начиная с которой грунт скрыт зеркалом воды (Main.wet_depth).
+    // Подаётся числом, а не выводится здесь: правило берега обязано быть ОДНИМ
+    // на оба языка — ровно как высота земли (см. Height)
+    private float _wetDepth = 0.0f;
     // Русло только в поле карты (|z| <= _riverHalfZ) — см. Main.river_in_field
     private float _riverHalfZ = 1e9f;
     // Плато (Main.plateau_list): по 5 чисел — cx, cz, r_flat, h, ramp_dir
@@ -67,6 +71,115 @@ public partial class ArmyCore : RefCounted
     {
         _plat = data ?? System.Array.Empty<float>();
         _platGentle = gentle; _platSteep = steep; _platCone = cone;
+    }
+
+    // ── СКАЛЫ: МАСКА НЕПРОХОДИМЫХ СКЛОНОВ (спринт 18) ─────────────────────
+    // Поиска пути в игре нет, и до сих пор непроходимых склонов не было
+    // (обрыв только рисовался стеной). Заказ владельца: боковые скалы
+    // возвышенностей — непроходимы. Маска строится один раз при сборке карты
+    // по крутизне высоты ядра (та же Height, что у шага): ячейка cell метров,
+    // байт на ячейку. Шаг в скалу СКОЛЬЗИТ вдоль неё (по X или по Z), разведение
+    // на скалу не выталкивает. Вне маски — проходимо (стенды за краем карты)
+    private byte[] _cliff = System.Array.Empty<byte>();
+    private int _cliffCols = 0, _cliffRows = 0;
+    private float _cliffOx = 0.0f, _cliffOz = 0.0f, _cliffCell = 1.0f;
+    private bool _cliffOn = false;
+    public int CliffCells = 0;
+
+    public void BuildCliffMask(float ox, float oz, float cell, int cols, int rows,
+        float reliefAmp, float slopeThr)
+    {
+        _cliffCols = cols; _cliffRows = rows; _cliffOx = ox; _cliffOz = oz; _cliffCell = cell;
+        _cliff = new byte[Math.Max(cols * rows, 1)];
+        CliffCells = 0;
+        float h2 = cell * 0.5f;
+        for (int r = 0; r < rows; r++)
+        {
+            float z = oz + (r + 0.5f) * cell;
+            for (int c = 0; c < cols; c++)
+            {
+                float x = ox + (c + 0.5f) * cell;
+                // Русло реки в маску НЕ входит: откос берега (RIVER_BANK) по
+                // крутизне у самого порога, и с гармониками берег превращался
+                // бы в стену — боец не доходил бы до брода (qa_map C1).
+                // Скалы — это плато и гора: высота считается БЕЗ просадки русла
+                float dhx = DryHeight(x + h2, z, reliefAmp) - DryHeight(x - h2, z, reliefAmp);
+                float dhz = DryHeight(x, z + h2, reliefAmp) - DryHeight(x, z - h2, reliefAmp);
+                float slope = Math.Max(Math.Abs(dhx), Math.Abs(dhz)) / cell;
+                if (slope > slopeThr) { _cliff[r * cols + c] = 1; CliffCells++; }
+            }
+        }
+        _cliffThr = slopeThr; _cliffAmp = reliefAmp;
+        // Расширение на ячейку: точный тест зовётся и у самой кромки
+        _cliffNear = new byte[_cliff.Length];
+        for (int r = 0; r < rows; r++)
+            for (int c = 0; c < cols; c++)
+            {
+                if (_cliff[r * cols + c] == 0) continue;
+                for (int dr = -1; dr <= 1; dr++)
+                    for (int dc = -1; dc <= 1; dc++)
+                    {
+                        int rr = r + dr, cc = c + dc;
+                        if (rr < 0 || cc < 0 || rr >= rows || cc >= cols) continue;
+                        _cliffNear[rr * cols + cc] = 1;
+                    }
+            }
+        _cliffOn = CliffCells > 0;
+    }
+
+    public void SetCliffEnabled(bool on) { _cliffOn = on && _cliff.Length > 1; }
+
+    // Высота без русла: гармоники + гора + плато (см. Height)
+    private float DryHeight(float x, float z, float reliefAmp)
+    {
+        return Height(x, z, reliefAmp) + RiverDepth(x, z);
+    }
+
+    // ── ТОЧНАЯ ПРОВЕРКА: МАСКА — ТОЛЬКО ГРУБЫЙ ФИЛЬТР ─────────────────────
+    // Ячейка в 1 м даёт зубчатую границу, и во «вогнутых углах» зубцов боец
+    // застревал (касательная к шагу, а не к склону). Маска расширена на
+    // ячейку и отвечает «рядом обрыв?»; сама крутизна считается в ТОЧКЕ по
+    // четырём высотам (непрерывно), а скольжение идёт вдоль настоящего
+    // градиента склона (CliffGrad). Цена — четыре высоты только у обрывов
+    private float _cliffThr = 0.45f, _cliffAmp = 0.0f;
+    private byte[] _cliffNear = System.Array.Empty<byte>();
+
+    private bool CliffNear(float x, float z)
+    {
+        int c = (int)Math.Floor((x - _cliffOx) / _cliffCell);
+        int r = (int)Math.Floor((z - _cliffOz) / _cliffCell);
+        if (c < 0 || r < 0 || c >= _cliffCols || r >= _cliffRows) return false;
+        return _cliffNear[r * _cliffCols + c] != 0;
+    }
+
+    // Градиент «сухой» высоты в точке; возвращает крутизну (max по осям)
+    private float CliffGrad(float x, float z, out float gx, out float gz)
+    {
+        const float h2 = 0.5f;
+        gx = (DryHeight(x + h2, z, _cliffAmp) - DryHeight(x - h2, z, _cliffAmp));
+        gz = (DryHeight(x, z + h2, _cliffAmp) - DryHeight(x, z - h2, _cliffAmp));
+        return Math.Max(Math.Abs(gx), Math.Abs(gz));
+    }
+
+    // Стоящий НА скале (рождён там, вытолкнут, перенесён разлётом) вправе
+    // шагнуть, только если новая точка ПОЛОЖЕ текущей: уйти со стены можно,
+    // пройти сквозь неё — нет
+    private bool CliffEscape(float x, float z, float nx, float nz)
+    {
+        if (!CliffNear(x, z)) return false;
+        float gx, gz, hx, hz;
+        float here = CliffGrad(x, z, out gx, out gz);
+        if (here <= _cliffThr) return false;
+        float there = CliffGrad(nx, nz, out hx, out hz);
+        // Не круче текущего: вдоль склона и вниз — можно, глубже в стену — нет
+        return there <= here + 1e-4f;
+    }
+
+    public bool IsCliffAt(float x, float z)
+    {
+        if (!_cliffOn || !CliffNear(x, z)) return false;
+        float gx, gz;
+        return CliffGrad(x, z, out gx, out gz) > _cliffThr;
     }
 
     // Та же формула, что Main.plateau_height
@@ -104,13 +217,14 @@ public partial class ArmyCore : RefCounted
 
     public void SetRiver(bool on, float halfW, float meander, float k, float fordZ,
         float fordHalf, float depth, float fordDepth, float bank, float margin,
-        float halfZ)
+        float halfZ, float wetDepth)
     {
         _riverOn = on;
         _riverHalfZ = halfZ;
         _riverHalfW = halfW; _riverMeander = meander; _riverK = k;
         _fordZ = fordZ; _fordHalf = fordHalf;
         _riverDepth = depth; _fordDepth = fordDepth; _riverBank = bank; _riverMargin = margin;
+        _wetDepth = wetDepth;
     }
 
     private float RiverX(float z) => _riverMeander * Mathf.Sin(z * _riverK);
@@ -148,10 +262,14 @@ public partial class ArmyCore : RefCounted
     }
 
     // Вода реки — то же правило, что Main.is_water для русла
+    // Вода там, где грунт ушёл под зеркало (та же мера, что Main.is_water).
+    // Полосой вокруг оси это считалось до спринта 15, и верх откоса оставался
+    // проходимым — «юниты сидят ногами в воде»
     private bool RiverWater(float x, float z)
     {
         if (!_riverOn || Mathf.Abs(z) > _riverHalfZ) return false;
-        return Mathf.Abs(x - RiverX(z)) < _riverHalfW + _riverMargin && !InFord(z);
+        if (InFord(z)) return false;
+        return RiverDepth(x, z) > _wetDepth;
     }
 
     // Река — своей арифметикой; озеро (если когда-нибудь включат) — GDScript
@@ -184,6 +302,16 @@ public partial class ArmyCore : RefCounted
     private float[] _sepNX = Array.Empty<float>();
     private float[] _sepNZ = Array.Empty<float>();
     private byte[] _sepGo = Array.Empty<byte>();
+    // Сторона обхода обрыва (спринт 18): 0 — не идём вдоль стены, ±1 — идём;
+    // держится, пока прямой шаг упирается, сбрасывается свободным шагом
+    private sbyte[] _cliffSide = Array.Empty<sbyte>();
+    private byte[] _cliffFree = Array.Empty<byte>();
+    private const float CliffBack = 0.35f;
+    // Сколько свободных шагов подряд забывают сторону обхода: отступ от стены
+    // делает прямой шаг свободным на такт-другой, и сброс на первом же
+    // свободном шаге возвращал выбор стороны «куда ближе цель» — с
+    // переворотом в точке, где стена перпендикулярна цели
+    private const int CliffForget = 45;
 
     /// Число потоков пакетных проходов (ставит GDScript из perf_config;
     /// 1 — однопоточно). Потокам разрешена ТОЛЬКО чистая математика по
@@ -590,6 +718,8 @@ public partial class ArmyCore : RefCounted
         Array.Resize(ref _atkReach, cap);
         Array.Resize(ref _sepNX, cap); Array.Resize(ref _sepNZ, cap);
         Array.Resize(ref _sepGo, cap);
+        Array.Resize(ref _cliffSide, cap);
+        Array.Resize(ref _cliffFree, cap);
         Array.Resize(ref _pressX, cap); Array.Resize(ref _pressZ, cap);
         Array.Resize(ref _pressV, cap); Array.Resize(ref _pressStop, cap);
         Array.Resize(ref _rbB, cap); Array.Resize(ref _rbI, cap);
@@ -1590,6 +1720,72 @@ public partial class ArmyCore : RefCounted
                     nx = x + sx; nz = z + sz;
                 }
             }
+            // ── СКАЛА: скольжение вдоль обрыва, в лоб — стоим ───────────────
+            // Стоящий НА скале (рождён там, вытолкнут) вправе уйти с неё: блок
+            // только на ВХОД в скалу с проходимой земли
+            if (_cliffOn && boundsOn && IsCliffAt(nx, nz) && !CliffEscape(x, z, nx, nz))
+            {
+                // ВДОЛЬ ОБРЫВА С ПАМЯТЬЮ СТОРОНЫ: кольцо плато замкнуто, выход
+                // один — спуск, и боец обязан ползти вдоль стены до него.
+                // Касательная — перпендикуляр к градиенту высоты в точке шага.
+                // Сторона выбирается на ПЕРВОМ упоре (куда ближе цель) и ДЕРЖИТСЯ,
+                // пока прямой шаг упирается: без памяти в точке, где стена
+                // перпендикулярна цели, касательная меняла знак и боец замирал
+                // (зонд qa_cliff_probe: 20 с у стены на (-40.5, -42)). Вогнутый
+                // угол (обе касательные в скале) — сторона переворачивается
+                float gx, gz;
+                CliffGrad(nx, nz, out gx, out gz);
+                float gl = (float)Math.Sqrt(gx * gx + gz * gz);
+                float len = (float)Math.Sqrt(sx * sx + sz * sz);
+                float tx, tz;
+                if (gl > 1e-6f) { tx = -gz / gl * len; tz = gx / gl * len; }
+                else { tx = -sz; tz = sx; }
+                int side = _cliffSide[i];
+                if (side == 0)
+                {
+                    float d = sx * tx + sz * tz;
+                    side = d >= 0.0f ? 1 : -1;
+                    if (Math.Abs(d) < 1e-6f) side = ((i & 1) != 0) ? -1 : 1;
+                }
+                // Касательная с ОТСТУПОМ от стены: хорды вдоль кривой стены
+                // сносят бойца в склон, и без отступа обе касательные оказывались
+                // в скале. Отступ — НАЗАД ПО ШАГУ (шаг и привёл в стену), а не по
+                // градиенту: знак градиента не говорит, сверху боец или снизу
+                float bx = -sx * CliffBack, bz = -sz * CliffBack;
+                float ux = tx * side + bx, uz = tz * side + bz;
+                if (IsCliffAt(x + ux, z + uz))
+                {
+                    side = -side;
+                    ux = tx * side + bx; uz = tz * side + bz;
+                    if (IsCliffAt(x + ux, z + uz))
+                    {
+                        // Вогнутый угол: назад по шагу, прочь от стены
+                        ux = bx * 2.0f; uz = bz * 2.0f;
+                        if (ux * ux + uz * uz < 1e-10f || IsCliffAt(x + ux, z + uz))
+                        {
+                            // Стоим НА стене (рождены там, вытолкнуты): скатываемся
+                            // вниз по склону — у стены есть подножие, и оно ровное
+                            float hx = 0.0f, hz = 0.0f;
+                            float here = CliffNear(x, z) ? CliffGrad(x, z, out hx, out hz) : 0.0f;
+                            float hl = (float)Math.Sqrt(hx * hx + hz * hz);
+                            if (here > _cliffThr && hl > 1e-6f)
+                            {
+                                ux = -hx / hl * len; uz = -hz / hl * len;
+                            }
+                            else { _cliffSide[i] = 0; continue; }
+                        }
+                    }
+                }
+                _cliffSide[i] = (sbyte)side;
+                _cliffFree[i] = 0;
+                sx = ux; sz = uz;
+                nx = x + sx; nz = z + sz;
+            }
+            else if (_cliffSide[i] != 0)
+            {
+                if (_cliffFree[i] < 255) _cliffFree[i]++;
+                if (_cliffFree[i] >= CliffForget) { _cliffSide[i] = 0; _cliffFree[i] = 0; }
+            }
             // ── СТВОЛ ДЕРЕВА ───────────────────────────────────────────────
             if ((fl & (FClearTrunk | FTrunkIgnore)) == 0)
             {
@@ -2227,6 +2423,7 @@ public partial class ArmyCore : RefCounted
             var u = _unitOf[i];
             if (u == null || !GodotObject.IsInstanceValid(u)) continue;
             if (waterOn && IsWaterAt(nx2, nz2, gm)) continue;
+            if (_cliffOn && waterOn && IsCliffAt(nx2, nz2) && !IsCliffAt(_px[i], _pz[i])) continue;   // на скалу не выталкиваем
             float ny = Height(nx2, nz2, reliefAmp);
             _px[i] = nx2; _py[i] = ny; _pz[i] = nz2;
             if (u is Node3D n3)
@@ -2911,10 +3108,16 @@ public partial class ArmyCore : RefCounted
     private float[] _afSx = new float[64], _afSy = new float[64], _afSz = new float[64];
     private float[] _afEx = new float[64], _afEy = new float[64], _afEz = new float[64];
     private float[] _afArc = new float[64], _afT = new float[64], _afRate = new float[64];
+    // МАСШТАБ ОСИ — ЭТО ПРИЗНАК «КРУЧУСЬ В ПОЛЁТЕ», А НЕ ГЕОМЕТРИЯ.
+    // Шейдер снаряда ось всё равно нормирует, поэтому её МОДУЛЬ свободен:
+    // единица — обычная стрела, меньше — кость гнолла, которую рисовать надо
+    // кувырком. Канала instance-цвета под это нет (все четыре заняты осью и
+    // растворением), а второй слой отрисовки ради одного бита — расточительство
+    private float[] _afAxK = new float[64];
     private readonly Godot.Collections.Array _afEvents = new();
 
     public void ArrowLaunch(int id, int b, int slot, Vector3 s, Vector3 e,
-        float arcH, float rate, int fac)
+        float arcH, float rate, int fac, float axK = 1.0f)
     {
         if (_afN >= _afId.Length)
         {
@@ -2924,6 +3127,7 @@ public partial class ArmyCore : RefCounted
             Array.Resize(ref _afSx, cap); Array.Resize(ref _afSy, cap); Array.Resize(ref _afSz, cap);
             Array.Resize(ref _afEx, cap); Array.Resize(ref _afEy, cap); Array.Resize(ref _afEz, cap);
             Array.Resize(ref _afArc, cap); Array.Resize(ref _afT, cap); Array.Resize(ref _afRate, cap);
+            Array.Resize(ref _afAxK, cap);
         }
         int k = _afN++;
         _afB[k] = b;
@@ -2931,6 +3135,7 @@ public partial class ArmyCore : RefCounted
         _afSx[k] = s.X; _afSy[k] = s.Y; _afSz[k] = s.Z;
         _afEx[k] = e.X; _afEy[k] = e.Y; _afEz[k] = e.Z;
         _afArc[k] = arcH; _afT[k] = 0.0f; _afRate[k] = rate;
+        _afAxK[k] = axK;
     }
 
     public void ArrowCancel(int id)
@@ -2951,6 +3156,7 @@ public partial class ArmyCore : RefCounted
             _afSx[k] = _afSx[last]; _afSy[k] = _afSy[last]; _afSz[k] = _afSz[last];
             _afEx[k] = _afEx[last]; _afEy[k] = _afEy[last]; _afEz[k] = _afEz[last];
             _afArc[k] = _afArc[last]; _afT[k] = _afT[last]; _afRate[k] = _afRate[last];
+            _afAxK[k] = _afAxK[last];
         }
         _afN = last;
     }
@@ -2983,8 +3189,10 @@ public partial class ArmyCore : RefCounted
             if (o + RbStride <= buf.Length)
             {
                 buf[o + 3] = x; buf[o + 7] = y; buf[o + 11] = z;
-                buf[o + 12] = ax * 0.5f + 0.5f; buf[o + 13] = ay * 0.5f + 0.5f;
-                buf[o + 14] = az * 0.5f + 0.5f; buf[o + 15] = 1.0f;
+                // Модуль оси несёт признак кувырка (см. _afAxK)
+                float axk = _afAxK[k];
+                buf[o + 12] = ax * axk * 0.5f + 0.5f; buf[o + 13] = ay * axk * 0.5f + 0.5f;
+                buf[o + 14] = az * axk * 0.5f + 0.5f; buf[o + 15] = 1.0f;
                 rb.Dirty = true;
             }
             // Попадание — тем же правилом, что было в Arrow._check_hit
@@ -3449,5 +3657,316 @@ public partial class ArmyCore : RefCounted
         }
         res.Add(n); res.Add(cx); res.Add(cz); res.Add(rad); res.Add(watch); res.Add(fc);
         return res;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // НАВИГАЦИЯ: КОАРС-СЕТКА ПРОХОДИМОСТИ И A* (спринт 19, письмо 11)
+    // ═════════════════════════════════════════════════════════════════════
+    // Поиска пути в игре не было: боец шёл по прямой, а скалу и воду обходил
+    // скольжением вдоль стены. У замкнутого кольца плато это оборачивалось
+    // «отряд упёрся в обрыв и дёргается», у брода — ниткой вдоль берега.
+    // Теперь у карты есть сетка ячеек NavCell метров: ячейка непроходима,
+    // если в ней есть ячейка маски скал (BuildCliffMask) или вода реки вне
+    // брода (RiverWater). По ней A* (8 связей, без срезания углов), потом
+    // «натягивание нити» по видимости (NavLineBlocked) — остаются только
+    // углы, — и отжим углов от стены (NavCornerPush). Зовётся ИЗ ПРИКАЗА
+    // (command_move) и раз в NAV_RECHECK у подхода к цели; в покадровый
+    // путь не входит. Всё в ядре: GDScript получает готовый плоский массив
+    private byte[] _nav = System.Array.Empty<byte>();
+    private int _navCols = 0, _navRows = 0;
+    private float _navOx = 0.0f, _navOz = 0.0f, _navCell = 2.0f;
+    private bool _navOn = false;
+    public int NavBlocked = 0;
+    public bool NavLastFound = false;
+    public float NavLastLength = 0.0f;
+    public int NavCalls = 0;
+    // Скрэтч A*: печать эпохи вместо очистки массивов на каждый вызов
+    private int[] _navStamp = System.Array.Empty<int>();
+    private float[] _navG = System.Array.Empty<float>();
+    private int[] _navParent = System.Array.Empty<int>();
+    private byte[] _navClosed = System.Array.Empty<byte>();
+    private int _navEpoch = 0;
+    private float[] _heapF = new float[1024];
+    private int[] _heapI = new int[1024];
+    private int _heapN = 0;
+    private const int NavMaxExpand = 60000;
+    // Зазор от стены при проверке видимости: боец — тело радиусом ~0.55, и
+    // нить, натянутая впритык к углу, вела бы его В стену
+    private const float NavClearance = 0.7f;
+
+    public int BuildNavGrid(float cell)
+    {
+        if (_cliff.Length <= 1) { _navOn = false; NavBlocked = 0; return 0; }
+        _navCell = cell;
+        _navOx = _cliffOx; _navOz = _cliffOz;
+        _navCols = Math.Max((int)Math.Ceiling(_cliffCols * _cliffCell / cell), 1);
+        _navRows = Math.Max((int)Math.Ceiling(_cliffRows * _cliffCell / cell), 1);
+        int n = _navCols * _navRows;
+        _nav = new byte[n];
+        _navStamp = new int[n]; _navG = new float[n]; _navParent = new int[n]; _navClosed = new byte[n];
+        NavBlocked = 0;
+        for (int r = 0; r < _navRows; r++)
+        {
+            float z0 = _navOz + r * cell;
+            for (int c = 0; c < _navCols; c++)
+            {
+                float x0 = _navOx + c * cell;
+                bool blocked = false;
+                // Любая ячейка маски скал внутри — непроходимо
+                int cc0 = (int)Math.Floor((x0 - _cliffOx) / _cliffCell);
+                int cr0 = (int)Math.Floor((z0 - _cliffOz) / _cliffCell);
+                int cc1 = (int)Math.Floor((x0 + cell - 0.01f - _cliffOx) / _cliffCell);
+                int cr1 = (int)Math.Floor((z0 + cell - 0.01f - _cliffOz) / _cliffCell);
+                for (int rr = Math.Max(cr0, 0); rr <= cr1 && rr < _cliffRows && !blocked; rr++)
+                    for (int cc = Math.Max(cc0, 0); cc <= cc1 && cc < _cliffCols; cc++)
+                        if (_cliff[rr * _cliffCols + cc] != 0) { blocked = true; break; }
+                // Вода реки вне брода: центр и четыре точки внутри ячейки
+                if (!blocked && _riverOn)
+                {
+                    float q = cell * 0.25f;
+                    float cx = x0 + cell * 0.5f, cz = z0 + cell * 0.5f;
+                    if (RiverWater(cx, cz) || RiverWater(cx - q, cz - q) || RiverWater(cx + q, cz - q)
+                        || RiverWater(cx - q, cz + q) || RiverWater(cx + q, cz + q))
+                        blocked = true;
+                }
+                if (blocked) { _nav[r * _navCols + c] = 1; NavBlocked++; }
+            }
+        }
+        _navOn = NavBlocked > 0;
+        return NavBlocked;
+    }
+
+    public void SetNavEnabled(bool on) { _navOn = on && _nav.Length > 1; }
+    public bool NavEnabled() { return _navOn; }
+    public float NavCellSize() { return _navCell; }
+
+    private bool NavCellBlocked(int c, int r)
+    {
+        if (c < 0 || r < 0 || c >= _navCols || r >= _navRows) return true;
+        return _nav[r * _navCols + c] != 0;
+    }
+
+    private bool NavBlockedAt(float x, float z)
+    {
+        int c = (int)Math.Floor((x - _navOx) / _navCell);
+        int r = (int)Math.Floor((z - _navOz) / _navCell);
+        if (c < 0 || r < 0 || c >= _navCols || r >= _navRows) return false;
+        return _nav[r * _navCols + c] != 0;
+    }
+
+    public bool NavFree(float x, float z)
+    {
+        if (!_navOn) return true;
+        return !NavBlockedAt(x, z);
+    }
+
+    // Видимость по сетке с зазором NavClearance по обе стороны отрезка:
+    // выборка каждые полклетки, в каждой точке — центр и два бока
+    public bool NavLineBlocked(float x0, float z0, float x1, float z1)
+    {
+        if (!_navOn) return false;
+        float dx = x1 - x0, dz = z1 - z0;
+        float len = (float)Math.Sqrt(dx * dx + dz * dz);
+        if (len < 1e-4f) return NavBlockedAt(x0, z0);
+        float nx = -dz / len * NavClearance, nz = dx / len * NavClearance;
+        int steps = Math.Max((int)Math.Ceiling(len / (_navCell * 0.45f)), 1);
+        for (int i = 0; i <= steps; i++)
+        {
+            float t = (float)i / steps;
+            float x = x0 + dx * t, z = z0 + dz * t;
+            if (NavBlockedAt(x, z) || NavBlockedAt(x + nx, z + nz) || NavBlockedAt(x - nx, z - nz))
+                return true;
+        }
+        return false;
+    }
+
+    // Ближайшая проходимая ячейка кольцами (до maxR ячеек); -1 — не нашлась
+    private int NavNearestFree(int c, int r, int maxR)
+    {
+        if (!NavCellBlocked(c, r)) return r * _navCols + c;
+        for (int rad = 1; rad <= maxR; rad++)
+        {
+            int best = -1; float bd = float.MaxValue;
+            for (int dr = -rad; dr <= rad; dr++)
+                for (int dc = -rad; dc <= rad; dc++)
+                {
+                    if (Math.Abs(dr) != rad && Math.Abs(dc) != rad) continue;
+                    int cc = c + dc, rr = r + dr;
+                    if (NavCellBlocked(cc, rr)) continue;
+                    float d = dc * dc + dr * dr;
+                    if (d < bd) { bd = d; best = rr * _navCols + cc; }
+                }
+            if (best >= 0) return best;
+        }
+        return -1;
+    }
+
+    private void HeapPush(float f, int idx)
+    {
+        if (_heapN >= _heapF.Length)
+        {
+            System.Array.Resize(ref _heapF, _heapF.Length * 2);
+            System.Array.Resize(ref _heapI, _heapI.Length * 2);
+        }
+        int i = _heapN++;
+        _heapF[i] = f; _heapI[i] = idx;
+        while (i > 0)
+        {
+            int p = (i - 1) >> 1;
+            if (_heapF[p] <= _heapF[i]) break;
+            (_heapF[p], _heapF[i]) = (_heapF[i], _heapF[p]);
+            (_heapI[p], _heapI[i]) = (_heapI[i], _heapI[p]);
+            i = p;
+        }
+    }
+
+    private int HeapPop()
+    {
+        int top = _heapI[0];
+        _heapN--;
+        if (_heapN > 0)
+        {
+            _heapF[0] = _heapF[_heapN]; _heapI[0] = _heapI[_heapN];
+            int i = 0;
+            while (true)
+            {
+                int l = 2 * i + 1, rr = l + 1, m = i;
+                if (l < _heapN && _heapF[l] < _heapF[m]) m = l;
+                if (rr < _heapN && _heapF[rr] < _heapF[m]) m = rr;
+                if (m == i) break;
+                (_heapF[m], _heapF[i]) = (_heapF[i], _heapF[m]);
+                (_heapI[m], _heapI[i]) = (_heapI[i], _heapI[m]);
+                i = m;
+            }
+        }
+        return top;
+    }
+
+    private static readonly int[] NavDc = { 1, -1, 0, 0, 1, 1, -1, -1 };
+    private static readonly int[] NavDr = { 0, 0, 1, -1, 1, -1, 1, -1 };
+    private static readonly float[] NavDw = { 1f, 1f, 1f, 1f, 1.41421f, 1.41421f, 1.41421f, 1.41421f };
+
+    private readonly System.Collections.Generic.List<float> _navOut = new System.Collections.Generic.List<float>(64);
+    private readonly System.Collections.Generic.List<int> _navCells = new System.Collections.Generic.List<int>(256);
+
+    /// Маршрут по сетке: плоский массив [x0, z0, x1, z1, ...] ПРОМЕЖУТОЧНЫХ
+    /// точек (без начала и конца). Пусто, если путь прямой (NavLastFound = true)
+    /// или пути нет вовсе (NavLastFound = false). NavLastLength — длина по
+    /// нити в метрах (прямая — расстояние между концами)
+    public float[] NavPath(float x0, float z0, float x1, float z1)
+    {
+        NavCalls++;
+        NavLastFound = true;
+        float sdx = x1 - x0, sdz = z1 - z0;
+        NavLastLength = (float)Math.Sqrt(sdx * sdx + sdz * sdz);
+        if (!_navOn) return System.Array.Empty<float>();
+        if (!NavLineBlocked(x0, z0, x1, z1)) return System.Array.Empty<float>();
+        int sc = (int)Math.Floor((x0 - _navOx) / _navCell), sr = (int)Math.Floor((z0 - _navOz) / _navCell);
+        int gc = (int)Math.Floor((x1 - _navOx) / _navCell), gr = (int)Math.Floor((z1 - _navOz) / _navCell);
+        sc = Math.Clamp(sc, 0, _navCols - 1); sr = Math.Clamp(sr, 0, _navRows - 1);
+        gc = Math.Clamp(gc, 0, _navCols - 1); gr = Math.Clamp(gr, 0, _navRows - 1);
+        int start = NavNearestFree(sc, sr, 8);
+        int goal = NavNearestFree(gc, gr, 8);
+        if (start < 0 || goal < 0) { NavLastFound = false; return System.Array.Empty<float>(); }
+        if (start == goal) return System.Array.Empty<float>();
+        // ── A* ────────────────────────────────────────────────────────────
+        _navEpoch++;
+        if (_navEpoch == int.MaxValue) { System.Array.Clear(_navStamp, 0, _navStamp.Length); _navEpoch = 1; }
+        _heapN = 0;
+        int gcc = goal % _navCols, gcr = goal / _navCols;
+        _navStamp[start] = _navEpoch; _navG[start] = 0f; _navParent[start] = -1; _navClosed[start] = 0;
+        HeapPush(0f, start);
+        int expanded = 0;
+        bool found = false;
+        while (_heapN > 0)
+        {
+            int cur = HeapPop();
+            if (_navClosed[cur] != 0 && _navStamp[cur] == _navEpoch) continue;
+            _navClosed[cur] = 1;
+            if (cur == goal) { found = true; break; }
+            if (++expanded > NavMaxExpand) break;
+            int cc = cur % _navCols, cr = cur / _navCols;
+            float g0 = _navG[cur];
+            for (int k = 0; k < 8; k++)
+            {
+                int nc = cc + NavDc[k], nr = cr + NavDr[k];
+                if (NavCellBlocked(nc, nr)) continue;
+                // Диагональ без срезания угла: оба ортогональных соседа свободны
+                if (k >= 4 && (NavCellBlocked(cc + NavDc[k], cr) || NavCellBlocked(cc, cr + NavDr[k]))) continue;
+                int ni = nr * _navCols + nc;
+                float g = g0 + NavDw[k];
+                if (_navStamp[ni] == _navEpoch)
+                {
+                    if (_navClosed[ni] != 0 || g >= _navG[ni]) continue;
+                }
+                else { _navStamp[ni] = _navEpoch; _navClosed[ni] = 0; }
+                _navG[ni] = g; _navParent[ni] = cur;
+                int ddx = Math.Abs(nc - gcc), ddz = Math.Abs(nr - gcr);
+                float h = (ddx + ddz) + (1.41421f - 2f) * Math.Min(ddx, ddz);
+                HeapPush(g + h, ni);
+            }
+        }
+        if (!found) { NavLastFound = false; return System.Array.Empty<float>(); }
+        // ── ЦЕПОЧКА ЯЧЕЕК → ТОЧКИ, НАТЯГИВАНИЕ НИТИ ───────────────────────
+        _navCells.Clear();
+        for (int i = goal; i >= 0; i = _navParent[i]) { _navCells.Add(i); if (i == start) break; }
+        _navCells.Reverse();
+        int nCells = _navCells.Count;
+        // Точки: старт, центры ячеек (кроме первой и последней), цель
+        var px = new float[nCells + 2]; var pz = new float[nCells + 2];
+        px[0] = x0; pz[0] = z0;
+        for (int i = 0; i < nCells; i++)
+        {
+            int ci = _navCells[i];
+            px[i + 1] = _navOx + (ci % _navCols + 0.5f) * _navCell;
+            pz[i + 1] = _navOz + (ci / _navCols + 0.5f) * _navCell;
+        }
+        px[nCells + 1] = x1; pz[nCells + 1] = z1;
+        int last = nCells + 1;
+        _navOut.Clear();
+        float total = 0f;
+        int anchor = 0;
+        float ax = px[0], az = pz[0];
+        while (anchor < last)
+        {
+            // Самая дальняя точка, видимая из якоря
+            int far = anchor + 1;
+            for (int j = last; j > anchor + 1; j--)
+            {
+                if (!NavLineBlocked(ax, az, px[j], pz[j])) { far = j; break; }
+            }
+            float fx = px[far], fz = pz[far];
+            if (far != last)
+            {
+                NavCornerPush(ref fx, ref fz);
+                _navOut.Add(fx); _navOut.Add(fz);
+            }
+            float ddx = fx - ax, ddz = fz - az;
+            total += (float)Math.Sqrt(ddx * ddx + ddz * ddz);
+            ax = fx; az = fz;
+            anchor = far;
+        }
+        NavLastLength = total;
+        return _navOut.ToArray();
+    }
+
+    // Отжим угла от стены: средняя сторона непроходимых соседей в радиусе
+    // ячейки — и точка уезжает от неё на полклетки, если там свободно
+    private void NavCornerPush(ref float x, ref float z)
+    {
+        int c = (int)Math.Floor((x - _navOx) / _navCell), r = (int)Math.Floor((z - _navOz) / _navCell);
+        float sx = 0f, sz = 0f; int n = 0;
+        for (int dr = -1; dr <= 1; dr++)
+            for (int dc = -1; dc <= 1; dc++)
+            {
+                if (dr == 0 && dc == 0) continue;
+                if (!NavCellBlocked(c + dc, r + dr)) continue;
+                sx += dc; sz += dr; n++;
+            }
+        if (n == 0) return;
+        float l = (float)Math.Sqrt(sx * sx + sz * sz);
+        if (l < 1e-4f) return;
+        float nx = x - sx / l * _navCell * 0.6f, nz = z - sz / l * _navCell * 0.6f;
+        if (!NavBlockedAt(nx, nz)) { x = nx; z = nz; }
     }
 }

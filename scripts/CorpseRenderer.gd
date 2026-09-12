@@ -324,6 +324,14 @@ class Corpse:
 	## Стрелы, оставшиеся в этом теле. Растворяются ВМЕСТЕ с ним: стрела,
 	## пережившая тело и повисшая в воздухе, — заметнее любой экономии
 	var arrows: Array = []
+	## ── ЧЬЁ ТЕЛО (письмо 12, воскрешение) ──────────────────────────────
+	## Сторона, род войск и отряд павшего: по ним монах ищет, кого поднять,
+	## и куда вернуть поднятого. raisable — люди игрока и ИИ; орда и её
+	## звери не поднимаются
+	var faction: int = -1
+	var unit_id: String = ""
+	var squad_id: int = 0
+	var raisable: bool = false
 
 
 ## ── СЛОЙ ТЕНЕЙ: ОДИН НА ВСЕ ТЕЛА ───────────────────────────────────────────
@@ -590,6 +598,11 @@ func spawn(unit: Unit, world_root: Node3D, ground_y: float) -> Corpse:
 	sl.write(c.shadow_index, Vector3(at.x, ground_y + SHADOW_DROP, at.z),
 		c.shadow_size)
 	c.born = _clock
+	c.faction = int(unit.faction)
+	c.unit_id = String(unit.stat_id)
+	c.squad_id = int(unit.squad_id)
+	c.raisable = c.faction != Constants.FACTION_GOBLIN \
+		and Building.PRELOAD_SCENES.has(c.unit_id) and c.unit_id != "troll"
 	_list.append(c)
 	spawned_total += 1
 
@@ -894,6 +907,33 @@ func _drop_arrows(cc: Corpse) -> void:
 ## массиве до накопления пачки (см. COMPACT_MIN), и без уплотнения и счёт, и
 ## индексы в lay_of поехали бы на число догоревших. Зовут это всё только стенды
 ## и панель, в покадровом пути таких вызовов нет
+## ── КОГО ПОДНЯТЬ (письмо 12): ближайшее целое тело своей стороны ───────────
+## Тело на растворении не поднимается (его уже нет наполовину)
+func find_raisable(fac: int, at: Vector3, radius: float):
+	var best: Corpse = null
+	var bd: float = radius * radius
+	for c in _list:
+		var cc := c as Corpse
+		if cc == null or cc.index < 0 or not cc.raisable or cc.fade_left >= 0.0:
+			continue
+		if cc.faction != fac:
+			continue
+		var dx: float = cc.pos.x - at.x
+		var dz: float = cc.pos.z - at.z
+		var d: float = dx * dx + dz * dz
+		if d < bd:
+			bd = d
+			best = cc
+	return best
+
+func raisable_count(fac: int) -> int:
+	var n := 0
+	for c in _list:
+		var cc := c as Corpse
+		if cc != null and cc.index >= 0 and cc.raisable and cc.fade_left < 0.0 and cc.faction == fac:
+			n += 1
+	return n
+
 func count() -> int:
 	_compact()
 	return _list.size()

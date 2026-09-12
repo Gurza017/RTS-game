@@ -485,6 +485,12 @@ var _dead := false
 func take_damage(amount: float, attacker: Node = null) -> void:
 	if _dead:
 		return
+	# Орда не сносит крепость ИИ (GameManager.goblin_may_raze): брызги, снаряд
+	# и дубина доходят сюда мимо приказа — страховка на самом уроне
+	if attacker != null and is_instance_valid(attacker) and attacker is Unit \
+			and (attacker as Unit).faction == Constants.FACTION_GOBLIN \
+			and not GameManager.goblin_may_raze(self):
+		return
 	current_health -= amount
 	_update_hp_bar()
 	if current_health <= 0.0:
@@ -568,6 +574,11 @@ func ruin_scale() -> float:
 ## наследники; читает spawn_ruin / GameManager.rebuild_ruin
 func ruin_sprite_override() -> String:
 	return ""
+
+## Подкраска руины (спринт 20): пень тролля оставляет СВОЙ спрайт, только
+## затенённый — «дерево заглохло». У прочих построек своя картинка руины
+func ruin_tint() -> Color:
+	return Color.WHITE
 
 func ruin_any_faction() -> bool:
 	return false
@@ -677,6 +688,12 @@ func queue_unit(unit_name: String, cost: Dictionary, build_time: float) -> bool:
 	# заказ обязан знать своё время сразу — по нему рисуется полоса готовности,
 	# и пересчёт задним числом дёргал бы её у игрока на глазах
 	var wait: float = _Diff.train_time(faction, build_time)
+	# ── СКОРОСТЬ ОБУЧЕНИЯ ИЗ КУЗНИЦЫ (письмо 12, колонка D рабочего) ──────
+	# Доля к темпу: +25 % значит в 1.25 раза быстрее. Читается по типу
+	# заказа, поэтому ветка рабочего не ускоряет копейщиков
+	var tr: float = GameManager.unit_bonus(faction, unit_name, "bonus_train")
+	if tr > 0.0:
+		wait /= (1.0 + tr)
 	# Цена едет ВМЕСТЕ с заказом: только так отмена по ПКМ может вернуть ровно
 	# столько, сколько было списано, не пересчитывая её задним числом
 	production_queue.append({"name": unit_name, "time": wait, "size": sz,
@@ -907,11 +924,19 @@ func facade_dir() -> Vector3:
 ## ближе к центру, чем сама коробка, — тем более (иначе боец появлялся бы
 ## внутри постройки). Постройка без рисунка отвечает по-старому: у неё есть
 ## настоящий объём, и коробка для неё правильна
+## ПОТОЛОК ВЫНОСА ВОРОТ (спринт 19, письмо 9: «точка спавна впритык к
+## зданию, ~3 м от стенки»). Низ рисунка постройки стоит в центре габарита, и
+## у крепости ворота на 4.5 м от центра рисовались в трёх метрах под стеной —
+## отряд «появлялся в воздухе». С потолком ворота стоят в GATE_MAX_DEPTH +
+## GATE_CLEARANCE = 3.0 м от центра у любой постройки крупнее
+const GATE_MAX_DEPTH := 2.5
+
 func gate_depth() -> float:
 	var by_box: float = build_size.z * 0.5
+	var d: float = by_box
 	if _draw_half_w >= 0.0:
-		return minf(by_box, _draw_half_w) + GATE_CLEARANCE
-	return by_box + GATE_CLEARANCE
+		d = minf(by_box, _draw_half_w)
+	return minf(d, GATE_MAX_DEPTH) + GATE_CLEARANCE
 
 func _ensure_spawn_point() -> void:
 	if spawn_point != null and is_instance_valid(spawn_point):
@@ -1330,12 +1355,27 @@ func _build_rally_marker() -> Node3D:
 
 ## Показать/спрятать флажок. Зовётся из set_selected: маркер нужен игроку
 ## ровно тогда, когда он смотрит на это здание
+## Куда пойдут новые отряды: назначенная точка сбора, а без неё — середина
+## площадки перед воротами (rally_zone). Маркер показывает ИМЕННО это
+func effective_rally_point() -> Vector3:
+	if has_rally:
+		return rally_point
+	var z: Dictionary = rally_zone()
+	var c: Vector3 = z["centre"]
+	return Vector3(c.x, GameManager.get_terrain_height(c.x, c.z), c.z)
+
+## ── МАРКЕР ТОЧКИ СБОРА ВИДЕН У ЛЮБОГО ВЫДЕЛЕННОГО ЗДАНИЯ (спринт 19) ──────
+## Заказ владельца: при выделении производственной постройки на карте всегда
+## стоит маркер её текущей точки сбора — и назначенной, и умолчательной
+## (площадка перед воротами). Прежде без назначенной точки маркера не было
 func _refresh_rally_marker() -> void:
-	if not has_rally:
+	if not _rally_visible and not has_rally:
 		if _rally_marker != null and is_instance_valid(_rally_marker):
 			_rally_marker.queue_free()
 		_rally_marker = null
 		return
+	if squad_size <= 1 and not has_rally:
+		return    # у здания без отрядов (рудник, дом) площадки нет
 	if _rally_marker == null or not is_instance_valid(_rally_marker):
 		_rally_marker = _build_rally_marker()
 		# Маркер живёт в МИРЕ, а не под зданием: иначе он ездил бы вместе с
@@ -1344,7 +1384,7 @@ func _refresh_rally_marker() -> void:
 		if host == null:
 			host = self
 		host.add_child(_rally_marker)
-	_rally_marker.global_position = rally_point
+	_rally_marker.global_position = effective_rally_point()
 	_rally_marker.visible = _rally_visible
 
 ## Выделено ли здание прямо сейчас
@@ -1485,11 +1525,13 @@ func _spawn_one(unit_name: String, idx: int, cols: int = -1, spacing: float = -1
 	# в строю переносится как есть, а направление взгляда считается от ворот
 	# к точке — отряд приходит туда единым фронтом, а не толпой
 	if r_has:
-		var course := r_pos - gate
-		course.y = 0.0
-		if course.length() > 0.01:
-			exit_dir = course.normalized()
-			side = Vector3(-exit_dir.z, 0.0, exit_dir.x)
+		# ── БЛОК НЕ РАЗВОРАЧИВАЕТСЯ НА ТОЧКУ СБОРА (спринт 19, письмо 9) ──
+		# Прежде оси блока брались по курсу «ворота → точка сбора»: при
+		# диагональной точке отряд выходил ромбом, повёрнутым на 45°, и под
+		# камерой читался как «два треугольника» (скриншоты владельца). Оси
+		# блока — оси фасада здания, как и без точки сбора: плотный
+		# прямоугольник по экрану; к точке он идёт целиком, не меняя формы
+		pass
 		# ПОЛОСА ВЫХОДА К НАЗНАЧЕННОЙ ТОЧКЕ НЕ ПРИБАВЛЯЕТСЯ. Полосы разводят
 		# отряды, выходящие из ОДНИХ ворот, чтобы они не толкались в дверях —
 		# у ворот это нужно. Но игрок указал КОНКРЕТНОЕ место, и сдвигать
@@ -1701,12 +1743,17 @@ func spawn_ruin() -> void:
 	ruin.set_meta("ruin_any_faction", ruin_any_faction())
 	var quad := QuadMesh.new()
 	quad.size = sprite_quad_size(tex, build_size) * ruin_scale()
-	var rmat: ShaderMaterial = _BBUtil.make_static_material(tex)
-	# ── БОЕЦ РИСУЕТСЯ ПОВЕРХ ПЕПЕЛИЩА (заказ владельца 10.09.2026) ────────
-	# Точка сортировки руины уходит от камеры на половину её нарисованной
-	# высоты (см. depth_push в cyl_billboard): пепелище — мусор на земле, и
-	# спрайт тролля (живого или мёртвого) обязан быть выше него
-	rmat.set_shader_parameter("depth_push", quad.size.y * 0.5)
+	var rmat: ShaderMaterial = _BBUtil.make_static_material(tex, ruin_tint())
+	# ── БОЕЦ РИСУЕТСЯ ПОВЕРХ ПЕПЕЛИЩА (10.09.2026, пересмотр спринта 15) ──
+	# ОТХОДА ОТ КАМЕРЫ ЗДЕСЬ БОЛЬШЕ НЕТ, И ЭТО ИСПРАВЛЕНИЕ, А НЕ ОТКАТ.
+	# Стояла половина нарисованной высоты — у башни это 3.7 м, то есть нижние
+	# 3.7 экранных метра руины прятал под собой ГРУНТ (разбор цены —
+	# VegetationRenderer.DEPTH_PUSH_HEIGHTS). Поймано спринтом 15 на дереве,
+	# где отход был полным и рисунок пропал целиком; у руины та же поломка
+	# просто не была видна — оконного снимка руины в проекте не было.
+	# Порядок держат две честные вещи: глубина руины берётся у её точки на
+	# земле (ground_depth в cyl_billboard), а боец приподнят к камере
+	# (mm_unit_sprite, depth_lift)
 	quad.material = rmat
 	var mi := MeshInstance3D.new()
 	mi.name = "RuinSprite"
@@ -1719,6 +1766,23 @@ func spawn_ruin() -> void:
 	col.shape = box
 	col.position.y = build_size.y * 0.5
 	ruin.add_child(col)
+	# ── РУИНА КЛИКАЕТСЯ ПО КАРТИНКЕ, А НЕ ТОЛЬКО ПО КОРОБКЕ (спринт 20) ────
+	# Та же пластина в плоскости спрайта, что у живой постройки
+	# (_fit_pick_to_sprite): ПКМ рабочим по верхней половине пепелища раньше
+	# пролетал над коробкой в землю, и «отстроить» срабатывало не с первого
+	# клика. Коробка у основания остаётся — по ней кликают по фундаменту
+	var r: Rect2 = _BBUtil.opaque_rect(tex)
+	var vs: float = _BBUtil.V_STRETCH
+	var sw: float = quad.size.x * r.size.x
+	var sb: float = quad.size.y * (1.0 - r.end.y)
+	var st: float = quad.size.y * (1.0 - r.position.y)
+	var slab := CollisionShape3D.new()
+	var sbox := BoxShape3D.new()
+	sbox.size = Vector3(maxf(sw, 0.2), maxf((st - sb) * vs, 0.2), PICK_SLAB_DEPTH)
+	slab.shape = sbox
+	slab.position = Vector3(quad.size.x * (r.position.x + r.size.x * 0.5 - 0.5),
+		(sb + st) * 0.5 * vs, 0.0)
+	ruin.add_child(slab)
 	parent.add_child(ruin)
 	ruin.global_position = global_position
 	# Срок жизни руин — в конфиге владельца; 0 означает «лежат вечно»

@@ -67,7 +67,9 @@ func _flag_nodes() -> Array:
 		var n: Node = stack.pop_back()
 		if n == null or not is_instance_valid(n):
 			continue
-		if n is MeshInstance3D and n.get("shown_white") != null:
+		# Флажок владельца у рудника (Mine._refresh_flag, тот же скрипт знамени)
+		# — не флаг отряда: со спринта 17 рудник орды стоит с ним с первой секунды
+		if n is MeshInstance3D and n.get("shown_white") != null and not (n.get_parent() is Building):
 			out.append(n)
 		for c in n.get_children():
 			stack.append(c)

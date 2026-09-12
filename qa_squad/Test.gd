@@ -1245,7 +1245,7 @@ func _test_mass_and_reset() -> void:
 	# И БРИГАДА ИГРОКА (10.09.2026): партия начинается пятью рабочими БЕЗ
 	# крепости, у каждого свой отряд из одного.
 	# И СТАЯ ГНОЛЛОВ У ПНЯ (спринт 13): GNOLL_START_SQUADS отрядов сразу
-	var want_after: int = _AICfg.START_WORKERS + _GobCfg.army_squads() 		+ _GobCfg.LAIR_START_TROLLS 		+ main.START_WORKER_RESOURCES.size() 		+ _GobCfg.GNOLL_START_SQUADS
+	var want_after: int = _AICfg.START_WORKERS + _GobCfg.army_squads() 		+ _GobCfg.LAIR_START_TROLLS * (2 if _GobCfg.LAIR_AI_ENABLED else 1) 		+ main.START_WORKER_RESOURCES.size() 		+ _GobCfg.GNOLL_START_SQUADS + _GobCfg.MINE_GUARD.size()   # + стража рудника орды (спринт 17)
 	var max_id := 0
 	for k in GameManager.squads.keys():
 		max_id = maxi(max_id, int(k))

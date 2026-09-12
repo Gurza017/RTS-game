@@ -115,9 +115,12 @@ func _check_lair() -> void:
 		"троллей %d" % GameManager.trolls_alive())
 	var trees := 0
 	for rn in get_tree().get_nodes_in_group("resource_nodes"):
-		if is_instance_valid(rn) and (rn as Node3D).global_position.distance_to(lp) < _GobCfg.LAIR_CLEAR * 0.8:
+		# Спринт 20: глушь вокруг пня — рощицы с LAIR_GLADE_TREES_R; чистой
+		# обязана быть только площадка внутри кольца декора
+		if is_instance_valid(rn) and (rn as Node3D).global_position.distance_to(lp) < _GobCfg.LAIR_GLADE_R1 - 1.0:
 			trees += 1
-	verdict("A5 площадка логова расчищена от леса и руды", trees == 0, "узлов ресурсов рядом %d" % trees)
+	verdict("A5 площадка логова расчищена от леса и руды (внутри %.0f м)" % (_GobCfg.LAIR_GLADE_R1 - 1.0),
+		trees == 0, "узлов ресурсов рядом %d" % trees)
 
 # ═════════════════════════════════════════════════════════════════════════════
 func _check_troll() -> void:
@@ -150,9 +153,13 @@ func _check_troll() -> void:
 		anims.size() == 6, str(anims))
 	var asp := troll._active_sprite as AnimatedSprite3D
 	var px: float = asp.pixel_size if asp != null else 0.0
-	verdict("B3 размер ~×4 копейщика", px >= _GobCfg.TROLL_PIXEL_SIZE * 0.99
-		and _GobCfg.TROLL_PIXEL_SIZE * 211.0 >= 0.0108 * 150.0 * 3.5
-		and _GobCfg.TROLL_PIXEL_SIZE * 211.0 <= 0.0108 * 150.0 * 4.5,
+	# СПРИНТ 15: спрайт тролля уменьшен на 15 % (заказ); эталон — TROLL_SIZE_SCALE
+	# из конфига, а не число в стенде (правило 10)
+	var want_k: float = _GobCfg.TROLL_SIZE_SCALE
+	verdict("B3 размер ~×%.1f копейщика (TROLL_SIZE_SCALE)" % want_k,
+		px >= _GobCfg.TROLL_PIXEL_SIZE * 0.99
+		and _GobCfg.TROLL_PIXEL_SIZE * 211.0 >= 0.0108 * 150.0 * (want_k - 0.5)
+		and _GobCfg.TROLL_PIXEL_SIZE * 211.0 <= 0.0108 * 150.0 * (want_k + 0.5),
 		"пиксель %.4f, рост %.1f м против %.1f у копейщика" % [px,
 			_GobCfg.TROLL_PIXEL_SIZE * 211.0, 0.0108 * 150.0])
 	verdict("B4 таран настроен (charge_range, брызги, откидывание)",

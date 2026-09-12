@@ -69,6 +69,34 @@ const FORD_Z := 0.0                # середина брода по Z
 const FORD_HALF := 18.0            # полуширина брода по Z, м (проходимая полоса)
 const FORD_DEPTH := 0.14           # просадка брода: по щиколотку
 const FORD_ROCKS := 26             # камней в воде брода
+## Запас от края брода, в который полосы отряда не заходят: у самой кромки
+## полосы лежит уже глубокая вода, и крайний боец отряда съезжал бы в неё
+const FORD_LANE_MARGIN := 4.0
+## ── НОГИ НА СУШЕ: СКОЛЬКО ГРУНТА ОБЯЗАНО ТОРЧАТЬ НАД ВОДОЙ, МЕТРЫ ─────────
+## Жалоба владельца со скриншотом (спринт 15): «юниты сидят ногами в воде у
+## береговой линии». Виновата была не проверка воды, а ЕЁ МЕРА: непроходимой
+## считалась полоса RIVER_HALF_W + LAKE_MARGIN = 9.6 м от оси русла, а зеркало
+## воды лежит ТАМ, ГДЕ ГРУНТ ОПУСКАЕТСЯ НИЖЕ НЕГО, и это совсем другое число.
+## Арифметика: русло просажено на RIVER_DEPTH = 1.5 м, зеркало стоит на
+## WATER_DROP = 0.2 доли ниже кромки берега, откос идёт RIVER_BANK = 3.5 м —
+## значит грунт уходит под воду уже в 11.85 м от оси. Две с лишним метровых
+## полосы воды были для ходьбы открыты, и ровно в них стоял отряд со скриншота.
+##
+## ТЕПЕРЬ ПРАВИЛО ВЫВОДИТСЯ ИЗ ТОГО ЖЕ, ЧЕМ РИСУЕТСЯ ВОДА (water_surface_y), а
+## не подбирается числом: разойтись картинке и проходимости больше нечем.
+## Запас сверху — чтобы ступни стояли над урезом, а не ровно в нём
+const SHORE_DRY := 0.10
+
+## Просадка дна, НАЧИНАЯ С КОТОРОЙ грунт скрыт зеркалом воды.
+## Вывод: грунт = база − просадка, зеркало = база − RIVER_DEPTH * WATER_DROP
+## + 0.02 (см. water_surface_y). Грунт ПОДНИМАЕТСЯ над зеркалом меньше чем на
+## SHORE_DRY, когда просадка > RIVER_DEPTH * WATER_DROP − 0.02 − SHORE_DRY.
+## ЗНАК ЗАПАСА ОТРИЦАТЕЛЬНЫЙ, И ПЕРВАЯ ВЕРСИЯ ОШИБЛАСЬ ИМЕННО В НЁМ: с плюсом
+## порог РАСТЁТ, то есть запрет отодвигается ГЛУБЖЕ в воду, и полоса залитого
+## грунта шириной в запас остаётся проходимой (поймал qa_map B2б: 24 точки под
+## зеркалом, глубже всего 0.06 м — ровно этот запас)
+static func wet_depth() -> float:
+	return RIVER_DEPTH * WATER_DROP - 0.02 - SHORE_DRY
 ## Гора: гауссов холм, высота и радиус (σ = радиус / 2)
 const HILL_HEIGHT := 7.0
 const HILL_RADIUS := 30.0
@@ -147,6 +175,13 @@ const FOAM_STEP := 6.0
 ## Полоса у самой границы, в которую юнит уже не заходит (упор в стену)
 const MAP_EDGE_MARGIN := 1.5
 ## Зона общей генерации (лес, кусты, кучи ресурсов)
+## ── СКАЛЫ (спринт 18): боковые склоны возвышенностей непроходимы ──────────
+## Маска ядра (ArmyCore.BuildCliffMask) по крутизне выше CLIFF_SLOPE — тот же
+## порог, что у стены плато (PLATEAU_WALL_SLOPE): что рисуется обрывом, то и
+## не проходится. Пологие спуски (PLATEAU_RAMP_GENTLE) остаются дорогой
+const CLIFFS_ENABLED := true
+const CLIFF_SLOPE := 0.45
+const CLIFF_CELL := 1.0
 const GEN_HALF_X := MAP_HALF_X - 9.0
 const GEN_HALF_Z := MAP_HALF_Z - 9.0
 ## Зона разброса куч ресурсов
@@ -235,6 +270,15 @@ const BASE_RESOURCE_DIST := 15.0
 var _reserved: Array = []
 
 var _castle_placed: bool       = false
+## Крепость ИИ уже стояла на карте (спринт 17): победа засчитывается только
+## над разбитым ИИ, у которого она БЫЛА. Пока он отстраивается, вырезанные
+## гоблинами рабочие или сожжённый барак — не победа
+var _ai_castle_placed: bool    = false
+## Страховка: ИИ так и не заложил крепость, а живых у него нет уже столько
+## секунд подряд — партия не должна висеть вечно
+const AI_WIPED_GRACE_SEC := 300.0
+var _ai_wiped_since: float = -1.0
+var _match_clock: float = 0.0
 var _placing_build_fn: Callable
 var _placing_refund: Dictionary = {}
 var _duck_node: Node3D         = null
@@ -428,6 +472,7 @@ func start_game() -> void:
 	_spawn_goblin_village()
 	_spawn_troll_lair()
 	_spawn_gold_mines()
+	_spawn_goblin_mine()
 	# ── ЗАГРУЗКА ПАРТИИ: ПОСЛЕДНИМ ДЕЛОМ ────────────────────────────────────
 	# Слепок применяется, когда карта уже готова и стартовая расстановка уже
 	# сделана: apply() сносит живое (замки, рабочих, орду) и ставит сохранённое.
@@ -507,6 +552,9 @@ func _setup_reserved_zones() -> void:
 		_reserve(goblin_village_center(), GOBLIN_VILLAGE_CLEAR)
 		# Логово тролля — тоже площадка: дерево и кольцо кольев без леса
 		_reserve(troll_lair_center(), _GobCfg.LAIR_CLEAR)
+		# И второй пень у ИИ (спринт 18) — та же площадка
+		if _GobCfg.LAIR_AI_ENABLED:
+			_reserve(troll_lair_center_ai(), _GobCfg.LAIR_CLEAR)
 	# Пятачки под СВОИ кучи руды резервируются ЗДЕСЬ, а не после их спавна.
 	# Порядок вызовов: _ready() → _setup_terrain() сажает лес подковы, и только
 	# потом start_game() ставит кучи. Резерв, выставленный вместе с кучей,
@@ -775,6 +823,12 @@ func _input(event: InputEvent) -> void:
 	if _phase != Phase.PLACING_CASTLE and _phase != Phase.PLACING_BUILDING:
 		return
 	if event is InputEventMouseButton and event.pressed:
+		# ── КЛИК ПО ИНТЕРФЕЙСУ — НЕ КЛИК ПО КАРТЕ (письмо 12) ───────────────
+		# Этот _input идёт РАНЬШЕ разбора кнопок, и клик по иконке другого
+		# дома в меню построек ставил фантом первого дома под курсором, а до
+		# кнопки не доходил вовсе. Над панелью клик отдаётся интерфейсу
+		if hud != null and hud.point_over_ui(event.position):
+			return
 		if event.button_index == MOUSE_BUTTON_LEFT:
 			if _phase == Phase.PLACING_CASTLE:
 				_try_place_castle(event.position)
@@ -815,13 +869,26 @@ func _refund_and_cancel() -> void:
 	_cancel_placement()
 
 # Called by GameManager when player clicks a build button for Smithy/Barracks/Mine
-func enter_building_placement(cost: Dictionary, ghost_size: Vector3, build_fn: Callable, building_name: String = "Здание") -> void:
+## Повторный фантом того же здания под Shift (письмо 12): кто нас позвал,
+## тот и повторит заказ (GameManager.try_worker_build — списание, артель)
+var _placing_repeat: Callable = Callable()
+var placements_done: int = 0
+
+func enter_building_placement(cost: Dictionary, ghost_size: Vector3, build_fn: Callable,
+		building_name: String = "Здание", building_id: String = "",
+		repeat_fn: Callable = Callable()) -> void:
+	# ── ПЕРЕКЛЮЧЕНИЕ ТИПА ПОСТРОЙКИ ПРЯМО ИЗ РЕЖИМА РАЗМЕЩЕНИЯ (письмо 12) ──
+	# Игрок с фантомом дома №1 щёлкнул иконку дома №2: прежний заказ
+	# отменяется с возвратом, новый встаёт под курсор
+	if _phase == Phase.PLACING_BUILDING:
+		_refund_and_cancel()
 	if _phase != Phase.PLAYING:
 		return
 	_placing_build_fn = build_fn
+	_placing_repeat   = repeat_fn
 	_placing_refund   = cost
 	_phase = Phase.PLACING_BUILDING
-	_create_building_ghost(ghost_size)
+	_create_building_ghost(ghost_size, building_id)
 	hud.show_placement_hint(building_name)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -873,13 +940,60 @@ func _tint_ghost(ok: bool) -> void:
 		if mat != null:
 			mat.albedo_color = col
 
-func _create_building_ghost(ghost_size: Vector3) -> void:
+## ── ФАНТОМ — ПОЛУПРОЗРАЧНЫЙ СПРАЙТ САМОЙ ПОСТРОЙКИ (спринт 19, письмо 9) ──
+## Крепость со спринта 12 ставит рабочий кнопкой панели, то есть ОБЩИМ путём
+## enter_building_placement — а у него фантомом была коробка с овалом (скриншот
+## владельца: голубой прямоугольник вместо замка). Теперь любая постройка с
+## картинкой показывает СЕБЯ: тот же квад и та же компенсация наклона, что у
+## настоящего здания (см. _create_ghost у стартового замка), синева и
+## прозрачность — чертёж, а не готовый дом; краснеет вместе с кольцом, если
+## ставить здесь нельзя (_tint_ghost). Коробка осталась запасным путём для
+## постройки без картинки (рудник)
+func _create_building_ghost(ghost_size: Vector3, building_id: String = "") -> void:
 	if _ghost:
 		_ghost.queue_free()
 	_ghost_mats.clear()
 	_ghost_ok = true
 	_ghost = MeshInstance3D.new()
 	_ghost.name = "BuildingGhost"
+	if building_id != "":
+		var sprite_path: String = GameManager.building_sprite_path(
+			Constants.FACTION_PLAYER, building_id)
+		if not sprite_path.is_empty() and ResourceLoader.exists(sprite_path):
+			var tex := load(sprite_path) as Texture2D
+			if tex != null:
+				var quad := QuadMesh.new()
+				quad.size = Building.sprite_quad_size(tex, ghost_size)
+				var gm := StandardMaterial3D.new()
+				gm.albedo_texture   = tex
+				gm.albedo_color     = GHOST_OK
+				gm.shading_mode     = BaseMaterial3D.SHADING_MODE_UNSHADED
+				gm.transparency     = BaseMaterial3D.TRANSPARENCY_ALPHA
+				gm.cull_mode        = BaseMaterial3D.CULL_DISABLED
+				gm.depth_draw_mode  = BaseMaterial3D.DEPTH_DRAW_DISABLED
+				quad.material = gm
+				_ghost_mats.append(gm)
+				var sp := MeshInstance3D.new()
+				sp.name = "GhostSprite"
+				sp.mesh = quad
+				sp.scale.y = _BBUtil.V_STRETCH
+				sp.position.y = quad.size.y * 0.5 * _BBUtil.V_STRETCH
+				_ghost.add_child(sp)
+				var foot := MeshInstance3D.new()
+				var tor := TorusMesh.new()
+				tor.inner_radius = maxf(ghost_size.x, ghost_size.z) * 0.5
+				tor.outer_radius = maxf(ghost_size.x, ghost_size.z) * 0.5 + 0.3
+				foot.mesh = tor
+				var fm := StandardMaterial3D.new()
+				fm.albedo_color = GHOST_OK
+				fm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+				fm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+				foot.material_override = fm
+				_ghost_mats.append(fm)
+				foot.position.y = 0.08
+				_ghost.add_child(foot)
+				add_child(_ghost)
+				return
 	var box := BoxMesh.new()
 	box.size = ghost_size
 	var mat := StandardMaterial3D.new()
@@ -923,7 +1037,16 @@ func _try_place_building(screen_pos: Vector2) -> void:
 	_ghost_mats.clear()
 	_phase = Phase.PLAYING
 	hud.hide_placement_hint()
+	var repeat: Callable = _placing_repeat
+	_placing_repeat = Callable()
+	_placing_refund = {}
+	placements_done += 1
 	_placing_build_fn.call(world_pos)
+	# ── SHIFT: СЛЕДУЮЩИЙ ФАНТОМ ТОГО ЖЕ ЗДАНИЯ (письмо 12) ──────────────────
+	# Зажат Shift — заказ повторяется (новое списание, та же артель), и
+	# площадки встают в очередь строителям (Worker.command_build(queue))
+	if Input.is_key_pressed(KEY_SHIFT) and repeat.is_valid():
+		repeat.call()
 
 func _screen_to_world(screen_pos: Vector2) -> Vector3:
 	if _camera == null:
@@ -1124,10 +1247,14 @@ func _spawn_starting_workers(origin: Vector3, site: Node3D = null) -> void:
 		_start_crew.append(w)
 		if site != null and is_instance_valid(site):
 			w.command_build(site)
-		else:
-			# Площадки нет (замок поставлен готовым — так делают стенды):
-			# прежнее поведение, сразу на ресурсы
+		elif GameManager.castle_count(Constants.FACTION_PLAYER) > 0:
+			# Замок уже стоит готовым (так делают стенды): сразу на ресурсы
 			_send_worker_to_resource(w, int(START_WORKER_RESOURCES[i]))
+		# ── КРЕПОСТИ НЕТ — БРИГАДА СТОИТ И ЖДЁТ (спринт 19, письмо 9) ──────
+		# Партия открывается пятью рабочими в чистом поле, и они тут же
+		# разбегались по лесу и руде без единого приказа. Заказ владельца:
+		# на старте авто-сбора нет, рабочие ждут закладки крепости и приказов
+		# игрока; по ресурсам их разошлёт _on_castle_built
 
 ## Замок готов — бригада возвращается к обычной работе. Порядок ресурсов тот
 ## же, что и раньше: двое на лес, один на камень, один на золото
@@ -1373,6 +1500,7 @@ func _process(delta: float) -> void:
 	if not frozen and _phase == Phase.PLAYING:
 		# ИИ тикает сам (EnemyAI._process по THINK_INTERVAL из конфига);
 		# «волн усиления из воздуха» больше нет — армия только через найм
+		_match_clock += delta
 		_victory_timer += delta
 		if _victory_timer >= VICTORY_CHECK_INTERVAL:
 			_victory_timer = 0.0
@@ -1423,15 +1551,10 @@ func glide_camera_to(world_pos: Vector3) -> void:
 		_camera.glide_to(world_pos)
 
 func _apply_custom_cursor() -> void:
-	var tex := _UIAssets.cursor(1)
-	if tex == null:
-		return
-	Input.set_custom_mouse_cursor(tex, Input.CURSOR_ARROW, _UIAssets.cursor_hotspot(1))
-	# Рука при наведении на кликабельное — второй вариант курсора
-	var hand := _UIAssets.cursor(2)
-	if hand != null:
-		Input.set_custom_mouse_cursor(hand, Input.CURSOR_POINTING_HAND,
-			_UIAssets.cursor_hotspot(2))
+	# Один путь с меню (UIAssets.install_cursor): курсор ставится ещё в меню,
+	# здесь только возвращается видимость после загрузочного экрана
+	_UIAssets.install_cursor()
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
 # ─────────────────────────────────────────────────────────────────────────────
 # КУРСОР НЕ ДОЛЖЕН УБЕГАТЬ НА ВТОРОЙ МОНИТОР
@@ -1515,7 +1638,15 @@ func _check_victory() -> void:
 			if not cc.is_dead() and cc.is_stronghold():
 				_castle_placed = true
 				break
-	if _faction_beaten("enemy_units", "enemy_buildings"):
+	if not _ai_castle_placed:
+		for b2 in get_tree().get_nodes_in_group("enemy_buildings"):
+			if not is_instance_valid(b2) or not (b2 is Castle):
+				continue
+			var ce := b2 as Castle
+			if not ce.is_dead() and ce.is_stronghold():
+				_ai_castle_placed = true
+				break
+	if _ai_beaten():
 		_phase = Phase.VICTORY
 		hud.show_victory()
 	elif _castle_placed and _player_defeated():
@@ -1553,6 +1684,36 @@ func _player_defeated() -> bool:
 	var cost: Dictionary = _UCfg.building_cost("castle")
 	var can_pay: bool = ResourceManager.can_afford(Constants.FACTION_PLAYER, cost)
 	return not (can_pay and workers > 0)
+
+## ── ПОБЕДА НАД ИИ (спринт 17) ───────────────────────────────────────────────
+## Жалоба: «на 4:30-5:00 игра выдаёт Победу». Орда без спячки вырезала пять
+## стартовых рабочих ИИ до того, как тот заложил крепость, — и «крепости нет,
+## живых нет» читалось как разгром. Теперь победа — только над ИИ, у которого
+## крепость УЖЕ БЫЛА; ИИ без крепости считается разбитым лишь после
+## AI_WIPED_GRACE_SEC подряд без единого живого и без единой постройки
+func _ai_beaten() -> bool:
+	var beaten: bool = _faction_beaten("enemy_units", "enemy_buildings")
+	if not beaten:
+		_ai_wiped_since = -1.0
+		return false
+	if _ai_castle_placed:
+		return true
+	var any_alive := false
+	for n in get_tree().get_nodes_in_group("enemy_units"):
+		if is_instance_valid(n) and n is Unit and not (n as Unit).is_dead():
+			any_alive = true
+			break
+	if not any_alive:
+		for b in get_tree().get_nodes_in_group("enemy_buildings"):
+			if is_instance_valid(b) and b is Building and not (b as Building).is_dead():
+				any_alive = true
+				break
+	if any_alive:
+		_ai_wiped_since = -1.0
+		return false
+	if _ai_wiped_since < 0.0:
+		_ai_wiped_since = _match_clock
+	return _match_clock - _ai_wiped_since >= AI_WIPED_GRACE_SEC
 
 ## Разбита ли фракция: не осталось живых бойцов И (нет замка ИЛИ нет зданий)
 func _faction_beaten(units_group: String, buildings_group: String) -> bool:
@@ -1955,12 +2116,33 @@ func _add_base_resource_clusters(anchor: Vector3) -> void:
 	var types := [Constants.RESOURCE_GOLD, Constants.RESOURCE_STONE]
 	for i in range(spots.size()):
 		var p: Vector3 = spots[i]
+		# ── БАЗОВАЯ ЖИЛА СПАВНИТСЯ ВСЕГДА (заказ спринта 17) ────────────────
+		# Точка в воде прежде ПРОПУСКАЛА кучу целиком — партия без золота у
+		# базы. Теперь точка уводится на ближайшую сушу, а после посадки
+		# проверяется, что хоть один кусок встал; нет — ставится одиночный
 		if is_water(p.x, p.z):
-			continue
+			p = GameManager.land_target(p)
 		# Пятачок уже зарезервирован (см. _setup_reserved_zones), но чужие
 		# спавнеры могли поставить сюда что-то ДО резерва — подчищаем
 		_clear_area_of_resources(p, BASE_ORE_CLEAR)
 		_spawn_resource_cluster(p, int(types[i]), true)
+		if _resource_pieces_near(p, BASE_ORE_CLEAR * 1.5, int(types[i])) == 0:
+			var node := ResourceNode.new()
+			node.resource_type = int(types[i])
+			_world.add_child(node)
+			node.global_position = Vector3(p.x, get_terrain_height(p.x, p.z), p.z)
+			node.add_to_group("resource_nodes")
+
+## Сколько кусков ресурса данного типа лежит в радиусе r от точки
+func _resource_pieces_near(p: Vector3, r: float, res_type: int) -> int:
+	var n := 0
+	for rn in get_tree().get_nodes_in_group("resource_nodes"):
+		var node := rn as ResourceNode
+		if node == null or not is_instance_valid(node) or node.resource_type != res_type:
+			continue
+		if Vector2(node.global_position.x - p.x, node.global_position.z - p.z).length() <= r:
+			n += 1
+	return n
 
 # ── ЛЕСНОЙ КАРМАН ВОКРУГ БАЗЫ (ПОДКОВА) ──────────────────────────────────────
 # Замок прикрыт густым лесом с ТРЁХ сторон, а перед ним остаётся открытый плац
@@ -2225,6 +2407,7 @@ func _spawn_goblin_village() -> void:
 	# Список идёт ЧЕРЕЗ СЛОЖНОСТЬ: она может сдвинуть ранг стартовых отрядов
 	# (goblin_vet_shift), но не трогает ни состав, ни численность
 	var roster: Array = _Diff.goblin_start_squads()
+	var garrison_ids: Array = []
 	for i in range(roster.size()):
 		var row: Dictionary = roster[i]
 		var uid: String = String(row["unit"])
@@ -2246,8 +2429,15 @@ func _spawn_goblin_village() -> void:
 		if int(row["vet"]) > 0:
 			grant_squad_veterancy(sid, int(row["vet"]), int(row["picks"]),
 				_GobCfg.VETERAN_PREFERENCE)
+		# ── ЭЛИТНЫЙ ГАРНИЗОН (спринт 17): первые GARRISON_SQUADS ветеранских
+		# отрядов копейщиков никогда не покидают деревню
+		if goblin_ai != null and uid == "goblin_spearman" and int(row["vet"]) > 0 \
+				and garrison_ids.size() < _GobCfg.GARRISON_SQUADS:
+			garrison_ids.append(sid)
 	if goblin_ai != null:
 		goblin_ai.setup(self, center)
+		for gid in garrison_ids:
+			goblin_ai.register_garrison(int(gid))
 
 ## ВЫПУСТИТЬ ОТРЯД ОРДЫ ТОЛПОЙ ВОКРУГ ТОЧКИ. Один путь на стартовую орду и на
 ## «месть гоблинов» (GoblinAI): раскладка по диску (goblin_config.horde_offset),
@@ -2313,6 +2503,56 @@ func _spawn_gold_mines() -> void:
 		_world.add_child(m)
 		m.global_position = Vector3(spot.x, get_terrain_height(spot.x, spot.z), spot.z)
 
+## ── РУДНИК ОРДЫ (заказ спринта 17) ─────────────────────────────────────────
+## В MINE_OFFSET метрах от деревни к центру карты, с рождения захвачен ордой
+## (золото капает в её банк), при нём охрана из трёх ветеранских отрядов —
+## конный и два пеших. Их регистрирует вожак (GoblinAI.register_mine_guard):
+## они патрулируют кольцом и не уходят в волны; удар по руднику или чужой на
+## захвате — тревога, и к руднику идёт вся орда (GoblinAI._on_mine_attacked)
+func goblin_mine_spot() -> Vector3:
+	var c: Vector3 = goblin_village_center()
+	var to_c: Vector3 = Vector3.ZERO - c
+	to_c.y = 0.0
+	if to_c.length() < 0.01:
+		to_c = Vector3.FORWARD
+	var p: Vector3 = c + to_c.normalized() * (_GobCfg.VILLAGE_RADIUS + _GobCfg.MINE_OFFSET)
+	p.x = clampf(p.x, -GEN_HALF_X, GEN_HALF_X)
+	p.z = clampf(p.z, -GEN_HALF_Z, GEN_HALF_Z)
+	return Vector3(p.x, 0.0, p.z)
+
+func _spawn_goblin_mine() -> void:
+	if not _Opt.goblin_village:
+		return
+	var spot: Vector3 = GameManager.land_target(goblin_mine_spot())
+	_clear_area_of_resources(spot, GOLD_MINE_CLEAR)
+	var m := Mine.new()
+	m.faction = Constants.FACTION_NEUTRAL
+	_world.add_child(m)
+	m.global_position = Vector3(spot.x, get_terrain_height(spot.x, spot.z), spot.z)
+	m.set_owner_faction(Constants.FACTION_GOBLIN)
+	GameManager.goblin_mine = m
+	# Охрана — кольцом вокруг рудника, за его площадкой
+	var guard: Array = _GobCfg.MINE_GUARD
+	for i in range(guard.size()):
+		var row: Dictionary = guard[i]
+		var uid: String = String(row["unit"])
+		var n: int = int(row["count"])
+		if n <= 0:
+			n = int(_GobCfg.SQUAD_SIZE.get(uid, 20))
+		var ang: float = TAU * float(i) / float(maxi(guard.size(), 1))
+		var r: float = GOLD_MINE_CLEAR + _GobCfg.horde_radius(n) + 1.0
+		var base := Vector3(spot.x + cos(ang) * r, 0.0, spot.z + sin(ang) * r)
+		var sid: int = spawn_goblin_squad(uid, n, GameManager.land_target(base))
+		if sid <= 0:
+			continue
+		if int(row["vet"]) > 0:
+			grant_squad_veterancy(sid, int(row["vet"]), int(row["picks"]),
+				_GobCfg.VETERAN_PREFERENCE)
+		if goblin_ai != null:
+			goblin_ai.register_mine_guard(sid)
+	if goblin_ai != null:
+		goblin_ai.attach_mine(m)
+
 func _spawn_troll_lair() -> void:
 	if not _Opt.goblin_village:
 		return
@@ -2322,7 +2562,106 @@ func _spawn_troll_lair() -> void:
 	_world.add_child(lair)
 	lair.global_position = c
 	GameManager.troll_lair = lair
+	lair.set("side_faction", Constants.FACTION_PLAYER)
+	GameManager.register_lair(lair)
+	GameManager.lair_spots[Constants.FACTION_PLAYER] = c
 	lair.call("spawn_guards", _GobCfg.LAIR_START_TROLLS)
+	_dress_lair_glade(c)
+	# ── ВТОРОЙ ПЕНЬ У КРАСНОГО ИИ (спринт 18) ──────────────────────────────
+	# Зеркально первому: на стороне ИИ, перед рекой и внизу карты, чтобы
+	# ИИ-человек взаимодействовал с троллем так же, как игрок
+	if _GobCfg.LAIR_AI_ENABLED:
+		var c2 := troll_lair_center_ai()
+		var lair2: Building = _TrollLair.new()
+		lair2.faction = Constants.FACTION_GOBLIN
+		_world.add_child(lair2)
+		lair2.global_position = c2
+		lair2.set("side_faction", Constants.FACTION_ENEMY)
+		GameManager.register_lair(lair2)
+		GameManager.lair_spots[Constants.FACTION_ENEMY] = c2
+		lair2.call("spawn_guards", _GobCfg.LAIR_START_TROLLS)
+		_dress_lair_glade(c2)
+
+## ── ГЛУШЬ ВОКРУГ ПНЯ (спринт 20, модуль 1.2) ───────────────────────────────
+## Поляна логова: грибы, камни, кости и кусты по кольцу вокруг пня плюс
+## рощицы поодаль — «частичный лес». Декор идёт ОБЩЕЙ отрисовкой (бакеты
+## VegetationRenderer по файлу — ноль новых вызовов), деревья — обычные
+## ResourceNode (их можно рубить). Площадка пня зарезервирована от леса
+## (LAIR_CLEAR), поэтому сажаем сами, минуя проверку резерва.
+## ЖРЕБИЙ — СВОЙ ГЕНЕРАТОР ОТ ТОЧКИ ПНЯ: общий поток партии не трогается
+## (иначе одно зерно давало бы другой мир и пришлось бы поднимать
+## WORLD_GEN_VERSION), а два прогона дают одну поляну
+var lair_glade_deco: int = 0
+var lair_glade_trees: int = 0
+
+func _dress_lair_glade(c: Vector3) -> void:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = int(round(c.x * 73.0 + c.z * 131.0)) + 977
+	var r0: float = _GobCfg.LAIR_GLADE_R0
+	var r1: float = _GobCfg.LAIR_GLADE_R1
+	var groups: Array = [
+		[[1, 2, 3], _GobCfg.LAIR_GLADE_MUSHROOMS, Vector2(0.45, 0.8)],
+		[[4, 5, 6], _GobCfg.LAIR_GLADE_STONES, Vector2(0.6, 1.1)],
+		[[14, 15], _GobCfg.LAIR_GLADE_BONES, Vector2(0.5, 0.9)],
+		[[7, 8, 9], _GobCfg.LAIR_GLADE_BUSHES, Vector2(0.9, 1.4)],
+	]
+	for g in groups:
+		var ids: Array = g[0]
+		var want: int = int(g[1])
+		var hr: Vector2 = g[2]
+		var placed := 0
+		var tries := 0
+		while placed < want and tries < want * 6:
+			tries += 1
+			var a: float = rng.randf() * TAU
+			var r: float = rng.randf_range(r0, r1)
+			var x: float = c.x + cos(a) * r
+			var z: float = c.z + sin(a) * r
+			if not _fits_in_map(x, z) or is_water(x, z) or near_river(x, z, 1.5):
+				continue
+			var tex: Texture2D = _deco_tex(int(ids[rng.randi() % ids.size()]))
+			if _deco_plant(tex, x, z, rng.randf_range(hr.x, hr.y)):
+				placed += 1
+		lair_glade_deco += placed
+	# Рощицы поодаль — частичный лес: по дуге, не смыкаясь в кольцо
+	var tr: float = _GobCfg.LAIR_GLADE_TREES_R
+	var base_a: float = rng.randf() * TAU
+	for k in range(_GobCfg.LAIR_GLADE_TREE_CLUSTERS):
+		var ca: float = base_a + TAU * float(k) / float(_GobCfg.LAIR_GLADE_TREE_CLUSTERS) \
+			+ rng.randf_range(-0.3, 0.3)
+		var cc := Vector3(c.x + cos(ca) * tr, 0.0, c.z + sin(ca) * tr)
+		var pts: Array = []
+		for i in range(_GobCfg.LAIR_GLADE_TREES_PER):
+			var pa: float = rng.randf() * TAU
+			var pr: float = sqrt(rng.randf()) * 5.0
+			var cand := Vector2(cos(pa) * pr, sin(pa) * pr)
+			var ok := true
+			for q in pts:
+				if cand.distance_to(q) < 1.7:
+					ok = false
+					break
+			if not ok:
+				continue
+			pts.append(cand)
+			var px: float = cc.x + cand.x
+			var pz: float = cc.z + cand.y
+			if not _fits_in_map(px, pz) or is_water(px, pz) or near_river(px, pz, 1.5):
+				continue
+			var tree := ResourceNode.new()
+			tree.resource_type = Constants.RESOURCE_WOOD
+			tree.remaining     = rng.randf_range(480.0, 720.0)
+			tree.tree_variant  = rng.randi_range(1, 4)
+			_world.add_child(tree)
+			tree.global_position = Vector3(px, get_terrain_height(px, pz), pz)
+			lair_glade_trees += 1
+
+## Центр второго логова: от якоря ИИ смещение LAIR_OFFSET по X зеркально
+## (к реке), по Z — то же (вниз)
+func troll_lair_center_ai() -> Vector3:
+	var o: Vector2 = _GobCfg.LAIR_AI_OFFSET
+	var x: float = clampf(ENEMY_BASE_ANCHOR.x + o.x, -GEN_HALF_X, GEN_HALF_X)
+	var z: float = clampf(ENEMY_BASE_ANCHOR.z + o.y, -GEN_HALF_Z, GEN_HALF_Z)
+	return Vector3(x, get_terrain_height(x, z), z)
 
 ## ВЫДАТЬ ОТРЯДУ РАНГ ПРИ РОЖДЕНИИ И РАЗДАТЬ ЗА НЕГО НАГРАДЫ.
 ##
@@ -3024,6 +3363,47 @@ func river_depth(x: float, z: float) -> float:
 	var t: float = clampf((edge - d) / RIVER_BANK, 0.0, 1.0)
 	return depth * t
 
+## ── ДОРОГА ЧЕРЕЗ БРОД: ВХОД И ВЫХОД, С СОХРАНЕНИЕМ МЕСТА В СТРОЮ ─────────
+## Жалоба владельца со скриншотом (спринт 15): «армия выстраивается в тонкую
+## шеренгу по одному вдоль края воды». Виноват был не поиск пути (его нет
+## вовсе), а ЕДИНСТВЕННАЯ ТОЧКА, к которой сходились все: боец, чей шаг упёрся
+## в воду, скользил вдоль берега строго к середине брода (slide_around_water),
+## и шестьдесят человек шли в одну и ту же щель друг за другом.
+##
+## ТЕПЕРЬ ДОРОГА ВЫДАЁТСЯ ПРИКАЗОМ, А НЕ ВЫТАЛКИВАНИЕМ, И У КАЖДОГО СВОЯ
+## ПОЛОСА. `lane_dz` — смещение бойца от центра отряда вдоль русла; брод шириной
+## 2 × FORD_HALF = 36 м вмещает любой строй целиком, поэтому отряд входит в воду
+## тем же фронтом, каким шёл по берегу. Это тот же приём, что у переноса стены
+## строя (Unit._wall_goal): всем один вектор, взаимное расположение не меняется.
+##
+## Возвращает [вход, выход] или пустой массив, если река на пути не лежит.
+func ford_route(from_p: Vector3, to_p: Vector3, lane_dz: float) -> Array:
+	if not RIVER_ENABLED:
+		return []
+	# Река существует только в поле карты; за его краем дороги нет
+	if not river_in_field(from_p.z) and not river_in_field(to_p.z):
+		return []
+	# ── БЕРЕГА РАЗНЫЕ? ────────────────────────────────────────────────────
+	# Знак «с какой стороны от оси русла» — единственное, что здесь нужно:
+	# берег один, значит река на пути не лежит и дорога не нужна вовсе
+	var s_from: float = signf(from_p.x - river_x(from_p.z))
+	var s_to: float = signf(to_p.x - river_x(to_p.z))
+	if s_from == 0.0 or s_to == 0.0 or s_from == s_to:
+		return []
+	# Оба конца уже в полосе брода — отрезок между ними из неё не выходит
+	# (полоса задана интервалом по Z и выпукла), и вести некуда
+	if in_ford(from_p.z) and in_ford(to_p.z):
+		return []
+	# Своя полоса бойца, зажатая в проходимую ширину брода
+	var lim: float = maxf(FORD_HALF - FORD_LANE_MARGIN, 0.0)
+	var lane_z: float = FORD_Z + clampf(lane_dz, -lim, lim)
+	# Вход и выход — на сухих кромках откоса, по разные стороны русла
+	var off: float = RIVER_HALF_W + RIVER_BANK
+	var axis: float = river_x(lane_z)
+	var a := Vector3(axis + s_from * off, 0.0, lane_z)
+	var b := Vector3(axis - s_from * off, 0.0, lane_z)
+	return [a, b]
+
 ## Точка ближе margin к руслу (включая само русло и брод)
 func near_river(x: float, z: float, margin: float = 0.0) -> bool:
 	if not RIVER_ENABLED or not river_in_field(z):
@@ -3388,9 +3768,12 @@ func _lake_point(angle: float) -> Vector2:
 # нулевые (см. README — включённые маски давали дрожание на грунте), а форма
 # берега и так задана функцией, поэтому проверка точная и без узлов физики.
 func is_water(x: float, z: float) -> bool:
-	# ── РЕКА (09.09.2026): русло непроходимо, брод — суша ───────────────────
-	if RIVER_ENABLED and river_in_field(z):
-		if absf(x - river_x(z)) < RIVER_HALF_W + LAKE_MARGIN and not in_ford(z):
+	# ── РЕКА: ВОДА — ЭТО ГДЕ ГРУНТ НИЖЕ ЗЕРКАЛА, А НЕ ПОЛОСА ВОКРУГ ОСИ ─────
+	# Прежняя мера (RIVER_HALF_W + LAKE_MARGIN) оставляла проходимой всю верхнюю
+	# часть откоса, уже залитую водой, — разбор и числа у SHORE_DRY. Брод
+	# по-прежнему суша целиком: он для того и нарисован
+	if RIVER_ENABLED and river_in_field(z) and not in_ford(z):
+		if river_depth(x, z) > wet_depth():
 			return true
 	# ОЗЕРО ВРЕМЕННО ОТКЛЮЧЕНО: воды на карте нет вовсе, центр — суша.
 	# Одна проверка на самом верху отключает и обход берега, и поиск суши,
@@ -3438,7 +3821,15 @@ func slide_around_water(from: Vector3, step: Vector3) -> Vector3:
 	# ось Z, и выбирать нужно ту сторону, где брод. Так отряд, посланный на
 	# другой берег, сам доходит вдоль воды до брода и переходит. Подмес
 	# «прочь от воды» — чтобы не тереться о кромку в изгибе меандра
-	if RIVER_ENABLED and near_river(to.x, to.z, LAKE_MARGIN + 0.5):
+	# ── «ЭТО РЕКА?» СПРАШИВАЕТСЯ ТЕМ ЖЕ ПРАВИЛОМ, ЧТО И САМА ВОДА ─────────
+	# Стояло near_river(to, LAKE_MARGIN + 0.5), то есть полоса 10.1 м от оси —
+	# прежняя мера русла. Со спринта 15 вода кончается там, где грунт выходит
+	# из-под зеркала (12.1 м), и шаг в промежуток между этими числами до
+	# здешней ветки НЕ ДОХОДИЛ: он проваливался в ветку ОЗЕРА и уезжал по
+	# радиусу от LAKE_CENTER, то есть куда угодно, только не к броду
+	# (поймал qa_map B7). Сюда попадает шаг, уже признанный водой выше, и
+	# единственное, что осталось спросить, — река ли это
+	if RIVER_ENABLED and river_in_field(to.z):
 		var len_r: float = step.length()
 		var toward: float = 1.0 if FORD_Z >= from.z else -1.0
 		var away_x: float = 1.0 if from.x >= river_x(from.z) else -1.0

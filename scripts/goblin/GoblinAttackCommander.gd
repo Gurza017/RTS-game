@@ -255,7 +255,9 @@ func _refresh_geometry(army_c: Vector3) -> void:
 	# Край базы — ближайшая к армии чужая постройка; нет построек — сама точка
 	front_pt = aim
 	var bd := INF
-	for b in GameManager.enemy_buildings_snapshot(Constants.FACTION_GOBLIN):
+	# Снимок — ПАРА [узлы, xz] (спринт 14): обход самой пары молча давал
+	# ноль построек, и орда не выбирала здания целью вовсе
+	for b in (GameManager.enemy_buildings_snapshot(Constants.FACTION_GOBLIN)[0] as Array):
 		if b == null or not is_instance_valid(b):
 			continue
 		var bld := b as Building
@@ -432,11 +434,13 @@ func _nearest_foe(from: Vector3, radius: float) -> Node3D:
 func _nearest_building(from: Vector3, radius: float) -> Node3D:
 	var best: Node3D = null
 	var bd: float = radius * radius
-	for b in GameManager.enemy_buildings_snapshot(Constants.FACTION_GOBLIN):
+	# Снимок — ПАРА [узлы, xz] (спринт 14): обход самой пары молча давал
+	# ноль построек, и орда не выбирала здания целью вовсе
+	for b in (GameManager.enemy_buildings_snapshot(Constants.FACTION_GOBLIN)[0] as Array):
 		if b == null or not is_instance_valid(b):
 			continue
 		var bld := b as Building
-		if bld == null or bld.is_dead():
+		if bld == null or bld.is_dead() or not GameManager.goblin_may_raze(bld):
 			continue
 		var d: float = from.distance_squared_to(bld.global_position)
 		if d < bd:

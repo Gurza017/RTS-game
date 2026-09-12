@@ -993,6 +993,11 @@ func _maybe_load_sprite() -> void:
 	var aspect: float = crop_w / crop_h if crop_h > 0.0 else 1.0
 	quad.size = Vector2(h * aspect, h)
 	var res_mat := _BBUtil.make_material(draw_tex)
+	# ── БОЕЦ РИСУЕТСЯ ПОВЕРХ КАМНЕЙ И РУДЫ (заказ спринта 15) ─────────────
+	# Кусок сортируется по своей точке на земле (ground_depth), а «всегда
+	# выше» доделывает подъём бойца к камере (mm_unit_sprite, depth_lift).
+	# Отход от камеры не годится НИКОМУ: он прячет низ рисунка под грунт,
+	# разбор цены — VegetationRenderer.DEPTH_PUSH_HEIGHTS
 	if frames > 1:
 		# ЧИСЛО КАДРОВ ЗАДАЁМ ЯВНО. У пересобранной ленты нет resource_path, и
 		# BillboardUtil.frame_count падает на угадывание по пропорции — при

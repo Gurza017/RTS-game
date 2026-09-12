@@ -442,8 +442,13 @@ func _c_leash() -> void:
 	await frames(5)
 
 	# ── C5: ПРЯМОЙ ПРИКАЗ через полкарты мимо врагов поводок не ограничивает ──
+	# ЛАГЕРЬ — В СТОРОНЕ ОТ БРОДА (спринт 19). Стоял на (0, 0), то есть ровно в
+	# коридоре брода (z ± FORD_HALF), через который маршрут через реку и
+	# ведёт: с навигацией отряд срезает брод по диагонали и выходил на лагерь
+	# в упор. Смысл проверки — «поводок не режет прямой приказ мимо врага»,
+	# и лагерь остаётся в 26 м от линии марша, но вне брода
 	var camp_z := 0.0
-	var camp: Array = _mk_wall(Constants.FACTION_ENEMY, 0.0, camp_z, 12, 1.2)
+	var camp: Array = _mk_wall(Constants.FACTION_ENEMY, -30.0, camp_z, 12, 1.2)
 	await frames(3)
 	for f in camp:
 		(f as Unit).command_move((f as Node3D).global_position)

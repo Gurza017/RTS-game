@@ -276,8 +276,10 @@ func _run() -> void:
 	verdict("E2 стрелок целится в тушу, а не в точку на земле",
 		troll.aim_height() >= 2.0 and troll.aim_height() > 0.8,
 		"высота прицела %.1f м" % troll.aim_height())
-	# Стрелы торчат в спрайте
-	var stuck0: int = troll._arrows.size()
+	# СПРИНТ 14 РАЗВЕРНУЛ: гнёзд под стрелы у тролля больше нет вовсе
+	# (arrow_sockets() → 0), стрела в тушу НЕ втыкается — она бьёт и ложится
+	# штатным путём. Прежняя проверка «застревают до N штук» читала поле
+	# _arrows, которого нет, и роняла стенд молча
 	var shots := 0
 	for i in range(6):
 		var arr: Node3D = GameManager.spawn_arrow(main.world_root(),
@@ -289,11 +291,9 @@ func _run() -> void:
 		if troll.stick_arrow(arr):
 			shots += 1
 	await pframes(2)
-	verdict("E3 стрелы застревают в туше (до %d штук)" % troll.arrow_sockets(),
-		shots >= 5 and troll._arrows.size() >= 5
-			and troll._arrows.size() <= troll.arrow_sockets(),
-		"воткнулось %d, держится %d при %d гнёздах" % [shots, troll._arrows.size(),
-			troll.arrow_sockets()])
+	verdict("E3 стрелы в туше НЕ застревают (гнёзд нет — спринт 14)",
+		shots == 0 and troll.arrow_sockets() == 0,
+		"воткнулось %d при %d гнёздах" % [shots, troll.arrow_sockets()])
 	# Окружение: кольцо копейщиков — тролль пробивает тела и расталкивает
 	var ring: Array = []
 	var rsid: int = GameManager.new_squad(f, "spearman")

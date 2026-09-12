@@ -12,6 +12,14 @@ render_mode unshaded, cull_disabled;
 uniform sampler2D albedo_tex : source_color, filter_linear_mipmap;
 uniform vec4 modulate : source_color = vec4(1.0, 1.0, 1.0, 1.0);
 uniform float alpha_scissor : hint_range(0.0, 1.0) = 0.2;
+// ── КУВЫРОК ЛЕТЯЩЕЙ КОСТИ (спринт 15) ────────────────────────────────────
+// Оборотов в секунду; ноль — слой не крутится вовсе (стрелы). Признак
+// «этот снаряд сейчас летит» приезжает ДЛИНОЙ упакованной оси: шейдер ось
+// всё равно нормирует, поэтому её модуль свободен. Ось короче spin_gate —
+// снаряд в полёте и кувыркается, ровно единица — воткнулся и лежит смирно.
+// Фаза берётся у INSTANCE_ID: иначе все кости в воздухе крутились бы в такт
+uniform float spin_turns = 0.0;
+uniform float spin_gate : hint_range(0.0, 1.0) = 0.75;
 
 varying float v_fade;
 
@@ -30,7 +38,19 @@ void vertex() {
 	} else {
 		z = z / zl;
 	}
+	// Кувырок — это поворот пары (ax, y) в плоскости, обращённой к камере:
+	// кость идёт через голову, как брошенная от руки, а не винтом вокруг
+	// собственной оси (вокруг оси поворот у осевого билборда не виден вовсе)
 	vec3 y = cross(z, ax);
+	if (spin_turns > 0.0 && axl < spin_gate) {
+		float ang = TIME * spin_turns * 6.2831853
+			+ float(INSTANCE_ID) * 2.399963;
+		float cs = cos(ang);
+		float sn = sin(ang);
+		vec3 ax2 = ax * cs + y * sn;
+		y = y * cs - ax * sn;
+		ax = ax2;
+	}
 	mat4 world = mat4(
 		vec4(ax, 0.0),
 		vec4(y, 0.0),

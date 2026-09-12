@@ -195,14 +195,56 @@ func set_hill(cx: float, cz: float, h: float, radius: float) -> void:
 func set_plateaus(data: PackedFloat32Array, gentle: float, steep: float, cone: float) -> void:
 	_c.SetPlateaus(data, gentle, steep, cone)
 
+## Скалы (спринт 18): маска непроходимых склонов по крутизне высоты ядра
+func build_cliff_mask(ox: float, oz: float, cell: float, cols: int, rows: int,
+		relief_amp: float, slope_thr: float) -> int:
+	_c.BuildCliffMask(ox, oz, cell, cols, rows, relief_amp, slope_thr)
+	return int(_c.CliffCells)
+
+func set_cliff_enabled(on: bool) -> void:
+	_c.SetCliffEnabled(on)
+
+func is_cliff(x: float, z: float) -> bool:
+	return bool(_c.IsCliffAt(x, z))
+
+## ── НАВИГАЦИЯ (спринт 19, письмо 11): сетка проходимости и A* ядра ───────
+## Строится ПОСЛЕ маски скал и реки (из них и складывается); зовётся из
+## приказа, не из кадра
+func build_nav_grid(cell: float) -> int:
+	return int(_c.BuildNavGrid(cell))
+
+func set_nav_enabled(on: bool) -> void:
+	_c.SetNavEnabled(on)
+
+func nav_free(x: float, z: float) -> bool:
+	return bool(_c.NavFree(x, z))
+
+func nav_line_blocked(x0: float, z0: float, x1: float, z1: float) -> bool:
+	return bool(_c.NavLineBlocked(x0, z0, x1, z1))
+
+## Плоский массив [x, z, x, z, …] промежуточных точек; пусто — путь прямой
+## (nav_last_found = true) либо пути нет (false). Длина нити — nav_last_length
+func nav_path(x0: float, z0: float, x1: float, z1: float) -> PackedFloat32Array:
+	return PackedFloat32Array(_c.NavPath(x0, z0, x1, z1))
+
+func nav_last_found() -> bool:
+	return bool(_c.NavLastFound)
+
+func nav_last_length() -> float:
+	return float(_c.NavLastLength)
+
+func nav_calls() -> int:
+	return int(_c.NavCalls)
+
 ## Высота по формуле ядра (стенды сверяют с Main.get_terrain_height)
 func height_at(x: float, z: float, relief_amp: float) -> float:
 	return _c.HeightAt(x, z, relief_amp)
 
 func set_river(on: bool, half_w: float, meander: float, k: float, ford_z: float,
 		ford_half: float, depth: float, ford_depth: float, bank: float, margin: float,
-		half_z: float) -> void:
-	_c.SetRiver(on, half_w, meander, k, ford_z, ford_half, depth, ford_depth, bank, margin, half_z)
+		half_z: float, wet_depth: float) -> void:
+	_c.SetRiver(on, half_w, meander, k, ford_z, ford_half, depth, ford_depth, bank,
+		margin, half_z, wet_depth)
 
 func set_sep_radius(i: int, r: float) -> void:
 	_c.SetSepRadius(i, r)
@@ -391,9 +433,11 @@ func batch_visual(delta: float, lerp_k: float, snap_sq: float,
 func set_skip_body_scan(on: bool) -> void:
 	_c.SkipBodyScan = on
 
+## ax_k — масштаб оси: единица у стрелы, меньше у кости гнолла (признак
+## кувырка в полёте, разбор — в ArmyCore._afAxK и mm_arrow.gdshader)
 func arrow_launch(id: int, b: int, slot: int, s: Vector3, e: Vector3,
-		arc_h: float, rate: float, fac: int) -> void:
-	_c.ArrowLaunch(id, b, slot, s, e, arc_h, rate, fac)
+		arc_h: float, rate: float, fac: int, ax_k: float = 1.0) -> void:
+	_c.ArrowLaunch(id, b, slot, s, e, arc_h, rate, fac, ax_k)
 
 func arrow_cancel(id: int) -> void:
 	_c.ArrowCancel(id)

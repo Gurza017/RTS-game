@@ -1,0 +1,19 @@
+[remap]
+
+importer="oggvorbisstr"
+type="AudioStreamOggVorbis"
+uid="uid://b5do44nv1khdu"
+path="res://.godot/imported/Sea.ogg-8117c9f538ddcc8618fa44a701c4d9e2.oggvorbisstr"
+
+[deps]
+
+source_file="res://assets/environment/Main Sounds/Sea.ogg"
+dest_files=["res://.godot/imported/Sea.ogg-8117c9f538ddcc8618fa44a701c4d9e2.oggvorbisstr"]
+
+[params]
+
+loop=false
+loop_offset=0
+bpm=0
+beat_count=0
+bar_beats=4

@@ -49,6 +49,23 @@ const SHEETS := {
 ## Логово (пень), которое гнолл охраняет. Null — вольный гнолл
 var lair: Node3D = null
 
+## ── БРОСОК ВЫЛЕТАЕТ С КАДРА ЗАМАХА, А НЕ С НАЧАЛА ЛЕНТЫ ───────────────────
+## Боевая петля зовёт `_on_attack_fired` в момент УДАРА, а лента броска
+## (Gnoll_Throw, восемь кадров) в этот миг только начинается: кость вылетала
+## из опущенной руки. Теперь бросок ПЛАНИРУЕТСЯ — цель и урон запоминаются,
+## а сам снаряд рождается через `_throw_delay()` секунд, то есть ровно на том
+## кадре, где рука распрямилась.
+## ЦЕЛЬ ЗАПОМИНАЕТСЯ ТОЧКОЙ, А НЕ ССЫЛКОЙ: за полкадра замаха жертва может
+## погибнуть, и бросок обязан уйти туда, куда гнолл целился, — иначе рука
+## провожает пустоту (и правило 5: ссылка на освобождённый узел бросает)
+var _throw_left: float = 0.0
+var _throw_aim: Vector3 = Vector3.ZERO
+var _throw_dmg: float = 0.0
+## Задуманный промах едет вместе с броском: считать его в момент ПРИЦЕЛИВАНИЯ
+## нельзя — замах, перебитый следующим приказом, до кости не доходит вовсе, и
+## доля промахов считалась бы от несостоявшихся бросков
+var _throw_miss: bool = false
+
 var _patrol_t: float = 0.0
 var _kite_t: float = 0.0
 var _flank_t: float = 0.0
@@ -62,6 +79,14 @@ var _kite_check_t: float = 0.0
 var _kite_block_t: float = 0.0
 ## Стенды: сколько раз кайт признан невозможным
 var kite_blocked: int = 0
+## Бежит прятаться в пень (см. GNOLL_HIDE_HP); внутри — `hidden`
+var hiding_to_lair: bool = false
+var hidden: bool = false
+## Стенды: сколько раз ужаленный гнолл взял обидчика целью и сколько отходов
+var aggro_answers: int = 0
+var run_backs: int = 0
+## Пока > 0 — гнолл отходит после броска: фланг и патруль его не перебивают
+var _run_back_t: float = 0.0
 ## Стенды: сколько раз отбегал от подошедшей пехоты и сколько костей метнул
 var kites: int = 0
 var bones_thrown: int = 0
@@ -124,6 +149,22 @@ func aggro_leash() -> float:
 func _sfx_swing() -> String:
 	return ""
 
+## ГОЛОСА ОРДЫ (спринт 18): крики атаки вперемешку с расстройкой высоты и
+## громкости (см. AudioManager.SFX_LIMITS goblin_attack), смерть — свой сэмпл
+## с ±0.08 к высоте. Шанс на удар — общий (Unit.SHOUT_CHANCE): жребий идёт из
+## того же потока, что и у людей, и число вызовов не меняется — иначе
+## сеяные стенды орды (qa_gnoll_fix) поехали бы от одной смены порога
+const GOBLIN_SHOUT_CHANCE := SHOUT_CHANCE
+
+func _sfx_shout() -> String:
+	return "goblin_attack"
+
+func _shout_chance() -> float:
+	return GOBLIN_SHOUT_CHANCE
+
+func _sfx_death() -> String:
+	return "goblin_death"
+
 func _sfx_hit() -> String:
 	return ""
 
@@ -131,6 +172,13 @@ func _sfx_hit() -> String:
 # БРОСОК КОСТИ
 # ─────────────────────────────────────────────────────────────────────────────
 func _on_attack_fired(target: Node3D, damage: float) -> void:
+	# ── ЗАМАХ УЖЕ ИДЁТ — СНАЧАЛА ВЫПУСТИТЬ ТУ КОСТЬ (спринт 16) ─────────
+	# Новый удар до вылета прежней кости ПЕРЕЗАПУСКАЛ отсчёт замаха, и кость
+	# терялась: у гнолла, получившего цель от авто-агро посреди чужого замаха,
+	# первый бросок пропадал вовсе (qa_gnoll_fix C6/E6 — «в воздухе 0»)
+	if _throw_left > 0.0:
+		_throw_left = 0.0
+		_release_bone()
 	_play_attack_anim("attack", 520)
 	var parent := get_parent()
 	if parent == null or target == null or not is_instance_valid(target):
@@ -152,12 +200,64 @@ func _on_attack_fired(target: Node3D, damage: float) -> void:
 	aim += Vector3(cos(ang) * off, 0.0, sin(ang) * off)
 	if miss:
 		aim.y = 0.0
-		bones_missed += 1
+	# ── ЦЕЛИТСЯ СЕЙЧАС, БРОСАЕТ НА КАДРЕ ЗАМАХА ───────────────────────────
+	_throw_aim = aim
+	_throw_dmg = damage
+	_throw_miss = miss
+	_throw_left = _throw_delay()
+
+## Сколько ждать от начала ленты до вылета кости. Считается ИЗ САМОЙ ЛЕНТЫ
+## (номер кадра на её темп): перерисуют бросок другим числом кадров или fps —
+## задержка доедет сама, без правки кода
+func _throw_delay() -> float:
+	var fps := 10.0
+	var asp := _active_sprite as AnimatedSprite3D
+	if asp != null and asp.sprite_frames != null \
+			and asp.sprite_frames.has_animation("attack"):
+		fps = maxf(asp.sprite_frames.get_animation_speed("attack"), 1.0)
+	return float(_GobCfgG.GNOLL_THROW_FRAME) / fps
+
+## Выпустить запланированную кость. Зовётся из тика по истечении задержки
+func _release_bone() -> void:
+	var parent := get_parent()
+	if parent == null:
+		return
+	var from_pos: Vector3 = global_position + Vector3(0.0, _GobCfgG.GNOLL_THROW_Y, 0.0)
 	bones_thrown += 1
-	var dist: float = from_pos.distance_to(aim)
-	GameManager.spawn_arrow(parent, from_pos, aim, dist,
-		_GobCfgG.GNOLL_BONE_SPEED, _GobCfgG.GNOLL_BONE_ARC, damage, self,
+	if _throw_miss:
+		bones_missed += 1
+	var dist: float = from_pos.distance_to(_throw_aim)
+	GameManager.spawn_arrow(parent, from_pos, _throw_aim, dist,
+		_GobCfgG.GNOLL_BONE_SPEED, _GobCfgG.GNOLL_BONE_ARC, _throw_dmg, self,
 		faction, true)
+	# ── МЕТНУЛ — ОТОШЁЛ (спринт 16: «подбегают, метают кость и отступают») ──
+	# Отход к пню на GNOLL_RUN_BACK обычным приказом: он снимает цель, гнолл
+	# уходит в покой, и следующий наскок ему даёт либо авто-агро, либо новый
+	# укол обидчика (см. take_damage). Без пня — просто прочь от цели
+	# Отход — только у НАСТОЯЩЕГО броска по цели: у стенда, дёргающего
+	# _on_attack_fired напрямую без цели, гнолл остаётся на месте
+	if attack_target == null:
+		return
+	# Отойти некуда (кайт это уже выяснил — _kite_block_t): не бежать на месте
+	if _kite_block_t > 0.0:
+		return
+	var back: Vector3 = global_position - _throw_aim
+	back.y = 0.0
+	if lair != null and is_instance_valid(lair):
+		back = lair.global_position - global_position
+		back.y = 0.0
+	if back.length_squared() > 1e-4:
+		run_backs += 1
+		command_move(GameManager.land_target(
+			global_position + back.normalized() * _GobCfgG.GNOLL_RUN_BACK))
+		# Срок отхода — дорога плюс запас: фланговый приказ (_tick_flank) и
+		# патруль иначе перебивали отход в следующий же такт, и гнолл бежал
+		# ОБРАТНО к стрелку (qa_gnoll_behavior B3: «было 7.1, стало 6.9»)
+		_run_back_t = _GobCfgG.GNOLL_RUN_BACK / maxf(move_speed, 0.5) + 0.4
+		# Тот же надзор, что у кайта: не сдвинулся за GNOLL_KITE_GIVEUP —
+		# отход признаётся невозможным, гнолл встаёт (см. _tick_kite)
+		_kite_from = global_position
+		_kite_check_t = _GobCfgG.GNOLL_KITE_GIVEUP
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ХОД: КАЙТ, ФЛАНГ, ПАТРУЛЬ
@@ -166,7 +266,17 @@ func tick_physics(delta: float, prof: bool = false, bm: bool = true,
 		bonus_ver: int = -1) -> void:
 	super.tick_physics(delta, prof, bm, bonus_ver)
 	if state == State.DEAD:
+		# Замах, оборванный смертью, броска не даёт
+		_throw_left = 0.0
 		return
+	# ── ОТЛОЖЕННЫЙ БРОСОК ─────────────────────────────────────────────────
+	# Стоит ПЕРВЫМ и до всех ворот хода: кость обязана вылететь на своём кадре
+	# независимо от того, кайтит гнолл, обходит с фланга или патрулирует
+	if _throw_left > 0.0:
+		_throw_left -= delta
+		if _throw_left <= 0.0:
+			_throw_left = 0.0
+			_release_bone()
 	# Гнолл из сохранённой партии рождается без логова — подхватываем логово
 	# партии, чтобы патруль и оборона пня работали и после загрузки
 	if lair == null and GameManager.troll_lair != null \
@@ -174,8 +284,26 @@ func tick_physics(delta: float, prof: bool = false, bm: bool = true,
 		lair = GameManager.troll_lair as Node3D
 	# ПОРЯДОК ВОРОТ ЗНАЧИМ: кайт важнее и фланга, и патруля. Подошедшая пехота
 	# убивает гнолла за пару ударов, а «отойти» — единственная его защита
+	# ── БЕЖИТ В ПЕНЬ: ничего другого не делает, у ворот прячется ──────────
+	if hiding_to_lair:
+		if lair == null or not is_instance_valid(lair) or bool(lair.call("is_dead")):
+			hiding_to_lair = false
+		else:
+			var d_l: float = Vector2(global_position.x - lair.global_position.x,
+				global_position.z - lair.global_position.z).length()
+			if d_l <= _GobCfgG.GNOLL_HIDE_RANGE:
+				lair.call("hide_gnoll", self)
+				return
+			if state != State.MOVING:
+				command_move(GameManager.land_target(lair.global_position))
+			return
 	if _tick_kite(delta):
 		return
+	if _run_back_t > 0.0:
+		_run_back_t -= delta
+		if state == State.MOVING:
+			return
+		_run_back_t = 0.0
 	if _tick_flank(delta):
 		return
 	_tick_patrol(delta)
@@ -265,6 +393,12 @@ func _tick_flank(delta: float) -> bool:
 	_flank_t -= delta
 	if _flank_t > 0.0:
 		return false
+	# ── ОТВЕТ ОБИДЧИКУ ВАЖНЕЕ ФЛАНГА (спринт 16) ──────────────────────────
+	# Фланговый приказ — command_move, и он снимает цель: ужаленный гнолл
+	# брал стрелка целью и через такт уезжал на фланг, так и не бросив
+	# (qa_gnoll_behavior B2: «брошено 0»). Пока цель есть — фланг подождёт
+	if attack_target != null:
+		return false
 	if lair == null or not is_instance_valid(lair):
 		return false
 	if lair.has_method("is_dead") and bool(lair.call("is_dead")):
@@ -305,6 +439,10 @@ func _tick_patrol(delta: float) -> void:
 	var p: Vector3 = lair.global_position + Vector3(cos(a) * r, 0.0, sin(a) * r)
 	command_move(GameManager.land_target(p))
 
+## Ответ на обстрел у гнолла свой (ниже, в take_damage), общий не нужен
+func answers_far_fire() -> bool:
+	return false
+
 ## Удар по гноллу поднимает волну у пня — тем же путём, что у тролля
 func take_damage(amount: float, attacker: Node3D = null) -> void:
 	if state == State.DEAD:
@@ -314,3 +452,23 @@ func take_damage(amount: float, attacker: Node3D = null) -> void:
 		return
 	if lair != null and is_instance_valid(lair) and lair.has_method("on_gnoll_hit"):
 		lair.call("on_gnoll_hit", self, attacker)
+	if hidden:
+		return
+	# ── МАЛО ЗАПАСА — В ПЕНЬ ───────────────────────────────────────────────
+	if not hiding_to_lair and lair != null and is_instance_valid(lair) \
+			and not bool(lair.call("is_dead")) \
+			and current_health < max_health * _GobCfgG.GNOLL_HIDE_HP:
+		hiding_to_lair = true
+		_throw_left = 0.0
+		command_move(GameManager.land_target(lair.global_position))
+		return
+	# ── УЖАЛИЛИ — ОТВЕТИТЬ ОБИДЧИКУ ───────────────────────────────────────
+	# Базовый ответ на удар работает только вплотную (COUNTER_CHARGE_RANGE), а
+	# гнолла бьют стрелой с двадцати метров: он продолжал патрулировать под
+	# обстрелом. Обидчик, кем бы он ни был, становится целью — гнолл подбегает
+	# на бросок (Unit.pursues_target у него «да») и метает
+	if attack_target == null and attacker != null and is_instance_valid(attacker) \
+			and attacker is Unit and (attacker as Unit).faction != faction \
+			and not (attacker as Unit).is_dead():
+		aggro_answers += 1
+		command_attack(attacker, true)

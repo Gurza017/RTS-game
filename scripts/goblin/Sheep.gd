@@ -134,9 +134,14 @@ static func _texture(kind: String, mirror: bool) -> Texture2D:
 	var ch: int = int(rows[1]) - top
 	var fw: int = int(rows[2])
 	var frames: int = maxi(img.get_width() / maxi(fw, 1), 1)
+	# «rest» — ОДИН кадр, последний из прыжка: овца лежит (спринт 19)
+	var first: int = 0
+	if kind == "rest":
+		first = frames - 1
+		frames = 1
 	var strip := Image.create(fw * frames, ch, false, img.get_format())
 	for f in range(frames):
-		var fr: Image = img.get_region(Rect2i(f * fw, top, fw, ch))
+		var fr: Image = img.get_region(Rect2i((first + f) * fw, top, fw, ch))
 		if mirror:
 			fr.flip_x()
 		strip.blit_rect(fr, Rect2i(0, 0, fw, ch), Vector2i(f * fw, 0))
@@ -164,6 +169,8 @@ func bind_to_pen(p: Node3D, f: int) -> void:
 	owner_faction = f
 	lair = null
 	home = (p as Node3D).global_position
+	if p.has_method("next_seq"):
+		bind_seq = int(p.call("next_seq"))
 	_breed_t = breed_sec() * (0.5 + 0.5 * fposmod(float(get_instance_id()) * 0.37, 1.0))
 	_hop_t = 1.0
 
@@ -188,6 +195,10 @@ func graze_home() -> Vector3:
 	return home
 
 func graze_radius() -> float:
+	# ЗАГОН: первые INSIDE_CAP по порядку привязки — ВНУТРИ ограды, у центра;
+	# лишние пасутся вокруг в OVERFLOW_RADIUS (письмо 10, спринт 19)
+	if pen != null and is_instance_valid(pen) and pen.has_method("graze_radius_for"):
+		return float(pen.call("graze_radius_for", self))
 	if pen != null and is_instance_valid(pen) and pen.has_method("graze_radius"):
 		return float(pen.call("graze_radius"))
 	if keep != null and is_instance_valid(keep):
@@ -242,6 +253,8 @@ func breed_one() -> int:
 	s.pen = pen
 	s.keep = keep
 	s.home = graze_home()
+	if pen != null and is_instance_valid(pen) and pen.has_method("next_seq"):
+		s.bind_seq = int(pen.call("next_seq"))
 	par.add_child(s)
 	var ang: float = randf() * TAU
 	var p: Vector3 = global_position + Vector3(cos(ang), 0.0, sin(ang)) * 1.6
@@ -295,6 +308,46 @@ func _set_anim(walking: bool, mirror: bool) -> void:
 	_mat.set_shader_parameter("frame_count", float(frames_in(SHEET_WALK if walking else SHEET_IDLE)))
 	_mat.set_shader_parameter("frame_fps", WALK_FPS if walking else IDLE_FPS)
 
+## Лента настроения: покой медленнее/быстрее или лежащий кадр (спринт 19)
+func _set_mood_anim(kind: String, fps: float) -> void:
+	if _mat == null:
+		return
+	var tex: Texture2D = _texture(kind, _mirror)
+	if tex == null:
+		return
+	_walking = false
+	_mat.set_shader_parameter("albedo_tex", tex)
+	_mat.set_shader_parameter("frame_count", float(1 if kind == "rest" else frames_in(SHEET_IDLE)))
+	_mat.set_shader_parameter("frame_fps", fps)
+
+func mood() -> int:
+	return _mood
+
+## ── НАСТРОЕНИЯ НА ВЫПАСЕ (письмо 10: «пакет анимаций») ────────────────────
+## Своего арта под «щиплет / оглядывается / лежит» у овцы нет — есть покой
+## (8 кадров, движение головы) и прыжок (6 кадров, последний — лежит). Из
+## них и собран выпас: перебежка (как прежде), прыжок на месте, лежание,
+## медленное щипание. Жребий — из AudioManager.rng: общий поток посеян зерном
+## партии, и лишний randf() сдвинул бы все жребии мира
+func _pick_mood() -> void:
+	var r: float = AudioManager.rng.randf()
+	moods_seen += 1
+	if r < 0.55:
+		force_hop()
+		return
+	if r < 0.70:
+		_mood = 1
+		_mood_t = 0.75
+		_set_anim(true, _mirror)
+	elif r < 0.85:
+		_mood = 2
+		_mood_t = AudioManager.rng.randf_range(6.0, 12.0)
+		_set_mood_anim("rest", 0.0)
+	else:
+		_mood = 3
+		_mood_t = AudioManager.rng.randf_range(5.0, 9.0)
+		_set_mood_anim("idle", IDLE_FPS * 0.5)
+
 func is_walking() -> bool:
 	return _walking
 
@@ -330,7 +383,13 @@ func force_hop() -> void:
 	var from_home: Vector3 = p - gh
 	from_home.y = 0.0
 	if from_home.length() > gr:
-		p = gh + from_home.normalized() * gr * 0.85
+		# ── ТОЧКА ВНУТРИ КРУГА, А НЕ НА ЕГО КРОМКЕ (спринт 19) ──────────
+		# Прежний зажим на 0.85 радиуса сажал стадо КОЛЬЦОМ по границе
+		# выпаса: у загона это ограда, и внутри не стоял никто (скриншот
+		# владельца). Теперь точка выбирается равномерно по кругу выпаса
+		var ang2: float = AudioManager.rng.randf() * TAU
+		var rr: float = gr * sqrt(AudioManager.rng.randf()) * 0.92
+		p = gh + Vector3(cos(ang2) * rr, 0.0, sin(ang2) * rr)
 	var xz: Vector2 = GameManager.clamp_to_map(p.x, p.z)
 	p = GameManager.land_target(Vector3(xz.x, 0.0, xz.y))
 	_target = Vector3(p.x, 0.0, p.z)
@@ -366,6 +425,9 @@ func captured_by(w: Node3D) -> void:
 	_carried = true
 	_pinned = true
 	_target = Vector3.INF
+	_mood = 0
+	# Перехват у тролля (письмо 10): рабочий отбил овцу из угоняемой отары
+	herder = null
 	_set_anim(false, _mirror)
 
 func carry_to(p: Vector3) -> void:
@@ -386,6 +448,45 @@ func release_from(w: Node3D) -> void:
 
 func is_carried() -> bool:
 	return _carried
+
+## ── УВОДИТ ТРОЛЛЬ (спринт 18) ─────────────────────────────────────────────
+## Овца в стаде рейда идёт за пастухом: прыжок раз в HERD_HOP_SEC к точке
+## возле него; привязка к загону/замку снята сразу (хозяин её лишился)
+const HERD_HOP_SEC := 1.2
+const HERD_GAP := 2.2
+var herder: Node3D = null
+
+## ── ТУША (спринт 19, письмо 10) ───────────────────────────────────────────
+## Мясо лежит У ТУШИ: MEAT_TRIPS кусков, их выносит АРТЕЛЬ (butcher_join, не
+## больше MAX_BUTCHERS). Никто не режет CORPSE_DESPAWN_SEC подряд — туша
+## истлевает (consume). Свежая туша окровавлена (BLOOD_TINT в modulate)
+const MEAT_TRIPS := 20
+const MAX_BUTCHERS := 4
+const CORPSE_DESPAWN_SEC := 120.0
+const BLOOD_TINT := Color(0.78, 0.40, 0.40, 1.0)
+var meat_left: int = 0
+var butchers: Array = []
+var _corpse_t: float = 0.0
+var killed_by: Node3D = null
+## Порядок привязки к загону: первые SheepPen.INSIDE_CAP пасутся ВНУТРИ ограды
+var bind_seq: int = 0
+## Настроение на выпасе (см. _pick_mood): 0 покой, 1 прыжок на месте,
+## 2 лежит, 3 щиплет медленно
+var _mood: int = 0
+var _mood_t: float = 0.0
+var moods_seen: int = 0
+
+func herd_by(t: Node3D) -> void:
+	herder = t
+	pen = null
+	keep = null
+	owner_faction = -1
+	_pinned = false
+	_hop_t = 0.2
+
+func release_herd() -> void:
+	herder = null
+	_hop_t = 1.0
 
 ## ── КРАСНОГО МИГАНИЯ БОЛЬШЕ НЕТ ВОВСЕ (заказ спринта 13) ──────────────────
 ## История ручки короткая и однонаправленная: (1.7, 0.45, 0.45) → мягкое
@@ -410,11 +511,20 @@ func kill_flip() -> void:
 	if dead or eaten:
 		return
 	dead = true
+	meat_left = MEAT_TRIPS
+	_corpse_t = 0.0
+	_mood = 0
+	herder = null
+	# Логово узнаёт о потере: последняя овца — таймер новой отары (спринт 18)
+	if lair != null and is_instance_valid(lair) and lair.has_method("on_sheep_eaten"):
+		lair.call("on_sheep_eaten", self)
 	_target = Vector3.INF
 	_pinned = true
 	_set_anim(false, _mirror)
 	if _mat != null:
 		_mat.set_shader_parameter("world_fixed", 1.0)
+		# Окровавленная туша (письмо 10): подкраска, а не мигание
+		_mat.set_shader_parameter("modulate", BLOOD_TINT)
 	if _mi != null:
 		# Овца ложится на бок: голова влево или вправо — от номера узла, а не
 		# случайно (два прогона стенда обязаны дать одну картинку)
@@ -426,6 +536,56 @@ func kill_flip() -> void:
 
 func is_dead_body() -> bool:
 	return dead
+
+## ── ТУША: КТО РЕЖЕТ И СКОЛЬКО ОСТАЛОСЬ (спринт 19) ────────────────────────
+## Убить может любой боец одним ударом (Unit._hunt_arrival) или рабочий
+## пятью надрезами; и там и там — сюда
+func kill_by(who: Node3D) -> void:
+	if dead or eaten:
+		return
+	# Овца, взятая рабочим (captured_by), числится «на руках» и до
+	# смерти: нож режет её на месте, и признак переноски снимается здесь —
+	# иначе туша оставалась живой, и рабочий резал её по кругу
+	_carried = false
+	killed_by = who
+	kill_flip()
+
+func _prune_butchers() -> void:
+	var i: int = butchers.size() - 1
+	while i >= 0:
+		var b = butchers[i]
+		if b == null or not is_instance_valid(b) or bool(b.call("is_dead")):
+			butchers.remove_at(i)
+		i -= 1
+
+func butcher_has_room() -> bool:
+	_prune_butchers()
+	return butchers.size() < MAX_BUTCHERS
+
+func butcher_join(w: Node3D) -> bool:
+	if not dead or eaten or w == null:
+		return false
+	_prune_butchers()
+	if butchers.has(w):
+		return true
+	if butchers.size() >= MAX_BUTCHERS:
+		return false
+	butchers.append(w)
+	return true
+
+func butcher_leave(w: Node3D) -> void:
+	butchers.erase(w)
+
+func butcher_count() -> int:
+	_prune_butchers()
+	return butchers.size()
+
+## Отрезать кусок: false — мясо кончилось
+func take_meat() -> bool:
+	if meat_left <= 0:
+		return false
+	meat_left -= 1
+	return true
 
 ## Мясо кончилось — туша исчезает
 func consume() -> void:
@@ -439,8 +599,21 @@ func _process(delta: float) -> void:
 	if eaten or _carried:
 		return
 	# ── ТУША ЛЕЖИТ: НИ ХОДЬБЫ, НИ ПРИПЛОДА ────────────────────────────────
+	# Никто не режет — истлевает за CORPSE_DESPAWN_SEC (письмо 10); часы
+	# идут только пока у туши нет ни одного рабочего
 	if dead:
+		if butchers.is_empty() or butcher_count() == 0:
+			_corpse_t += delta
+			if _corpse_t >= CORPSE_DESPAWN_SEC:
+				consume()
 		return
+	# ── НАСТРОЕНИЕ НА ВЫПАСЕ (спринт 19): лежит, прыгает, щиплет ───────────
+	if _mood != 0:
+		_mood_t -= delta
+		if _mood_t <= 0.0:
+			_mood = 0
+			_set_anim(false, _mirror)
+			_hop_t = AudioManager.rng.randf_range(1.0, 3.0)
 	# ── РАЗМНОЖЕНИЕ: ТОЛЬКО ЦЕЛАЯ И СПОКОЙНАЯ ОВЦА ─────────────────────────
 	# Приплод раздаёт ПРИВЯЗКА: у дикой — логово (у него свой потолок стада),
 	# у хозяйской — она сама (breed_one, потолок загона или зоны замка)
@@ -454,11 +627,28 @@ func _process(delta: float) -> void:
 			elif lair != null and is_instance_valid(lair) \
 					and lair.has_method("spawn_sheep"):
 				bred += int(lair.call("spawn_sheep", 1))
-	if _target.x == INF:
-		if not _pinned:
+	# За пастухом (рейд тролля): цель — точка у него, по своему такту
+	if herder != null:
+		if not is_instance_valid(herder) or bool(herder.get("is_dead_flag")):
+			herder = null
+		else:
 			_hop_t -= delta
-		if _hop_t <= 0.0:
-			force_hop()
+			if _hop_t <= 0.0:
+				_hop_t = HERD_HOP_SEC
+				var hp: Vector3 = (herder as Node3D).global_position
+				var k: float = float(get_instance_id() % 7) * 0.9
+				var off := Vector3(cos(k) * HERD_GAP, 0.0, sin(k) * HERD_GAP)
+				var tp: Vector3 = GameManager.land_target(hp + off)
+				_target = Vector3(tp.x, 0.0, tp.z)
+				_set_anim(true, _target.x < global_position.x)
+	if _target.x == INF:
+		if not _pinned and _mood == 0:
+			_hop_t -= delta
+		if _hop_t <= 0.0 and _mood == 0:
+			if herder != null or captor != null:
+				force_hop()
+			else:
+				_pick_mood()
 	else:
 		var d: Vector3 = _target - global_position
 		d.y = 0.0

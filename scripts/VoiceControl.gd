@@ -222,6 +222,14 @@ func apply_text(text: String) -> Dictionary:
 		_show_text("не понял: «%s»" % text, Color(1.0, 0.6, 0.6), TEXT_SHOW_SEC)
 		return m
 	var sids: Array = squads_for(m["groups"])
+	# ── «ЗАЩИТА» — ТОЛЬКО КОПЕЙЩИКАМ (четвёртое письмо спринта 18) ────────
+	# «Деф / защита / держать строй» — режим фаланги: копейщики выделения
+	# смыкаются стеной копий, ВСЕ ОСТАЛЬНЫЕ (лучники, мечники, конница)
+	# команду не получают вовсе: ни стойки, ни строя, ни сброса приказа.
+	# Выделение пусто — все копейщики армии: команда никого не срывает с
+	# места, «срыва армии» из прежней жалобы здесь нет
+	if intent == "defense":
+		sids = _spearmen_only(sids if not sids.is_empty() else _all_squads_of_type("spearman"))
 	if sids.is_empty():
 		_show_text("некому: «%s»" % text, Color(1.0, 0.85, 0.5), TEXT_SHOW_SEC)
 		return m
@@ -235,7 +243,7 @@ func apply_text(text: String) -> Dictionary:
 		"forward":
 			_order_march(sids, _Cfg.FORWARD_M, false)
 		"attack":
-			_order_march(sids, _Cfg.ATTACK_M, false)
+			_order_attack(sids)
 		"retreat":
 			_order_retreat(sids, float(m["distance"]))
 	# Отклик: на атаку — горн, на остальное — один клич первого отряда, не хор
@@ -250,20 +258,59 @@ func apply_text(text: String) -> Dictionary:
 	_show_text(text, Color(1, 1, 1), TEXT_SHOW_SEC)
 	return m
 
-## Отряды игрока по типам из словаря; "all" — все боевые (рабочих не трогаем)
+## ── ГОЛОС — ТОЛЬКО ВЫДЕЛЕННЫМ (спринт 18, второе письмо) ─────────────────
+## Жалоба: «голосовые команды выполняет ВСЯ армия на карте». Раньше отряды
+## брались по типу из реестра ВСЕЙ армии игрока. Теперь — из текущего
+## выделения (рамка ЛКМ, клик по отряду, группа Ctrl+1..9): слово рода войск
+## сужает выделение до этого типа, без слова («все» или ничего) — всё
+## выделенное боевое. Пусто выделение — пусто и множество: с места никто не
+## срывается. Рабочих не трогаем и здесь
 func squads_for(groups: Array) -> Array:
 	var out: Array = []
-	var all: bool = groups.has("all")
-	for sq in GameManager.squads_of_faction(Constants.FACTION_PLAYER):
-		var d := sq as Dictionary
-		var sid: int = int(d["id"])
-		var kind: String = String(d["type"])
-		if all:
-			if GameManager.squad_is_combat(sid):
-				out.append(sid)
-		elif groups.has(kind):
+	var all: bool = groups.has("all") or groups.is_empty()
+	var sm = _selection_manager()
+	if sm == null:
+		return out
+	var seen: Dictionary = {}
+	for u in sm.selected_units:
+		if u == null or not is_instance_valid(u) or not (u is Unit):
+			continue
+		var uu := u as Unit
+		if uu.faction != Constants.FACTION_PLAYER or uu.is_dead():
+			continue
+		var sid: int = uu.squad_id
+		if sid <= 0 or seen.has(sid):
+			continue
+		if not GameManager.squad_is_combat(sid):
+			continue
+		var kind: String = GameManager.squad_type(sid)
+		if all or groups.has(kind):
+			seen[sid] = true
 			out.append(sid)
 	return out
+
+## Только копейщики из списка отрядов
+func _spearmen_only(sids: Array) -> Array:
+	var out: Array = []
+	for sid in sids:
+		if GameManager.squad_type(int(sid)) == "spearman":
+			out.append(int(sid))
+	return out
+
+## Все отряды игрока данного рода войск (для «защиты» без выделения)
+func _all_squads_of_type(kind: String) -> Array:
+	var out: Array = []
+	for sq in GameManager.squads_of_faction(Constants.FACTION_PLAYER):
+		var d := sq as Dictionary
+		if String(d["type"]) == kind:
+			out.append(int(d["id"]))
+	return out
+
+func _selection_manager():
+	var mn = GameManager.main
+	if mn == null or not is_instance_valid(mn):
+		return null
+	return mn.get("selection_manager")
 
 ## Совместимость со старым стендом
 func spearman_squads() -> Array:
@@ -275,6 +322,7 @@ func _order_stance(sids: Array, stance: String) -> void:
 		for u in GameManager.squad_members(int(sid)):
 			if is_instance_valid(u) and (u as Unit).has_method("set_stance"):
 				(u as Unit).set_stance(stance)
+		GameManager.on_squad_stance(int(sid), stance)   # стена копий (спринт 18)
 
 ## Встать на месте: приказ идти в собственную точку — прибытие мгновенное,
 ## боец переходит в покой, цель атаки снята; стойка и курс не меняются
@@ -300,6 +348,70 @@ func _order_march(sids: Array, dist: float, back: bool) -> void:
 				continue
 			var uu := u as Unit
 			uu.command_move(uu.global_position + shift, false, course, false, true)
+
+## ── «В АТАКУ» — ЭТО ПРИКАЗ АТАКИ, А НЕ МАРШ ВСЛЕПУЮ ─────────────────────────
+## ЖАЛОБА ВЛАДЕЛЬЦА (спринт 15): «лучники по команде "в атаку" должны выдвигаться
+## вперёд, но строго при входе на дистанцию атаки ближайшего противника
+## останавливаться и открывать огонь». Прежде команда была маршем на ATTACK_M
+## по курсу — а МАРШ ИДЁТ МИМО ВРАГА: авто-агро работает только в покое, и
+## отряд лучников честно проходил свои сорок метров сквозь дистанцию выстрела,
+## не выпустив ни одной стрелы, и вставал где-то за противником.
+##
+## Теперь команда ищет ближайшего чужого у центра отряда и раздаёт ТОТ ЖЕ
+## приказ атаки, что и правый клик мышью (command_attack с замком цели): к нему
+## подходят на дистанцию своего оружия и бьют — стрелок встаёт и стреляет
+## (Archer.pursues_target = false), пехота доходит до рукопашной. Врага в
+## пределах видимости нет — остаётся прежний марш по курсу: команда «в атаку»
+## в чистом поле обязана хоть что-то делать.
+##
+## РАДИУС ПОИСКА ЧУТЬ МЕНЬШЕ ATTACK_M, И ЭТО НЕ ОКРУГЛЕНИЕ: замок цели дальше
+## Unit._lock_sight_range() (у лучника 2 × дальность = 40 м) сбрасывается на
+## подходе как исчерпанный (замер спринта 14), а задняя шеренга стоит на
+## несколько метров дальше центра отряда. Запас — на глубину строя
+const VOICE_ATTACK_SEARCH_K := 0.85
+
+func _order_attack(sids: Array) -> void:
+	var march_sids: Array = []
+	for sid in sids:
+		var s: int = int(sid)
+		_reform.erase(s)
+		var c: Vector2 = GameManager.squad_centre_xz(s)
+		var foe: Node3D = null
+		if c.x != INF:
+			foe = _nearest_foe(Vector3(c.x, 0.0, c.y), _Cfg.ATTACK_M * VOICE_ATTACK_SEARCH_K)
+		if foe == null:
+			march_sids.append(s)
+			continue
+		for u in GameManager.squad_members(s):
+			if not is_instance_valid(u):
+				continue
+			var uu := u as Unit
+			if uu.has_method("command_attack"):
+				# Те же четыре аргумента, что у правого клика (SelectionManager):
+				# приказ игрока, разгон разрешён, замок цели
+				uu.command_attack(foe, true, true, true)
+	if not march_sids.is_empty():
+		_order_march(march_sids, _Cfg.ATTACK_M, false)
+
+## Ближайший живой чужой боец в радиусе от точки — по сетке соседей, а не
+## перебором армии. Зовётся ИЗ ПРИКАЗА (раз на команду), не из кадра
+func _nearest_foe(at: Vector3, radius: float) -> Node3D:
+	var best: Node3D = null
+	var best_d: float = INF
+	for n in GameManager.unit_grid.query_radius(at, radius):
+		if n == null or not is_instance_valid(n):
+			continue
+		var u := n as Unit
+		if u == null or u.is_dead() or u.garrisoned:
+			continue
+		# Свои и нейтралы (рабочие ничейного рудника) — не враги
+		if u.faction == Constants.FACTION_PLAYER or u.faction == Constants.FACTION_NEUTRAL:
+			continue
+		var d: float = at.distance_to(u.global_position)
+		if d < best_d:
+			best_d = d
+			best = u
+	return best
 
 ## ОТХОД. Заказ владельца: фаланга не пятится с опущенными копьями. Копья
 ## поднимаются (стойка «атака»), отряд отходит на N м, по приходу встаёт,

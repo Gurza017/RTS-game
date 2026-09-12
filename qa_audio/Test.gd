@@ -128,7 +128,7 @@ func _b_assets() -> void:
 		var files: Array = AudioManager.SFX_BANK[cat]
 		for f in files:
 			total += 1
-			var p: String = AudioManager.DIR_SFX + String(f)
+			var p: String = AudioManager.sfx_path(String(f))
 			if not ResourceLoader.exists(p):
 				missing.append(p)
 	print("  файлов эффектов в банке: %d, не найдено: %d" % [total, missing.size()])
@@ -302,7 +302,8 @@ func _e_music() -> void:
 		amb.playing and amb.stream != null
 			and String(amb.stream.resource_path).contains("Forest Day"),
 		"играет=%s" % str(amb.playing))
-	verdict("E2 эмбиент идёт по шине Music", String(amb.bus) == "Music")
+	# Спринт 18: у атмосферы своя шина Ambient (лес и река), музыка отдельно
+	verdict("E2 эмбиент идёт по шине Ambient", String(amb.bus) == "Ambient")
 	verdict("E3 лес зациклен",
 		amb.stream is AudioStreamOggVorbis and (amb.stream as AudioStreamOggVorbis).loop)
 

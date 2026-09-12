@@ -1,0 +1,19 @@
+[remap]
+
+importer="oggvorbisstr"
+type="AudioStreamOggVorbis"
+uid="uid://bwvuaav6lcls1"
+path="res://.godot/imported/River Loop.ogg-3fcea6ebd55e602d658a6a90a5d761a3.oggvorbisstr"
+
+[deps]
+
+source_file="res://assets/environment/Main Sounds/River Loop.ogg"
+dest_files=["res://.godot/imported/River Loop.ogg-3fcea6ebd55e602d658a6a90a5d761a3.oggvorbisstr"]
+
+[params]
+
+loop=false
+loop_offset=0
+bpm=0
+beat_count=0
+bar_beats=4

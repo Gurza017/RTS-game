@@ -458,14 +458,21 @@ func _run() -> void:
 	var charged: bool = String(cmd.state) == cmd.ST_CHARGE
 	var contact_d: float = _xz(cmd.contact_pt, Vector3(-35.0, 0.0, -2.0)) if cmd.contact_pt != Vector3.INF else INF
 	await think(1)
+	# СПРИНТ 17: в фазе центра один отряд ДЕРЖИТ РУДНИК НА ХОЛМЕ (ROLE_MINE_HOLD,
+	# hill_mine_sid) и командиру не подчиняется — считаем только его поле
 	var atk := 0
+	var in_field := 0
 	for sid in g_sids:
+		if int(sid) == int(ai.hill_mine_sid):
+			continue
+		in_field += 1
 		var k3: String = String((cmd._ordered.get(int(sid), {}) as Dictionary).get("kind", ""))
 		if k3 == "attack" or GameManager.squad_in_combat(int(sid)):
 			atk += 1
 	verdict("E3 дозор заметил чужих — армия в штурм точки контакта (за %d тактов)" % steps,
-		charged and contact_d <= 8.0 and atk == g_sids.size(),
-		"состояние %s, контакт в %.1f м от чужих, в атаке %d из %d" % [String(cmd.state), contact_d, atk, g_sids.size()])
+		charged and contact_d <= 8.0 and atk == in_field and in_field >= 2,
+		"состояние %s, контакт в %.1f м от чужих, в атаке %d из %d (рудник холма держит %d)" % [
+			String(cmd.state), contact_d, atk, in_field, int(ai.hill_mine_sid)])
 	# Бой кончился (чужие выбиты) — марш продолжается
 	for u in picket:
 		if is_instance_valid(u) and not (u as Unit).is_dead():

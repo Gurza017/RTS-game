@@ -35,6 +35,22 @@ func sep_radius() -> float:
 func _sfx_swing() -> String:
 	return "sword_attack"
 
+## ГОЛОСА ОРДЫ (спринт 18): крики атаки вперемешку с расстройкой высоты и
+## громкости (см. AudioManager.SFX_LIMITS goblin_attack), смерть — свой сэмпл
+## с ±0.08 к высоте. Шанс на удар — общий (Unit.SHOUT_CHANCE): жребий идёт из
+## того же потока, что и у людей, и число вызовов не меняется — иначе
+## сеяные стенды орды (qa_gnoll_fix) поехали бы от одной смены порога
+const GOBLIN_SHOUT_CHANCE := SHOUT_CHANCE
+
+func _sfx_shout() -> String:
+	return "goblin_attack"
+
+func _shout_chance() -> float:
+	return GOBLIN_SHOUT_CHANCE
+
+func _sfx_death() -> String:
+	return "goblin_death"
+
 func _sfx_hit() -> String:
 	return "sword_hit"
 

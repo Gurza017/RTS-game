@@ -106,7 +106,13 @@ func _run() -> void:
 	var lz: float = GameManager.map_lim_z * 0.6
 	_spot_a = Vector3(-lx, 0.0, -lz)
 	_spot_b = Vector3(-lx, 0.0,  lz)
-	_spot_c = Vector3( lx, 0.0, -lz)
+	# ── ПЛОЩАДКА C — НЕ У ДЕРЕВНИ ГОБЛИНОВ (спринт 15) ─────────────────────
+	# Угол (+x, −z) — это угол деревни орды. Со спринта 15 пехота на марше
+	# цепляет врага в радиусе агро (10 м), а не только в упор: копейщик,
+	# идущий мимо спящих гоблинов, разворачивался на них, будил деревню и
+	# погибал до конца замера («previously freed» на строке замера). Площадка
+	# блока про ствол дерева, деревня ей не нужна — отходим к центру
+	_spot_c = Vector3( lx * 0.5, 0.0, -lz * 0.5)
 	print("  карта: полуоси %.1f x %.1f м; площадки стенда %s %s %s"
 		% [GameManager.map_lim_x, GameManager.map_lim_z, str(_spot_a), str(_spot_b), str(_spot_c)])
 	await frames(3)
@@ -291,6 +297,9 @@ func _test_tree_escape() -> void:
 	var arrived := false
 	for _i in range(480):
 		await get_tree().physics_frame
+		# Правило 5: боец мог погибнуть и освободиться за время ожидания
+		if not is_instance_valid(u):
+			break
 		if u.state == Unit.State.IDLE:
 			arrived = true
 			break

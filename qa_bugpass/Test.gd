@@ -271,10 +271,16 @@ func _f_phalanx_front() -> void:
 	await pframes(2)
 	s.set_stance("defense")
 	s._facing = Vector3(1, 0, 0)
+	# ФРОНТАЛЬНЫЙ — ЧУТЬ БЛИЖЕ БОКОВОГО. У одиночки без разметки «перёд»
+	# — это направление на ЗАМЕЧЕННОГО врага (_phalanx_dir → _enemy_seen_dir),
+	# а при равных дистанциях ближайшего выбирает порядок строк ядра, то есть
+	# история выделения строк в прежних блоках стенда: спринт 19 (рабочие с
+	# топором дерутся и гибнут в блоках выше) сдвинул её, и «замеченным»
+	# стал боковой. Проверяется свойство, а не жребий ничьей
 	var side_foe: Unit = _spawn("res://scenes/units/Spearman.tscn",
-		Constants.FACTION_ENEMY, Vector3(200.0, 0.0, 201.5))
+		Constants.FACTION_ENEMY, Vector3(200.0, 0.0, 201.6))
 	var front_foe: Unit = _spawn("res://scenes/units/Spearman.tscn",
-		Constants.FACTION_ENEMY, Vector3(201.5, 0.0, 200.0))
+		Constants.FACTION_ENEMY, Vector3(201.4, 0.0, 200.0))
 	await pframes(2)
 	verdict("F1 враг сбоку фронтальным не считается",
 		not s._in_phalanx_front(side_foe),

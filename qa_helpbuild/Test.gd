@@ -275,7 +275,14 @@ func _run() -> void:
 			else ("РАБОЧИЙ" if (hit3 is Unit) else ("ДЕРЕВО" if (hit3 is ResourceNode)
 			else str(hit3)))))
 	sm._handle_right_click(scr)
-	await pframes(240)
+	# Ждём СВОЙСТВО, а не 240 кадров: со спринта 19 рабочий ходит 2.5 м/с,
+	# и десять метров до угла площадки плюс защёлка прихода в четыре секунды
+	# уже не укладываются (три прежних строителя стоят у стены, четвёртый
+	# был на полпути — «строителей 3»). Потолок — в физкадрах
+	for _w in range(900):
+		await get_tree().physics_frame
+		if site.builder_count() >= 4:
+			break
 	verdict("C2 после правого клика рабочий строит",
 		d.state == Unit.State.BUILDING and site.builder_count() >= 4,
 		"состояние %s, строителей %d, цель стройки=%s"

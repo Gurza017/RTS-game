@@ -287,10 +287,13 @@ func _apply_enemy_building_visibility() -> void:
 	# ровно так же, как красный замок
 	for group in ["enemy_buildings", "goblin_buildings", "construction_sites"]:
 		for b in GameManager.nodes_in_group_cached(String(group)):
-			var bl := b as Node3D
-			if bl == null or not is_instance_valid(bl):
+			# Живость — на СЫРОЙ ссылке, до приведения (правило 5): снесённое
+			# здание в кэше группы уже освобождено, и `as Node3D` бросал
+			# «Trying to cast a freed object» (зонд длинной партии, 15-я мин)
+			if b == null or not is_instance_valid(b):
 				continue
-			if not bl.has_method("set_fog_hidden"):
+			var bl := b as Node3D
+			if bl == null or not bl.has_method("set_fog_hidden"):
 				continue
 			# Свои стройплощадки прятать не от кого: группа construction_sites
 			# общая на обе стороны

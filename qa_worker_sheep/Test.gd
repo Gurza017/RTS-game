@@ -245,8 +245,10 @@ func _run() -> void:
 		if c > cuts_seen:
 			cuts_seen = c
 			if is_instance_valid(s):
+				# Окровавленная туша (спринт 19) — ПОСТОЯННАЯ подкраска
+				# BLOOD_TINT, а не мигание: считаем только всё остальное
 				var mod = s._mat.get_shader_parameter("modulate")
-				if mod != null and (mod as Color).g < 0.95:
+				if mod != null and (mod as Color).g < 0.95 						and not (mod as Color).is_equal_approx(s.BLOOD_TINT):
 					flashes += 1
 		if thief.sheep_phase() == Worker.SheepPhase.HAUL and thief.carrying_amount > 0.0 \
 				and thief.carrying_type == Constants.RESOURCE_FOOD:

@@ -141,8 +141,11 @@ const STATS := {
 		# по рангу («Отряд ветеранов МОНАХОВ», см. veteran_rank_name)
 		"name_genitive_plural": "монахов",
 		"movement_speed": 2.0,               # скорость ходьбы, м/с
-		"attack_1": 7.0,                     # символический урон
-		"attack_2": 7.0,                     # мощного удара у монаха нет
+		# ── МОНАХ НЕ ДЕРЁТСЯ (спринт 19, письмо 12) ────────────────────────
+		# Ноль урона выключает и авто-агро, и ответ на удар, и тыловой напор:
+		# все три ворота спрашивают «вооружён ли» по attack_damage > 0
+		"attack_1": 0.0,
+		"attack_2": 0.0,
 		"attack_range": 1.4,                 # длина руки, м
 		"attack_cooldown": 1.6,              # пауза между ударами, с
 		"defense": 0.0,                      # защита
@@ -189,14 +192,21 @@ const STATS := {
 	"gnoll": {
 		"health": 55.0,
 		"name_genitive_plural": "гноллов",
-		"movement_speed": 3.6,
+		# ── ШАГ СРЕЗАН ДО 2.5 (заказ спринта 15) ──────────────────────────
+		# Было 3.6 — быстрее пехоты игрока в полтора раза, и стая «мелькала»
+		# по экрану. Теперь гнолл лишь немного быстрее копейщика: он всё ещё
+		# уходит от строя, но глаз успевает за ним следить
+		"movement_speed": 2.5,
 		# КЛЮЧ ИМЕННО attack_1: _apply_config_stats читает урон оттуда
 		# (общий контракт со всеми родами войск), "attack_damage" он не знает
 		"attack_1": 4.0,
 		# Короткий бросок (спринт 14): на длинной дистанции навес размазывался
 		# и кость читалась летящей по прямой — разбор в goblin_config
 		"attack_range": 8.5,
-		"attack_cooldown": 1.6,
+		# Кулдаун +30 % (заказ спринта 15): 1.6 → 2.08. Стая у пня бросала
+		# костями сплошным потоком — на экране это читалось не броском, а
+		# обстрелом
+		"attack_cooldown": 1.77,             # спринт 20: −15 % (было 2.08)
 		"defense": 0.0,
 		"armor": 0.0,
 		"morale": 40.0,
@@ -259,7 +269,7 @@ const STATS := {
 		#
 		# УРОН СЧИТАЕТСЯ ОТ ЗАПАСА ЖЕРТВЫ, а не от силы удара седока: сминает
 		# не топор, а полтонны кабана на скорости. Половина — заказ владельца.
-		"charge_range": 10.0,                # за сколько метров до цели начинается разгон
+		"charge_range": 14.0,   # спринт 15: разгон длиннее — иначе 10 м пробега не набрать (было 10.0),                # за сколько метров до цели начинается разгон
 		# ── БЕЗ РАЗГОНА НЕТ И ТАРАНА ───────────────────────────────────────
 		# Жалоба владельца: «эффект разлёта срабатывает дважды за одно
 		# соприкосновение, в том числе когда юниты уже сошлись в плотном бою
@@ -278,14 +288,14 @@ const STATS := {
 		# метров. Порог в шесть метров оставлял полтора метра запаса и на
 		# стенде срабатывал через раз: цель успевала подойти сама, всадник
 		# взводил разгон позже десяти метров и не добирал своего
-		"charge_min_runup": 5.0,             # сколько метров надо РЕАЛЬНО проехать
+		"charge_min_runup": 10.0,            # спринт 15: ТОЛЬКО после 10 м бега по прямой
 		"charge_speed_mult": 1.8,            # во сколько раз быстрее на разгоне
 		"charge_impact_frac": 0.5,           # доля МАКС. запаса ЖЕРТВЫ, снимаемая тараном
 		# ── ОДИН ВСАДНИК = ДВА ПЕХОТИНЦА ПРИ СЧЁТЕ СИЛЫ ОТРЯДА ────────
 		# Заказ владельца. Конный отряд численно меньше пехотного, и любой
 		# счёт «по головам» считал его втрое слабее, чем он есть
 		"squad_weight": 2.0,
-		"charge_splash": 2.0,                # радиус первого ряда контакта, м
+		"charge_splash": 3.0,                # радиус первого ряда контакта, м
 		"charge_knockback": 3.2,             # на сколько метров отлетают накрытые
 		# Сколько метров кабан проезжает СКВОЗЬ строй сразу после удара.
 		# Ноль вернул бы прежнее «ударил и встал в первой шеренге»
@@ -295,6 +305,13 @@ const STATS := {
 		# то же требование, что и «отбрасывания нет»: фронт копейщиков должен
 		# быть местом, куда конницу гнать НЕЛЬЗЯ, а не местом, где она теряет
 		# часть эффективности
+		# ── УДАР ПО РЯДАМ (заказ спринта 15) ──────────────────────────────
+		# Первая ячейка по ходу — гибель на месте (charge_row_kill бойцов),
+		# вторая — отлёт, падение и charge_row2_frac максимального запаса,
+		# третья и дальше — плавный толчок назад. Глубина ряда — charge_row_depth м
+		"charge_row_kill": 1,
+		"charge_row2_frac": 0.3,
+		"charge_row_depth": 1.1,
 		"charge_counter_frac": 0.35,         # доля СВОЕГО запаса за навал на копья
 		"description": "Pig rider. Fast shock cavalry — hits hard, dies fast.",
 	},
@@ -308,7 +325,7 @@ const STATS := {
 	# тролля лишь малую долю (charge_counter_frac): пика для него — заноза
 	"troll": {
 		# 32400 (180 копейщиков) −30 % (10.09.2026) −20 % (спринт 14)
-		"health": 18144.0,
+		"health": 10160.0,                   # спринт 20: −20 % (было 12700)
 		"name_genitive_plural": "троллей",
 		"movement_speed": 2.88,              # тяжёлый шаг; +20 % к прежним 2.4 (заказ 09.09.2026)
 		"attack_1": 48.0,                    # удар дубиной по цели
@@ -338,12 +355,23 @@ const STATS := {
 
 	# ── РАБОЧИЙ (Worker / Pawn) — не боец ────────────────────────────────────
 	"worker": {
-		"health": 30.0,                      # запас жизни: рабочий не боец
-		"walk_speed_empty": 3.0,             # скорость БЕЗ груза, м/с
+		# ── РАБОЧИЙ ВООРУЖЁН (спринт 19, письмо 10) ────────────────────────
+		# Заказ владельца: запас и удар на уровне базового гнолла (55 / 4),
+		# бьёт топором/ножом, отвечает на удар, агрится сам и идёт в атаку по
+		# ПКМ. Боевым отрядом он при этом НЕ считается (Unit.is_combatant):
+		# ни клича, ни реплик, ни голосового «все» рабочим не положено
+		"health": 55.0,
+		"attack_1": 4.0,
+		"attack_range": 1.3,
+		"attack_cooldown": 1.6,
+		# ── МЕДЛЕННЫЙ СТАРТ (письмо 12): без кузницы рабочий идёт, рубит и
+		# носит скромно; прокачка (worker 1a-5d) возвращает и превосходит
+		# прежние числа (3.0 / 1.9 / 5 с / 6 ед.)
+		"walk_speed_empty": 2.5,             # скорость БЕЗ груза, м/с
 		# ── ГРУЖЁНЫЙ ИДЁТ ЗАМЕТНО МЕДЛЕННЕЕ (баланс темпа, см. BALANCE_MATH) ─
 		# Половина цикла добычи — это ходка, и именно ею экономика упирается в
 		# кузницу: ветка «Крепкая обувь / Торные тропы» окупается сразу
-		"walk_speed_loaded": 1.9,            # скорость С грузом, м/с
+		"walk_speed_loaded": 1.6,            # скорость С грузом, м/с
 		"defense": 0.0,                      # защита
 		"armor": 0.0,                        # броня
 		"morale": 40.0,                      # мораль 0..100
@@ -354,9 +382,9 @@ const STATS := {
 		# есть ОДИН рабочий приносит ~36 единиц в минуту. Вся арифметика темпа
 		# (за сколько копится первое исследование) выведена из этого числа —
 		# см. docs/BALANCE_MATH.md, раздел «Экономика»
-		"gather_time": 5.0,                  # секунд на один цикл добычи
-		"gather_amount": 6.0,                # сколько ресурса приносит за ходку
-		"description": "Gathers resources and builds structures. Unarmed — keep away from the fighting.",
+		"gather_time": 6.0,                  # секунд на один цикл добычи
+		"gather_amount": 5.0,                # сколько ресурса приносит за ходку
+		"description": "Gathers resources and builds structures. Fights back with an axe when cornered.",
 	},
 }
 
@@ -1081,9 +1109,51 @@ const SQUAD_SIZE_MONKS     := 1
 ## участок фронта, и его гибель означала конец лечения до конца партии
 const MONK_LIMIT           := 3
 ## Лечение: радиус ауры, такт и «секунд на полный запас одного бойца»
-const MONK_HEAL_RADIUS     := 12.0
+## Радиус ПОИСКА раненого (заказ владельца, спринт 15: «в радиусе 10 метров»)
+const MONK_HEAL_RADIUS     := 10.0
+## Дистанция применения заклинания. Монах ПОДХОДИТ на неё и только тогда
+## лечит: «подходит на дистанцию применения, проигрывает анимацию каста».
+## Меньше радиуса поиска — иначе подходить было бы некуда и незачем
+const MONK_CAST_RANGE      := 3.0
+## Насколько цель вправе отойти, прежде чем монах её бросит. Больше радиуса
+## поиска намеренно: раненый, отошедший на шаг за черту поиска, не должен
+## отменять уже начатое лечение — иначе монах дёргается между целями
+const MONK_HEAL_LEASH      := 14.0
+## Не чаще этого монах переиздаёт приказ идти к своей цели. Цель движется,
+## и приказ на каждый такт будил бы бойца шестьдесят раз в секунду
+const MONK_STEP_SEC        := 0.6
 const MONK_HEAL_TICK       := 0.5
-const MONK_HEAL_SEC_PER_MAN := 10.0
+## Одиночное лечение МЕДЛЕННОЕ (письмо 12, tier 1): полный запас за 14 с;
+## «Благодать» (весь отряд разом) режет темп каждого вдвое (MONK_AOE_RATE) —
+## раненый отряд лечится 25-30 с, а не за пару секунд
+const MONK_HEAL_SEC_PER_MAN := 14.0
+## ── ДИСТАНЦИЯ МЕЖДУ МОНАХАМИ (письмо 12) ───────────────────────────────────
+## Два монаха в одной точке кроют один фланг: свободный монах отходит от
+## соседа-монаха на MONK_SPACING
+const MONK_SPACING := 5.0
+## ── ВОСКРЕШЕНИЕ (письмо 12, tier 3, forge monk_3d) ─────────────────────────
+## Павший поднимается с MONK_RES_HP запаса за MONK_RES_SEC канала (нарочно
+## долго: баланс), не чаще раза в MONK_RES_COOLDOWN, только когда рядом нет
+## раненых; «Двойное попечение» (monk_4d) режет канал в MONK_RES_PARALLEL_MULT
+## и разрешает лечить во время канала
+const MONK_RES_SEC := 20.0
+const MONK_RES_COOLDOWN := 8.0
+const MONK_RES_HP := 1.0
+const MONK_RES_PARALLEL_MULT := 0.7
+## ── ОПЫТ ЗА ЛЕЧЕНИЕ, А НЕ ЗА УБИЙСТВА (письмо 12) ──────────────────────────
+## Каждые MONK_XP_HP_PER_KILL восстановленных очков — «убийство» в счёт
+## ветеранства; поднятый павший — MONK_RES_XP_KILLS сразу
+const MONK_XP_HP_PER_KILL := 150.0
+const MONK_RES_XP_KILLS := 3
+## ── АУРЫ ПОДДЕРЖКИ (награды ветеранства монаха) ────────────────────────────
+## Базовый радиус MONK_AURA_BASE_R плюс «Аура радиуса»; раздача раз в
+## MONK_AURA_TICK, действие держится MONK_AURA_HOLD_MS (чуть дольше такта)
+const MONK_AURA_BASE_R := 4.0
+const MONK_AURA_TICK := 1.0
+const MONK_AURA_HOLD_MS := 1700
+## AOE-перк «Благодать» (forge monk_1d): лечит всех раненых в радиусе, каждого
+## с этой долей одиночного темпа (заказ спринта 16: «в 2 раза медленнее»)
+const MONK_AOE_RATE        := 0.5
 
 ## Предохранитель от опечатки: заказ больше этого числа обрезается
 ## (Building.queue_unit). Поднимать вместе с SQUAD_SIZE_*.
@@ -1143,6 +1213,50 @@ const SQUAD_SIZE_HARD_CAP := 100
 ## звать методы в инициализаторе const, да и независимые литералы честнее
 ## отражают "4 блока для будущей настройки порознь" — правка одного блока
 ## физически не может задеть другой)
+## ── ШАБЛОН НАГРАД МОНАХА: АУРЫ (письмо 12) ────────────────────────────────
+## Монах не дерётся, и «Атака/Броня/Здоровье» ему ни к чему: на каждой
+## ступени — три ауры на выбор, действующие на союзников в радиусе
+## (MONK_AURA_BASE_R + аура радиуса). Броня — «Аура морали», удар — «Боевой
+## клич» (только рукопашным), темп стрельбы — стрелкам, радиус — всем аурам.
+## Три карточки на ступень, как у всех; лестница +1 / +2 по ступеням
+const _VET_MONK_TEMPLATE := [
+	[
+		{"id": "aura_armor", "name": "Аура морали", "icon": "icon_shield.png", "bonus_aura_armor": 1.0},
+		{"id": "aura_attack", "name": "Боевой клич", "icon": "icon_sword.png", "bonus_aura_attack": 1.0},
+		{"id": "aura_rate", "name": "Аура скорострельности", "icon": "icon_might.png", "bonus_aura_rate": 0.08},
+	],
+	[
+		{"id": "aura_attack", "name": "Боевой клич", "icon": "icon_sword.png", "bonus_aura_attack": 1.0},
+		{"id": "aura_rate", "name": "Аура скорострельности", "icon": "icon_might.png", "bonus_aura_rate": 0.08},
+		{"id": "aura_radius", "name": "Аура радиуса", "icon": "icon_trader.png", "bonus_aura_radius": 1.0},
+	],
+	[
+		{"id": "aura_armor", "name": "Аура морали", "icon": "icon_shield.png", "bonus_aura_armor": 1.0},
+		{"id": "aura_radius", "name": "Аура радиуса", "icon": "icon_trader.png", "bonus_aura_radius": 1.0},
+		{"id": "aura_rate", "name": "Аура скорострельности", "icon": "icon_might.png", "bonus_aura_rate": 0.08},
+	],
+	[
+		{"id": "aura_armor", "name": "Аура стойкости", "icon": "icon_shield.png", "bonus_aura_armor": 2.0},
+		{"id": "aura_attack", "name": "Громовой клич", "icon": "icon_sword.png", "bonus_aura_attack": 2.0},
+		{"id": "aura_rate", "name": "Аура беглого огня", "icon": "icon_might.png", "bonus_aura_rate": 0.12},
+	],
+	[
+		{"id": "aura_attack", "name": "Громовой клич", "icon": "icon_sword.png", "bonus_aura_attack": 2.0},
+		{"id": "aura_radius", "name": "Широкая аура", "icon": "icon_trader.png", "bonus_aura_radius": 1.5},
+		{"id": "aura_rate", "name": "Аура беглого огня", "icon": "icon_might.png", "bonus_aura_rate": 0.12},
+	],
+	[
+		{"id": "aura_armor", "name": "Аура стойкости", "icon": "icon_shield.png", "bonus_aura_armor": 2.0},
+		{"id": "aura_radius", "name": "Широкая аура", "icon": "icon_trader.png", "bonus_aura_radius": 1.5},
+		{"id": "aura_attack", "name": "Громовой клич", "icon": "icon_sword.png", "bonus_aura_attack": 2.0},
+	],
+	[
+		{"id": "aura_armor", "name": "Святой оплот", "icon": "icon_shield.png", "bonus_aura_armor": 2.0, "bonus_aura_attack": 2.0},
+		{"id": "aura_rate", "name": "Ливень стрел", "icon": "icon_might.png", "bonus_aura_rate": 0.15, "bonus_aura_radius": 1.0},
+		{"id": "aura_radius", "name": "Свет над войском", "icon": "icon_trader.png", "bonus_aura_radius": 2.0, "bonus_aura_armor": 1.0},
+	],
+]
+
 const _VET_BONUS_TEMPLATE := [
 	# ═══════════════════════════════════════════════════════════════════════
 	# ЭТАП 1 — СЕРЕБРЯНЫЕ ЛЫЧКИ (грейды 1-3, красный вымпел)
@@ -1152,14 +1266,20 @@ const _VET_BONUS_TEMPLATE := [
 	# в плюс: у брони это плата скоростью, у защиты — темпом удара. Именно она
 	# и делает выбор выбором, а не «возьми всё подряд».
 	#
-	# ШАГ ПРИБАВКИ ЗАДАН ЛЕСТНИЦЕЙ, А НЕ ПОДОБРАН НА ГЛАЗ:
-	#   лычки  (1-3) — +2 к главному параметру за ступень;
-	#   флаги  (4-6) — +3;
-	#   штандарт (7) — +4 и ПРАВИЛО (см. ниже).
-	# Итог по одной ветке за всю жизнь отряда: +13 к главному параметру, то
-	# есть ровно удвоение базы у копейщика (14 → 27 урона, 3 → 22 брони).
-	# Удвоение — потолок намеренный: легендарный отряд обязан стоить двух
-	# новобранцев, а не десяти (разбор — docs/BALANCE_MATH.md).
+	# ШАГ ПРИБАВКИ ЗАДАН ЛЕСТНИЦЕЙ, А НЕ ПОДОБРАН НА ГЛАЗ (СПРИНТ 18, «реже,
+	# но мощнее»: пороги опыта ×1.3, шаг наград выше):
+	#   лычки  (1-3) — +3 к главному параметру за ступень (было +2);
+	#   флаги  (4-6) — +4 (было +3), плата парным параметром −2 (было −1);
+	#   штандарт (7) — +4 и ПРАВИЛО (см. ниже, не тронут).
+	# Вторичный запас жизни +8 / +10 (было +5 / +7), карточка здоровья +21 /
+	# +30 (было +14 / +20). Итог по одной ветке: +25 к главному параметру
+	# (было +13) — копейщик 14 → 39 урона; вместе с кузницей ×3.4 от базы
+	# (было ×2.5). Потолок сдвинут СОЗНАТЕЛЬНО по заказу владельца («+2..+3 к
+	# атаке за награду, ощутимо в бою»), а цена ему — 30 % больше убийств на
+	# каждую ступень (455 вместо 350 у копейщика до штандарта) и стартовые
+	# ветераны орды на грейд ниже при той же силе (goblin_config.START_SQUADS,
+	# MINE_GUARD: vet 3 / picks 3 = +9, как прежние vet 4 / picks 4).
+	# Разбор — docs/BALANCE_MATH.md, раздел 5.
 	# ── ТРИ КАРТОЧКИ НА КАЖДОЙ СТУПЕНИ, И ВСЕ ТРИ ИЗ ОДНОЙ ТРОЙКИ СТАТОВ ───
 	# ЗАКАЗ ВЛАДЕЛЬЦА: «выбор из пяти карточек создаёт информационный шум;
 	# сократить всегда строго до ТРЁХ, каждая даёт РОВНО ТРИ параметра,
@@ -1186,54 +1306,54 @@ const _VET_BONUS_TEMPLATE := [
 	# ── ЛЫЧКА I ────────────────────────────────────────────────────────────
 	[
 		{"id": "attack", "name": "Заточка", "icon": "icon_sword.png",
-			"bonus_attack": 2.0, "bonus_armor": -1.0, "bonus_defense": 0.0,
-			"bonus_health": 5.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_attack": 3.0, "bonus_armor": -1.0, "bonus_defense": 0.0,
+			"bonus_health": 8.0, "bonus_speed": 0.0, "bonus_range": 0.0,
 			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
 			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 		{"id": "armor", "name": "Щит", "icon": "icon_shield.png",
-			"bonus_attack": -1.0, "bonus_armor": 2.0, "bonus_defense": 0.0,
-			"bonus_health": 5.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_attack": -1.0, "bonus_armor": 3.0, "bonus_defense": 0.0,
+			"bonus_health": 8.0, "bonus_speed": 0.0, "bonus_range": 0.0,
 			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
 			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 		{"id": "health", "name": "Выносливость", "icon": "icon_heart.png",
 			"bonus_attack": -1.0, "bonus_armor": 1.0, "bonus_defense": 0.0,
-			"bonus_health": 14.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_health": 21.0, "bonus_speed": 0.0, "bonus_range": 0.0,
 			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
 			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	],
 	# ── ЛЫЧКА II ───────────────────────────────────────────────────────────
 	[
 		{"id": "attack", "name": "Крепкая рука", "icon": "icon_sword.png",
-			"bonus_attack": 2.0, "bonus_armor": -1.0, "bonus_defense": 0.0,
-			"bonus_health": 5.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_attack": 3.0, "bonus_armor": -1.0, "bonus_defense": 0.0,
+			"bonus_health": 8.0, "bonus_speed": 0.0, "bonus_range": 0.0,
 			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
 			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 		{"id": "armor", "name": "Наручи", "icon": "icon_shield.png",
-			"bonus_attack": -1.0, "bonus_armor": 2.0, "bonus_defense": 0.0,
-			"bonus_health": 5.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_attack": -1.0, "bonus_armor": 3.0, "bonus_defense": 0.0,
+			"bonus_health": 8.0, "bonus_speed": 0.0, "bonus_range": 0.0,
 			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
 			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 		{"id": "health", "name": "Второе дыхание", "icon": "icon_heart.png",
 			"bonus_attack": -1.0, "bonus_armor": 1.0, "bonus_defense": 0.0,
-			"bonus_health": 14.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_health": 21.0, "bonus_speed": 0.0, "bonus_range": 0.0,
 			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
 			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	],
 	# ── ЛЫЧКА III ──────────────────────────────────────────────────────────
 	[
 		{"id": "attack", "name": "Отточенный удар", "icon": "icon_sword.png",
-			"bonus_attack": 2.0, "bonus_armor": -1.0, "bonus_defense": 0.0,
-			"bonus_health": 5.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_attack": 3.0, "bonus_armor": -1.0, "bonus_defense": 0.0,
+			"bonus_health": 8.0, "bonus_speed": 0.0, "bonus_range": 0.0,
 			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
 			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 		{"id": "armor", "name": "Кольчуга", "icon": "icon_shield.png",
-			"bonus_attack": -1.0, "bonus_armor": 2.0, "bonus_defense": 0.0,
-			"bonus_health": 5.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_attack": -1.0, "bonus_armor": 3.0, "bonus_defense": 0.0,
+			"bonus_health": 8.0, "bonus_speed": 0.0, "bonus_range": 0.0,
 			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
 			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 		{"id": "health", "name": "Закалка", "icon": "icon_heart.png",
 			"bonus_attack": -1.0, "bonus_armor": 1.0, "bonus_defense": 0.0,
-			"bonus_health": 14.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_health": 21.0, "bonus_speed": 0.0, "bonus_range": 0.0,
 			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
 			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	],
@@ -1244,54 +1364,54 @@ const _VET_BONUS_TEMPLATE := [
 	# ── ФЛАГ I ─────────────────────────────────────────────────────────────
 	[
 		{"id": "attack", "name": "Клинок ветерана", "icon": "icon_sword.png",
-			"bonus_attack": 3.0, "bonus_armor": -1.0, "bonus_defense": 0.0,
-			"bonus_health": 7.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_attack": 4.0, "bonus_armor": -2.0, "bonus_defense": 0.0,
+			"bonus_health": 10.0, "bonus_speed": 0.0, "bonus_range": 0.0,
 			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
 			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 		{"id": "armor", "name": "Латы", "icon": "icon_shield.png",
-			"bonus_attack": -1.0, "bonus_armor": 3.0, "bonus_defense": 0.0,
-			"bonus_health": 7.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_attack": -2.0, "bonus_armor": 4.0, "bonus_defense": 0.0,
+			"bonus_health": 10.0, "bonus_speed": 0.0, "bonus_range": 0.0,
 			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
 			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 		{"id": "health", "name": "Стойкость", "icon": "icon_heart.png",
-			"bonus_attack": -1.0, "bonus_armor": 1.0, "bonus_defense": 0.0,
-			"bonus_health": 20.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_attack": -2.0, "bonus_armor": 1.0, "bonus_defense": 0.0,
+			"bonus_health": 30.0, "bonus_speed": 0.0, "bonus_range": 0.0,
 			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
 			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	],
 	# ── ФЛАГ II ────────────────────────────────────────────────────────────
 	[
 		{"id": "attack", "name": "Сокрушающий удар", "icon": "icon_sword.png",
-			"bonus_attack": 3.0, "bonus_armor": -1.0, "bonus_defense": 0.0,
-			"bonus_health": 7.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_attack": 4.0, "bonus_armor": -2.0, "bonus_defense": 0.0,
+			"bonus_health": 10.0, "bonus_speed": 0.0, "bonus_range": 0.0,
 			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
 			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 		{"id": "armor", "name": "Пластины", "icon": "icon_shield.png",
-			"bonus_attack": -1.0, "bonus_armor": 3.0, "bonus_defense": 0.0,
-			"bonus_health": 7.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_attack": -2.0, "bonus_armor": 4.0, "bonus_defense": 0.0,
+			"bonus_health": 10.0, "bonus_speed": 0.0, "bonus_range": 0.0,
 			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
 			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 		{"id": "health", "name": "Железное здоровье", "icon": "icon_heart.png",
-			"bonus_attack": -1.0, "bonus_armor": 1.0, "bonus_defense": 0.0,
-			"bonus_health": 20.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_attack": -2.0, "bonus_armor": 1.0, "bonus_defense": 0.0,
+			"bonus_health": 30.0, "bonus_speed": 0.0, "bonus_range": 0.0,
 			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
 			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	],
 	# ── ФЛАГ III ───────────────────────────────────────────────────────────
 	[
 		{"id": "attack", "name": "Разящий", "icon": "icon_sword.png",
-			"bonus_attack": 3.0, "bonus_armor": -1.0, "bonus_defense": 0.0,
-			"bonus_health": 7.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_attack": 4.0, "bonus_armor": -2.0, "bonus_defense": 0.0,
+			"bonus_health": 10.0, "bonus_speed": 0.0, "bonus_range": 0.0,
 			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
 			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 		{"id": "armor", "name": "Полный доспех", "icon": "icon_shield.png",
-			"bonus_attack": -1.0, "bonus_armor": 3.0, "bonus_defense": 0.0,
-			"bonus_health": 7.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_attack": -2.0, "bonus_armor": 4.0, "bonus_defense": 0.0,
+			"bonus_health": 10.0, "bonus_speed": 0.0, "bonus_range": 0.0,
 			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
 			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 		{"id": "health", "name": "Несгибаемые", "icon": "icon_heart.png",
-			"bonus_attack": -1.0, "bonus_armor": 1.0, "bonus_defense": 0.0,
-			"bonus_health": 20.0, "bonus_speed": 0.0, "bonus_range": 0.0,
+			"bonus_attack": -2.0, "bonus_armor": 1.0, "bonus_defense": 0.0,
+			"bonus_health": 30.0, "bonus_speed": 0.0, "bonus_range": 0.0,
 			"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
 			"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	],
@@ -1390,19 +1510,20 @@ static func perk_mask_of(chosen: Array) -> int:
 ## раз при загрузке скрипта, значения дальше можно менять по каждому ключу
 ## порознь, ничего не задевая
 static var VET_CONFIG: Dictionary = {
-	"spearman": {"thresholds": [40, 80, 120, 180, 240, 300, 350], "bonuses": _VET_BONUS_TEMPLATE.duplicate(true)},
-	"warrior":  {"thresholds": [100, 200, 400, 600, 800, 1000, 1300], "bonuses": _VET_BONUS_TEMPLATE.duplicate(true)},
-	"archer":   {"thresholds": [100, 200, 400, 600, 800, 1000, 1300], "bonuses": _VET_BONUS_TEMPLATE.duplicate(true)},
-	"monk":     {"thresholds": [40, 100, 200, 300, 400, 500, 600], "bonuses": _VET_BONUS_TEMPLATE.duplicate(true)},
+	"spearman": {"thresholds": [50, 105, 155, 235, 310, 390, 455], "bonuses": _VET_BONUS_TEMPLATE.duplicate(true)},
+	"warrior":  {"thresholds": [130, 260, 520, 780, 1040, 1300, 1690], "bonuses": _VET_BONUS_TEMPLATE.duplicate(true)},
+	"archer":   {"thresholds": [130, 260, 520, 780, 1040, 1300, 1690], "bonuses": _VET_BONUS_TEMPLATE.duplicate(true)},
+	# ── МОНАХ: НАГРАДЫ — АУРЫ ПОДДЕРЖКИ (письмо 12), опыт — за лечение ─────
+	"monk":     {"thresholds": [50, 130, 260, 390, 520, 650, 780], "bonuses": _VET_MONK_TEMPLATE.duplicate(true)},
 	# ── ГОБЛИНЫ: ШКАЛА ЛЮДЕЙ ЦЕЛИКОМ (заказ владельца) ──────────────────────
 	# Тот же шаблон наград и та же лестница порогов. Записи отдельные, а не
 	# «сослаться на копейщика»: VET_CONFIG — static var, её правят вживую, и
 	# общая ссылка означала бы, что правка гоблинам молча меняет людей
-	"goblin_spearman": {"thresholds": [100, 200, 400, 600, 800, 1000, 1300],
+	"goblin_spearman": {"thresholds": [130, 260, 520, 780, 1040, 1300, 1690],
 		"bonuses": _VET_BONUS_TEMPLATE.duplicate(true)},
-	"gnoll":           {"thresholds": [60, 120, 240, 400, 560, 720, 900],
+	"gnoll":           {"thresholds": [80, 155, 310, 520, 730, 935, 1170],
 		"bonuses": _VET_BONUS_TEMPLATE.duplicate(true)},
-	"goblin_rider":    {"thresholds": [140, 240, 400, 600, 800, 1000, 1600],
+	"goblin_rider":    {"thresholds": [180, 310, 520, 780, 1040, 1300, 2080],
 		"bonuses": _VET_BONUS_TEMPLATE.duplicate(true)},
 }
 
@@ -1567,6 +1688,9 @@ const _MOD_TO_STAT := {
 	"bonus_health": "health", "bonus_speed": "speed", "bonus_range": "range",
 	"bonus_cooldown": "cooldown", "bonus_spread": "spread", "bonus_push": "push",
 	"bonus_morale": "morale", "bonus_carry": "carry", "bonus_gather": "gather",
+	"bonus_train": "train",
+	"bonus_aura_armor": "aura_armor", "bonus_aura_attack": "aura_attack",
+	"bonus_aura_rate": "aura_rate", "bonus_aura_radius": "aura_radius",
 }
 
 ## Короткое имя характеристики по ключу модификатора ("bonus_attack" → "attack")
@@ -1714,7 +1838,9 @@ static func squad_size(unit_id: String) -> int:
 ##   cols  — ширина строя при выходе из здания, колонок
 const TRAINING := {
 	"castle": {
-		"worker":   {"cost_wood":  50.0, "cost_gold":  0.0, "time":  10.0, "squad": 1, "cols": 4},
+		# Рабочий обучается ДОЛГО (письмо 12): 16 с против прежних 10; линию
+		# «скорость обучения» даёт кузница (bonus_train, Building.queue_unit)
+		"worker":   {"cost_wood":  50.0, "cost_gold":  0.0, "time":  16.0, "squad": 1, "cols": 4},
 		# ЭЛИТА ДОРОЖЕ И ДОЛЬШЕ (ребаланс 10.09.2026): втрое к золоту и вдвое
 		# ко времени против прежних 100/200/30 — отряд рыцарей это событие
 		# партии, а не очередная шеренга
@@ -2026,7 +2152,17 @@ const BONUS_KEYS := ["bonus_attack", "bonus_armor", "bonus_defense",
 					 "bonus_health", "bonus_speed", "bonus_range",
 					 "bonus_cooldown", "bonus_spread",
 					 "bonus_push", "bonus_morale",
-					 "bonus_carry", "bonus_gather", "bonus_build"]
+					 "bonus_carry", "bonus_gather", "bonus_build",
+					 # ── ЛЕЧЕНИЕ МОНАХА (спринт 16): доля темпа, доля объёма за такт,
+					 # метры к радиусу. Ключи читает Monk через unit_bonus, как
+					 # лучник читает bonus_range
+					 "bonus_heal_rate", "bonus_heal_amount", "bonus_heal_radius",
+					 # ── ОБУЧЕНИЕ РАБОЧЕГО (письмо 12): доля к темпу найма ─────
+					 "bonus_train",
+					 # ── АУРЫ МОНАХА (письмо 12): броня, удар, темп стрельбы
+					 # союзникам в радиусе; последняя — метры к самому радиусу
+					 "bonus_aura_armor", "bonus_aura_attack", "bonus_aura_rate",
+					 "bonus_aura_radius"]
 
 ## Шаблон с нулями — КОПИЯ, а не сам словарь: вызывающий волен его править
 static func zero_modifiers() -> Dictionary:

@@ -1,0 +1,24 @@
+[remap]
+
+importer="wav"
+type="AudioStreamWAV"
+uid="uid://drwjfumthrkgl"
+path="res://.godot/imported/Door Close 1.wav-b8e9ec9e37c8629d1d7c968cb116c81e.sample"
+
+[deps]
+
+source_file="res://assets/factions/humans/Sounds Human/Door Close 1.wav"
+dest_files=["res://.godot/imported/Door Close 1.wav-b8e9ec9e37c8629d1d7c968cb116c81e.sample"]
+
+[params]
+
+force/8_bit=false
+force/mono=false
+force/max_rate=false
+force/max_rate_hz=44100
+edit/trim=false
+edit/normalize=false
+edit/loop_mode=0
+edit/loop_begin=0
+edit/loop_end=-1
+compress/mode=2

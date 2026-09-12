@@ -18,6 +18,7 @@ extends Node
 ##
 ## Запуск: godot --headless --path . res://qa_balance/Test.tscn
 
+const _GobCfgB := preload("res://scripts/goblin/goblin_config.gd")   # стартовые ветераны орды (спринт 18)
 const _UCfg  := preload("res://scripts/unit_stats_config.gd")
 const _Forge := preload("res://scripts/forge_config.gd")
 
@@ -392,6 +393,50 @@ func _block_legend() -> void:
 				bad.append("%d/%s=%d" % [lv, String((c as Dictionary).get("id", "?")), n])
 	verdict("D3 у каждого выбора ровно 3 параметра", bad.is_empty(),
 		("нарушения: " + str(bad)) if not bad.is_empty() else "проверено 29 выборов")
+
+	# ── D3б. ЛЕСТНИЦА НАГРАД (спринт 18: «реже, но мощнее») ─────────────────
+	# Лычки: главный +3, флаги: главный +4 с платой −2; порог опыта у каждого
+	# рода войск на 30 % выше прежней базы (спрашиваем СВОЙСТВО: пороги
+	# монотонно растут, а первая ступень копейщика не раньше 50 убийств)
+	var ladder_ok := true
+	var ladder_txt: Array = []
+	for lv3 in range(1, 7):
+		var want_main: float = 3.0 if lv3 <= 3 else 4.0
+		var want_hp: float = 21.0 if lv3 <= 3 else 30.0
+		for c3 in _UCfg.veteran_choices("spearman", lv3):
+			var d3: Dictionary = c3
+			var cid: String = String(d3.get("id", ""))
+			var main_v: float = 0.0
+			if cid == "attack": main_v = float(d3.get("bonus_attack", 0.0))
+			elif cid == "armor": main_v = float(d3.get("bonus_armor", 0.0)) + float(d3.get("bonus_defense", 0.0))
+			elif cid == "health": main_v = float(d3.get("bonus_health", 0.0))
+			var want: float = want_hp if cid == "health" else want_main
+			if not is_equal_approx(main_v, want):
+				ladder_ok = false
+				ladder_txt.append("%d/%s=%.0f (ждали %.0f)" % [lv3, cid, main_v, want])
+	verdict("D3б лестница наград: лычки +3 / +21 HP, флаги +4 / +30 HP", ladder_ok, str(ladder_txt))
+	var th_ok := true
+	for ut in ["spearman", "warrior", "archer", "monk", "goblin_spearman", "goblin_rider", "gnoll"]:
+		var th: Array = _UCfg._vet_thresholds(ut)
+		for i in range(1, th.size()):
+			if int(th[i]) <= int(th[i - 1]):
+				th_ok = false
+	verdict("D3в пороги опыта растут монотонно, первая ступень копейщика ≥ 50 убийств",
+		th_ok and _UCfg.veteran_threshold("spearman", 1) >= 50 and _UCfg.veteran_threshold("spearman", 7) >= 450,
+		"копейщик: %s" % str(_UCfg._vet_thresholds("spearman")))
+	# Компенсация: стартовые ветераны орды не сильнее прежних (+9 к главному)
+	var worst_gain := 0.0
+	for row in _GobCfgB.start_squads():
+		var rd: Dictionary = row
+		var v: int = int(rd.get("vet", 0))
+		var picks: int = int(rd.get("picks", 0))
+		var gain := 0.0
+		for lv4 in range(1, mini(v, picks) + 1):
+			var first: Dictionary = _UCfg.veteran_choices(String(rd["unit"]), lv4)[0]
+			gain += float(first.get("bonus_attack", 0.0))
+		worst_gain = maxf(worst_gain, gain)
+	verdict("D3г стартовые ветераны орды не сильнее прежних (+9 к главному, грейд ниже)",
+		worst_gain <= 9.0 + 0.01, "лучший ряд +%.0f" % worst_gain)
 
 	# D4 — «НЕПРЕКЛОННЫЕ» НЕ ПАНИКУЮТ
 	var at := Vector3(300.0, 0.0, 300.0)

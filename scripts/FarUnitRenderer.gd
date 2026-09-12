@@ -109,6 +109,16 @@ class Bucket:
 	## Плотность пятен крови (см. Unit.blood_spots, шейдер blood_spots).
 	## Свойство ЛЕНТЫ, как и привязка ног: бакет заведён по ленте, а тролль
 	## один на свою. Запись только на изменение — обращение в сервер отрисовки
+	## Цвет вспышки удара (см. Unit.hit_flash_color, uniform flash_color) —
+	## свойство ленты, запись только на изменение
+	var _flash: Color = Color(-1.0, -1.0, -1.0)
+	func set_flash(c: Color) -> void:
+		if c.is_equal_approx(_flash):
+			return
+		_flash = c
+		if mat != null:
+			mat.set_shader_parameter("flash_color", Vector3(c.r, c.g, c.b))
+
 	var _blood: float = -1.0
 	func set_blood(v: float) -> void:
 		if absf(v - _blood) < 0.0005:
@@ -346,6 +356,7 @@ func register(unit: Unit, world_root: Node3D, mirror: bool) -> Slot:
 	s.base_y = base_y * _BB.V_STRETCH
 	b.set_foot(s.base_y)
 	b.set_blood(unit.blood_spots())
+	b.set_flash(unit.hit_flash_color())
 	s.frame  = sf[1]
 	s.mirror = mirror
 	s.pos    = unit.global_position + Vector3(0.0, s.base_y, 0.0)

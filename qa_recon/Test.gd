@@ -151,8 +151,10 @@ func _a_rings() -> void:
 	await frames(3)
 	sm._select_one(w)
 	main._update_enemy_hover(_screen_of(foes[0]), false)
-	verdict("A5 артель рабочих прицел не рисует",
-		GameManager.sel_decals.hover_count() == 0,
+	# СПРИНТ 19: у рабочего есть топор (письмо 10) — прицел на враге он
+	# рисует, как любой боец. Прежнее «артель боя не обещает» развёрнуто
+	verdict("A5 артель рабочих (с топором) прицел рисует, как боец",
+		GameManager.sel_decals.hover_count() > 0,
 		"колец %d (у рабочего урон %.0f)" % [
 			GameManager.sel_decals.hover_count(), w.attack_damage])
 

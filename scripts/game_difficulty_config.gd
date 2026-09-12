@@ -75,8 +75,9 @@ const DEFAULT := NORMAL
 ##                         строки тот же: {"unit", "count", "vet", "picks"}
 ##
 ##   ── ОРДА ГОБЛИНОВ (Constants.FACTION_GOBLIN) ──────────────────────────
-##   goblin_dormant_mult — множитель срока спячки (goblin_config.DORMANT_UNTIL_SEC):
-##                         на Easy орда просыпается позже, на Hard — раньше
+##   goblin_dormant_mult — множитель МИРНОЙ ФАЗЫ орды (goblin_config.PEACE_SEC,
+##                         спринт 17; спячки DORMANT_UNTIL_SEC больше нет — 0):
+##                         на Easy орда выходит к центру позже, на Hard — раньше
 ##   goblin_food_mult    — множитель дохода хижины (HUT_FOOD_PER_MIN), то есть
 ##                         темпа, с которым орда восполняет потери
 ##   goblin_vet_shift    — СДВИГ РАНГА стартовых отрядов орды: +1 поднимает
@@ -280,9 +281,14 @@ static func ai_start_squads() -> Array:
 		})
 	return out
 
-## Срок спячки орды, секунд от начала партии
+## Срок спячки орды, секунд от начала партии (спринт 17: спячки нет, 0)
 static func goblin_dormant_sec() -> float:
 	return maxf(_GobCfg.DORMANT_UNTIL_SEC * _f("goblin_dormant_mult"), 0.0)
+
+## Мирная фаза орды (отстройка и патруль границ), секунд от начала партии:
+## тот же множитель сложности, что прежде крутил спячку
+static func goblin_peace_sec() -> float:
+	return maxf(_GobCfg.PEACE_SEC * _f("goblin_dormant_mult"), 0.0)
 
 ## Доход одной хижины, еды в минуту
 static func goblin_hut_food_per_min() -> float:

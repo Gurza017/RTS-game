@@ -195,6 +195,26 @@ func _run() -> void:
 	var is_moving := func(u): return u.state == Unit.State.MOVING
 	var in_def := func(u): return u.stance == "defense"
 
+	# ── СПРИНТ 18: ГОЛОС — ТОЛЬКО ВЫДЕЛЕННЫМ ─────────────────────────────
+	# Жалоба: «команды выполняет вся армия». Без выделения голос никого не
+	# трогает; выделены одни копейщики — «все» означает их; полное
+	# выделение — как прежде, по типам
+	var sm = main.selection_manager
+	sm.select_units([])
+	var applied0: int = voice.commands_applied
+	voice.apply_text("все в атаку")
+	await pframes(3)
+	verdict("C0а без выделения голос никого не срывает («некому»)",
+		voice.squads_for(["all"]).is_empty() and voice.commands_applied == applied0
+		and _count(ar["men"], is_moving) == 0 and _count(sp["men"], is_moving) == 0 and _count(wr["men"], is_moving) == 0)
+	sm.select_units(sp["men"])
+	verdict("C0б выделены одни копейщики — «все» это они, «лучники» пусто",
+		voice.squads_for(["all"]).size() == 1 and int(voice.squads_for(["all"])[0]) == int(sp["sid"])
+		and voice.squads_for(["archer"]).is_empty())
+	var everyone: Array = []
+	everyone.append_array(sp["men"]); everyone.append_array(ar["men"])
+	everyone.append_array(wr["men"]); everyone.append_array(wk["men"])
+	sm.select_units(everyone)
 	verdict("C0 группы разбираются по типу отряда: копейщики 1, лучники 1, мечники 1, все боевые 3 (рабочие вне)",
 		voice.squads_for(["spearman"]).size() == 1 and voice.squads_for(["archer"]).size() == 1
 		and voice.squads_for(["warrior"]).size() == 1 and voice.squads_for(["all"]).size() == 3,
@@ -208,6 +228,38 @@ func _run() -> void:
 		"копейщики %d/12, лучники %d, мечники %d" % [_count(sp["men"], in_def), _count(ar["men"], in_def), _count(wr["men"], in_def)])
 	verdict("C1б плашка показала распознанный текст", String(voice.shown_text()) == "копейщики держать позицию")
 
+	# 1в. «Защита» без слова рода войск при ПОЛНОМ выделении — только копейщикам;
+	# лучники в марше приказа не теряют, мечники стойку не меняют (спринт 18,
+	# четвёртое письмо)
+	voice.apply_text("копейщики вольно")
+	await pframes(3)
+	var ar_goal := Vector3(0.0, 0.0, 60.0)
+	for ua in ar["men"]:
+		(ua as Unit).command_move(ar_goal)
+	await pframes(3)
+	var wr_stance0: String = (wr["men"][0] as Unit).stance
+	voice.apply_text("держать строй")
+	await pframes(3)
+	var ar_kept: int = _count(ar["men"], func(u): return u.state == Unit.State.MOVING and u.move_target.distance_to(ar_goal) < 1.0)
+	verdict("C1в «держать строй» без рода войск: копейщики в обороне, лучники не бросили марш, мечники в прежней стойке",
+		_count(sp["men"], in_def) == 12 and ar_kept == 8 and _count(wr["men"], func(u): return u.stance == wr_stance0) == 8,
+		"копейщики %d/12, лучники в марше %d/8" % [_count(sp["men"], in_def), ar_kept])
+	verdict("C1г «деф» тоже понимается как защита", String(_Cfg.match("деф")["intent"]) == "defense")
+	# Пустое выделение — все копейщики армии, остальным ничего
+	sm.select_units([])
+	voice.apply_text("копейщики вольно")
+	await pframes(3)
+	verdict("C1д «вольно» без выделения — некому (движение/стойки прочих не трогаем)", _count(sp["men"], in_def) == 12)
+	for us in sp["men"]:
+		(us as Unit).set_stance("attack")
+	voice.apply_text("защита")
+	await pframes(3)
+	verdict("C1е «защита» без выделения — всем копейщикам армии", _count(sp["men"], in_def) == 12
+		and _count(ar["men"], in_def) == 0)
+	sm.select_units(everyone)
+	for ua2 in ar["men"]:
+		(ua2 as Unit).command_move((ua2 as Unit).global_position)
+	await pframes(3)
 	# 2. Вольно — копья вверх
 	voice.apply_text("копейщики вольно")
 	await pframes(3)

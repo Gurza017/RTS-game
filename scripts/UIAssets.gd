@@ -73,6 +73,23 @@ static func cursor(index: int = 1) -> Texture2D:
 static var _hotspots: Dictionary = {}
 
 ## Остриё курсора в пикселях его текстуры. Считается вместе с загрузкой
+## ── ИГРОВОЙ КУРСОР СТАВИТСЯ ОДИН РАЗ, В МЕНЮ (спринт 17) ─────────────────
+## Жалоба: «первый клик по START только переключает системный курсор на
+## игровой». Курсор ставился в Main._ready, то есть уже ПОСЛЕ старта; меню
+## жило с системной стрелкой. Теперь один статический вход, зовут и меню
+## (в _ready), и партия. Повторный вызов — бесплатный (флаг)
+static var cursor_installed: bool = false
+
+static func install_cursor() -> void:
+	var tex := cursor(1)
+	if tex == null:
+		return
+	Input.set_custom_mouse_cursor(tex, Input.CURSOR_ARROW, cursor_hotspot(1))
+	var hand := cursor(2)
+	if hand != null:
+		Input.set_custom_mouse_cursor(hand, Input.CURSOR_POINTING_HAND, cursor_hotspot(2))
+	cursor_installed = true
+
 static func cursor_hotspot(index: int = 1) -> Vector2:
 	var key := "Cursor_%02d" % index
 	if not _hotspots.has(key):

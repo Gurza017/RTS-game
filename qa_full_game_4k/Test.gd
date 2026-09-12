@@ -234,6 +234,9 @@ func _arrow_stats() -> Dictionary:
 		# чуть выше; полметра над грунтом — это уже «висит в воздухе»
 		if lift > 0.5:
 			hanging += 1
+			# Диагностика висящей: что это за стрела и где стоит её узел
+			print("    ВИСИТ: слот y=%.2f грунт=%.2f узел=%s в теле=%s гаснет=%s полёт=%d кость=%s" % [
+				y, g, str((a as Node3D).global_position), str(a.get("_in_corpse")), str(a.get("_fading")), int(a.get("_flight_id")), str(a.get("bone"))])
 		worst = maxf(worst, lift)
 	return {
 		"nodes": arrows.size(), "flying": flying, "stuck": stuck,

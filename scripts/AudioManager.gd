@@ -59,6 +59,19 @@ const VOICE_MARCH_5PLUS := DIR_VOICE + "5+combat-voice-forward-march-543679.mp3"
 const VOICE_HOLD_LINE   := DIR_VOICE + "combat-voice-hold-the-line-543680.mp3"
 const VOICE_HORN_ATTACK := DIR_VOICE + "horn_attacks.mp3"
 ## Лупы шага и бега пехоты
+const DIR_GOBLIN_VOICE := "res://assets/factions/Goblin/Goblins_voice/"
+const DIR_TROLL_VOICE  := "res://assets/factions/orc/Troll/Troll_voice/"
+## Эмбиент реки (спринт 18): заменяет прежний файл моря, которого в коде и не
+## было. Слышен только у русла и брода, см. RIVER_*
+const AMBIENCE_RIVER := DIR_MUSIC + "River Stream Loop.ogg"
+## Реплики приказов (спринт 18): «Go, go, go» и составной файл с тремя «Come
+## on!» — режется ПО ТАЙМКОДАМ (AudioStreamMP3 нельзя разрезать на ресурсы,
+## а перекодировать чужие файлы — значит держать вторую копию). Границы
+## сняты зондом qa_audio_env/Probe по огибающей: [0.30-0.78] [2.24-2.80]
+## [4.24-4.64]; у «go go go» голос начинается с 1.14 с — тишина в начале
+## файла пропускается
+const VOICE_GO_GO_GO := DIR_SFX + "magiaz-man_saying_go_go_go-396189.mp3"
+const VOICE_COME_ON  := DIR_SFX + "magiaz-man_saying_come_on-396180.mp3"
 const MARCH_WALK_LOOP := DIR_VOICE + "community-marching-loop-32908.mp3"
 const MARCH_RUN_LOOP  := DIR_VOICE + "magiaz-soldiers_marching-394036.mp3"
 
@@ -91,7 +104,14 @@ const DIR_UI := DIR_MUSIC + "Sound ui menu/"
 const UI_BANK := {
 	"order_unit":  "select unit.ogg",          # заказан любой юнит в любом здании
 	"smith_pick":  "select_icon_in_smith.ogg", # клик по исследованию в кузнице
-	"pick_building": "click1.ogg",             # выделено здание
+	# Спринт 18: щелчок по зданию людей — «Chest Close 1» (папка юнитов,
+	# путь абсолютный: банк интерфейса живёт в DIR_UI); у крепости, бараков
+	# и кузницы СВОИ щелчки (второе письмо): выстрел из лука, рычаг, дверь.
+	# Событие выбирает GameManager._selection_click_sfx по building_id
+	"pick_building": DIR_SFX + "Chest Close 1.ogg",
+	"pick_castle":   DIR_SFX + "bow_and_arrow_shot.mp3",
+	"pick_barracks": DIR_SFX + "lever_pull.mp3",
+	"pick_smithy":   DIR_SFX + "Door Close 1.wav",
 	"pick_squad":  "click3.ogg",               # выделен отряд/юниты
 }
 
@@ -102,6 +122,9 @@ const UI_LIMITS := {
 	"order_unit":    {"gap": 0.06, "db": -6.0},
 	"smith_pick":    {"gap": 0.06, "db": -6.0},
 	"pick_building": {"gap": 0.05, "db": -7.0},
+	"pick_castle":   {"gap": 0.05, "db": -7.0},
+	"pick_barracks": {"gap": 0.05, "db": -7.0},
+	"pick_smithy":   {"gap": 0.05, "db": -7.0},
 	"pick_squad":    {"gap": 0.05, "db": -7.0},
 }
 
@@ -131,12 +154,41 @@ const UI_VOICES := 4
 ## голосом, и двух говорящих разом игрок разбирает уже как кашу.
 const VOICE_VOICES := 2
 
-## Событие → файл. Ровно три реплики из задания
+## Событие → файл. События приказов движения и строя (mass_march, hold_line)
+## СО СПРИНТА 18 ИГРАЮТ НЕ СВОЙ ФАЙЛ, А ОДНУ ИЗ РЕПЛИК ПУЛА ORDER_REPLIES —
+## имя события остаётся (по нему считают стенды и окна повтора), а фраза
+## выбирается случайно без повтора подряд (см. _pick_reply)
 const VOICE_BANK := {
 	"mass_march": VOICE_MARCH_5PLUS,   # 5+ отрядов получили приказ идти
 	"hold_line":  VOICE_HOLD_LINE,     # растянут строй (отпущена ПКМ)
 	"horn_attack": VOICE_HORN_ATTACK,  # 5+ отрядов получили приказ атаковать
+	"horde_horn": DIR_GOBLIN_VOICE + "horde_horn.mp3",  # горн орды (см. play_horn)
 }
+
+## ПУЛ РЕПЛИК ПРИКАЗА (заказ спринта 18: «юниты постоянно повторяют одну и ту
+## же фразу»). Пять реплик: «Hold the line», «Go, go, go!» и три разных
+## «Come on!» из одного файла — кусок задаётся парой from/to в секундах.
+## Кусок без «to» играет до конца файла. Выбор — случайный, но не тот же,
+## что в прошлый раз (_reply_last)
+const ORDER_REPLIES := [
+	{"id": "hold_line", "file": VOICE_HOLD_LINE},
+	{"id": "go_go_go",  "file": VOICE_GO_GO_GO, "from": 1.0},
+	{"id": "come_on_1", "file": VOICE_COME_ON, "from": 0.20, "to": 1.10},
+	{"id": "come_on_2", "file": VOICE_COME_ON, "from": 2.12, "to": 3.10},
+	{"id": "come_on_3", "file": VOICE_COME_ON, "from": 4.12, "to": 5.06},
+]
+## События, чья фраза берётся из пула
+const REPLY_POOL_EVENTS := {"mass_march": true, "hold_line": true}
+var _reply_last: int = -1
+## СВОЙ ГЕНЕРАТОР СЛУЧАЙНЫХ ДЛЯ ЗВУКА (спринт 18). Партия сеется (seed зерна
+## карты), и два прогона одного боя обязаны давать одно поле; всякий новый
+## randf() в общем потоке сдвигает ВСЕ последующие жребии игры (qa_monk B1
+## менял 63.0 → 50.5 HP от одного лишнего вызова при рождении тролля).
+## Новые случайности звука — выбор реплики, дрожание громкости, задержки
+## хора, окна рыка тролля — берутся отсюда и игрового потока не касаются
+static var rng := RandomNumberGenerator.new()
+var reply_last_id: String = ""      # для стендов: какая реплика пула прозвучала
+var _voice_clip_end: Array = []     # на голос: позиция, на которой кусок кончается (0 — до конца)
 
 ## Пауза между ПОВТОРАМИ одной реплики и её громкость.
 ## Пауза здесь длинная и это главное отличие от щелчка: игрок, ведущий войско,
@@ -146,7 +198,21 @@ const VOICE_LIMITS := {
 	"mass_march":  {"gap": 9.0, "db": -4.0},
 	"hold_line":   {"gap": 9.0, "db": -4.0},
 	"horn_attack": {"gap": 5.0, "db": 0.5},
+	# Горн орды — средняя громкость, не оглушает; окно длинное: два триггера
+	# (первый контакт и штурм) могут совпасть по времени
+	"horde_horn":  {"gap": 20.0, "db": -8.0},
 }
+## ── ГОРН ОРДЫ: СВОЯ ШИНА С РЕВЕРБЕРАЦИЕЙ (спринт 18) ─────────────────────
+## Умеренный эмбиентный эффект: шина «Horn» → SFX с AudioEffectReverb
+## (комната средняя, мокрая доля небольшая). Реплики людей идут прямой шиной
+## — им реверберация только мылит слова
+const HORN_BUS := "Horn"
+const HORN_REVERB_ROOM := 0.55
+const HORN_REVERB_WET := 0.28
+const HORN_REVERB_DRY := 0.85
+var _horn: AudioStreamPlayer = null
+var horn_calls: int = 0
+var horn_played: int = 0
 
 ## ── РЕПЛИКИ РЕЖЕ (заказ 10.09.2026: «Hold the line звучит слишком часто») ──
 ## Окна повтора подняты до 9 с, а перечисленные реплики к тому же играют
@@ -298,9 +364,10 @@ const MARCH_BUDGET := 0.5
 ## тяжелее, — но обоим пришлось подвинуться вниз: это цена второго слоя
 ## −30 % громкости шагов и бега (заказ 10.09.2026): −3.1 дБ к обоим слоям
 ## (0.7 амплитуды), бюджет MARCH_BUDGET не тронут — потолок остался запасом
-const MARCH_WALK_DB := -14.1
+## Спринт 18 (второе письмо): шаги ещё на 20 % тише (−1.9 дБ) — −16.0 / −14.1
+const MARCH_WALK_DB := -16.0
 ## Бег громче шага на те же два с половиной децибела: сапоги бьют чаще и тяжелее
-const MARCH_RUN_DB  := -12.2
+const MARCH_RUN_DB  := -14.1
 
 ## Дальность марша короче боевой (SFX_MAX_DISTANCE = 120): топот — звук
 ## близкий, и слышать марш через весь кадр незачем. Заодно это второй, после
@@ -481,6 +548,23 @@ const SFX_BANK := {
 	# Имя файла на диске — строчными и через дефисы; в ТЗ оно было записано как
 	# «Sounds/Human/Soldiers_BattleCry.wav», такого пути в проекте нет вовсе
 	"battle_cry":  ["soldiers-battle-cry.wav"],
+	# ── СПРИНТ 18: РАБОЧИЙ НА СТРОЙКЕ, ОРДА, ТРОЛЛЬ ─────────────────────────
+	# Пути с «res://» берутся как есть (папки орды и тролля не в DIR_SFX)
+	"build_hammer": ["mine 5.ogg"],                       # молоток строителя
+	"goblin_attack": [DIR_GOBLIN_VOICE + "goblin_attack_1.mp3",
+					  DIR_GOBLIN_VOICE + "goblin_attack_2.mp3",
+					  DIR_GOBLIN_VOICE + "goblin_attack_3.mp3",
+					  DIR_GOBLIN_VOICE + "goblin_attack_4.mp3"],
+	"goblin_death": [DIR_GOBLIN_VOICE + "goblin_death.mp3"],
+	# Хор смеха: ВСЕ четыре файла разом (play_chorus), не по одному
+	"goblin_laugh": [DIR_GOBLIN_VOICE + "goblin_laugh_1.mp3",
+					 DIR_GOBLIN_VOICE + "goblin_laugh_2.mp3",
+					 DIR_GOBLIN_VOICE + "goblin_laugh_3.mp3",
+					 DIR_GOBLIN_VOICE + "goblin_laugh_4.mp3"],
+	"troll_growl": [DIR_TROLL_VOICE + "troll_growl_2.mp3",
+					DIR_TROLL_VOICE + "troll_growl_3.mp3",
+					DIR_TROLL_VOICE + "troll_growl_4.mp3"],
+	"troll_victory": [DIR_TROLL_VOICE + "troll_victory.mp3"],
 }
 
 ## Настройки категории: сколько голосов ей можно занять одновременно,
@@ -545,7 +629,28 @@ const SFX_LIMITS := {
 	# pitch шире обычного (см. DEFAULT_PITCH_RANGE): это единственная категория,
 	# где ОДИН И ТОТ ЖЕ файл штатно звучит несколькими голосами разом
 	"battle_cry":   {"voices": 6, "gap": 0.0,   "db": -4.0, "pitch": [0.92, 1.08]},
+	# ── СПРИНТ 18 ───────────────────────────────────────────────────────────
+	# Молоток строителя — рабочая категория (прореживание по плотности, как у
+	# топора и кирки), темп замаха тот же, что у кирки
+	"build_hammer": {"voices": 4, "gap": 0.10, "db": -4.0, "pitch": [0.92, 1.08]},
+	# Крики атаки орды: вперемешку, с расстройкой высоты и ГРОМКОСТИ
+	# (db_jitter — случайное ± к db на каждый запуск)
+	"goblin_attack": {"voices": 4, "gap": 0.35, "db": -7.0, "pitch": [0.90, 1.10],
+					  "db_jitter": 3.0},
+	# Смерть гоблина: ±0.08 к высоте — массовая гибель не сливается в один сэмпл
+	"goblin_death": {"voices": 5, "gap": 0.12, "db": -3.0, "pitch": [0.92, 1.08]},
+	# Хор смеха: четыре голоса РАЗОМ, окно между хорами, лёгкая расстройка
+	"goblin_laugh": {"voices": 4, "gap": 0.0, "db": -5.0, "pitch": [0.96, 1.04]},
+	# Рык тролля: редкий, тяжёлый; окно держит его от пулемёта при трёх троллях
+	"troll_growl": {"voices": 2, "gap": 1.5, "db": -4.0, "pitch": [0.92, 1.06]},
+	"troll_victory": {"voices": 1, "gap": 2.5, "db": -3.0, "pitch": [0.97, 1.03]},
 }
+## Окно между ХОРАМИ смеха (сек): два выбитых отряда подряд — один хор
+const LAUGH_CHORUS_GAP := 4.0
+## Микро-задержки голосов хора: «толпа», а не один сэмпл в четыре голоса
+const LAUGH_STAGGER_MAX := 0.14
+var _laugh_last: float = -999.0
+var laugh_chorus_count: int = 0     # для стендов: сколько хоров прозвучало
 
 ## Расстройка высоты по умолчанию. Узкая: у остальных категорий по нескольку
 ## сэмплов, и главное расхождение даёт уже выбор файла, а не питч
@@ -596,6 +701,21 @@ const MUSIC_UNDER_DB := -14.0
 ## Громкость темы в меню
 const MUSIC_MENU_DB := -6.0
 const AMBIENCE_DB := -10.0
+## ── ЭМБИЕНТ РЕКИ (спринт 18) ─────────────────────────────────────────────
+## Мягкий и тихий шум воды, слышный только у русла: громкость считается от
+## ТОЧКИ ФОКУСА камеры (GameManager.view_point, как у марша — слушатель висит
+## позади фокуса), полная в полосе реки, спадает до нуля за RIVER_FADE_M за
+## её кромкой («зона реки + 5 м»), и сглаживается во времени (вход/выход по
+## RIVER_FADE_IN_SEC / RIVER_FADE_OUT_SEC) — камера дёргается, шум нет.
+## Зум гасит так же, как марш (march_zoom_gain): отдалённая камера воды не
+## слышит. Пик громкости RIVER_DB — «едва уловимый фон», не ручей в ухе
+const RIVER_DB := -20.0
+const RIVER_FADE_M := 5.0
+const RIVER_FADE_IN_SEC := 1.6
+const RIVER_FADE_OUT_SEC := 2.2
+var _river: AudioStreamPlayer = null
+var _river_gain: float = 0.0        # текущая доля 0..1 (сглаженная)
+var river_target: float = 0.0       # целевая доля по геометрии (для стендов)
 
 const SETTINGS_PATH := "user://audio_settings.cfg"
 
@@ -642,8 +762,11 @@ func _ready() -> void:
 	_music.finished.connect(_on_music_finished)
 	add_child(_music)
 	_ambience = AudioStreamPlayer.new()
-	_ambience.bus = "Music"
+	_ambience.bus = "Ambient"
 	add_child(_ambience)
+	_river = AudioStreamPlayer.new()
+	_river.bus = "Ambient"
+	add_child(_river)
 	_build_ui_pool()
 	_preload_ui()
 	_build_voice_pool()
@@ -653,8 +776,11 @@ func _ready() -> void:
 
 # ── ШИНЫ И ГРОМКОСТЬ ─────────────────────────────────────────────────────────
 
+## Шины: Music и SFX → Master (ползунки настроек), Ambient → Master (лес и
+## река, спринт 18: свой канал, чтобы атмосфера не ехала за громкостью
+## музыки), Horn → SFX с реверберацией (горн орды)
 func _ensure_buses() -> void:
-	for nm in ["Music", "SFX"]:
+	for nm in ["Music", "SFX", "Ambient"]:
 		var bus_name: String = nm
 		if AudioServer.get_bus_index(bus_name) >= 0:
 			continue
@@ -662,6 +788,16 @@ func _ensure_buses() -> void:
 		var idx: int = AudioServer.bus_count - 1
 		AudioServer.set_bus_name(idx, bus_name)
 		AudioServer.set_bus_send(idx, "Master")
+	if AudioServer.get_bus_index(HORN_BUS) < 0:
+		AudioServer.add_bus()
+		var hi: int = AudioServer.bus_count - 1
+		AudioServer.set_bus_name(hi, HORN_BUS)
+		AudioServer.set_bus_send(hi, "SFX")
+		var rv := AudioEffectReverb.new()
+		rv.room_size = HORN_REVERB_ROOM
+		rv.wet = HORN_REVERB_WET
+		rv.dry = HORN_REVERB_DRY
+		AudioServer.add_bus_effect(hi, rv)
 	_ensure_limiter()
 
 ## ── ЛИМИТЕР С МАСТЕРА СНЯТ ────────────────────────────────────────────────
@@ -711,7 +847,13 @@ func _load_settings() -> void:
 	if cfg.load(SETTINGS_PATH) == OK:
 		for key in _volumes.keys():
 			var k: String = String(key)
-			_volumes[k] = float(cfg.get_value("audio", k, _volumes[k]))
+			# Чужой тип (словарь, вектор) float() не примет — SCRIPT ERROR на
+			# старте игры из-за битого файла настроек (qa_audio2, E-ДОП)
+			var v: Variant = cfg.get_value("audio", k, _volumes[k])
+			if typeof(v) == TYPE_FLOAT or typeof(v) == TYPE_INT:
+				_volumes[k] = float(v)
+			elif typeof(v) == TYPE_STRING and String(v).is_valid_float():
+				_volumes[k] = float(String(v))
 	for key in _volumes.keys():
 		set_bus_volume(String(key), float(_volumes[key]))
 
@@ -852,9 +994,18 @@ func _preload_music() -> void:
 	_stream(AMBIENCE_FOREST)
 	_stream(MUSIC_MENU)
 
+## Путь боевого звука: запись банка относительна DIR_SFX, кроме «res://»
+## (папки орды и тролля — спринт 18)
+static func sfx_path(fname: String) -> String:
+	return fname if fname.begins_with("res://") else DIR_SFX + fname
+
+## Путь звука интерфейса: запись банка относительна DIR_UI, кроме «res://»
+static func ui_path(fname: String) -> String:
+	return fname if fname.begins_with("res://") else DIR_UI + fname
+
 func _preload_ui() -> void:
 	for k in UI_BANK:
-		_stream(DIR_UI + String(UI_BANK[k]))
+		_stream(ui_path(String(UI_BANK[k])))
 
 ## ЗВУК ИНТЕРФЕЙСА. Ни тумана, ни расстояния, ни слушателя — только окно
 ## повтора. Возвращает true, если звук реально пошёл
@@ -877,7 +1028,7 @@ func play_ui(event: String) -> bool:
 	var now: float = float(Time.get_ticks_msec()) * 0.001
 	if now - float(_ui_last.get(event, -999.0)) < float(lim.get("gap", 0.05)):
 		return false
-	var s: AudioStream = _stream(DIR_UI + fname)
+	var s: AudioStream = _stream(ui_path(fname))
 	if s == null:
 		return false
 	_ui_last[event] = now
@@ -910,10 +1061,16 @@ func _build_voice_pool() -> void:
 		# договаривать приказ над замершей картинкой незачем
 		add_child(p)
 		_voice_pool.append(p)
+		_voice_clip_end.append(0.0)
+	_horn = AudioStreamPlayer.new()
+	_horn.bus = HORN_BUS
+	add_child(_horn)
 
 func _preload_voice() -> void:
 	for k in VOICE_BANK:
 		_stream(String(VOICE_BANK[k]))
+	for r in ORDER_REPLIES:
+		_stream(String((r as Dictionary)["file"]))
 	_stream(MARCH_WALK_LOOP)
 	_stream(MARCH_RUN_LOOP)
 
@@ -926,6 +1083,8 @@ func play_voice(event: String) -> bool:
 	var path: String = String(VOICE_BANK.get(event, ""))
 	if path == "":
 		return false
+	var clip_from: float = 0.0
+	var clip_to: float = 0.0
 	var now: float = float(Time.get_ticks_msec()) * 0.001
 	# Сначала ОБЩЕЕ окно, потом своё: разные реплики подряд — это тоже каша
 	if now - _voice_last_any < VOICE_GLOBAL_GAP:
@@ -939,6 +1098,13 @@ func play_voice(event: String) -> bool:
 		if skip:
 			_voice_last[event] = now     # молчание тоже держит окно: «через раз»
 			return false
+	# ── РЕПЛИКА ИЗ ПУЛА: файл и кусок выбираются здесь, событие не меняется ──
+	if REPLY_POOL_EVENTS.has(event):
+		var r: Dictionary = _pick_reply()
+		path = String(r["file"])
+		clip_from = float(r.get("from", 0.0))
+		clip_to = float(r.get("to", 0.0))
+		reply_last_id = String(r["id"])
 	var s: AudioStream = _stream(path)
 	if s == null:
 		return false
@@ -948,11 +1114,54 @@ func play_voice(event: String) -> bool:
 	_unloop(s)
 	_voice_last[event] = now
 	_voice_last_any = now
+	# Горн орды — на своей шине с реверберацией, остальные — плоским пулом
+	if event == "horde_horn":
+		return _play_horn_stream(s, float(lim.get("db", -8.0)))
 	var v: AudioStreamPlayer = _voice_pool[_voice_next]
+	_voice_clip_end[_voice_next] = clip_to
 	_voice_next = (_voice_next + 1) % _voice_pool.size()
 	v.stream = s
 	v.volume_db = float(lim.get("db", -4.0))
-	v.play()
+	v.play(clip_from)
+	return true
+
+## Случайная реплика пула, не совпадающая с прошлой
+func _pick_reply() -> Dictionary:
+	var n: int = ORDER_REPLIES.size()
+	var i: int = rng.randi() % n
+	if n > 1 and i == _reply_last:
+		i = (i + 1 + rng.randi() % (n - 1)) % n
+	_reply_last = i
+	return ORDER_REPLIES[i]
+
+## Кусок составного файла кончился — голос глушится (позиция читается в
+## _process, раз в кадр по двум голосам — дёшево)
+func _tick_voice_clips() -> void:
+	for i in range(_voice_pool.size()):
+		var end: float = float(_voice_clip_end[i])
+		if end <= 0.0:
+			continue
+		var v: AudioStreamPlayer = _voice_pool[i]
+		if not v.playing:
+			_voice_clip_end[i] = 0.0
+			continue
+		if v.get_playback_position() >= end:
+			v.stop()
+			_voice_clip_end[i] = 0.0
+
+## ГОРН ОРДЫ. Два триггера (GoblinAI): первый контакт сторон и начало общего
+## наступления. Возвращает true, если горн реально пошёл
+func play_horn() -> bool:
+	horn_calls += 1
+	return play_voice("horde_horn")
+
+func _play_horn_stream(s: AudioStream, db: float) -> bool:
+	if _horn == null:
+		return false
+	_horn.stream = s
+	_horn.volume_db = db
+	_horn.play()
+	horn_played += 1
 	return true
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1392,7 +1601,7 @@ func _stream(path: String) -> AudioStream:
 ## работающих: до WORK_DENSITY_FULL слышно всё, к WORK_DENSITY_HALF остаётся
 ## половина, дальше — не меньше WORK_DENSITY_FLOOR.
 ## Категории, к которым это применяется (звуки инструмента):
-const WORK_CATS := {"chop": true, "mine_gold": true, "mine_stone": true}
+const WORK_CATS := {"chop": true, "mine_gold": true, "mine_stone": true, "build_hammer": true}
 const WORK_DENSITY_FULL  := 6      # столько работяг слышно полностью
 const WORK_DENSITY_HALF  := 36     # при стольких остаётся половина ударов
 const WORK_DENSITY_FLOOR := 0.35   # ниже этой доли не опускаемся
@@ -1419,8 +1628,15 @@ func _audible_at(at: Vector3) -> bool:
 		return true
 	return fog.is_lit(at.x, at.z)
 
+## Трассировка по категориям — ТОЛЬКО для стендов (одно сравнение bool в
+## горячем пути; словарь растёт лишь при включённом флаге)
+var sfx_trace: bool = false
+var sfx_trace_counts: Dictionary = {}
+
 func play_3d(cat: String, at: Vector3) -> bool:
 	sfx_calls += 1
+	if sfx_trace:
+		sfx_trace_counts[cat] = int(sfx_trace_counts.get(cat, 0)) + 1
 	if not enabled:
 		return false
 	# ── УМОЛЧАНИЕ У `get` ВЫЧИСЛЯЕТСЯ ВСЕГДА, ДАЖЕ ПРИ ПОПАДАНИИ ───────────
@@ -1452,7 +1668,10 @@ func play_3d(cat: String, at: Vector3) -> bool:
 	# чтобы занять меньше голосов, а в том, чтобы сорок топоров не били в ухо
 	# одновременно. Решение случайное на каждый удар, поэтому стук остаётся
 	# живым и рваным, а не превращается в метроном из каждого N-го рабочего
-	if WORK_CATS.has(cat) and randf() > work_density():
+	# Молоток строителя (новая категория, спринт 18) прореживается жребием из
+	# генератора звука: общий поток партии обязан потреблять ровно столько
+	# randf(), сколько до спринта, — иначе сеяные стенды едут (см. rng)
+	if WORK_CATS.has(cat) and (rng.randf() if cat == "build_hammer" else randf()) > work_density():
 		return false
 	# ДАЛЬНИЙ ЗВУК ОТСЕКАЕТСЯ ДО ПУЛА. Голосов всего POOL_SIZE, а слышно только
 	# в радиусе SFX_MAX_DISTANCE. Без этой отсечки свалка на другом конце карты
@@ -1482,7 +1701,7 @@ func play_3d(cat: String, at: Vector3) -> bool:
 	# и категория навсегда теряет по голосу на каждый пропавший файл.
 	# Порядок «сначала поток, потом голос» снимает вопрос целиком.
 	var fname: String = String(files[randi() % files.size()])
-	var s: AudioStream = _stream(DIR_SFX + fname)
+	var s: AudioStream = _stream(sfx_path(fname))
 	if s == null:
 		return false
 	var voice: AudioStreamPlayer3D = _take_voice(cat, int(lim.get("voices", 3)))
@@ -1491,7 +1710,9 @@ func play_3d(cat: String, at: Vector3) -> bool:
 	_cat_last[cat] = now
 	voice.stream = s
 	voice.global_position = at
-	voice.volume_db = float(lim.get("db", -6.0))
+	# Дрожание громкости (спринт 18, крики орды): ± db_jitter дБ на запуск
+	var jit: float = float(lim.get("db_jitter", 0.0))
+	voice.volume_db = float(lim.get("db", -6.0)) + (rng.randf_range(-jit, jit) if jit > 0.0 else 0.0)
 	# ── КАТЕГОРИЯ БЕЗ ЗАТУХАНИЯ ПО ДИСТАНЦИИ (flat) ────────────────────────
 	# Нужна ровно тем звукам, которые являются СЛОЕМ АТМОСФЕРЫ, а не событием
 	# в точке: лязг доспехов на марше — часть шагов, и он обязан вести себя как
@@ -1523,6 +1744,64 @@ func play_3d(cat: String, at: Vector3) -> bool:
 	voice.play()
 	sfx_played += 1
 	return true
+
+## ── ХОР СМЕХА НАД ВЫБИТЫМ ОТРЯДОМ (спринт 18) ────────────────────────────
+## Все файлы категории разом, каждый со своей микро-задержкой (эффект толпы).
+## Слышимость проверяется ОДИН РАЗ, в момент гибели последнего бойца: точка
+## ещё освещена его же обзором, маска тумана пересчитывается раз в 0.15 с, и
+## отложенные голоса не должны заново спрашивать пелену — иначе половина хора
+## молчала бы, «закрытая» туманом, который закрылся на долю секунды позже.
+## Возвращает число голосов, которым назначен старт
+func play_chorus(cat: String, at: Vector3) -> int:
+	if sfx_trace:
+		sfx_trace_counts[cat] = int(sfx_trace_counts.get(cat, 0)) + 1
+	if not enabled:
+		return 0
+	var fv: Variant = SFX_BANK.get(cat)
+	if fv == null:
+		return 0
+	var files: Array = fv
+	if files.is_empty() or not _audible_at(at):
+		return 0
+	var lis: Node3D = _listener_node()
+	if lis != null and lis.global_position.distance_squared_to(at) \
+			> SFX_CULL_DISTANCE * SFX_CULL_DISTANCE:
+		return 0
+	var now: float = float(Time.get_ticks_msec()) * 0.001
+	if now - _laugh_last < LAUGH_CHORUS_GAP:
+		return 0
+	_laugh_last = now
+	laugh_chorus_count += 1
+	var lv: Variant = SFX_LIMITS.get(cat)
+	var lim: Dictionary = lv if lv != null else _EMPTY_LIMITS
+	var n := 0
+	for i in range(files.size()):
+		var fname: String = String(files[i])
+		var s: AudioStream = _stream(sfx_path(fname))
+		if s == null:
+			continue
+		var delay: float = rng.randf_range(0.0, LAUGH_STAGGER_MAX) if i > 0 else 0.0
+		n += 1
+		if delay <= 0.0:
+			_chorus_voice(cat, s, at, lim)
+		else:
+			get_tree().create_timer(delay).timeout.connect(_chorus_voice.bind(cat, s, at, lim))
+	return n
+
+func _chorus_voice(cat: String, s: AudioStream, at: Vector3, lim: Dictionary) -> void:
+	var voice: AudioStreamPlayer3D = _take_voice(cat, int(lim.get("voices", 4)))
+	if voice == null:
+		return
+	voice.stream = s
+	voice.global_position = at
+	voice.volume_db = float(lim.get("db", -6.0))
+	voice.attenuation_model = AudioStreamPlayer3D.ATTENUATION_INVERSE_SQUARE_DISTANCE
+	voice.unit_size = SFX_UNIT_SIZE
+	var pr: Array = lim.get("pitch", DEFAULT_PITCH_RANGE)
+	# Питч хора — тоже из генератора звука (голоса новые, общий поток не трогаем)
+	voice.pitch_scale = rng.randf_range(float(pr[0]), float(pr[1]))
+	voice.play()
+	sfx_played += 1
 
 # ── МУЗЫКА И ЭМБИЕНТ ─────────────────────────────────────────────────────────
 
@@ -1569,12 +1848,26 @@ func start_game_audio() -> void:
 	_ambience.stream = s
 	_ambience.volume_db = AMBIENCE_DB
 	_ambience.play()
+	# Река: поток заведён и зациклен, громкость ведёт _tick_river из _process;
+	# стартует в тишине — у камеры на старте партии реки рядом нет
+	var rs: AudioStream = _stream(AMBIENCE_RIVER)
+	if rs != null and _river != null:
+		_loop(rs)
+		_river.stream = rs
+		_river_gain = 0.0
+		river_target = 0.0
+		_river.volume_db = -80.0
+		_river.play()
 
 func stop_all_music() -> void:
 	_in_game = false
 	_fade_dir = 0.0
 	_music.stop()
 	_ambience.stop()
+	if _river != null:
+		_river.stop()
+		_river_gain = 0.0
+		river_target = 0.0
 	# Марш — тоже зациклённый поток, и он не кончится сам никогда
 	march_stop_all()
 
@@ -1603,6 +1896,10 @@ func set_paused(on: bool) -> void:
 		_music.stream_paused = on
 	if _ambience != null and is_instance_valid(_ambience):
 		_ambience.stream_paused = on
+	if _river != null and is_instance_valid(_river):
+		_river.stream_paused = on
+	if _horn != null and is_instance_valid(_horn):
+		_horn.stream_paused = on
 	for p in _pool:
 		var v: AudioStreamPlayer3D = p
 		if v != null and is_instance_valid(v):
@@ -1689,6 +1986,8 @@ func _process(delta: float) -> void:
 	# ПОСЛЕ проверки паузы — на паузе голоса заморожены, и досушивать хвост
 	# нечему; он досохнет, когда паузу снимут
 	_tick_march(delta)
+	_tick_voice_clips()
+	_tick_river(delta)
 	# Очередь реплик (рог -> клич, см. play_voice_chain). ПОСЛЕ проверки паузы:
 	# на паузе приказов не отдают, и договаривать начатую цепочку не надо
 	_drain_voice_queue()
@@ -1721,6 +2020,40 @@ func _process(delta: float) -> void:
 		var left: float = _music.stream.get_length() - _music.get_playback_position()
 		if left <= MUSIC_FADE:
 			_fade_dir = -1.0
+
+## ── РЕКА: ЦЕЛЬ ПО ГЕОМЕТРИИ, ГРОМКОСТЬ — СГЛАЖИВАНИЕМ ────────────────────
+## Расстояние от точки фокуса до КРОМКИ русла (полуширина RIVER_HALF_W у Main),
+## внутри русла — ноль. Карта без реки или сцена без камеры — тишина
+func river_gain_at(p: Vector3) -> float:
+	var mn = GameManager.main
+	if mn == null or not is_instance_valid(mn) or not mn.has_method("river_x"):
+		return 0.0
+	if not bool(mn.RIVER_ENABLED) or not bool(mn.river_in_field(p.z)):
+		return 0.0
+	var half: float = float(mn.RIVER_HALF_W)
+	var edge: float = maxf(absf(p.x - float(mn.river_x(p.z))) - half, 0.0)
+	if edge >= RIVER_FADE_M:
+		return 0.0
+	var t: float = 1.0 - edge / RIVER_FADE_M
+	return t * t * (3.0 - 2.0 * t)       # smoothstep: мягкий вход у кромки
+
+func _tick_river(delta: float) -> void:
+	if _river == null or not _in_game or not _river.playing:
+		return
+	var target: float = 0.0
+	if GameManager.has_view_point():
+		target = river_gain_at(GameManager.view_point()) * march_zoom_gain()
+	river_target = target
+	if target > _river_gain:
+		_river_gain = minf(_river_gain + delta / RIVER_FADE_IN_SEC, target)
+	elif target < _river_gain:
+		_river_gain = maxf(_river_gain - delta / RIVER_FADE_OUT_SEC, target)
+	_river.volume_db = RIVER_DB + linear_to_db(maxf(_river_gain, 0.0001)) \
+		if _river_gain > 0.001 else -80.0
+
+## Текущая сглаженная доля громкости реки (для стендов)
+func river_gain() -> float:
+	return _river_gain
 
 ## Очередной трек плейлиста. Пропускает отсутствующие файлы, чтобы один
 ## недостающий не останавливал музыку на всю партию

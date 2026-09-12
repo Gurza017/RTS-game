@@ -36,6 +36,16 @@ func _sfx_swing() -> String:
 # ускоренным под щитом до конца партии.
 const RAGE_HITS := 5
 const RAGE_SPEED_MULT := 1.45
+## ── СТЕНА ЩИТОВ НА ПОСЛЕДНИХ МЕТРАХ РАЗГОНА (заказ владельца, спринт 15) ────
+## «Юнит бежит, а за 5-10 метров до цели включает "Стену щитов" (+30 % к
+## скорости) и влетает во врага». В набеге щит поднят с первого шага (см.
+## _update_guard), а вот РЫВОК — это отдельная фаза: пока до цели дальше
+## SHIELD_WALL_RANGE, мечник бежит набегом; ближе — стена щитов, скорость ещё
+## на SHIELD_WALL_SPEED_MULT выше, и в строй он входит на ней. Множитель
+## ставится ПОВЕРХ набега (после ветки щита — та же причина, что у
+## RAGE_SPEED_MULT: штраф щита не должен съесть рывок)
+const SHIELD_WALL_RANGE := 8.0
+const SHIELD_WALL_SPEED_MULT := 1.3
 ## Удары в серии БЫСТРЫЕ: доля обычной перезарядки
 const RAGE_COOLDOWN_MULT := 0.45
 const RAGE_SEC := 9.0
@@ -72,6 +82,19 @@ func rage_active() -> bool:
 
 func rage_left() -> int:
 	return _rage_left if rage_active() else 0
+
+## Стена щитов: набег идёт И до цели осталось не больше SHIELD_WALL_RANGE.
+## Цель читается сырой ссылкой (правило 5): в разгаре набега она гибнет чаще,
+## чем меняется
+func shield_wall_active() -> bool:
+	if not rage_active():
+		return false
+	var t = attack_target
+	if t == null or not is_instance_valid(t):
+		return false
+	var tp: Vector3 = (t as Node3D).global_position
+	var me: Vector3 = position if _local_xform else global_position
+	return Vector2(tp.x - me.x, tp.z - me.z).length() <= SHIELD_WALL_RANGE
 
 # Каждый 4-й удар — мощный: другой урон и другая анимация.
 # В НАБЕГЕ ротация другая — фиксированная пятёрка (см. RAGE_STRONG)
@@ -304,7 +327,10 @@ func _effective_speed() -> float:
 	# ставится ПОСЛЕ ветки щита (ниже), иначе 1.45 × 0.65 дало бы 0.94 — то
 	# есть «рывок» медленнее обычного марша
 	if rage_active():
-		return s * RAGE_SPEED_MULT
+		var m: float = RAGE_SPEED_MULT
+		if shield_wall_active():
+			m *= SHIELD_WALL_SPEED_MULT
+		return s * m
 	if _guard_active:
 		var stance_mult: float = _UStats.stance_stat(stance, "move_speed_mult", 1.0)
 		if stance_mult > GUARD_SPEED_FACTOR:

@@ -108,6 +108,14 @@ func _upgrade_damage_bonus() -> float:
 # почему 0.65 давало «дорогу из стрел» в пустом поле. Здесь только формула.
 # Базовый разброс в метрах даже по стоящей цели
 const SCATTER_BASE := 0.35
+## ── «ПО ГОТОВНОСТИ» — ШИРОКИЙ РАЗБРОС, ЗАЛП — КУЧНАЯ ТУЧА (спринт 16) ──────
+## Заказ: залп — «высокая точность и кучность, выгодный основной режим»;
+## по готовности — «увеличен разброс, больше промахов, стрелы накрывают
+## широкую область без фокуса». Залп и так кладёт стрелы золотым углом с
+## сантиметровым дрожанием (см. VOLLEY_JITTER); у одиночной стрельбы разброс
+## умножается на READY_SCATTER_MULT — множитель, а не новое число, чтобы
+## кузница и выучка резали его так же, как раньше
+const READY_SCATTER_MULT := 1.7
 # Добавка разброса на каждый м/с скорости цели: бегущая пехота ловит
 # заметно больше промахов, чем строй, стоящий на месте
 const SCATTER_PER_SPEED := 0.34
@@ -151,9 +159,22 @@ const VOLLEY_SLOTS := 97
 func _volley_offset(radius: float) -> Vector3:
 	if radius <= 0.01:
 		return Vector3.ZERO
-	var k: float = float(get_instance_id() % VOLLEY_SLOTS)
+	# ── МЕСТО В ТУЧЕ — ПОРЯДКОВЫЙ НОМЕР В ОТРЯДЕ (спринт 16) ─────────────
+	# Здесь стоял `get_instance_id() % VOLLEY_SLOTS`. Номера узлов у бойцов
+	# одного заказа идут с ОДИНАКОВЫМ шагом (сцена рождает одно и то же число
+	# объектов), и при шаге, кратном 97, весь отряд получал ОДНО k: залп
+	# ложился в точку в 1.1 м от центра чужого строя, мимо всех
+	# (qa_volley_fix B3 «залп 90 % в землю, разброс 0.07 м»; тот же жребий
+	# мигал в qa_volley D2 «совпавших пар»). Номер в отряде у всех разный по
+	# построению; одиночка без отряда — прежний путь
+	# Диск Фогеля на N точек заполняется равномерно, только если N — ЧИСЛО
+	# точек: с номерами 0..9 при делителе 97 все десять ложились в центральную
+	# треть радиуса, и залп задевал двоих из шестнадцати (qa_volley D5)
+	var ord: int = GameManager.squad_member_ordinal(squad_id, self)
+	var n: int = GameManager.squad_member_count(squad_id) if ord >= 0 else VOLLEY_SLOTS
+	var k: float = float((ord if ord >= 0 else int(get_instance_id())) % maxi(n, 1))
 	var ang: float = k * 2.39996323            # золотой угол, радианы
-	var r: float = sqrt((k + 0.5) / float(VOLLEY_SLOTS)) * radius
+	var r: float = sqrt((k + 0.5) / float(maxi(n, 1))) * radius
 	return Vector3(cos(ang) * r, 0.0, sin(ang) * r)
 
 ## Уровень выучки отряда: он же уровень ветеранства. Одиночка вне отряда —
@@ -233,7 +254,13 @@ func _on_attack_fired(target: Node3D, damage: float) -> void:
 	# уходил в точку, которую цель уже покинула
 	# ВЫСОТА ПРИЦЕЛА — У ЦЕЛИ, А НЕ ЧИСЛОМ ЗДЕСЬ (заказ 10.09.2026): у тролля
 	# 0.8 м это ступни, и весь залп уходил в землю под ним
-	var aim_h: float = (target as Unit).aim_height() if target is Unit else 0.8
+	# У постройки тоже может быть своя точка (пень тролля: центр пня, а не
+	# корни, см. TrollLair.aim_height); у прочих зданий — прежние 0.8
+	var aim_h: float = 0.8
+	if target is Unit:
+		aim_h = (target as Unit).aim_height()
+	elif target != null and target.has_method("aim_height"):
+		aim_h = float(target.call("aim_height"))
 	var tbase: Vector3 = target.global_position + Vector3(0, aim_h, 0)
 	var aim := tbase
 	var lead_k: float = _UStats.ARCHER_LEAD_FACTOR
@@ -276,7 +303,8 @@ func _on_attack_fired(target: Node3D, damage: float) -> void:
 	if not volley:
 		# ── ОБЫЧНЫЙ РАЗБРОС ─────────────────────────────────────────────────
 		# Чем быстрее цель, тем больше промахов: такие стрелы уходят в землю рядом
-		var scatter := SCATTER_BASE + tvel.length() * SCATTER_PER_SPEED
+		var scatter := (SCATTER_BASE + tvel.length() * SCATTER_PER_SPEED) \
+			* READY_SCATTER_MULT
 		# КУЧНОСТЬ ИЗ КУЗНИЦЫ (bonus_spread) — доля, на которую срезается
 		# разброс. Зажата в [0; 0.9): полностью обнулять разброс исследованием
 		# нельзя, иначе весь отряд кладёт стрелы в одну точку и добивает уже

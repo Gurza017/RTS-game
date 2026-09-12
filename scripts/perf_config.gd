@@ -83,6 +83,42 @@ static var mm_render_all: bool = true
 ## говорит, где внутри тика деньги. См. qa_perf/Test.gd: включает флаг,
 ## печатает разбивку в конце замера.
 static var profile_physics: bool = false
+## ── ИЗМЕРИТЕЛЬ ПО РОДАМ ВОЙСК (спринт 19, стресс-отчёт) ────────────────────
+## Пара get_ticks_usec вокруг tick_physics КАЖДОГО бойца с раскладкой по
+## stat_id: сколько миллисекунд кадра стоит класс и сколько — один тик бойца.
+## Дорого (два вызова часов на бойца), поэтому выключен; включает стенд.
+## Навигация меряется отдельно (nav_usec — время NavPath в GameManager)
+static var class_meter: bool = false
+static var _class_usec: Dictionary = {}
+static var _class_ticks: Dictionary = {}
+static var _class_frames: int = 0
+static var nav_usec: int = 0
+static var nav_calls: int = 0
+
+static func class_reset() -> void:
+	_class_usec = {}
+	_class_ticks = {}
+	_class_frames = 0
+	nav_usec = 0
+	nav_calls = 0
+
+static func class_add(id: String, usec: int) -> void:
+	_class_usec[id] = int(_class_usec.get(id, 0)) + usec
+	_class_ticks[id] = int(_class_ticks.get(id, 0)) + 1
+
+static func class_frame() -> void:
+	_class_frames += 1
+
+## [[id, мс на кадр, мкс на тик, тиков], …] по убыванию мс на кадр
+static func class_report() -> Array:
+	var rows: Array = []
+	var fr: float = float(maxi(_class_frames, 1))
+	for id in _class_usec:
+		var total: int = int(_class_usec[id])
+		var ticks: int = int(_class_ticks.get(id, 1))
+		rows.append([String(id), float(total) / 1000.0 / fr, float(total) / float(maxi(ticks, 1)), ticks])
+	rows.sort_custom(func(a, b): return float(a[1]) > float(b[1]))
+	return rows
 static var _prof_usec: Dictionary = {}
 static var _prof_calls: Dictionary = {}
 

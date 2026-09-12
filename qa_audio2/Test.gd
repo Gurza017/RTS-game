@@ -461,6 +461,7 @@ func _d_leaks() -> void:
 	files += AudioManager.VOICE_BANK.size()       # реплики команд
 	files += AudioManager.MUSIC_PLAYLIST.size()   # игровые треки
 	files += 4                                    # лес, тема меню, два лупа марша
+	files += 3                                    # спринт 18: река, «go go go», «come on»
 	var cache_n: int = AudioManager._streams.size()
 	print("  кэш потоков: %d ключей при %d файлах во всех банках" % [
 		cache_n, files])
@@ -501,7 +502,7 @@ func _d_leaks() -> void:
 	# Спрашиваем объявленный размер пула, а не число одновременных голосов —
 	# иначе проверка судит об одном, а код строит другое
 	var want_3d: int = AudioManager.POOL_SIZE + AudioManager.MARCH_POOL_SIZE
-	var want_flat: int = 2 + AudioManager.UI_VOICES + AudioManager.VOICE_VOICES
+	var want_flat: int = 4 + AudioManager.UI_VOICES + AudioManager.VOICE_VOICES   # +река, +горн (спринт 18)
 	print("  детей у AudioManager: 3D-голосов %d (ждём %d = бой %d + марш %d), плоских %d (ждём %d)" % [
 		players, want_3d, AudioManager.POOL_SIZE, AudioManager.MARCH_POOL_SIZE,
 		streamers, want_flat])
@@ -611,7 +612,7 @@ func _e_edges() -> void:
 			streamers += 1
 	# Плоских плееров столько же, сколько объявлено (см. разбор у D5): «два»
 	# здесь означало «тема и лес» и не учитывало ни интерфейс, ни реплики
-	var want_flat2: int = 2 + AudioManager.UI_VOICES + AudioManager.VOICE_VOICES
+	var want_flat2: int = 4 + AudioManager.UI_VOICES + AudioManager.VOICE_VOICES
 	print("  двойной старт партии: позиция леса %.2f → %.2f с, плееров %d (ждём %d), тема молчит=%s, таймер %.0f с" % [
 		pos1, pos2, streamers, want_flat2, str(not AudioManager._music.playing),
 		AudioManager.seconds_to_music()])

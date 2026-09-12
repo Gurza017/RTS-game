@@ -5,13 +5,12 @@ extends Node
 ## ═══════════════════════════════════════════════════════════════════════════
 ##   A СКОРОСТЬ — на патруле шаг из конфига, с целью ×TROLL_COMBAT_SPEED_MULT,
 ##     без цели снова обычный.
-##   B АГРО-ВЫЗОВ — первый удар по стражу: он агрится на обидчика, из логова
-##     сразу выходят TROLL_AGGRO_HELPERS с приказом на обидчика; второй удар
-##     никого не добавляет.
-##   C БОНУСНАЯ ПАРА — вся группа выбита → мгновенно ещё TROLL_AGGRO_BONUS,
-##     логово НЕ считается зачищенным.
-##   D СТАНДАРТ — у бонусной пары действует прежняя подмога на трети запаса
-##     (один тролль), повторного агро-вызова нет; выбили всех — логово зачищено.
+##   B СОЛИДАРНОСТЬ (спринт 20) — задели одного стража: дерётся только он,
+##     из пня никто не выходит; задели двоих в TROLL_SOLIDARITY_SEC — все
+##     тролли логова идут на обидчика.
+##   C ПОВОДОК ПОГОНИ (спринт 20) — TROLL_CHASE_SEC без удара: цель брошена,
+##     тролль возвращается к пню; агро только в TROLL_AGGRO_RADIUS.
+##   D ЗАЧИСТКА — выбили всех: логово зачищено, бонусной пары нет.
 ## Запуск: godot --headless --path . res://qa_troll_aggro/Test.tscn
 
 const _GobCfg := preload("res://scripts/goblin/goblin_config.gd")
@@ -130,9 +129,19 @@ func _run() -> void:
 	verdict("A4 цели нет — снова обычный шаг", is_equal_approx(troll.move_speed, base_spd),
 		"move_speed %.2f" % troll.move_speed)
 
-	# ── B. Агро-вызов ──────────────────────────────────────────────────────
-	print("\n═════ B. АГРО-ВЫЗОВ ═════")
-	var n0: int = _alive_trolls(lair).size()
+	# ── B. Солидарность стражей (спринт 20) ────────────────────────────────
+	# Задели ОДНОГО — дерётся только он; задели ДВОИХ в TROLL_SOLIDARITY_SEC —
+	# все тролли логова идут на обидчика. Помощников из пня по удару больше
+	# не выходит (TROLL_AGGRO_HELPERS = 0)
+	print("\n═════ B. СОЛИДАРНОСТЬ СТРАЖЕЙ ═════")
+	lair.call("spawn_guards", 2)
+	await pframes(2)
+	var all_t: Array = _alive_trolls(lair)
+	for t in all_t:
+		(t as Unit).set("_hunger_t", 1.0e6)
+		(t as Unit).command_move((t as Unit).global_position)
+	await pframes(2)
+	var n0: int = all_t.size()
 	var hitters: Array = _spawn_squad("spearman", troll.global_position + Vector3(6.0, 0.0, 0.0), 2)
 	for h in hitters:
 		(h as Unit).set_tick(false)
@@ -140,70 +149,97 @@ func _run() -> void:
 	troll.take_damage(50.0, hitter)
 	await pframes(2)
 	var after: Array = _alive_trolls(lair)
-	verdict("B1 первый удар — из логова сразу вышли ещё %d тролля" % _GobCfg.TROLL_AGGRO_HELPERS,
-		after.size() == n0 + _GobCfg.TROLL_AGGRO_HELPERS and int(lair.get("aggro_wave")) == 1,
-		"было %d, стало %d, волна %d" % [n0, after.size(), int(lair.get("aggro_wave"))])
+	verdict("B1 удар по одному стражу: из пня НИКТО не выходит (помощников %d)" % _GobCfg.TROLL_AGGRO_HELPERS,
+		after.size() == n0 and _GobCfg.TROLL_AGGRO_HELPERS == 0,
+		"было %d, стало %d" % [n0, after.size()])
 	verdict("B2 ужаленный страж агрится на обидчика", troll.attack_target == hitter)
-	# Приказ атаки раздаётся ПО ОТРЯДУ обидчика (squad_pick_member выбирает
-	# наименее обстрелянного) — считаем цели из его отряда
-	var helpers_on_foe := 0
+	var others_idle := 0
+	var second: Unit = null
 	for t in after:
+		if t == troll:
+			continue
+		if second == null:
+			second = t
 		var tg = (t as Unit).attack_target
-		if t != troll and tg != null and is_instance_valid(tg) and tg is Unit and (tg as Unit).squad_id == hitter.squad_id:
-			helpers_on_foe += 1
-	verdict("B3 помощники выходят с приказом на обидчика", helpers_on_foe == _GobCfg.TROLL_AGGRO_HELPERS,
-		"на обидчика %d" % helpers_on_foe)
-	troll.take_damage(50.0, hitter)
-	(after[1] as Unit).take_damage(50.0, hitter)
+		if tg == null or not is_instance_valid(tg) or not (tg is Unit) \
+				or (tg as Unit).squad_id != hitter.squad_id:
+			others_idle += 1
+	verdict("B3 остальные стражи в бой не рвутся (%d из %d без цели на обидчика)" % [others_idle, after.size() - 1],
+		others_idle == after.size() - 1)
+	# Второй удар — по ДРУГОМУ троллю в окне солидарности
+	if second != null:
+		second.take_damage(50.0, hitter)
 	await pframes(2)
-	verdict("B4 повторные удары по группе никого не добавляют",
-		_alive_trolls(lair).size() == after.size(), "троллей %d" % _alive_trolls(lair).size())
-	troll.current_health = troll.max_health * 0.2
-	troll._soa_push_stats()
-	troll.take_damage(10.0, hitter)
-	await pframes(2)
-	verdict("B5 у первой группы порог трети запаса подмогу не зовёт",
-		_alive_trolls(lair).size() == after.size(), "троллей %d" % _alive_trolls(lair).size())
-
-	# ── C. Бонусная пара ───────────────────────────────────────────────────
-	print("\n═════ C. БОНУСНАЯ ПАРА ═════")
-	var spawns_before: int = int(lair.get("aggro_spawns"))
-	_kill_all(lair)
-	await pframes(3)
-	var bonus: Array = _alive_trolls(lair)
-	verdict("C1 группа выбита — мгновенно вышли ещё %d тролля" % _GobCfg.TROLL_AGGRO_BONUS,
-		bonus.size() == _GobCfg.TROLL_AGGRO_BONUS and int(lair.get("aggro_wave")) == 2
-			and int(lair.get("aggro_spawns")) == spawns_before + _GobCfg.TROLL_AGGRO_BONUS,
-		"троллей %d, волна %d" % [bonus.size(), int(lair.get("aggro_wave"))])
-	verdict("C2 логово ещё не зачищено", not GameManager.troll_lair_cleared())
 	var on_foe := 0
-	for b in bonus:
-		var tg2 = (b as Unit).attack_target
+	for t in _alive_trolls(lair):
+		var tg2 = (t as Unit).attack_target
 		if tg2 != null and is_instance_valid(tg2) and tg2 is Unit and (tg2 as Unit).squad_id == hitter.squad_id:
 			on_foe += 1
-	verdict("C3 бонусная пара идёт на последнего обидчика", on_foe == bonus.size(), "на обидчика %d" % on_foe)
-
-	# ── D. Стандартный алгоритм и зачистка ─────────────────────────────────
-	print("\n═════ D. СТАНДАРТ И ЗАЧИСТКА ═════")
-	var b0: Unit = bonus[0]
-	var n_before: int = _alive_trolls(lair).size()
-	b0.take_damage(50.0, hitter)
+	verdict("B4 задели двоих — ВСЕ стражи логова идут на обидчика", on_foe == _alive_trolls(lair).size()
+		and int(lair.get("solidarity_calls")) >= 1,
+		"на обидчика %d из %d, вызовов %d" % [on_foe, _alive_trolls(lair).size(), int(lair.get("solidarity_calls"))])
+	troll.take_damage(50.0, hitter)
 	await pframes(2)
-	verdict("D1 удар по бонусному троллю повторного агро-вызова не даёт",
-		_alive_trolls(lair).size() == n_before, "троллей %d" % _alive_trolls(lair).size())
-	b0.current_health = b0.max_health * (_GobCfg.TROLL_REINFORCE_AT + 0.02)
-	b0._soa_push_stats()
-	b0.take_damage(b0.max_health * 0.1, hitter)
-	await pframes(3)
-	verdict("D2 …а прежняя подмога на трети запаса у него действует (+%d)" % _GobCfg.TROLL_REINFORCE_COUNT,
-		_alive_trolls(lair).size() == n_before + _GobCfg.TROLL_REINFORCE_COUNT,
+	verdict("B5 повторные удары никого не добавляют", _alive_trolls(lair).size() == after.size(),
 		"троллей %d" % _alive_trolls(lair).size())
+
+	# ── C. Поводок погони и малый радиус агро ──────────────────────────────
+	print("\n═════ C. ПОВОДОК ПОГОНИ ═════")
+	for t in _alive_trolls(lair):
+		if t != troll:
+			(t as Unit).set_tick(false)
+	for h in hitters:
+		(h as Unit).take_damage(1.0e9)
+	await pframes(3)
+	troll.command_move(troll.global_position)
+	await pframes(3)
+	# Недосягаемая приманка: бессмертный копейщик за TROLL_CHASE_SEC × скорость
+	var far_bait: Array = _spawn_squad("spearman", troll.global_position + Vector3(60.0, 0.0, 0.0), 1)
+	var fb: Unit = far_bait[0]
+	fb.set_tick(false)
+	troll.command_attack(fb, true, true)
+	await pframes(30)
+	verdict("C1 тролль гонится за целью", troll.attack_target == fb and troll.chase_left() < _GobCfg.TROLL_CHASE_SEC,
+		"осталось %.1f с" % troll.chase_left())
+	var lp2: Vector3 = (lair as Node3D).global_position
+	await pframes(int(_GobCfg.TROLL_CHASE_SEC * 60.0) + 10)
+	verdict("C2 через %.0f с без удара агро сброшено" % _GobCfg.TROLL_CHASE_SEC,
+		troll.attack_target == null and troll.chase_resets == 1,
+		"цель %s, сбросов %d" % [str(troll.attack_target), troll.chase_resets])
+	var d_mid: float = Vector2(troll.global_position.x - lp2.x, troll.global_position.z - lp2.z).length()
+	await pframes(90)
+	var d_home: float = Vector2(troll.global_position.x - lp2.x, troll.global_position.z - lp2.z).length()
+	verdict("C3 …и возвращается к пню (%.1f → %.1f м от пня)" % [d_mid, d_home], d_home < d_mid - 1.0)
+	verdict("C4 приманка в 60 м агро не взводит (радиус %.0f м)" % _GobCfg.TROLL_AGGRO_RADIUS,
+		troll.attack_target == null and troll.aggro_radius() == _GobCfg.TROLL_AGGRO_RADIUS)
+	fb.take_damage(1.0e9)
+	# Остывание после сброса (TROLL_CHASE_COOL_SEC) — тролль стоит и ждёт
+	await pframes(int(troll.TROLL_CHASE_COOL_SEC * 60.0) + 10)
+	troll.command_move(troll.global_position)
+	await pframes(3)
+	var near_bait: Array = _spawn_squad("spearman", troll.global_position + Vector3(_GobCfg.TROLL_AGGRO_RADIUS - 4.0, 0.0, 0.0), 1)
+	var nb: Unit = near_bait[0]
+	nb.set_tick(false)
+	var got := false
+	for _w in range(240):
+		await get_tree().physics_frame
+		if troll.attack_target == nb:
+			got = true
+			break
+	verdict("C5 враг внутри радиуса агро — тролль берёт его сам", got)
+	nb.take_damage(1.0e9)
+	await pframes(3)
+
+	# ── D. Зачистка ────────────────────────────────────────────────────────
+	print("\n═════ D. ЗАЧИСТКА ═════")
 	var rounds := 0
 	while rounds < 5 and not _alive_trolls(lair).is_empty():
 		rounds += 1
 		_kill_all(lair)
 		await pframes(3)
-	verdict("D3 выбили всех — логово зачищено, новых спавнов нет",
-		GameManager.troll_lair_cleared() and _alive_trolls(lair).is_empty() and rounds <= 2,
+	verdict("D1 выбили всех — логово зачищено, бонусной пары нет (TROLL_AGGRO_BONUS %d)" % _GobCfg.TROLL_AGGRO_BONUS,
+		GameManager.troll_lair_cleared() and _alive_trolls(lair).is_empty() and rounds == 1,
 		"кругов %d, троллей %d" % [rounds, _alive_trolls(lair).size()])
+	verdict("D2 стражей у пня не больше %d (спавн −20 %%)" % _GobCfg.TROLL_GUARDS_MAX,
+		_GobCfg.TROLL_GUARDS_MAX == 2)
 	_finish()

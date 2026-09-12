@@ -151,8 +151,10 @@ func _b_gnolls() -> void:
 		float(g.get("attack_range", 999.0)) < float(ar.get("attack_range", 0.0)) * 0.75,
 		"%.1f м против %.1f у лучника" % [
 			float(g.get("attack_range", 0.0)), float(ar.get("attack_range", 0.0))])
-	verdict("B4 дуга кости КРУЧЕ стрелковой (навесной бросок)",
-		_GobCfg.GNOLL_BONE_ARC > _UCfg.stat("archer", "arrow_arc", 0.5),
+	# СПРИНТ 15 РАЗВЕРНУЛ: «кость летит почти по прямой, как бросок от руки, а
+	# не навесом» — дуга ниже стрелковой
+	verdict("B4 дуга кости ПОЛОЖЕ стрелковой (бросок от руки, спринт 15)",
+		_GobCfg.GNOLL_BONE_ARC < _UCfg.stat("archer", "arrow_arc", 0.5),
 		"дуга %.2f против %.2f" % [_GobCfg.GNOLL_BONE_ARC,
 			_UCfg.stat("archer", "arrow_arc", 0.5)])
 
@@ -212,8 +214,17 @@ func _b_gnolls() -> void:
 	# Жертва не должна ни двигаться, ни отвечать — меряем броски
 	victim.set_tick(false)
 	var arrows0: int = GameManager.arrows_mm.flight_count()
+	# ── СПРИНТ 15: КОСТЬ ВЫЛЕТАЕТ НА КАДРЕ ЗАМАХА, А НЕ В ТОТ ЖЕ ТИК ──────
+	# Бросок отложен на _throw_delay и живёт в тике гнолла: двадцать четыре
+	# вызова подряд дали бы ОДНУ кость (каждый следующий перебивает замах).
+	# Ждём каждый бросок и держим метателя на месте (патруль иначе уводит)
+	var pin_g: Vector3 = gn.global_position
 	for _i in range(24):
 		gn._on_attack_fired(victim, gn.attack_damage)
+		for _f in range(int(gn.call("_throw_delay") * 60.0) + 3):
+			gn.global_position = pin_g
+			gn.sync_row()
+			await get_tree().physics_frame
 	await pframes(2)
 	print("  брошено костей %d, из них промахов %d; полётов в слое стрел %d, в слое костей %d" % [
 		int(gn.bones_thrown), int(gn.bones_missed),
@@ -346,11 +357,12 @@ func _c_pen() -> void:
 	verdict("C9 потолок стада в загоне — %d голов" % _UCfg.SHEEP_PEN_CAPACITY,
 		s1.flock_limit() == _UCfg.SHEEP_PEN_CAPACITY,
 		"потолок %d" % s1.flock_limit())
-	# ── ОВЦА ХОДИТ И ВНУТРЬ, И НАРУЖУ: радиус выпаса ШИРЕ самой ограды ────
-	verdict("C10 радиус выпаса шире ограды: овца заходит и выходит",
-		s1.graze_radius() > maxf(pen.build_size.x, pen.build_size.z) * 0.5,
-		"радиус %.1f м при полуширине ограды %.1f м" % [
-			s1.graze_radius(), maxf(pen.build_size.x, pen.build_size.z) * 0.5])
+	# ── СПРИНТ 19 (письмо 10): первые INSIDE_CAP пасутся ВНУТРИ ограды, лишние
+	# — вокруг в OVERFLOW_RADIUS (разворот прежнего «заходит и выходит»)
+	verdict("C10 первая овца загона пасётся ВНУТРИ ограды (радиус %.1f < полуширины %.1f), лишние — в %.0f м" % [
+			s1.graze_radius(), minf(pen.build_size.x, pen.build_size.z) * 0.5, pen.OVERFLOW_RADIUS],
+		s1.graze_radius() < minf(pen.build_size.x, pen.build_size.z) * 0.5
+			and pen.OVERFLOW_RADIUS > maxf(pen.build_size.x, pen.build_size.z) * 0.5)
 	# ── ПОТОЛОК ВЫПАСА У ЗАМКА ───────────────────────────────────────────
 	var s2: Node3D = SheepS.new()
 	main.world_add(s2)

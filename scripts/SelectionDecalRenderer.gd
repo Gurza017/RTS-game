@@ -447,6 +447,9 @@ static func fine_ring_scale(n) -> float:
 ## крупного бойца — его собственное растяжение по осям
 static func fine_ring_oval(n) -> Vector2:
 	if n is Building:
+		# Постройка вправе задать свой овал (пень тролля, спринт 15)
+		if (n as Node).has_method("ring_oval"):
+			return (n as Node).call("ring_oval")
 		return Vector2.ONE
 	var u := n as Unit
 	return u.ring_oval() if u != null else Vector2.ONE
@@ -564,7 +567,17 @@ func _update_hover_positions() -> void:
 		var dz: float = p.z - was.z
 		if dx * dx + dz * dz < 0.0004:
 			continue
-		_hover_write(_hover_slot[uu], p, uu.ring_scale(), false, uu.ring_oval())
+		# ── В ТОТ ЖЕ СЛОЙ И ТЕМ ЖЕ МЕШЕМ, ЧТО ПРИ ПОСТАНОВКЕ (спринт 16) ───
+		# Здесь стояло `_hover_write(idx, p, ring_scale(), false, …)`: индекс
+		# ТОНКОГО слоя (тролль, см. wants_fine_ring) писался в ГРУБЫЙ слой
+		# наведения грубым же масштабом ×3.57 — на экране это третье кольцо,
+		# толстое, у ног тролля, а его настоящее тонкое кольцо не двигалось
+		# (скриншот владельца: «три красных круга»). Слой и масштаб берутся
+		# ровно так же, как в set_hover_units
+		var in_b: bool = bool(_hover_in_b.get(uu, false))
+		_hover_write(_hover_slot[uu], p,
+			fine_ring_scale(uu) if in_b else uu.ring_scale(), in_b,
+			fine_ring_oval(uu) if in_b else uu.ring_oval())
 		_hover_last[uu] = p
 	for k in stale:
 		_hover_drop(k)

@@ -17,6 +17,7 @@ extends Node
 ##
 ## Числа берутся из goblin_config / unit_stats_config, а не из стенда.
 
+const _Diff := preload("res://scripts/game_difficulty_config.gd")
 const _GobCfg := preload("res://scripts/goblin/goblin_config.gd")
 const _UCfg   := preload("res://scripts/unit_stats_config.gd")
 
@@ -90,15 +91,28 @@ func _goblins() -> Array:
 func _horde_squads() -> Array:
 	var out: Array = []
 	for sq in GameManager.squads_of_faction(Constants.FACTION_GOBLIN):
-		if String((sq as Dictionary).get("type", "")) != "troll":
-			out.append(sq)
+		# Стражи логова — тролли и стая гноллов у пня (спринт 13) — не орда:
+		# их ставит логово, а не стартовый состав деревни
+		var kind: String = String((sq as Dictionary).get("type", ""))
+		if kind == "troll" or kind == "gnoll":
+			continue
+		# Стража рудника орды (спринт 17) — тоже не стартовый состав деревни
+		var ai = main.goblin_ai
+		if ai != null and ai.mine_guard_sids.has(int((sq as Dictionary).get("id", 0))):
+			continue
+		out.append(sq)
 	return out
 
 func _huts() -> Array:
 	var out: Array = []
 	for b in get_tree().get_nodes_in_group("goblin_buildings"):
-		if is_instance_valid(b) and String((b as Building).building_id) != "troll_lair":
-			out.append(b)
+		if not is_instance_valid(b):
+			continue
+		var bid: String = String((b as Building).building_id)
+		# Логово и захваченный ордой рудник (спринт 17) — не хижины
+		if bid == "troll_lair" or bid == "mine":
+			continue
+		out.append(b)
 	return out
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -287,7 +301,8 @@ func _e_dormant() -> void:
 	for s in ai.squads:
 		for m in (s as Dictionary)["members"]:
 			ai._set_dormant(m as Unit, true)
-	ai.tick()
+	# СПРИНТ 17: срока спячки нет (0 с) — такт вожака разбудил бы орду тут же.
+	# Механизм сна проверяется без такта: усыплённые не тикают и не ходят
 	var ticking := 0
 	for g in _goblins():
 		if (g as Unit).is_physics_processing():
@@ -308,9 +323,11 @@ func _e_dormant() -> void:
 		_Opt.shards_for(act) <= _Opt.shards_for(live_n),
 		"шардов по ходящим %d, по реестру %d" % [
 			_Opt.shards_for(act), _Opt.shards_for(live_n)])
-	verdict("E2 срок подъёма взят из конфига",
-		_GobCfg.DORMANT_UNTIL_SEC >= 1800.0,
-		"подъём на %.0f с" % _GobCfg.DORMANT_UNTIL_SEC)
+	# СПРИНТ 17: спячки больше нет (DORMANT_UNTIL_SEC = 0) — орда с первой
+	# секунды живёт МИРНОЙ ФАЗОЙ (патруль границ, без выхода к центру)
+	verdict("E2 спячки нет, мирная фаза не короче 10 минут",
+		is_zero_approx(_GobCfg.DORMANT_UNTIL_SEC) and _GobCfg.PEACE_SEC >= 600.0,
+		"спячка %.0f с, мир %.0f с" % [_GobCfg.DORMANT_UNTIL_SEC, _GobCfg.PEACE_SEC])
 	# ЧАСЫ ПРОБИЛИ
 	ai.clock = _GobCfg.DORMANT_UNTIL_SEC + 1.0
 	ai.tick()
@@ -320,7 +337,11 @@ func _e_dormant() -> void:
 			awake += 1
 	verdict("E3 в срок орда просыпается целиком", awake == _goblins().size(),
 		"проснулись %d из %d" % [awake, _goblins().size()])
-	verdict("E4 фаза после подъёма — штурм центра",
+	verdict("E4 фаза после подъёма — мирная (до PEACE_SEC к центру не идут)",
+		String(ai.phase) == ai.PHASE_PEACE, "фаза=%s" % String(ai.phase))
+	ai.clock = _Diff.goblin_peace_sec() + 1.0
+	ai._decide_phase()
+	verdict("E4б по истечении мирной фазы — штурм центра",
 		String(ai.phase) == ai.PHASE_CENTER, "фаза=%s" % String(ai.phase))
 	# ПОДЪЁМ ПО УДАРУ: спящая деревня не должна вырезаться бесплатно
 	ai.clock = 0.0
@@ -546,6 +567,9 @@ func _i_waves() -> void:
 	var pick: Dictionary = {}
 	for s2 in saved:
 		var d3: Dictionary = s2
+		# Гарнизон деревни и стража рудника (спринт 17) в волну не входят
+		if ai._is_special(int(d3["id"])):
+			continue
 		if String(d3["role"]) != ai.ROLE_HEAL and not (d3["members"] as Array).is_empty():
 			pick = d3
 			break
@@ -566,13 +590,16 @@ func _i_waves() -> void:
 	var arrived: bool = ai._horde_at_center()
 	var clear: bool = ai._center_clear()
 	ai._decide_phase()
-	verdict("I3 дошедшая до зачищенного центра орда идёт на слабейшего",
-		arrived and clear and String(ai.phase) == ai.PHASE_HUNT,
+	# СПРИНТ 17: из взятого центра орда НЕ идёт сразу на базу — фаза
+	# беспокойства (рейды, разведка, рудник на холме); штурм не раньше
+	# ASSAULT_EARLIEST_SEC и накопленной армии
+	verdict("I3 дошедшая до зачищенного центра орда переходит к рейдам",
+		arrived and clear and String(ai.phase) == ai.PHASE_HARASS,
 		"дошла=%s, центр пуст=%s, фаза=%s" % [str(arrived), str(clear), String(ai.phase)])
 	ai.village = saved_village
 	ai.squads = saved
-	# Слабейший выбирается по здоровью зданий и числу бойцов
-	var target: Vector3 = ai._weakest_target()
+	# Цель штурма — известная (разведанная) база, иначе ближайшая постройка
+	var target: Vector3 = ai._assault_target()
 	verdict("I4 цель охоты определена", target != Vector3.ZERO or true,
 		"точка (%.0f, %.0f)" % [target.x, target.z])
 
@@ -583,7 +610,7 @@ func _j_ui_sfx() -> void:
 	print("\n═════ J. ЗВУКИ ИНТЕРФЕЙСА ═════")
 	var missing: Array = []
 	for k in AudioManager.UI_BANK:
-		var path: String = AudioManager.DIR_UI + String(AudioManager.UI_BANK[k])
+		var path: String = AudioManager.ui_path(String(AudioManager.UI_BANK[k]))
 		if not ResourceLoader.exists(path):
 			missing.append(path)
 	verdict("J1 все файлы интерфейса на месте", missing.is_empty(),
@@ -632,8 +659,9 @@ func _j_ui_sfx() -> void:
 		AudioManager.ui_last == "order_unit", "прозвучало: %s" % AudioManager.ui_last)
 	AudioManager.ui_last = ""
 	GameManager.on_selection_changed([castle])
-	verdict("J8 выделение здания щёлкает click1",
-		AudioManager.ui_last == "pick_building", "прозвучало: %s" % AudioManager.ui_last)
+	# Спринт 18: щелчок зависит от типа здания (крепость — выстрел из лука)
+	verdict("J8 выделение здания щёлкает своим событием (%s)" % GameManager.pick_event_for("castle"),
+		AudioManager.ui_last == GameManager.pick_event_for("castle"), "прозвучало: %s" % AudioManager.ui_last)
 	var sp: Unit = load("res://scenes/units/Spearman.tscn").instantiate()
 	sp.faction = Constants.FACTION_PLAYER
 	main.world_add(sp)
@@ -866,6 +894,6 @@ func _k_village_and_look() -> void:
 		AudioManager.ui_last = ""
 		GameManager.on_selection_changed([cst])
 		verdict("K6б клик игрока по тому же зданию по-прежнему звучит",
-			AudioManager.ui_last == "pick_building",
+			AudioManager.ui_last == GameManager.pick_event_for("castle"),
 			"прозвучало: %s" % AudioManager.ui_last)
 	await pframes(2)

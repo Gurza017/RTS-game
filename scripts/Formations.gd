@@ -18,6 +18,22 @@
 ## копейщики держат фронт, лучники бьют из-за их спин, тяжёлая пехота — резерв.
 ## Типы, которых здесь нет (рабочие и т.п.), уходят одним общим эшелоном в тыл
 const RANK_ORDER := ["spearman", "archer", "warrior"]
+## ── АВАНГАРД ПО КРУГУ (клавиша [3] при растяге ПКМ, спринт 19) ──────────────
+## Три порядка по тому, кто впереди: копейщики (по умолчанию) → мечники →
+## лучники. Монахи и прочие — по-прежнему последним общим эшелоном
+## (см. group_by_rank). Прежний инвертор из двух состояний (спринт 17) снят
+const RANK_ORDERS := [
+	["spearman", "archer", "warrior"],   # 0: копейщики впереди
+	["warrior", "archer", "spearman"],   # 1: мечники впереди
+	["archer", "spearman", "warrior"],   # 2: лучники впереди
+]
+
+static func rank_order(front: int = 0) -> Array:
+	return RANK_ORDERS[posmod(front, RANK_ORDERS.size())]
+
+## Кто впереди при данном режиме (для интерфейса и стендов)
+static func front_type(front: int) -> String:
+	return String(rank_order(front)[0])
 
 ## Тип бойца для целей построения. squad_id не нужен — stat_id боец несёт
 ## сам по себе (см. Unit.gd), поэтому раскладка работает и для бойцов вне
@@ -39,19 +55,20 @@ static func is_mixed(movable: Array) -> bool:
 ## Разбить выделение на эшелоны в порядке RANK_ORDER (+ общий "прочие" эшелон
 ## последним). Порядок бойцов ВНУТРИ эшелона — порядок появления в movable,
 ## что совпадает с порядком отрядов в выделении (симметрично _split_into_blocks)
-static func group_by_rank(movable: Array) -> Array:
+static func group_by_rank(movable: Array, front: int = 0) -> Array:
+	var order: Array = rank_order(front)
 	var buckets: Dictionary = {}
 	var other: Array = []
 	for u in movable:
 		var t := unit_type(u)
-		if t in RANK_ORDER:
+		if t in order:
 			if not buckets.has(t):
 				buckets[t] = []
 			(buckets[t] as Array).append(u)
 		else:
 			other.append(u)
 	var out: Array = []
-	for t in RANK_ORDER:
+	for t in order:
 		if buckets.has(t):
 			out.append(buckets[t])
 	if not other.is_empty():

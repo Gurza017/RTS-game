@@ -165,6 +165,45 @@ func _reshape_fence() -> void:
 func capacity() -> int:
 	return _UCfgP.SHEEP_PEN_CAPACITY
 
+## ── ВНУТРИ ОГРАДЫ — НЕ БОЛЬШЕ INSIDE_CAP (письмо 10, спринт 19) ──────────
+## Заказ: до десяти овец пасутся ВНУТРИ загона у центра, лишние — вокруг в
+## OVERFLOW_RADIUS. Кто внутри, решает ПОРЯДОК ПРИВЯЗКИ (Sheep.bind_seq):
+## первые десять по счётчику — внутри, остальные снаружи; выбыла внутренняя
+## — следующая по порядку занимает её место сама, при первой же перебежке
+const INSIDE_CAP := 10
+const OVERFLOW_RADIUS := 20.0
+const INSIDE_FRAC := 0.62
+var _bind_counter: int = 0
+
+func next_seq() -> int:
+	_bind_counter += 1
+	return _bind_counter
+
+func inside_radius() -> float:
+	return minf(build_size.x, build_size.z) * 0.5 * INSIDE_FRAC
+
+## Овца — из первых INSIDE_CAP по порядку привязки среди живых этого загона
+func inside_slot(s: Node) -> bool:
+	if s == null:
+		return false
+	var my: int = int(s.get("bind_seq"))
+	var ahead := 0
+	for o in get_tree().get_nodes_in_group("sheep"):
+		if o == s or o == null or not is_instance_valid(o):
+			continue
+		if o.get("pen") != self or bool(o.get("eaten")) or bool(o.get("dead")):
+			continue
+		if int(o.get("bind_seq")) < my:
+			ahead += 1
+	return ahead < INSIDE_CAP
+
+func graze_radius_for(s: Node) -> float:
+	return inside_radius() if inside_slot(s) else OVERFLOW_RADIUS
+
+## Сколько сейчас внутри (по правилу порядка)
+func inside_count() -> int:
+	return mini(sheep_count(), INSIDE_CAP)
+
 ## Где пасутся привязанные и как далеко разрешено отходить
 func graze_center() -> Vector3:
 	return global_position
@@ -197,4 +236,5 @@ func accept_sheep(s: Node3D) -> bool:
 
 ## Подпись для панели интерфейса (заказ: «Вместимость: X / 20 овец»)
 func capacity_text() -> String:
-	return "Вместимость: %d / %d овец" % [sheep_count(), capacity()]
+	var n: int = sheep_count()
+	return "Вместимость: %d / %d овец (внутри %d / %d)" % [n, capacity(), mini(n, INSIDE_CAP), INSIDE_CAP]

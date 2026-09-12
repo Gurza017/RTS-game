@@ -144,7 +144,11 @@ func _check_heal() -> void:
 	print("\n═════ B. ЛЕЧЕНИЕ ═════")
 	var at := Vector3(-60.0, 0.0, 0.0)
 	var monk: Unit = _spawn("monk", Constants.FACTION_PLAYER, at)
-	var wounded: Unit = _spawn("spearman", Constants.FACTION_PLAYER, at + Vector3(3.0, 0.0, 0.0))
+	# СПРИНТ 15: монах лечит только в упор (MONK_CAST_RANGE), к дальнему сначала
+	# идёт — раненый ставится внутри дистанции каста, иначе замер темпа
+	# считает и дорогу (54 против 72 при трёх метрах ровно на пороге)
+	var wounded: Unit = _spawn("spearman", Constants.FACTION_PLAYER,
+		at + Vector3(_UCfg.MONK_CAST_RANGE * 0.6, 0.0, 0.0))
 	var whole: Unit = _spawn("spearman", Constants.FACTION_PLAYER, at + Vector3(-3.0, 0.0, 0.0))
 	var foe: Unit = _spawn("spearman", Constants.FACTION_ENEMY, at + Vector3(0.0, 0.0, 4.0))
 	var far_w: Unit = _spawn("spearman", Constants.FACTION_PLAYER, at + Vector3(_UCfg.MONK_HEAL_RADIUS + 10.0, 0.0, 0.0))
@@ -158,6 +162,11 @@ func _check_heal() -> void:
 	far_w._soa_push_stats()
 	# Никто не дерётся: враг и свои в покое, монах стоит
 	foe.set_process(false)
+	# Тик бойца идёт из GameManager, set_process его не глушит: чужой копейщик
+	# бил раненого, и «вылечено» зависело от жребия боя (спринт 18: сдвиг
+	# общего RNG дал 63 → 50 HP при ожидании 72). Чужой здесь — цель проверки
+	# «не лечат», а не боец: замораживаем тик
+	foe.set_tick(false)
 	var hp0: float = wounded.current_health
 	var t_sec: float = 4.0
 	await pframes(int(t_sec * 60.0))

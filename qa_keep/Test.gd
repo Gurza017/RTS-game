@@ -135,9 +135,10 @@ func _check_gate(b: Building, nm: String) -> void:
 		dz > 0.0 and absf((gate - b.ring_center()).x) < 0.05,
 		"вынос %.2f м, отклонение по X %.3f м" % [
 			dz, (gate - b.ring_center()).x])
+	# Спринт 19: вынос ворот ограничен GATE_MAX_DEPTH («~3 м от стенки»)
 	verdict("A4 %s: ворота стоят у края рисунка, а не в поле за ним" % nm,
 		dz <= b.ring_radius() + Building.GATE_CLEARANCE + 0.01
-		and dz >= minf(b.ring_radius(), b.build_size.z * 0.5) - 0.01,
+		and dz >= minf(minf(b.ring_radius(), b.build_size.z * 0.5), Building.GATE_MAX_DEPTH) - 0.01,
 		"вынос %.2f м при радиусе рисунка %.2f м и зазоре %.2f" % [
 			dz, b.ring_radius(), Building.GATE_CLEARANCE])
 	# СЕРЕДИНА ВОРОТ — СЕРЕДИНА РИСУНКА, а не начало координат: непрозрачная

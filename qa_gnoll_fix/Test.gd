@@ -10,9 +10,10 @@ extends Node
 ##                 не сдвигается и ЧЕРЕЗ GNOLL_KITE_GIVEUP признаёт отход
 ##                 невозможным: выходит из MOVING и встаёт. Это и есть лечение
 ##                 «бежит на месте с зацикленным звуком шагов».
-##   C ДУГА      — кость летит НАВЕСОМ: подъём дуги против дальности у неё в
-##                 разы круче, чем у стрелы лучника, и на своей дальности она
-##                 поднимается выше собственного пути по земле.
+##   C ДУГА      — кость летит БРОСКОМ ОТ РУКИ: пологая дуга, а не свеча
+##                 (спринт 15 развернул навес спринта 14), вылетает с кадра
+##                 замаха и кувыркается в полёте, а воткнувшись — замирает.
+##   F СРОК      — упавшая кость исчезает за пять секунд.
 ##   D ПРОМАХ    — доля бросков уходит в землю и втыкается там КОСТЬЮ.
 ##   E ПУЛЫ      — стрела человека и кость гнолла в воздухе ОДНОВРЕМЕННО не
 ##                 путаются: у слоёв разные буферы и разные картинки, и каждый
@@ -24,6 +25,15 @@ extends Node
 
 const _UCfg   := preload("res://scripts/unit_stats_config.gd")
 const _GobCfg := preload("res://scripts/goblin/goblin_config.gd")
+const _Arrow  := preload("res://scripts/Arrow.gd")
+
+## ЧИСЛА ДО СПРИНТА 15. Требования сформулированы ОТНОСИТЕЛЬНО прежних
+## («уменьшить до 2.5», «увеличить на 30 %»), и назвать их иначе нечем;
+## нынешние читаются из конфига
+const SPEED_BEFORE_S15 := 3.6
+const COOLDOWN_BEFORE_S15 := 1.6
+## Прежняя дуга — навес спринта 14, развёрнутый спринтом 15
+const ARC_BEFORE_S15 := 1.35
 
 var main = null
 var _pass: int = 0
@@ -89,6 +99,7 @@ func _run() -> void:
 	await _c_arc()
 	await _d_miss()
 	await _e_pools()
+	await _f_bone_life()
 	_finish()
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -118,6 +129,24 @@ func _a_aggro() -> void:
 	verdict("A4 бросать дальше, чем видишь, нельзя: поводок шире броска",
 		g.aggro_leash() > g.attack_range,
 		"поводок %.1f, бросок %.1f м" % [g.aggro_leash(), g.attack_range])
+	# ── ШАГ И ТЕМП БРОСКА (заказ спринта 15) ──────────────────────────────
+	# Прежние числа записаны здесь прямо: требования звучат как «уменьшить до
+	# 2.5» и «увеличить на 30 %», и выразить их иначе, чем назвав прежнее
+	# значение, нечем
+	print("  шаг гнолла %.2f (было %.2f), кулдаун %.2f с (было %.2f)" % [
+		g.move_speed, SPEED_BEFORE_S15,
+		_UCfg.stat("gnoll", "attack_cooldown", 0.0), COOLDOWN_BEFORE_S15])
+	verdict("A7 шаг гнолла срезан до 2.5",
+		absf(g.move_speed - 2.5) < 0.01, "%.2f" % g.move_speed)
+	verdict("A8 шаг стал медленнее прежнего", g.move_speed < SPEED_BEFORE_S15,
+		"%.2f против %.2f" % [g.move_speed, SPEED_BEFORE_S15])
+	# СПРИНТ 20: поверх +30 % спринта 15 владелец срезал 15 % («гноллы
+	# бросают чаще»): 1.6 × 1.3 × 0.85 = 1.77
+	verdict("A9 кулдаун броска: +30 % (спринт 15) и −15 % (спринт 20)",
+		absf(_UCfg.stat("gnoll", "attack_cooldown", 0.0)
+			- COOLDOWN_BEFORE_S15 * 1.3 * 0.85) < 0.01,
+		"%.2f при ожидаемых %.2f" % [_UCfg.stat("gnoll", "attack_cooldown", 0.0),
+			COOLDOWN_BEFORE_S15 * 1.3 * 0.85])
 
 	# ── ВРАГ ВНУТРИ ПОВОДКА — ГНОЛЛ ВСТУПАЕТ ───────────────────────────────
 	var near_foe: Unit = _spawn("spearman", Constants.FACTION_PLAYER,
@@ -238,11 +267,17 @@ func _c_arc() -> void:
 	var bone_r: float = _GobCfg.GNOLL_THROW_RANGE
 	print("  кость: дуга ×%.2f на %.1f м = подъём %.1f м; стрела: ×%.2f" % [
 		bone_arc, bone_r, bone_arc * bone_r, arrow_arc])
-	verdict("C1 дуга кости круче стрелы В РАЗЫ", bone_arc > arrow_arc * 2.0,
-		"×%.2f против ×%.2f" % [bone_arc, arrow_arc])
-	verdict("C2 на своей дальности кость поднимается выше, чем летит по земле",
-		bone_arc > 1.0, "подъём %.1f м при броске %.1f м" % [
-			bone_arc * bone_r, bone_r])
+	# ── РАЗВОРОТ СПРИНТА 15: БРОСОК ОТ РУКИ, А НЕ НАВЕС ───────────────────
+	# Спринт 14 требовал навеса и получил дугу ×1.35 — подъём БОЛЬШЕ самой
+	# дальности, то есть свечу под облака. Заказ спринта 15 прямо разворачивает
+	# это: «почти по прямой с минимальной дугой». Ноль при этом не годится —
+	# совсем прямая кость читается зависшей палкой, поэтому проверяются ОБА
+	# берега
+	verdict("C1 дуга стала пологой, а не свечой", bone_arc < ARC_BEFORE_S15 * 0.25,
+		"×%.2f против прежних ×%.2f" % [bone_arc, ARC_BEFORE_S15])
+	verdict("C2 но и не строго прямая: дуга различима глазом",
+		bone_arc > 0.05 and bone_arc * bone_r > 0.8,
+		"подъём %.2f м при броске %.1f м" % [bone_arc * bone_r, bone_r])
 	verdict("C3 дальность броска короткая — далеко по прямой не улетит",
 		bone_r <= 9.0, "%.1f м" % bone_r)
 	# И ЖИВОЙ ЗАМЕР: кость в полёте обязана подняться над прямой «стрелок → цель»
@@ -251,9 +286,30 @@ func _c_arc() -> void:
 	var foe: Unit = _spawn("spearman", Constants.FACTION_PLAYER,
 		spot + Vector3(bone_r * 0.95, 0.0, 0.0))
 	await pframes(4)
-	g.set_tick(false)
+	# ── МЕТАТЕЛЯ ЗАМОРАЖИВАТЬ НЕЛЬЗЯ ──────────────────────────────────────
+	# Со спринта 15 бросок ОТЛОЖЕН до кадра замаха, а отсчёт задержки живёт в
+	# тике гнолла: у замороженного (`set_tick(false)`) кость не вылетит вовсе.
+	# Первая версия этой проверки так и намеряла «в воздухе 0» на работающем
+	# коде. Стоять на месте гнолла заставляет не заморозка, а прикалывание
+	# точки (_pin) — патруль иначе уводит его с площадки замера
 	foe.set_tick(false)
+	var pin_c: Vector3 = g.global_position
+	# ── БРОСОК ВЫЛЕТАЕТ НЕ В ТОТ ЖЕ КАДР, И ЭТО ТРЕБОВАНИЕ ────────────────
+	# Боевая петля зовёт _on_attack_fired в момент удара, а кость обязана
+	# покинуть руку на кадре замаха (GNOLL_THROW_FRAME). Проверяем оба конца:
+	# сразу после вызова в воздухе пусто, а через задержку кость появилась
+	var flying0: int = _bones_in_flight()
 	g._on_attack_fired(foe, g.attack_damage)
+	await _pin(g, pin_c, 2)
+	verdict("C5 в тот же кадр кость НЕ вылетает — рука ещё за спиной",
+		_bones_in_flight() == flying0,
+		"в воздухе %d" % _bones_in_flight())
+	var wait_f: int = int(g.call("_throw_delay") * 60.0) + 8
+	await _pin(g, pin_c, wait_f)
+	verdict("C6 на кадре замаха кость вылетела",
+		_bones_in_flight() > flying0,
+		"ждали %.2f с, в воздухе %d" % [g.call("_throw_delay"),
+			_bones_in_flight()])
 	# ── ТОЧКУ ЛЕТЯЩЕГО СНАРЯДА ЗНАЕТ БУФЕР, А НЕ УЗЕЛ ──────────────────────
 	# На время полёта стрела (и кость) — ЗАПИСЬ в ядре: узел без своего тика
 	# стоит там, где взлетел, а позицию ведёт BatchArrows и пишет прямо в слот
@@ -261,7 +317,10 @@ func _c_arc() -> void:
 	# точку вылета — первая версия этой проверки так и сделала и намеряла
 	# ровно GNOLL_THROW_Y
 	var peak := 0.0
+	var spin_flying := 0.0
 	for _i in range(60):
+		g.global_position = pin_c
+		g.sync_row()
 		await get_tree().physics_frame
 		for b in _projectiles(true):
 			if bool(b.get("_spent")) or bool(b.get("_pooled")):
@@ -270,11 +329,26 @@ func _c_arc() -> void:
 			if p == Vector3.INF:
 				continue
 			peak = maxf(peak, p.y - GameManager.get_terrain_height(p.x, p.z))
+			spin_flying = maxf(spin_flying, _axis_len(b))
 	print("  живой замер: кость поднялась на %.2f м над грунтом (бросок %.1f м)" % [
 		peak, bone_r])
-	verdict("C4 живая кость и правда идёт по навесу, а не по прямой",
-		peak > _GobCfg.GNOLL_THROW_Y + 1.5,
-		"пик %.2f м при вылете с %.2f м" % [peak, _GobCfg.GNOLL_THROW_Y])
+	# Пик считается НАД ТОЧКОЙ ВЫЛЕТА: сама рука гнолла на GNOLL_THROW_Y, и
+	# путать высоту броска с высотой дуги нельзя
+	var rise: float = peak - _GobCfg.GNOLL_THROW_Y
+	verdict("C4 живая кость поднимается НЕМНОГО, а не свечой",
+		rise > 0.15 and rise < bone_r * 0.5,
+		"подъём над рукой %.2f м при броске %.1f м" % [rise, bone_r])
+	print("  модуль оси в полёте %.2f (кувырок), у стрелы %.2f" % [
+		spin_flying, _GobCfg.GNOLL_BONE_AXIS_K])
+	# ── КУВЫРОК ЕДЕТ В МОДУЛЕ ОСИ ─────────────────────────────────────────
+	# Шейдер ось нормирует, поэтому её длина свободна и несёт один бит: короче
+	# порога — снаряд летит и кувыркается, ровно единица — воткнулся и лежит.
+	# Проверяется именно ЧИСЛО В БУФЕРЕ: картинку headless не рисует вовсе
+	verdict("C7 летящая кость помечена в буфере как кувыркающаяся",
+		spin_flying > 0.0
+			and absf(spin_flying - _GobCfg.GNOLL_BONE_AXIS_K) < 0.05,
+		"модуль оси %.2f при заказанном %.2f" % [spin_flying,
+			_GobCfg.GNOLL_BONE_AXIS_K])
 	_kill(g)
 	_kill(foe)
 	await pframes(4)
@@ -289,14 +363,27 @@ func _d_miss() -> void:
 	var foe: Unit = _spawn("spearman", Constants.FACTION_PLAYER,
 		spot + Vector3(_GobCfg.GNOLL_THROW_RANGE * 0.8, 0.0, 0.0))
 	await pframes(4)
-	g.set_tick(false)
+	# ── МЕТАТЕЛЯ ЗАМОРАЖИВАТЬ НЕЛЬЗЯ ──────────────────────────────────────
+	# Со спринта 15 бросок ОТЛОЖЕН до кадра замаха, а отсчёт задержки живёт в
+	# тике гнолла: у замороженного (`set_tick(false)`) кость не вылетит вовсе.
+	# Первая версия этой проверки так и намеряла «в воздухе 0» на работающем
+	# коде. Стоять на месте гнолла заставляет не заморозка, а прикалывание
+	# точки (_pin) — патруль иначе уводит его с площадки замера
 	foe.set_tick(false)
 	foe.current_health = foe.max_health * 100.0
+	var pin_d: Vector3 = g.global_position
 	var stuck0: int = GameManager.stuck_arrow_count()
-	var shots := 40
+	# ── БРОСКИ РАЗНЕСЕНЫ ВО ВРЕМЕНИ, И ЭТО НЕ ФОРМАЛЬНОСТЬ ────────────────
+	# Замах теперь занимает GNOLL_THROW_FRAME кадров ленты, и второй приказ,
+	# отданный в тот же кадр, ПЕРЕБИВАЕТ первый: в руке одна кость, а не
+	# очередь. В бою так и есть — бросок раз в кулдаун; стенд обязан вести
+	# себя так же, иначе он проверял бы очередь, которой в игре нет
+	var shots := 20
+	var gap_f: int = int(g.call("_throw_delay") * 60.0) + 6
 	for _i in range(shots):
 		g._on_attack_fired(foe, 0.0)
-	await pframes(200)
+		await _pin(g, pin_d, gap_f)
+	await _pin(g, pin_d, 200)
 	var stuck_bones := 0
 	for a in GameManager._stuck_arrows:
 		if a == null or not is_instance_valid(a):
@@ -313,6 +400,21 @@ func _d_miss() -> void:
 			_GobCfg.GNOLL_MISS_CHANCE])
 	verdict("D2 промахнувшаяся кость ВТЫКАЕТСЯ В ЗЕМЛЮ и лежит там",
 		stuck_bones > 0, "костей в земле %d" % stuck_bones)
+	# ── ЛЕЖАЩАЯ КОСТЬ НЕ КУВЫРКАЕТСЯ (заказ спринта 16) ─────────────────
+	# Кувырок включает шейдер по КОРОТКОЙ оси (модуль < spin_gate); у
+	# воткнувшейся кости узел пишет ось единичной длины (Arrow.axis_scale
+	# отвечает 1.0 у _spent) — значит в буфере обязана лежать полная ось
+	var short_axes := 0
+	var stuck_seen := 0
+	for b in _projectiles(true):
+		if not bool(b.get("_spent")) or bool(b.get("_pooled")):
+			continue
+		stuck_seen += 1
+		if _axis_len(b) < 0.75:
+			short_axes += 1
+	verdict("D2б лежащая кость помечена НЕПОДВИЖНОЙ (ось полной длины)",
+		stuck_seen > 0 and short_axes == 0,
+		"лежит %d, с короткой осью %d" % [stuck_seen, short_axes])
 	verdict("D3 торчащих на поле стало больше",
 		GameManager.stuck_arrow_count() > stuck0,
 		"%d против %d" % [GameManager.stuck_arrow_count(), stuck0])
@@ -345,8 +447,10 @@ func _e_pools() -> void:
 	var tgt_g: Unit = _spawn("spearman", Constants.FACTION_PLAYER,
 		spot + Vector3(48.0, 0.0, 7.0))
 	await pframes(4)
-	for u in [arch, g, tgt_a, tgt_g]:
+	# Метателя не морозим (см. оговорку в блоке C); остальные стоят
+	for u in [arch, tgt_a, tgt_g]:
 		u.set_tick(false)
+	var pin_e: Vector3 = g.global_position
 	tgt_a.current_health = tgt_a.max_health * 1000.0
 	tgt_g.current_health = tgt_g.max_health * 1000.0
 
@@ -356,7 +460,7 @@ func _e_pools() -> void:
 	for _i in range(6):
 		arch._on_attack_fired(tgt_a, 0.0)
 		g._on_attack_fired(tgt_g, 0.0)
-		await pframes(3)
+		await _pin(g, pin_e, int(g.call("_throw_delay") * 60.0) + 6)
 
 	var am = GameManager.arrows_mm
 	var bm = GameManager.bones_mm
@@ -382,6 +486,8 @@ func _e_pools() -> void:
 	var bad_bone := 0
 	var checked := 0
 	for _step in range(50):
+		g.global_position = pin_e
+		g.sync_row()
 		await get_tree().physics_frame
 		for p in _projectiles(false):
 			if bool(p.get("_spent")) or bool(p.get("_pooled")):
@@ -411,29 +517,167 @@ func _e_pools() -> void:
 	# оказаться И стрелы, И кости — каждая своим видом
 	var stuck0_a := _count_stuck(false)
 	var stuck0_b := _count_stuck(true)
+	# ── ЦЕЛЬ ОТХОДИТ В СТОРОНУ СРАЗУ ПОСЛЕ ВЫСТРЕЛА ───────────────────────
+	# Снаряд обязан лечь в ЗЕМЛЮ, иначе мерить нечего. Прежде цели убивали
+	# после всего залпа — это работало, пока весь залп уходил в один кадр; с
+	# отложенным броском между выстрелами проходит почти полсекунды, и стрелы
+	# успевали попасть в живую цель. Точка прицеливания у обоих снимается В
+	# МОМЕНТ ВЫСТРЕЛА, поэтому достаточно сдвинуть цель сразу после него:
+	# снаряд долетит до пустого места и воткнётся
+	var side := 1.0
+	# Кость лежит в земле BONE_STUCK_LIFETIME (5 с), а двенадцать бросков с
+	# ожиданием замаха занимают дольше: к концу окна первые кости уже сняты
+	# сроком, и «конец минус начало» мигал (спринт 18: +7 / +1 / −1). Судим по
+	# ПИКУ прироста за окно — втыкалась ли кость вообще
+	var peak_b := 0
 	for _i in range(12):
+		peak_b = maxi(peak_b, _count_stuck(true) - stuck0_b)
 		arch._on_attack_fired(tgt_a, 0.0)
 		g._on_attack_fired(tgt_g, 0.0)
-	# Цели убираем, ПОКА СНАРЯДЫ В ВОЗДУХЕ: попадание ищется сканом сетки в
-	# конце дуги, и без цели снаряд честно втыкается в грунт
-	await pframes(2)
-	_kill(tgt_a)
-	_kill(tgt_g)
+		await _pin(g, pin_e, int(g.call("_throw_delay") * 60.0) + 4)
+		side = -side
+		for t in [tgt_a, tgt_g]:
+			if is_instance_valid(t):
+				var tp: Vector3 = t.global_position
+				tp.x += side * 7.0
+				t.global_position = Vector3(tp.x,
+					GameManager.get_terrain_height(tp.x, tp.z), tp.z)
+				t.sync_row()
 	await pframes(220)
 	var stuck_a: int = _count_stuck(false)
 	var stuck_b: int = _count_stuck(true)
 	print("  воткнулось за замер: стрел %d, костей %d" % [
 		stuck_a - stuck0_a, stuck_b - stuck0_b])
+	peak_b = maxi(peak_b, stuck_b - stuck0_b)
 	verdict("E6 на земле лежат и стрелы, и кости — каждая своим видом",
-		stuck_a > stuck0_a and stuck_b > stuck0_b,
-		"стрел +%d, костей +%d" % [stuck_a - stuck0_a, stuck_b - stuck0_b])
+		stuck_a > stuck0_a and peak_b > 0,
+		"стрел +%d, костей +%d (пик за окно +%d)" % [stuck_a - stuck0_a, stuck_b - stuck0_b, peak_b])
 	_kill(arch)
 	_kill(g)
 	await pframes(4)
 
 # ═════════════════════════════════════════════════════════════════════════════
+# F. УПАВШАЯ КОСТЬ ИСЧЕЗАЕТ ЗА ПЯТЬ СЕКУНД
+#
+# Гноллов у пня три отряда, и бросают они вчетверо чаще, чем стреляет лучник:
+# со сроком стрелы (45 с) поле вокруг пня превращалось в ковёр из костей.
+# Срок теперь СВОЙ по виду снаряда, и стенд стережёт обе его стороны — и что
+# кость исчезает, и что СТРЕЛА при этом лежит по-прежнему долго
+# ═════════════════════════════════════════════════════════════════════════════
+func _f_bone_life() -> void:
+	print("\n═════ F. КОСТЬ ЛЕЖИТ ПЯТЬ СЕКУНД ═════")
+	print("  срок кости %.1f с, срок стрелы %.1f с" % [
+		_Arrow.BONE_STUCK_LIFETIME, _Arrow.STUCK_LIFETIME])
+	verdict("F1 у кости свой срок, и он ровно пять секунд",
+		absf(_Arrow.BONE_STUCK_LIFETIME - 5.0) < 0.01,
+		"%.1f с" % _Arrow.BONE_STUCK_LIFETIME)
+	verdict("F2 стрела по-прежнему лежит долго — срок разделён по виду",
+		_Arrow.STUCK_LIFETIME > _Arrow.BONE_STUCK_LIFETIME * 5.0,
+		"стрела %.1f с против кости %.1f" % [_Arrow.STUCK_LIFETIME,
+			_Arrow.BONE_STUCK_LIFETIME])
+	verdict("F3 растворение короче самого срока, иначе кость мигала бы сразу",
+		_Arrow.BONE_STUCK_FADE < _Arrow.BONE_STUCK_LIFETIME * 0.5,
+		"%.1f из %.1f с" % [_Arrow.BONE_STUCK_FADE,
+			_Arrow.BONE_STUCK_LIFETIME])
+
+	# ── ЖИВОЙ ЗАМЕР ───────────────────────────────────────────────────────
+	var spot: Vector3 = main.PLAYER_BASE_ANCHOR + Vector3(0.0, 0.0, -80.0)
+	var g: Unit = _spawn("gnoll", Constants.FACTION_GOBLIN, spot)
+	var foe: Unit = _spawn("spearman", Constants.FACTION_PLAYER,
+		spot + Vector3(_GobCfg.GNOLL_THROW_RANGE * 0.8, 0.0, 0.0))
+	await pframes(4)
+	# ── МЕТАТЕЛЯ ЗАМОРАЖИВАТЬ НЕЛЬЗЯ ──────────────────────────────────────
+	# Со спринта 15 бросок ОТЛОЖЕН до кадра замаха, а отсчёт задержки живёт в
+	# тике гнолла: у замороженного (`set_tick(false)`) кость не вылетит вовсе.
+	# Первая версия этой проверки так и намеряла «в воздухе 0» на работающем
+	# коде. Стоять на месте гнолла заставляет не заморозка, а прикалывание
+	# точки (_pin) — патруль иначе уводит его с площадки замера
+	foe.set_tick(false)
+	foe.current_health = foe.max_health * 100.0
+	var pin_f: Vector3 = g.global_position
+	var stuck0: int = _count_stuck(true, pin_f)
+	# Бросаем, пока хоть одна кость не ляжет в землю: доля промахов — 0.3,
+	# и одного броска на это не хватит
+	var guard := 0
+	while guard < 60 * 40 and _count_stuck(true, pin_f) <= stuck0:
+		if int(g.get("_throw_left")) == 0 and g.get("_throw_left") <= 0.0:
+			g._on_attack_fired(foe, 0.0)
+		for _i in range(int(g.call("_throw_delay") * 60.0) + 90):
+			g.global_position = pin_f
+			g.sync_row()
+			await get_tree().physics_frame
+			guard += 1
+			if _count_stuck(true, pin_f) > stuck0:
+				break
+	var landed: int = _count_stuck(true, pin_f)
+	verdict("F4 кость и правда легла в землю (иначе мерить нечего)",
+		landed > stuck0, "торчит костей %d" % landed)
+	if landed <= stuck0:
+		_kill(g)
+		_kill(foe)
+		return
+	# ── ИСТОЧНИК КОСТЕЙ УБИРАЕМ, ИНАЧЕ ЗАМЕР СЧИТАЕТ ЧУЖИЕ ────────────────
+	# Гнолл тикает (иначе бросок не вылетит вовсе) и потому продолжает метать
+	# в живого врага сам: первая версия ловила на поле СВЕЖУЮ кость и считала,
+	# что старая не истекла
+	_kill(g)
+	_kill(foe)
+	await pframes(4)
+	var base: int = _count_stuck(true, pin_f)
+	# ── ЖДЁМ ТЕМИ ЖЕ ЧАСАМИ, КОТОРЫМИ ИДЁТ СРОК ───────────────────────────
+	# Срок торчащих считает ОБЩИЙ ОБХОД в _process (см. GameManager.
+	# _sweep_stuck_arrows), то есть по кадрам ОТРИСОВКИ и реальному времени, а
+	# не по физкадрам. В headless эти часы расходятся в разы: первая версия
+	# ждала 150 физкадров и находила поле уже чистым (правило 12)
+	await get_tree().create_timer(_Arrow.BONE_STUCK_LIFETIME * 0.4).timeout
+	var mid: int = _count_stuck(true, pin_f)
+	await get_tree().create_timer(_Arrow.BONE_STUCK_LIFETIME * 0.9).timeout
+	var gone: int = _count_stuck(true, pin_f)
+	stuck0 = base - (landed - stuck0)
+	print("  костей в земле: легло %d, через полсрока %d, через срок %d" % [
+		base, mid, gone])
+	verdict("F5 на полусроке кость ещё лежит", mid > 0,
+		"костей %d" % mid)
+	verdict("F6 через пять секунд её на поле нет", gone == 0,
+		"осталось %d" % gone)
+	await pframes(4)
+
+# ═════════════════════════════════════════════════════════════════════════════
 # СЛУЖЕБНОЕ
 # ═════════════════════════════════════════════════════════════════════════════
+## Подождать n физкадров, удерживая бойца на месте. Тик ему при этом НУЖЕН
+## (в нём живут и авто-агро, и отложенный бросок), а патруль иначе уводит его
+## с площадки замера — та же оговорка, что у _watch_aggro
+func _pin(u: Unit, at: Vector3, n: int) -> void:
+	for _i in range(n):
+		if is_instance_valid(u):
+			u.global_position = at
+			u.sync_row()
+		await get_tree().physics_frame
+
+## Сколько костей сейчас в воздухе (не воткнувшихся и не в пуле)
+func _bones_in_flight() -> int:
+	var n := 0
+	for b in _projectiles(true):
+		if not bool(b.get("_spent")) and not bool(b.get("_pooled")):
+			n += 1
+	return n
+
+## Модуль оси, записанной снаряду в буфер отрисовки. Единица — снаряд лежит
+## смирно, меньше — помечен кувырком (см. mm_arrow.gdshader)
+func _axis_len(p: Node) -> float:
+	var lay = GameManager.bones_mm if bool(p.get("bone")) else GameManager.arrows_mm
+	if lay == null or lay.core_id < 0:
+		return -1.0
+	var si: int = int(p.get("_slot_i"))
+	if si < 0:
+		return -1.0
+	var slot: PackedFloat32Array = GameManager.army.rb_slot(lay.core_id, si)
+	if slot.size() < 16:
+		return -1.0
+	return Vector3(slot[12] * 2.0 - 1.0, slot[13] * 2.0 - 1.0,
+		slot[14] * 2.0 - 1.0).length()
+
 ## Живые узлы снарядов. bones_only — только кости
 func _projectiles(bones_only: bool) -> Array:
 	var out: Array = []
@@ -482,13 +726,21 @@ func _off_corridor(p: Node, at: Vector3) -> float:
 	return q.distance_to(a + ab * t)
 
 ## Сколько снарядов нужного вида торчит в земле прямо сейчас
-func _count_stuck(bones: bool) -> int:
+## near/radius — считать только вокруг площадки замера: стая у пня живёт своей
+## жизнью (со спринта 17 мимо неё ходят рейды и разведка обеих сторон), и её
+## кости на другом конце карты замеру срока не принадлежат
+func _count_stuck(bones: bool, near: Vector3 = Vector3.INF, radius: float = 40.0) -> int:
 	var n := 0
 	for a in GameManager._stuck_arrows:
 		if a == null or not is_instance_valid(a):
 			continue
-		if bool((a as Node3D).get("bone")) == bones:
-			n += 1
+		if bool((a as Node3D).get("bone")) != bones:
+			continue
+		if near != Vector3.INF:
+			var p: Vector3 = (a as Node3D).global_position
+			if Vector2(p.x - near.x, p.z - near.z).length() > radius:
+				continue
+		n += 1
 	return n
 
 ## Убрать бойца со сцены смертью — единственным путём, на котором он снимает

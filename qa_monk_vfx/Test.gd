@@ -22,6 +22,9 @@ extends Node
 ## (правило 11). Запуск: godot --headless --path . res://qa_monk_vfx/Test.tscn
 
 const _UCfg := preload("res://scripts/unit_stats_config.gd")
+## Компенсация наклона камеры: ею растянут КАЖДЫЙ билборд в проекте, и
+## середина спрайта считается только с ней (см. B9)
+const _BBv := preload("res://scripts/BillboardUtil.gd")
 
 var main = null
 var _pass: int = 0
@@ -131,7 +134,12 @@ func _b_spawn() -> void:
 	await pframes(4)
 	verdict("B1 до лечения эффекта нет ни на ком",
 		_monk.heal_vfx_target() == null)
-	_hurt = _wounded(spot + Vector3(4.0, 0.0, 0.0), 0.3)
+	# ── РАНЕНЫЙ СТОИТ В ДИСТАНЦИИ КАСТА, И ЭТО НЕ ПРИДИРКА ────────────────
+	# Со спринта 15 монах ЛЕЧИТ ТОЛЬКО В УПОР (MONK_CAST_RANGE), а к дальнему
+	# сначала идёт. Прежние четыре метра были внутри радиуса лечения 12 м и
+	# работали; теперь они означают «монах в дороге», и стенд про VFX мерил бы
+	# подход. Подход проверяет qa_monk_healing — там ему и место
+	_hurt = _wounded(spot + Vector3(_UCfg.MONK_CAST_RANGE * 0.6, 0.0, 0.0), 0.3)
 	await pframes(4)
 	# Раненый заморожен: здесь меряется ЭФФЕКТ, а не то, куда боец ушёл
 	_hurt.set_tick(false)
@@ -170,11 +178,35 @@ func _b_spawn() -> void:
 		print("  эффект в %.2f м от цели и в %.2f м от монаха" % [d_t, d_m])
 		verdict("B8 эффект стоит НА ИСЦЕЛЯЕМОМ, а не на монахе",
 			d_t < 0.3 and d_t < d_m, "%.2f против %.2f м" % [d_t, d_m])
-		verdict("B9 и поднят к центру массы цели, а не лежит в ногах",
-			absf(vfx.global_position.y - (_hurt.draw_position().y
-				+ _hurt.aim_height())) < 0.2,
-			"высота %.2f при центре массы %.2f" % [vfx.global_position.y,
-				_hurt.draw_position().y + _hurt.aim_height()])
+		# ── ЦЕНТР СПРАЙТА, А НЕ ГРУДЬ (разворот заказа, спринт 15) ────────
+		# Владелец: эффект «строго в центре спрайта лечимого солдата, не на
+		# земле под ногами, а обволакивает сам спрайт». Прежде здесь стояла
+		# aim_height() — точка ПРИЦЕЛИВАНИЯ (у копейщика 0.8 м), и по ней
+		# заклинание висело у колен при середине рисунка на 1.4 м.
+		# Ожидание считается из САМОЙ ЛЕНТЫ цели, а не из числа в коде монаха:
+		# привязка ног, растянутая компенсацией наклона камеры, — то же, чем
+		# меряет середину спрайта qa_visual_smoke
+		var sf: Array = _hurt.sheet_frame()
+		var mid: float = _hurt.aim_height()
+		var tall: float = 0.0
+		if sf.size() >= 5:
+			mid = float(sf[4]) * _BBv.V_STRETCH
+			var tx: Texture2D = sf[0]
+			if tx != null:
+				tall = float(tx.get_height()) * float(sf[3]) * _BBv.V_STRETCH
+		var want: float = _hurt.draw_position().y + mid
+		verdict("B9 эффект в ЦЕНТРЕ СПРАЙТА цели, а не в ногах и не в груди",
+			absf(vfx.global_position.y - want) < 0.25,
+			"высота %.2f, середина рисунка %.2f" % [vfx.global_position.y, want])
+		# ── И ОБВОЛАКИВАЕТ ЕГО, А НЕ ВИСИТ ЗНАЧКОМ ───────────────────────
+		# Второе требование того же пункта: размер эффекта обязан считаться от
+		# нарисованной высоты цели, иначе на рыцаре и на монахе он одинаков
+		# СПРИНТ 18: размер СТРОГО ФИКСИРОВАН (прежнее «по спрайту цели» давало
+		# на копейщике трёхметровое кольцо — «гигантский круг» из жалобы)
+		var vq := (vfx as MeshInstance3D).mesh as QuadMesh
+		verdict("B9б размер эффекта фиксирован и не зависит от роста цели", vq != null and tall > 0.0
+			and is_equal_approx(vq.size.y, _monk.HEAL_VFX_SIZE_M) and vq.size.y < tall * 0.6,
+			"квад %.2f м при рисунке %.2f м" % [vq.size.y if vq != null else -1.0, tall])
 
 # ═════════════════════════════════════════════════════════════════════════════
 # C. ЕДЕТ ЗА ЦЕЛЬЮ
@@ -190,9 +222,13 @@ func _c_follow() -> void:
 		verdict("C0 эффект и цель на месте", false)
 		return
 	var worst := 0.0
+	# ── ШАГ УМЕНЬШЕН: ЦЕЛЬ ОБЯЗАНА ОСТАТЬСЯ В ДИСТАНЦИИ КАСТА ─────────────
+	# Прежние 0.06 м за кадр уводили раненого на 5.4 м — со спринта 15 это
+	# вдвое дальше MONK_CAST_RANGE, монах честно прекращает лечение, и стенд
+	# мерил бы отрыв уже ПОГАШЕННОГО эффекта
+	var step_z: float = _UCfg.MONK_CAST_RANGE * 0.4 / 90.0
 	for i in range(90):
-		# Двигаем раненого мелкими шагами, оставаясь в радиусе лечения
-		var p: Vector3 = _hurt.global_position + Vector3(0.0, 0.0, 0.06)
+		var p: Vector3 = _hurt.global_position + Vector3(0.0, 0.0, step_z)
 		_hurt.global_position = Vector3(p.x,
 			GameManager.get_terrain_height(p.x, p.z), p.z)
 		_hurt.sync_row()
@@ -204,7 +240,7 @@ func _c_follow() -> void:
 		worst = maxf(worst, Vector2(
 			vfx.global_position.x - _hurt.draw_position().x,
 			vfx.global_position.z - _hurt.draw_position().z).length())
-	print("  цель прошла %.2f м, худший отрыв эффекта %.2f м" % [90.0 * 0.06, worst])
+	print("  цель прошла %.2f м, худший отрыв эффекта %.2f м" % [90.0 * step_z, worst])
 	verdict("C1 эффект держится на цели всю дорогу", worst < 0.35,
 		"худший отрыв %.2f м" % worst)
 
@@ -249,15 +285,28 @@ func _e_stop() -> void:
 
 	# ── E2. ПЕРЕКЛЮЧЕНИЕ НА ДРУГУЮ ЦЕЛЬ ────────────────────────────────────
 	var spot: Vector3 = _monk.global_position
-	var a: Unit = _wounded(spot + Vector3(3.0, 0.0, 2.0), 0.2)
+	var near: float = _UCfg.MONK_CAST_RANGE * 0.6
+	var a: Unit = _wounded(spot + Vector3(near, 0.0, 0.0), 0.2)
 	await pframes(4)
 	a.set_tick(false)
 	await pframes(int(_UCfg.MONK_HEAL_TICK * 3.0 * 60.0))
 	var on_a: bool = _monk.heal_vfx_target() == a
-	# Второй, РАНЕНЫЙ СИЛЬНЕЕ: монах лечит самого раненого, значит переключится
-	var b: Unit = _wounded(spot + Vector3(-3.0, 0.0, 2.0), 0.05)
+	# ── ВТОРОЙ ЖДЁТ СВОЕЙ ОЧЕРЕДИ, И ЭТО РАЗВОРОТ ЗАКАЗА ─────────────────
+	# Прежде проверялось обратное: второй, раненный СИЛЬНЕЕ, перехватывал
+	# эффект тем же тактом — монах каждый такт выбирал самого раненого заново.
+	# Заказ спринта 15 прямо это отменяет: «лечит поочерёдно по одному», и
+	# «ПОСЛЕ ПОЛНОГО ИЗЛЕЧЕНИЯ первого монах переключается на следующего».
+	# Поэтому сначала убеждаемся, что второй НЕ перехватил, и только потом
+	# дочиниваем первого до конца
+	var b: Unit = _wounded(spot + Vector3(-near, 0.0, 0.0), 0.05)
 	await pframes(4)
 	b.set_tick(false)
+	await pframes(int(_UCfg.MONK_HEAL_TICK * 3.0 * 60.0))
+	verdict("E2б более раненый НЕ перехватывает начатое лечение",
+		_monk.heal_vfx_target() == a,
+		"висит на %s" % ("первом" if _monk.heal_vfx_target() == a else "не на первом"))
+	a.current_health = a.max_health
+	a._soa_push_stats()
 	await pframes(int(_UCfg.MONK_HEAL_TICK * 3.0 * 60.0))
 	var on_b: bool = _monk.heal_vfx_target() == b
 	print("  был на первом: %s, переехал на второго: %s" % [str(on_a), str(on_b)])

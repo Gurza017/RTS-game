@@ -59,6 +59,19 @@ var gnoll_squads_total: int = 0
 
 var sheep: Array = []
 var sheep_born: int = 0
+## Чья это сторона карты (игрок / красный ИИ): рейд за овцами и восстановление
+## пня идут по стороне (GameManager._sheep_pressure_check). Ставит Main
+var side_faction: int = -1
+var raid_rewards: int = 0
+
+## Рейд удался — отара приведена: пень выпускает ещё TROLL_RAID_REWARD
+## троллей сверх потолка стражи, и они принимаются за овец (голод: стадо
+## больше TROLL_HUNGRY_FLOCK едят без таймера)
+func on_raid_success() -> void:
+	if is_dead():
+		return
+	raid_rewards += 1
+	spawn_guards(_GobCfgL.TROLL_RAID_REWARD)
 var _flock_timer: Timer = null
 
 func _ready() -> void:
@@ -75,7 +88,72 @@ func _ready() -> void:
 	# Реестр партии: при загрузке слепка логово встаёт из фабрики зданий, и
 	# Main его не регистрирует — регистрируется само. Тролли из слепка
 	# подхватывают его лениво (Troll.tick_physics)
-	GameManager.troll_lair = self
+	call_deferred("_start_troll_respawn")
+	GameManager.register_lair(self)   # первое зарегистрированное = troll_lair
+
+## ── СНЕСЁННЫЙ ПЕНЬ — ТОТ ЖЕ РИСУНОК, ЗАТЕНЁННЫЙ (спринт 20) ───────────────
+## «Дерево заглохло»: руина оставляет Dead Tree в тёмной подкраске, а не общее
+## пепелище дома. Размер тот же
+func ruin_sprite_override() -> String:
+	return TREE_SPRITE
+
+func ruin_tint() -> Color:
+	return _GobCfgL.LAIR_RUIN_TINT
+
+## Точка прицела стрелка — центр пня, а не 0.8 м над корнями (заказ спринта 15)
+func aim_height() -> float:
+	return _GobCfgL.TROLL_LAIR_AIM_HEIGHT
+
+## ── ОВАЛ ВЫДЕЛЕНИЯ ШИРЕ И НИЖЕ, ПЕНЬ В ЦЕНТРЕ (заказ спринта 15) ───────────
+## Кольцо здания лежит на земле у основания рисунка, а пень нарисован ВВЕРХ от
+## него: на экране кольцо оказывалось под пнём, а не вокруг. Сдвигаем центр
+## К КАМЕРЕ (вниз по экрану) на долю радиуса и растягиваем поперёк. Направление
+## «к камере» берётся у самой камеры: ракурс в игре фиксирован, а привязывать
+## его к оси карты значило бы угадать сторону. Без камеры (headless) — как было
+func ring_oval() -> Vector2:
+	return _GobCfgL.TROLL_LAIR_RING_OVAL
+
+func ring_center() -> Vector3:
+	var c: Vector3 = super.ring_center()
+	var cam: Camera3D = get_viewport().get_camera_3d() if is_inside_tree() else null
+	if cam == null:
+		return c
+	var fwd: Vector3 = -cam.global_transform.basis.z
+	fwd.y = 0.0
+	if fwd.length_squared() < 1e-6:
+		return c
+	return c - fwd.normalized() * (ring_radius() * _GobCfgL.TROLL_LAIR_RING_SHIFT)
+
+## ── СТРАЖИ ВОСПОЛНЯЮТСЯ ПО ТАЙМЕРУ, ПОКА ПЕНЬ ЖИВ ─────────────────────────
+## Узел-таймер, а не свой тик: у логова нет _process, и заводить его ради
+## одного сравнения раз в две с половиной минуты незачем (то же решение, что
+## у стада и волн гноллов)
+var _troll_timer: Timer = null
+var respawned_total: int = 0
+
+func _start_troll_respawn() -> void:
+	if _troll_timer != null:
+		return
+	_troll_timer = Timer.new()
+	_troll_timer.wait_time = _GobCfgL.TROLL_RESPAWN_SEC
+	_troll_timer.one_shot = false
+	_troll_timer.timeout.connect(_on_troll_respawn)
+	add_child(_troll_timer)
+	_troll_timer.start()
+
+func _on_troll_respawn() -> void:
+	if is_dead():
+		if _troll_timer != null:
+			_troll_timer.stop()
+		return
+	if trolls_alive() >= _GobCfgL.TROLL_GUARDS_MAX:
+		return
+	var fresh: Array = spawn_guards(1)
+	respawned_total += fresh.size()
+
+## Сколько осталось до следующего пополнения (стендам)
+func troll_respawn_left() -> float:
+	return _troll_timer.time_left if _troll_timer != null else -1.0
 
 ## Принять тролля, рождённого не здесь (загрузка партии)
 # ═════════════════════════════════════════════════════════════════════════════
@@ -131,6 +209,13 @@ func spawn_gnoll_squads(n: int) -> int:
 func _start_gnoll_pack() -> void:
 	if is_dead():
 		return
+	# ── ЗАГРУЖЕННАЯ ПАРТИЯ СТАЮ УЖЕ ВЕЗЁТ В СЛЕПКЕ ────────────────────────
+	# Логово из сохранения рождало вторую стаю поверх восстановленной (поймал
+	# qa_difficulty G2/G3: +3 отряда, +36 бойцов после загрузки). Гноллы на
+	# карте уже есть — значит стая своя и восстановлена, новой не надо
+	for sq in GameManager.squads_of_faction(Constants.FACTION_GOBLIN):
+		if String((sq as Dictionary).get("type", "")) == "gnoll":
+			return
 	spawn_gnoll_squads(_GobCfgL.GNOLL_START_SQUADS)
 
 ## ── ЧАСЫ ВОЛН — УЗЕЛ-ТАЙМЕР, А НЕ СВОЙ ТИК ────────────────────────────────
@@ -155,6 +240,87 @@ func on_lair_attacked() -> void:
 ## Удар по гноллу — тот же сигнал тревоги, что и удар по троллю
 func on_gnoll_hit(_g: Node, _attacker: Node3D) -> void:
 	on_lair_attacked()
+
+## ── ГНОЛЛЫ ПРЯЧУТСЯ В ПНЕ (заказ спринта 16) ───────────────────────────────
+## Тот же приём, что у гарнизона замка (Castle.absorb_unit): боец снят с карты
+## (сетка, группы, отрисовка, тик, строка ядра вне карты), точка — пень.
+## Лечит его таймер логова раз в секунду; на полном запасе — выходит у ворот.
+## Своего тика у логова нет, узел-таймер — как у стада и волн
+var _hidden_gnolls: Array = []
+var _heal_timer: Timer = null
+var hidden_total: int = 0
+var released_total: int = 0
+
+func hide_gnoll(g: Unit) -> void:
+	if g == null or not is_instance_valid(g) or g.is_dead() or is_dead():
+		return
+	if bool(g.get("hidden")):
+		return
+	g.set("hidden", true)
+	g.set("hiding_to_lair", false)
+	g.end_retreat(true)
+	g.set_attack_target(null)
+	g.visible = false
+	g.leave_render()
+	g.set_draw(false)
+	g.set_tick(false)
+	GameManager.forget_on_map(g)
+	GameManager.unit_grid.remove(g)
+	for grp in Constants.UNIT_GROUPS.values():
+		g.remove_from_group(String(grp))
+	g.state = Unit.State.IDLE
+	g.global_position = global_position
+	g.set_off_map(true)
+	_hidden_gnolls.append(g)
+	hidden_total += 1
+	if _heal_timer == null:
+		_heal_timer = Timer.new()
+		_heal_timer.wait_time = 1.0
+		_heal_timer.one_shot = false
+		_heal_timer.timeout.connect(_on_heal_tick)
+		add_child(_heal_timer)
+		_heal_timer.start()
+
+func _on_heal_tick() -> void:
+	var keep: Array = []
+	for raw in _hidden_gnolls:
+		if raw == null or not is_instance_valid(raw) or (raw as Unit).is_dead():
+			continue
+		var g: Unit = raw
+		g.current_health = minf(g.max_health,
+			g.current_health + g.max_health * _GobCfgL.GNOLL_HIDE_HEAL_FRAC)
+		if g.current_health >= g.max_health - 0.01 or is_dead():
+			release_gnoll(g)
+		else:
+			keep.append(g)
+	_hidden_gnolls = keep
+
+func release_gnoll(g: Unit) -> void:
+	if g == null or not is_instance_valid(g) or not bool(g.get("hidden")):
+		return
+	g.set("hidden", false)
+	g.visible = true
+	var a: float = TAU * float(released_total) * 0.618 + 1.1
+	var r: float = maxf(build_size.x, build_size.z) * 0.5 + 2.5
+	var spot: Vector3 = GameManager.land_target(global_position
+		+ Vector3(cos(a) * r, 0.0, sin(a) * r))
+	g.global_position = Vector3(spot.x, GameManager.get_terrain_height(spot.x, spot.z), spot.z)
+	g.add_to_group(Constants.unit_group(g.faction))
+	g.set_draw(true)
+	g.set_tick(true)
+	g.enter_render()
+	g.sync_row()
+	g.post_pos = g.global_position
+	released_total += 1
+	_hidden_gnolls.erase(g)
+
+## Сколько гноллов сейчас внутри (стенды)
+func hidden_gnolls() -> int:
+	var n := 0
+	for raw in _hidden_gnolls:
+		if raw != null and is_instance_valid(raw) and bool((raw as Unit).get("hidden")):
+			n += 1
+	return n
 
 ## Живых гноллов (стенды)
 func gnolls_alive() -> int:
@@ -206,6 +372,37 @@ func breed_sheep() -> int:
 	var room: int = _GobCfgL.SHEEP_MAX - sheep_alive()
 	return spawn_sheep(mini(_GobCfgL.SHEEP_BREED_COUNT, maxi(room, 0)))
 
+## ── ОТАРА ЗАНОВО (спринт 18) ─────────────────────────────────────────────
+## Стадо вырезано или съедено целиком — через SHEEP_RESPAWN_SEC пень выпускает
+## новую отару из SHEEP_RESPAWN_COUNT. Ведёт свой таймер (у логова нет тика)
+var _respawn_timer: Timer = null
+var flocks_respawned: int = 0
+
+func _arm_flock_respawn() -> void:
+	if _respawn_timer != null and is_instance_valid(_respawn_timer):
+		return
+	_respawn_timer = Timer.new()
+	_respawn_timer.wait_time = _GobCfgL.SHEEP_RESPAWN_SEC
+	_respawn_timer.one_shot = true
+	add_child(_respawn_timer)
+	_respawn_timer.timeout.connect(_on_flock_respawn)
+	_respawn_timer.start()
+
+func _on_flock_respawn() -> void:
+	if _respawn_timer != null and is_instance_valid(_respawn_timer):
+		_respawn_timer.queue_free()
+	_respawn_timer = null
+	if is_dead() or sheep_alive() > 0:
+		return
+	flocks_respawned += 1
+	spawn_sheep(_GobCfgL.SHEEP_RESPAWN_COUNT)
+
+## Сколько секунд до новой отары (стендам); −1 — таймер не взведён
+func flock_respawn_left() -> float:
+	if _respawn_timer == null or not is_instance_valid(_respawn_timer) or _respawn_timer.is_stopped():
+		return -1.0
+	return _respawn_timer.time_left
+
 func spawn_sheep(n: int) -> int:
 	var parent := get_parent()
 	if parent == null or is_dead():
@@ -248,6 +445,20 @@ func nearest_sheep(from: Vector3) -> Node3D:
 
 func on_sheep_eaten(s: Node) -> void:
 	sheep.erase(s)
+	if sheep_alive() == 0 and not is_dead():
+		_arm_flock_respawn()
+
+## Овца, приведённая рейдом тролля, — теперь наша (без потолка стада: приплод
+## всё равно ограничен SHEEP_MAX в spawn_sheep)
+func adopt_sheep(s: Node3D) -> void:
+	if s == null or not is_instance_valid(s) or sheep.has(s):
+		return
+	s.set("lair", self)
+	s.set("home", global_position)
+	s.set("pen", null)
+	s.set("keep", null)
+	s.set("owner_faction", -1)
+	sheep.append(s)
 
 func adopt(u: Unit) -> void:
 	if u == null or not is_instance_valid(u) or trolls.has(u):
@@ -374,6 +585,31 @@ func call_guards(n: int, wounded: Node3D) -> void:
 
 ## Удар по стражу: тролль агрится на обидчика, первый удар по группе поднимает
 ## помощников из логова — сразу, без таймеров и порогов запаса
+## ── СОЛИДАРНОСТЬ СТРАЖЕЙ (спринт 20, модуль 2.4) ──────────────────────────
+## Задели ОДНОГО тролля — дерётся только он, остальные патрулируют. Задели
+## ДВОИХ в пределах TROLL_SOLIDARITY_SEC — все тролли логова разом идут на
+## обидчика. Выход помощников из пня по первому удару (агро-цепочка
+## 10.09.2026) снят: TROLL_AGGRO_HELPERS/BONUS = 0, спавн −20 %
+var _hit_at: Dictionary = {}          # тролль (id) → часы удара
+var solidarity_calls: int = 0
+
+func _lair_clock() -> float:
+	var m = GameManager.main
+	if m != null and is_instance_valid(m) and m.has_method("game_clock"):
+		return float(m.call("game_clock"))
+	return float(Time.get_ticks_msec()) * 0.001
+
+func _solidarity_count(now: float) -> int:
+	var n := 0
+	var keep: Dictionary = {}
+	for k in _hit_at:
+		var t: float = float(_hit_at[k])
+		if now - t <= _GobCfgL.TROLL_SOLIDARITY_SEC:
+			keep[k] = t
+			n += 1
+	_hit_at = keep
+	return n
+
 func on_guard_hit(troll: Node, attacker: Node3D) -> void:
 	# ЧАСЫ ВОЛН ГНОЛЛОВ ВЗВОДИТ ЛЮБОЙ УДАР ПО ЛОГОВУ ИЛИ ЕГО СТРАЖЕ: заказ
 	# говорит «если по пню бьют», а бьют по нему в трёх местах — по самому
@@ -384,6 +620,18 @@ func on_guard_hit(troll: Node, attacker: Node3D) -> void:
 		var t := troll as Unit
 		if t != null and is_instance_valid(t) and not t.is_dead() and t.attack_target == null:
 			t.command_attack(attacker, true, true)
+		if t != null and is_instance_valid(t) and aggro_enabled:
+			var now: float = _lair_clock()
+			_hit_at[t.get_instance_id()] = now
+			if _solidarity_count(now) >= 2:
+				solidarity_calls += 1
+				for o in trolls:
+					if o == null or not is_instance_valid(o) or o == t:
+						continue
+					var ou := o as Unit
+					if ou.is_dead() or ou.attack_target != null:
+						continue
+					ou.command_attack(attacker, true, true)
 	if not aggro_enabled or aggro_wave != 0 or is_dead():
 		return
 	aggro_wave = 1
@@ -428,6 +676,14 @@ func take_damage(amount: float, attacker: Node = null) -> void:
 	super.take_damage(amount, attacker)
 	if not is_dead():
 		on_lair_attacked()
+	else:
+		# ЧАСЫ ВОССТАНОВЛЕНИЯ (спринт 20): пень заново ставится не раньше
+		# LAIR_REGEN_SEC после сноса — даже при тридцати овцах у стороны
+		GameManager.note_lair_fell(side_faction)
+		# Пень снесён — укрывшиеся выходят наружу, прятаться больше негде
+		for raw in _hidden_gnolls.duplicate():
+			if raw != null and is_instance_valid(raw):
+				release_gnoll(raw)
 
 ## Логово зачищено: хоть один тролль когда-то был, и живых нет
 func is_cleared() -> bool:

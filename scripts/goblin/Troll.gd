@@ -41,6 +41,15 @@ var lair: Node3D = null
 var _swings: int = 0
 var _winded_until_ms: int = 0
 var _patrol_t: float = 0.0
+## ── РЫК (спринт 18) ──────────────────────────────────────────────────────
+## Выход из пня: гарантированный рык через _spawn_growl_t (разнесён по
+## троллям, чтобы три стража не рычали одним кадром в одно окно категории);
+## марш: раз в TROLL_GROWL_MIN..MAX секунд хода с шансом TROLL_GROWL_MARCH_P;
+## бой: редкие подрыкивания при ударах (_shout_chance). Слышимость — общие
+## правила play_3d: логово в тумане молчит
+var _spawn_growl_t: float = -1.0
+var _growl_t: float = 0.0
+var growls: int = 0                 # для стендов: сколько рыков запрошено
 var _was_charging: bool = false
 var _reinforced: bool = false
 ## «Стандартная» подмога на трети запаса действует только у троллей бонусной
@@ -134,6 +143,10 @@ func _ready() -> void:
 	_setup_visual()
 	_patrol_t = randf_range(1.0, _GobCfgT.TROLL_PATROL_SEC)
 	_hunger_t = _GobCfgT.TROLL_HUNGER_SEC * randf_range(0.5, 1.0)
+	# Жребии рыка — из генератора звука (AudioManager.rng), а не из общего
+	# потока партии: иначе рождение тролля сдвигало бы все жребии боя
+	_spawn_growl_t = AudioManager.rng.randf_range(0.15, 1.4)
+	_growl_t = AudioManager.rng.randf_range(_GobCfgT.TROLL_GROWL_MIN_SEC, _GobCfgT.TROLL_GROWL_MAX_SEC)
 	_base_move_speed = move_speed
 
 ## ── ВНЕШНОСТЬ ──────────────────────────────────────────────────────────────
@@ -164,7 +177,8 @@ func _apply_troll_scale(asp: AnimatedSprite3D) -> void:
 	var fh: float = at.region.size.y if at != null else first.get_size().y
 	if fh <= 0.0:
 		return
-	var pad: int = _anim_bottom_px(first)
+	# Ступни — по плотной краске (TROLL_FOOT_ALPHA), а не по краю тени
+	var pad: int = _anim_bottom_px(first, _GobCfgT.TROLL_FOOT_ALPHA)
 	asp.position.y = (fh * 0.5 - float(pad)) * asp.pixel_size
 
 ## Личный габарит — вчетверо шире пехотинца (см. Unit.sep_radius)
@@ -285,7 +299,8 @@ func _leave_corpse() -> void:
 	var px: float = _GobCfgT.TROLL_PIXEL_SIZE
 	var q := QuadMesh.new()
 	q.size = Vector2(float(fw) * px, float(ch) * px)
-	var mat: ShaderMaterial = _BBUtil.make_material(texs[0], Color.WHITE, 0.5, 0.0)
+	# Туша краснеет (заказ спринта 15: «усилить красный оттенок при смерти»)
+	var mat: ShaderMaterial = _BBUtil.make_material(texs[0], _GobCfgT.TROLL_DEATH_TINT, 0.5, 0.0)
 	mat.set_shader_parameter("frame_count", 1.0)
 	mat.set_shader_parameter("frame_fps", 0.0)
 	q.material = mat
@@ -349,6 +364,36 @@ func corpse_frame() -> Array:
 		return [r[0], maxi(int(r[1]) - 1, 0), int(r[1]), _look_px, _sprite_base_y]
 	return super.corpse_frame()
 
+## Рык: выход из пня — гарантированный; марш — редкий с шансом
+func _tick_growl(delta: float) -> void:
+	if _spawn_growl_t >= 0.0:
+		_spawn_growl_t -= delta
+		if _spawn_growl_t < 0.0:
+			growls += 1
+			AudioManager.play_3d("troll_growl", global_position)
+		return
+	if not moved_recently():
+		return
+	_growl_t -= delta
+	if _growl_t > 0.0:
+		return
+	_growl_t = AudioManager.rng.randf_range(_GobCfgT.TROLL_GROWL_MIN_SEC, _GobCfgT.TROLL_GROWL_MAX_SEC)
+	if AudioManager.rng.randf() < _GobCfgT.TROLL_GROWL_MARCH_P:
+		growls += 1
+		AudioManager.play_3d("troll_growl", global_position)
+
+## Подрыкивание в бою — тот же рык, редкий (вероятность на удар)
+func _sfx_shout() -> String:
+	return "troll_growl"
+
+func _shout_chance() -> float:
+	return _GobCfgT.TROLL_GROWL_FIGHT_P
+
+## Тролль не кричит человеческим голосом и на смерти: у его туши свой звук
+## не заказан — предсмертный человеческий стон снят
+func _sfx_death() -> String:
+	return "troll_growl"
+
 func _sfx_swing() -> String:
 	return "sword_attack"
 
@@ -370,9 +415,30 @@ func _may_strike_now() -> bool:
 ## тяжёлой конницы) и ЛЕЖИТ TROLL_KNOCKDOWN_SEC сбитым с ног. Назначенная
 ## цель получает урон штатным путём (возврат), остальные здесь; сбивание и
 ## отлёт — всем шести, включая цель
+## ЗАМАХ — СЕЙЧАС, КАСАНИЕ — ЧЕРЕЗ TROLL_SWING_HIT_SEC (разбор у константы).
+## Базовый удар по цели тоже отложен (см. _damage_on_strike): иначе цель
+## получала бы урон в начале замаха, а соседи — в конце
+var _swing_left: float = 0.0
+var _swing_look: Vector3 = Vector3.FORWARD
+var _swing_dmg: float = 0.0
+var _swing_target: Node3D = null
+
+func _damage_on_strike() -> bool:
+	return false   # урон списывает _release_swing, синхронно с касанием
+
+## ── СЕРИЯ ПРИВЯЗАНА К ЦЕЛИ (спринт 16) ─────────────────────────────────────
+## Заказ: «[1] → [2] → [3] → одышка; перебежал к новой цели — серия заново».
+## Смена цели между ударами обнуляет счёт: бить новую цель «третьим» ударом
+## с одышкой сразу после — не серия, а обрывок
+var _series_target: Node3D = null
+
 func _strike_damage() -> float:
+	var tgt_now: Node3D = attack_target as Node3D
+	if tgt_now != _series_target:
+		_series_target = tgt_now
+		_swings = 0
 	_swings += 1
-	var dmg: float = attack_damage
+	var dmg: float = attack_damage * _GobCfgT.TROLL_SWEEP_DMG_MULT
 	_play_attack_anim("attack", 600)
 	var mp: Vector3 = global_position
 	var tgt := attack_target as Node3D
@@ -384,6 +450,30 @@ func _strike_damage() -> float:
 			look = to.normalized()
 	if look.length_squared() < 1e-6:
 		look = Vector3.FORWARD
+	# ── СВЯЗКА: ПОЛШАГА К ЦЕЛИ НА КАЖДЫЙ УДАР ────────────────────────────
+	# Тем же плавным каналом, что у отлёта (push_smooth): шаг проходит через
+	# проверку чужих тел, в строй он не въезжает
+	push_smooth(look, _GobCfgT.TROLL_SWING_STEP, true)
+	_swing_look = look
+	_swing_dmg = dmg
+	_swing_target = tgt
+	_swing_left = _GobCfgT.TROLL_SWING_HIT_SEC
+	if _swings >= _GobCfgT.TROLL_SWINGS:
+		_swings = 0
+		_start_rest()
+	return dmg
+
+## Дубина коснулась: урон цели и дуге, отлёт и падение накрытых
+func _release_swing() -> void:
+	_swing_left = 0.0
+	if state == State.DEAD:
+		return
+	var mp: Vector3 = global_position
+	var look: Vector3 = _swing_look
+	var dmg: float = _swing_dmg
+	var tgt: Node3D = _swing_target if (_swing_target != null
+		and is_instance_valid(_swing_target)) else null
+	_swing_target = null
 	var reach: float = attack_range + _GobCfgT.TROLL_SWEEP_REACH_PAD
 	var hit: Array = []      # [dist, Unit]
 	for n in GameManager.unit_grid.query_radius(mp, reach):
@@ -397,8 +487,6 @@ func _strike_damage() -> float:
 		var d: float = off.length()
 		if d > reach:
 			continue
-		# Впереди по взгляду: косинус угла не меньше порога (вплотную —
-		# считается впереди всегда: там угол не определён)
 		if d > 0.2 and (off.x * look.x + off.z * look.z) / d < _GobCfgT.TROLL_SWEEP_ARC_COS:
 			continue
 		hit.append([d, v])
@@ -407,12 +495,18 @@ func _strike_damage() -> float:
 	last_sweep_count = n_hit
 	last_sweep_look = look
 	last_sweep_units.clear()
+	var tgt_hit: bool = false
+	if n_hit > 0:
+		_note_hit_landed()
 	for k in range(n_hit):
 		var v: Unit = hit[k][1]
 		last_sweep_units.append(v)
 		if not is_instance_valid(v) or v.is_dead():
 			continue
-		if v != tgt:
+		if v == tgt:
+			tgt_hit = true
+			v.take_damage(dmg, self)
+		else:
 			v.take_damage(dmg * _GobCfgT.TROLL_SPLASH_FRAC, self)
 		if not is_instance_valid(v) or v.is_dead():
 			continue
@@ -421,12 +515,22 @@ func _strike_damage() -> float:
 		var dirn: Vector3 = off2.normalized() if off2.length_squared() > 1e-4 else look
 		v.apply_knockback(dirn, _GobCfgT.TROLL_SWEEP_KNOCKBACK, mp)
 		v.knock_down(_GobCfgT.TROLL_KNOCKDOWN_SEC)
-	if _swings >= _GobCfgT.TROLL_SWINGS:
-		_swings = 0
-		_start_rest()
-	return dmg
+	# Цель, не попавшая в дугу (отошла на шаг), всё равно получает удар, если
+	# дубина до неё достаёт: так было и до синхронизации
+	if not tgt_hit and tgt != null:
+		var tu := tgt as Unit
+		if tu != null and not tu.is_dead() \
+				and mp.distance_to(tu.global_position) <= reach:
+			tu.take_damage(dmg, self)
+		# ── ПОСТРОЙКА ПОД ДУБИНОЙ (спринт 19, письмо 10) ─────────────────
+		# Дуга ищет по сетке БОЙЦОВ, а здание в ней не состоит: приказ «сломай
+		# дом» принимался, тролль подходил и махал — а урона не было вовсе.
+		# Стена цели — по рисунку (ring_radius), как у любого удара по зданию
+		var tb := tgt as Building
+		if tb != null and not tb.is_dead() and may_attack_building(tb) \
+				and mp.distance_to(tb.global_position) <= reach + tb.ring_radius():
+			tb.take_damage(dmg, self)
 
-## Кого и куда глядя накрыл последний удар дубины (стенды)
 var last_sweep_count: int = 0
 var last_sweep_units: Array = []
 var last_sweep_look: Vector3 = Vector3.FORWARD
@@ -438,6 +542,9 @@ func _trample_count() -> int:
 ## Вспышка слабее общей, кровь пятнами (см. goblin_config)
 func hit_flash_peak() -> float:
 	return _GobCfgT.TROLL_FLASH_PEAK
+
+func hit_flash_color() -> Color:
+	return _GobCfgT.TROLL_FLASH_COLOR
 
 func blood_spots() -> float:
 	return _GobCfgT.TROLL_BLOOD_SPOTS
@@ -485,6 +592,11 @@ func _start_rest() -> void:
 ## ── ТИК: ОДЫШКА СТОИТ НА МЕСТЕ, ПАТРУЛЬ, ЗАМАХ НА РАЗГОНЕ ──────────────────
 func tick_physics(delta: float, prof: bool = false, bm: bool = true,
 		bonus_ver: int = -1) -> void:
+	# Отложенное касание дубины идёт и на одышке: замах начат до неё
+	if _swing_left > 0.0:
+		_swing_left -= delta
+		if _swing_left <= 0.0:
+			_release_swing()
 	if is_winded():
 		# Стоит и дышит: ни шага, ни удара. Окно замера движения тикает,
 		# иначе зеркало и анимация ходьбы застыли бы на последнем шаге
@@ -500,11 +612,15 @@ func tick_physics(delta: float, prof: bool = false, bm: bool = true,
 	super.tick_physics(delta, prof, bm, bonus_ver)
 	if state == State.DEAD:
 		return
+	_tick_growl(delta)
+	# Поводок погони (спринт 20): 10 с без удара — цель брошена, домой
+	_tick_chase(delta)
 	# Тролль из сохранённой партии рождается без логова — подхватываем
 	# логово партии, чтобы патруль, подмога и месть работали и после загрузки
 	if lair == null and GameManager.troll_lair != null \
 			and is_instance_valid(GameManager.troll_lair):
-		lair = GameManager.troll_lair as Node3D
+		var nl: Node = GameManager.nearest_lair(global_position)   # логов два (спринт 18)
+		lair = (nl if nl != null else GameManager.troll_lair) as Node3D
 		if lair.has_method("adopt"):
 			lair.call("adopt", self)
 	# Замах — на входе в разгон (лента Windup), дальше базовый таран
@@ -534,6 +650,9 @@ func tick_physics(delta: float, prof: bool = false, bm: bool = true,
 	if breaks_bodies and _shove_t <= 0.0:
 		_shove_t = _GobCfgT.TROLL_SHOVE_SEC
 		_shove_ring()
+	# Рейд за чужими овцами (спринт 18): важнее обеда и патруля
+	if _tick_raid(delta):
+		return
 	# Обед: голодный тролль идёт к овце (см. _tick_hunger); патруль ждёт
 	if _tick_hunger(delta):
 		return
@@ -548,7 +667,280 @@ func tick_physics(delta: float, prof: bool = false, bm: bool = true,
 			var p: Vector3 = lair.global_position + Vector3(cos(a) * r, 0.0, sin(a) * r)
 			command_move(GameManager.land_target(p))
 
+# ═════════════════════════════════════════════════════════════════════════════
+# РЕЙД ЗА ОВЦАМИ (спринт 18, второе письмо)
+# ═════════════════════════════════════════════════════════════════════════════
+# У стороны (игрок или красный ИИ) больше TROLL_RAID_SHEEP овец — свободный
+# тролль идёт к их стаду, съедает TROLL_RAID_EAT, берёт под пастьбу
+# TROLL_RAID_HERD (Sheep.herd_by: привязка к загону снята, овца идёт за ним) и
+# возвращается к пню, где отара становится его (TrollLair.adopt_sheep). По
+# дороге ломает постройки в TROLL_RAID_SMASH_R, но КРЕПОСТЬ (ратушу) не
+# трогает никогда — см. command_attack. Фазы: "go" → "eat" → "herd" → "home"
+var _raid: Dictionary = {}
+var _raid_check_t: float = 3.0
+var _raid_cool_t: float = 0.0
+var raids_done: int = 0             # стендам
+var raid_eaten: int = 0
+var raid_herded: int = 0
+var is_dead_flag: bool = false       # для овец: пастух пал
+
+func raid_phase() -> String:
+	return String(_raid.get("phase", ""))
+
+func _raid_faction_ready() -> int:
+	for f in [Constants.FACTION_PLAYER, Constants.FACTION_ENEMY]:
+		if GameManager.faction_sheep_count(f) > _GobCfgT.TROLL_RAID_SHEEP:
+			return f
+	return -1
+
+func _owned_sheep_near(f: int, from: Vector3, radius: float) -> Node3D:
+	var best: Node3D = null
+	var bd: float = radius * radius
+	for sh in get_tree().get_nodes_in_group("sheep"):
+		if sh == null or not is_instance_valid(sh):
+			continue
+		if bool(sh.get("eaten")) or bool(sh.get("dead")) or sh.get("herder") != null:
+			continue
+		if int(sh.get("owner_faction")) != f or not bool(sh.call("is_owned")):
+			continue
+		var d: float = from.distance_squared_to((sh as Node3D).global_position)
+		if d < bd:
+			bd = d
+			best = sh
+	return best
+
+func _tick_raid(delta: float) -> bool:
+	_raid_cool_t -= delta
+	if _raid.is_empty():
+		_raid_check_t -= delta
+		if _raid_check_t > 0.0 or _raid_cool_t > 0.0:
+			return false
+		_raid_check_t = _GobCfgT.TROLL_RAID_CHECK_SEC
+		if state != State.IDLE or attack_target != null or lair == null or not is_instance_valid(lair):
+			return false
+		var f: int = _raid_faction_ready()
+		if f < 0:
+			return false
+		var s0: Node3D = _owned_sheep_near(f, global_position, 1.0e5)
+		if s0 == null:
+			return false
+		_raid = {"phase": "go", "faction": f, "eaten": 0, "herd": []}
+		command_move(GameManager.land_target(s0.global_position))
+		return true
+	var f2: int = int(_raid["faction"])
+	var phase: String = String(_raid["phase"])
+	# Бой важнее: пока есть цель, рейд ждёт (кроме ратуши — её не трогаем).
+	# Снос постройки (фаза smash) — тоже бой, и срок ему идёт здесь: вышел —
+	# бросаем стену и уводим отару
+	if attack_target != null:
+		if phase == "smash":
+			_raid["smash_t"] = float(_raid.get("smash_t", 0.0)) + delta
+			if float(_raid["smash_t"]) > _GobCfgT.TROLL_RAID_SMASH_SEC:
+				set_attack_target(null)
+				_raid_gather(f2)
+				return true
+		return false
+	match phase:
+		"go", "eat":
+			var s1: Node3D = _owned_sheep_near(f2, global_position, 60.0)
+			if s1 == null:
+				s1 = _owned_sheep_near(f2, global_position, 1.0e5)
+				if s1 == null:
+					_raid_finish(false)
+					return true
+			var d: Vector3 = s1.global_position - global_position
+			d.y = 0.0
+			if d.length() <= _GobCfgT.TROLL_EAT_RANGE:
+				_raid["phase"] = "eat"
+				_eat(s1)
+				_raid["eaten"] = int(_raid["eaten"]) + 1
+				raid_eaten += 1
+				if int(_raid["eaten"]) >= _GobCfgT.TROLL_RAID_EAT:
+					# Наелся — сперва СЛОМАТЬ ПОСТРОЙКУ у стада (письмо 10),
+					# отара уводится после неё
+					if not _raid_smash_start(f2):
+						_raid_gather(f2)
+				return true
+			_smash_nearby(f2)
+			if state == State.IDLE:
+				command_move(GameManager.land_target(s1.global_position))
+			return true
+		"smash":
+			# Наевшись — СЛОМАТЬ ПОСТРОЙКУ у стада (письмо 10): бой с ней ведёт
+			# обычный автомат, рейд ждёт; снесена или вышел срок — уводим отару
+			var tb = _raid.get("smash")
+			var alive: bool = tb != null and is_instance_valid(tb) and not bool(tb.call("is_dead"))
+			_raid["smash_t"] = float(_raid.get("smash_t", 0.0)) + delta
+			if not alive or float(_raid["smash_t"]) > _GobCfgT.TROLL_RAID_SMASH_SEC:
+				if not alive:
+					raid_smashed += 1
+				_raid_gather(f2)
+				return true
+			if attack_target == null:
+				command_attack(tb as Node3D, true)
+			return true
+		"home":
+			var lp: Vector3 = (lair as Node3D).global_position
+			var dh: Vector3 = lp - global_position
+			dh.y = 0.0
+			if dh.length() <= _GobCfgT.TROLL_RAID_HOME_R:
+				_raid_finish(true)
+				return true
+			if state == State.IDLE:
+				command_move(GameManager.land_target(lp))
+			return true
+	return false
+
+## Ближайшая постройка стороны у стада (кроме крепости) — под дубину.
+## false — ломать нечего, отара уводится сразу
+var raid_smashed: int = 0
+
+func _raid_smash_start(f: int) -> bool:
+	var best: Node3D = null
+	var bd: float = _GobCfgT.TROLL_RAID_SMASH_SEEK * _GobCfgT.TROLL_RAID_SMASH_SEEK
+	for b in GameManager.nodes_in_group_cached(Constants.building_group(f)):
+		if b == null or not is_instance_valid(b) or not (b is Building):
+			continue
+		var bld := b as Building
+		if bld.is_dead() or not may_attack_building(bld):
+			continue
+		var d: float = global_position.distance_squared_to(bld.global_position)
+		if d < bd:
+			bd = d
+			best = bld
+	if best == null:
+		return false
+	_raid["phase"] = "smash"
+	_raid["smash"] = best
+	_raid["smash_t"] = 0.0
+	command_attack(best, true)
+	return attack_target == best
+
+## Взять под пастьбу TROLL_RAID_HERD ближайших овец стороны и идти домой
+func _raid_gather(f: int) -> void:
+	var herd: Array = []
+	for _i in range(_GobCfgT.TROLL_RAID_HERD):
+		var sh: Node3D = _owned_sheep_near(f, global_position, 60.0)
+		if sh == null:
+			break
+		sh.call("herd_by", self)
+		herd.append(sh)
+	_raid["herd"] = herd
+	raid_herded += herd.size()
+	_raid["phase"] = "home"
+	if lair != null and is_instance_valid(lair):
+		command_move(GameManager.land_target((lair as Node3D).global_position))
+
+## Дошли: отара — логову; сорвался (овец не стало) — просто домой
+func _raid_finish(ok: bool) -> void:
+	for sh in _raid.get("herd", []):
+		if sh == null or not is_instance_valid(sh):
+			continue
+		# Отбитую по дороге овцу (рабочий перехватил, Sheep.captured_by
+		# снял пастуха) логову не отдаём — она уже не в отаре
+		if sh.get("herder") != self:
+			continue
+		sh.call("release_herd")
+		if ok and lair != null and is_instance_valid(lair) and lair.has_method("adopt_sheep"):
+			lair.call("adopt_sheep", sh)
+	_raid = {}
+	_raid_cool_t = _GobCfgT.TROLL_RAID_COOLDOWN_SEC
+	raids_done += 1
+	if ok and lair != null and is_instance_valid(lair) and lair.has_method("on_raid_success"):
+		lair.call("on_raid_success")
+
+## По дороге ломает постройки стороны в TROLL_RAID_SMASH_R — кроме ратуши
+func _smash_nearby(f: int) -> void:
+	var best: Node3D = null
+	var bd: float = _GobCfgT.TROLL_RAID_SMASH_R * _GobCfgT.TROLL_RAID_SMASH_R
+	for b in GameManager.nodes_in_group_cached(Constants.building_group(f)):
+		if b == null or not is_instance_valid(b) or not (b is Building):
+			continue
+		var bld := b as Building
+		if bld.is_dead() or (bld.has_method("is_stronghold") and bool(bld.call("is_stronghold"))):
+			continue
+		var d: float = global_position.distance_squared_to(bld.global_position)
+		if d < bd:
+			bd = d
+			best = bld
+	if best != null:
+		command_attack(best, true)
+
+## РАТУША НЕПРИКОСНОВЕННА (спринт 18): тролль ломает постройки, но крепость —
+## никогда: ни по приказу логова, ни по агро, ни в рейде
+## Троллю нельзя ни одну крепость (ни игрока, ни ИИ) — см. Unit.may_attack_building
+func may_attack_building(b: Building) -> bool:
+	if b == null or not is_instance_valid(b):
+		return false
+	return not (b.has_method("is_stronghold") and bool(b.call("is_stronghold")))
+
 ## ── УРОН: КТО СКОЛЬКО НАНЁС, И ПОЛОВИНА ЗАПАСА ──────────────────────────────
+## Ответ на обстрел у тролля ведёт логово (TrollLair.on_guard_hit): общий
+## отход к лагерю боссу не положен
+func answers_far_fire() -> bool:
+	return false
+
+## ── МАЛЫЙ РАДИУС АГРО И ПОВОДОК ПОГОНИ (спринт 20, модуль 2.4) ─────────────
+## Тролль реагирует на врага в TROLL_AGGRO_RADIUS, а не на весь обзор орды.
+## Погоня — не дольше TROLL_CHASE_SEC без НАНЕСЁННОГО удара: цель
+## сбрасывается, тролль возвращается к пню на патруль, и следующие
+## TROLL_CHASE_COOL_SEC сам никого не берёт (иначе тот же враг в двенадцати
+## метрах взводил бы погоню заново тем же тактом). Удар по нему в это окно
+## агрит его как обычно (on_guard_hit → command_attack)
+const TROLL_CHASE_COOL_SEC := 3.0
+var _chase_t: float = 0.0
+var _chase_target: Node3D = null
+var _chase_cool: float = 0.0
+var chase_resets: int = 0            # стендам: сколько раз поводок сработал
+
+func aggro_radius() -> float:
+	return _GobCfgT.TROLL_AGGRO_RADIUS
+
+func _check_auto_aggro() -> void:
+	if _chase_cool > 0.0:
+		_aggro_timer = AGGRO_INTERVAL_CALM
+		return
+	super._check_auto_aggro()
+
+## Удар дошёл до цели — погоня не напрасна, часы заново
+func _note_hit_landed() -> void:
+	_chase_t = 0.0
+
+func chase_left() -> float:
+	return maxf(_GobCfgT.TROLL_CHASE_SEC - _chase_t, 0.0)
+
+func _tick_chase(delta: float) -> bool:
+	if _chase_cool > 0.0:
+		_chase_cool -= delta
+	var t: Node3D = attack_target
+	if t == null or not is_instance_valid(t) or not _raid.is_empty():
+		_chase_t = 0.0
+		_chase_target = null
+		return false
+	if t != _chase_target:
+		_chase_target = t
+		_chase_t = 0.0
+	_chase_t += delta
+	if _chase_t < _GobCfgT.TROLL_CHASE_SEC:
+		return false
+	# Не догнал за отведённое — агро сброшено, домой
+	chase_resets += 1
+	_chase_t = 0.0
+	_chase_target = null
+	_chase_cool = TROLL_CHASE_COOL_SEC
+	release_target_lock()
+	set_attack_target(null)
+	_atk_pending = false
+	velocity = Vector3.ZERO
+	state = State.IDLE
+	if lair != null and is_instance_valid(lair):
+		var a: float = randf() * TAU
+		var r: float = _GobCfgT.TROLL_PATROL_RADIUS * 0.5
+		var p: Vector3 = lair.global_position + Vector3(cos(a) * r, 0.0, sin(a) * r)
+		command_move(GameManager.land_target(p))
+		_patrol_t = _GobCfgT.TROLL_PATROL_SEC
+	return true
+
 func take_damage(amount: float, attacker: Node3D = null) -> void:
 	if state == State.DEAD:
 		return
@@ -575,6 +967,9 @@ func take_damage(amount: float, attacker: Node3D = null) -> void:
 
 ## ── СМЕРТЬ: ЦЕНА В УБИЙСТВАХ ДЕЛИТСЯ ПО УРОНУ ───────────────────────────────
 func _die() -> void:
+	is_dead_flag = true
+	if not _raid.is_empty():
+		_raid_finish(false)
 	if state != State.DEAD:
 		_award_kills()
 		if lair != null and is_instance_valid(lair) and lair.has_method("on_troll_died"):

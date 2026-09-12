@@ -304,7 +304,23 @@ func _apply_dir_tex(key: String) -> void:
 func _update_sprite_anim() -> void:
 	if _dir_sprite == null or not is_instance_valid(_dir_sprite):
 		return
+	# Замок разового замаха (охота на овцу, спринт 19): пока он тикает, поза
+	# не переписывается — иначе следующий же такт вернул бы покой
+	if now_ms < _anim_lock_until_ms:
+		return
 	_update_dir_sprite()
+
+## Замах по овце направленным листом удара (спринт 19, см. Unit._hunt_strike_anim)
+func _hunt_strike_anim() -> void:
+	if _dir_sprite == null:
+		super._hunt_strike_anim()
+		return
+	var sec := _facing_to_dir_key(_facing.normalized() if _facing.length_squared() > 1e-6 else Vector3.RIGHT)
+	_apply_dir_tex(ATTACK_KEYS[sec])
+	_set_dir_flip(SECTOR_MIRROR[sec])
+	_anim_lock_until_ms = Time.get_ticks_msec() + 450
+	_lock_pending = true
+	_pose_dirty = true
 
 # Зеркалом направленных поз (attack_*/defence_*) управляет _update_dir_sprite:
 # он сам считает 8 направлений из одного набора шитов. Базовый разворот по
@@ -707,6 +723,12 @@ func _add_spear_procedural() -> void:
 ## ровно в тот момент, когда идёт вперёд.
 ## С фланга и с тыла не работает вовсе, и это главное: копья смотрят в одну
 ## сторону, обойти строй конница по-прежнему обязана уметь
+## Стена копий (спринт 18): стойка «Защита» И режим отряда «Стена копий»
+## (forge spearman_1d, переключатель, включён по умолчанию, как залп)
+func spear_wall_active() -> bool:
+	return stance == "defense" and squad_id > 0 \
+		and GameManager.spear_wall_ready(squad_id)
+
 func repels_charge() -> bool:
 	return true
 

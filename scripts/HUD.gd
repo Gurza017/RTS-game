@@ -1325,6 +1325,10 @@ func _update_top_right(delta: float) -> void:
 	if not get_tree().paused:
 		_match_seconds += delta
 	_timer_label.text = _format_match_time(_match_seconds)
+	# Перемирие первых минут (спринт 20): игрок видит, сколько осталось
+	var tl: float = GameManager.truce_left()
+	if tl > 0.0:
+		_timer_label.text += "  ·  перемирие %s" % _format_match_time(tl)
 	if _fps_label and _fps_label.visible:
 		_fps_label.text = "FPS: %d" % Engine.get_frames_per_second()
 	if _pause_btn:
@@ -4203,6 +4207,11 @@ const MOD_SHORT_LABELS := {
 	"bonus_cooldown": "ИНТЕРВАЛ АТАКИ", "bonus_spread": "SPREAD",
 	"bonus_push": "PUSH", "bonus_morale": "MORALE",
 	"bonus_carry": "CARRY", "bonus_gather": "GATHERING", "bonus_build": "BUILDING",
+	"bonus_heal_rate": "ТЕМП ЛЕЧЕНИЯ", "bonus_heal_amount": "ОБЪЁМ ЛЕЧЕНИЯ",
+	"bonus_heal_radius": "РАДИУС ЛЕЧЕНИЯ",
+	"bonus_train": "ОБУЧЕНИЕ",
+	"bonus_aura_armor": "АУРА: БРОНЯ", "bonus_aura_attack": "АУРА: УДАР",
+	"bonus_aura_rate": "АУРА: ТЕМП СТРЕЛЬБЫ", "bonus_aura_radius": "АУРА: РАДИУС",
 }
 
 var _vet_tip: Control = null

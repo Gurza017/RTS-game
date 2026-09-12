@@ -64,10 +64,14 @@ const GATE_DISTANCE := 6.5
 ## GATE_DISTANCE выведен из коробки замка (8 м), а нарисован он на 8.66 м в
 ## ширину, то есть полуширина рисунка 4.33 — на два метра ближе. Отряд честно
 ## возникал за кольцом, на пустой траве
+## …И НЕ ДАЛЬШЕ GATE_MAX_DEPTH ОТ СТЕНЫ (спринт 19, письмо 9): у замка
+## рисунок 8.66 м в ширину, и ворота по нему стояли в 4.8 м от центра —
+## «точка появления далеко от стены» на скриншоте владельца
 func gate_depth() -> float:
+	var d: float = GATE_DISTANCE
 	if _draw_half_w >= 0.0:
-		return minf(GATE_DISTANCE, _draw_half_w + GATE_CLEARANCE)
-	return GATE_DISTANCE
+		d = minf(GATE_DISTANCE, _draw_half_w + GATE_CLEARANCE)
+	return minf(d, GATE_MAX_DEPTH + GATE_CLEARANCE)
 
 # ═════════════════════════════════════════════════════════════════════════════
 # ГАРНИЗОН: ПОПОЛНЕНИЕ И ЛЕЧЕНИЕ ОТРЯДОВ

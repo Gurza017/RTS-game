@@ -43,6 +43,9 @@ const ROLE_RECAP   := "recap"     # общее наступление на це�
 const ROLE_FLANK   := "flank"     # мечники обходят строй и идут в тыл, к стрелкам
 const ROLE_KITE    := "kite"      # лучники отходят за спину своей пехоты
 const ROLE_RETREAT := "retreat"   # отряд выбит и уходит на восстановление в замок
+# ── ГЛАВНЫЙ ЦИКЛ (спринт 17) ────────────────────────────────────────────────
+const ROLE_MINE    := "mine"      # идёт захватывать рудник / держит его резервом
+const ROLE_RAID    := "raid"      # рейд по экономике игрока (hit-and-run)
 
 # Строй отряда при выдаче приказа
 const SQUAD_COLS    := 6
@@ -119,10 +122,29 @@ func reset() -> void:
 	last_stand   = false
 	recap_center = false
 	last_action  = ""
+	clock = 0.0
+	raid_sid = 0
+	_raid_since = 0.0
+	_raid_last = -1.0e9
+	raids_launched = 0
+	raid_retreats = 0
+	mine_sid = 0
+	mines_captured = 0
+
+## ── СОСТОЯНИЕ ГЛАВНОГО ЦИКЛА (спринт 17) ────────────────────────────────────
+var clock: float = 0.0
+var raid_sid: int = 0
+var _raid_since: float = 0.0
+var _raid_last: float = -1.0e9
+var raids_launched: int = 0
+var raid_retreats: int = 0
+var mine_sid: int = 0
+var mines_captured: int = 0
 
 func _process(delta: float) -> void:
 	if main == null:
 		return
+	clock += delta
 	if not _peace_over:
 		_peace_timer += delta
 		if _peace_timer >= _Diff.ai_peace_seconds():
@@ -169,10 +191,18 @@ func tick() -> void:
 		_hold_everyone_home(castle)
 		return
 	_train_army(castle)
-	if _AICfg.DEFENSIVE_MODE:
+	# ── ГЕНЕРАЛЬНЫЙ ШТУРМ С 35-й МИНУТЫ (спринт 17) ─────────────────────────
+	# Оборонительный режим держит центр и рудники; когда часы перевалили
+	# AI_ASSAULT_AT_SEC и лимит армии набран — волна на базу игрока
+	if _AICfg.DEFENSIVE_MODE and not _assault_time():
 		_command_squads_defensive(castle)
 	else:
 		_command_squads(castle)
+
+func _assault_time() -> bool:
+	if clock < _AICfg.AI_ASSAULT_AT_SEC:
+		return false
+	return army_ready() or _wave_out
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ВЕТЕРАНСКИЕ НАГРАДЫ ИИ
@@ -485,6 +515,37 @@ func _start_site(build_id: String, at: Vector3, free_build: bool = false) -> boo
 		(crew[i] as Worker).command_build(site)
 	return true
 
+## Сколько башен уже стоит или строится у ИИ
+func _towers_count() -> int:
+	var n := 0
+	for b in main.get_tree().get_nodes_in_group("enemy_buildings"):
+		if not is_instance_valid(b):
+			continue
+		var bld := b as Building
+		if bld == null or bld.is_dead():
+			continue
+		if bld.building_id == "tower":
+			n += 1
+		elif bld.get("target_id") != null and String(bld.get("target_id")) == "tower":
+			n += 1
+	return n
+
+## Точка очередной башни: на TOWER_BORDER_FRACTION пути от замка к базе игрока,
+## по очереди слева и справа от оси на TOWER_SIDE
+func _tower_spot(castle: Castle, idx: int) -> Vector3:
+	var base: Vector3 = _player_base_pos()
+	if base == Vector3.ZERO:
+		base = main.PLAYER_BASE_ANCHOR
+	var axis: Vector3 = base - castle.global_position
+	axis.y = 0.0
+	if axis.length() < 0.01:
+		axis = Vector3.FORWARD
+	var dist: float = axis.length() * _AICfg.TOWER_BORDER_FRACTION
+	axis = axis.normalized()
+	var side := Vector3(-axis.z, 0.0, axis.x) * (_AICfg.TOWER_SIDE if idx % 2 == 0 else -_AICfg.TOWER_SIDE)
+	var p: Vector3 = castle.global_position + axis * dist + side
+	return GameManager.land_target(p)
+
 func _construction(castle: Castle) -> void:
 	var barracks: Building = null
 	var smithy: Smithy = null
@@ -539,6 +600,16 @@ func _construction(castle: Castle) -> void:
 		if _start_site("archery", spot3):
 			last_action += "|заложена стрелковая"
 		return
+
+	# ── БАШНИ НА ГРАНИЦЕ (спринт 17) ────────────────────────────────────────
+	# После стрелковой: AI_TOWERS сторожевых башен на доле пути к базе игрока,
+	# разнесённых вбок. Стройка одна за раз (см. выше), поэтому башни идут по
+	# одной, а между ними — исследования кузницы по обычному кругу
+	if _AICfg.AI_BUILD_TOWERS and _towers_count() < _AICfg.AI_TOWERS:
+		var spot4: Vector3 = _tower_spot(castle, _towers_count())
+		if _start_site("tower", spot4):
+			last_action += "|заложена башня на границе"
+			return
 
 	for slot in _UCfg.UPGRADE_SLOTS:
 		var d: Dictionary = slot
@@ -1135,11 +1206,21 @@ func _command_squads_defensive(castle: Castle) -> void:
 	var course := _defense_course(castle)
 	var right := Vector3(-course.z, 0.0, course.x)
 
+	# ── ЭКСПАНСИЯ И РЕЙДЫ — ПЕРВЫМ ДЕЛОМ (спринт 17) ────────────────────────
+	# Отряд на рудник и рейд-отряд берутся ДО раздачи домашнего гарнизона:
+	# при HOME_GUARD_PER_TYPE = 7 излишков у ИИ не бывает почти никогда, и
+	# «экспансия первым делом» иначе не наступала бы вовсе
+	var pool: Array = []
+	for s0 in squads:
+		if String((s0 as Dictionary)["role"]) != ROLE_RETREAT:
+			pool.append(s0)
+	pool = _assign_mine_squad(pool)
+	pool = _assign_raid_squad(pool, castle)
 	# Раздача ролей: сначала домашний гарнизон, затем патрули, остальное — заслон
 	var per_type: Dictionary = {}
 	var home: Array = []
 	var rest: Array = []
-	for s in squads:
+	for s in pool:
 		var sq: Dictionary = s
 		var uid: String = String(sq["type"])
 		var seen: int = int(per_type.get(uid, 0))
@@ -1178,6 +1259,210 @@ func _command_squads_defensive(castle: Castle) -> void:
 			var pi: int = i - line_count
 			_set_role(sq, ROLE_PATROL, _patrol_point(center, pi, patrols, course))
 	_apply_orders()
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ЭКСПАНСИЯ: РУДНИКИ (спринт 17)
+# ═════════════════════════════════════════════════════════════════════════════
+## Номер отряда GameManager у записи ИИ — по первому живому бойцу (записи
+## ИИ своего id не держат, состав собирается пополнением)
+func _sid_of(sq: Dictionary) -> int:
+	for m in sq.get("members", []):
+		if m != null and is_instance_valid(m):
+			return int((m as Unit).squad_id)
+	return 0
+
+## Рудники не в нашей собственности (ничьи, игрока, орды)
+func _foreign_mines() -> Array:
+	var out: Array = []
+	for grp in ["neutral_buildings", "player_buildings", "goblin_buildings"]:
+		for b in main.get_tree().get_nodes_in_group(grp):
+			if b == null or not is_instance_valid(b):
+				continue
+			if b is Mine and not (b as Building).is_dead():
+				out.append(b)
+	return out
+
+func _own_mines() -> Array:
+	var out: Array = []
+	for b in main.get_tree().get_nodes_in_group("enemy_buildings"):
+		if b != null and is_instance_valid(b) and b is Mine and not (b as Building).is_dead():
+			out.append(b)
+	return out
+
+## Куда идти за рудником: ближайший к замку не свой; все наши — ближайший свой
+## (резерв на нём). null — рудников нет вовсе
+func _mine_goal() -> Node3D:
+	var best: Node3D = null
+	var bd := INF
+	var from: Vector3 = _home_pos
+	for m in _foreign_mines():
+		var d: float = from.distance_squared_to((m as Node3D).global_position)
+		if d < bd:
+			bd = d
+			best = m
+	if best != null:
+		return best
+	for m in _own_mines():
+		var d2: float = from.distance_squared_to((m as Node3D).global_position)
+		if d2 < bd:
+			bd = d2
+			best = m
+	return best
+
+## Отряд на рудник: один из излишков (пехота — первой). Возвращает остаток
+func _assign_mine_squad(rest: Array) -> Array:
+	if not _AICfg.AI_CAPTURE_MINES or rest.is_empty():
+		mine_sid = 0
+		return rest
+	var pick: Dictionary = {}
+	for s in rest:
+		if _sid_of(s) == mine_sid and mine_sid > 0:
+			pick = s
+			break
+	var goal: Node3D = null
+	if not pick.is_empty():
+		# Отряд уже за рудником: держит СВОЙ, пока тот наш (резерв на нём);
+		# рудник отбит или снесён — снова ближайший не свой
+		var mine_raw: Variant = pick.get("mine_node")
+		if mine_raw != null and is_instance_valid(mine_raw) and not (mine_raw as Building).is_dead():
+			goal = mine_raw as Node3D
+			var ours: bool = (goal as Building).faction == Constants.FACTION_ENEMY
+			if ours and bool(pick.get("mine_pending", false)):
+				pick["mine_pending"] = false
+				mines_captured += 1
+				last_action += "|рудник захвачен, резерв на нём"
+			elif not ours and not bool(pick.get("mine_pending", false)):
+				pick["mine_pending"] = true    # отбили — идём брать обратно
+	if goal == null:
+		goal = _mine_goal()
+		if goal == null:
+			mine_sid = 0
+			return rest
+		if pick.is_empty():
+			for s in rest:
+				var uid: String = String((s as Dictionary)["type"])
+				if uid == "spearman" or uid == "warrior":
+					pick = s
+					break
+			if pick.is_empty():
+				pick = rest[0]
+		pick["mine_node"] = goal
+		pick["mine_pending"] = (goal as Building).faction != Constants.FACTION_ENEMY
+	mine_sid = _sid_of(pick)
+	_set_role(pick, ROLE_MINE, GameManager.land_target(goal.global_position))
+	var out: Array = []
+	for s in rest:
+		if s != pick:
+			out.append(s)
+	return out
+
+# ═════════════════════════════════════════════════════════════════════════════
+# РЕЙДЫ ПО ЭКОНОМИКЕ ИГРОКА (спринт 17)
+# ═════════════════════════════════════════════════════════════════════════════
+## Добыча рейда у базы игрока: рабочий, иначе одиночная постройка (не крепость)
+func _raid_prey(base: Vector3) -> Node3D:
+	var best: Node3D = null
+	var bd: float = _AICfg.RAID_HUNT_RADIUS * _AICfg.RAID_HUNT_RADIUS
+	for n in main.get_tree().get_nodes_in_group("player_units"):
+		if n == null or not is_instance_valid(n):
+			continue
+		var u := n as Unit
+		if u == null or u.is_dead() or u.garrisoned or not (u is Worker):
+			continue
+		var d: float = base.distance_squared_to(u.global_position)
+		if d < bd:
+			bd = d
+			best = u
+	if best != null:
+		return best
+	for b in main.get_tree().get_nodes_in_group("player_buildings"):
+		if b == null or not is_instance_valid(b):
+			continue
+		var bld := b as Building
+		if bld == null or bld.is_dead():
+			continue
+		if bld is Castle and (bld as Castle).is_stronghold():
+			continue
+		var d2: float = base.distance_squared_to(bld.global_position)
+		if d2 < bd:
+			bd = d2
+			best = bld
+	return best
+
+## Боевых игрока рядом с точкой (сопротивление рейду)
+func _player_combat_at(p: Vector3, r: float) -> int:
+	var n := 0
+	for m in GameManager.unit_grid.query_radius(p, r):
+		if m == null or not is_instance_valid(m):
+			continue
+		var u := m as Unit
+		if u == null or u.is_dead() or u is Worker or int(u.faction) != Constants.FACTION_PLAYER:
+			continue
+		n += 1
+	return n
+
+## Рейд-отряд: раз в RAID_INTERVAL_SEC один из излишков идёт на экономику
+## игрока; ведётся здесь же каждый такт. Возвращает остаток излишков
+func _assign_raid_squad(rest: Array, castle: Castle) -> Array:
+	if not _AICfg.AI_RAIDS or castle == null:
+		return rest
+	var pick: Dictionary = {}
+	for s in rest:
+		if _sid_of(s) == raid_sid and raid_sid > 0:
+			pick = s
+			break
+	if pick.is_empty():
+		raid_sid = 0
+		if rest.size() < _AICfg.RAID_MIN_FIELD or squads.size() < _AICfg.RAID_MIN_ARMY:
+			return rest
+		if clock - _raid_last < _AICfg.RAID_INTERVAL_SEC:
+			return rest
+		# ПЕРЕМИРИЕ (спринт 20): первые AI_TRUCE_SEC партии рейдов нет
+		if clock < _AICfg.AI_TRUCE_SEC:
+			return rest
+		for s in rest:
+			if String((s as Dictionary)["type"]) == "warrior":
+				pick = s
+				break
+		if pick.is_empty():
+			pick = rest[0]
+		raid_sid = _sid_of(pick)
+		_raid_since = clock
+		_raid_last = clock
+		raids_launched += 1
+		last_action += "|рейд №%d на экономику игрока" % raids_launched
+	var base: Vector3 = _player_base_pos()
+	var c: Vector3 = _squad_centroid(pick["members"])
+	# Отход: сильное сопротивление, срок либо отряд уже разбит и отозван
+	# (_try_retreat) — в замок лечиться
+	var resisted: bool = _player_combat_at(c, _AICfg.RAID_FLEE_RADIUS) >= _AICfg.RAID_FLEE_FOES
+	var expired: bool = clock - _raid_since > _AICfg.RAID_MAX_SEC
+	var broken: bool = String(pick.get("role", "")) == ROLE_RETREAT
+	if resisted or expired or broken:
+		raid_sid = 0
+		raid_retreats += 1
+		last_action += "|рейд отходит (%s)" % ("сопротивление" if resisted else "срок")
+		var sid: int = _sid_of(pick)
+		if sid > 0 and castle.request_garrison(sid):
+			pick["role"] = ROLE_RETREAT
+			pick["retreat_until"] = Time.get_ticks_msec() + int(_AICfg.RETREAT_MIN_SEC * 1000.0)
+			pick["issued"] = true
+		else:
+			_set_role(pick, ROLE_GUARD, castle.global_position)
+		var out0: Array = []
+		for s in rest:
+			if s != pick:
+				out0.append(s)
+		return out0
+	var prey: Node3D = _raid_prey(base if base != Vector3.ZERO else c)
+	pick["raid_prey"] = prey
+	_set_role(pick, ROLE_RAID, GameManager.land_target(prey.global_position if prey != null else base))
+	pick["issued"] = false
+	var out: Array = []
+	for s in rest:
+		if s != pick:
+			out.append(s)
+	return out
 
 ## ── ПАТРУЛЬ ХОДИТ ТОЛЬКО ПО ФРОНТОВОЙ ЗОНЕ ──────────────────────────────────
 ## Раньше патрульные точки лежали на ПОЛНОМ круге вокруг рубежа. Половина
@@ -2011,6 +2296,14 @@ func _apply_orders() -> void:
 				_AICfg.DEFENSE_ENGAGE_RADIUS * 1.5)
 			if squad_prey == null:
 				squad_prey = threat
+		elif role == ROLE_RAID:
+			var rp: Variant = sq.get("raid_prey")
+			if rp != null and is_instance_valid(rp):
+				squad_prey = rp as Node3D
+			else:
+				squad_prey = _nearest_player_target(anchor, 24.0)
+		elif role == ROLE_MINE:
+			squad_prey = _nearest_player_target(anchor, _AICfg.DEFENSE_ENGAGE_RADIUS)
 		elif not holds and role != ROLE_KITE and role != ROLE_PATROL:
 			squad_prey = _nearest_player_target(anchor, 24.0)
 		# Решение принято — раздача уходит в очередь (см. _drain_orders)

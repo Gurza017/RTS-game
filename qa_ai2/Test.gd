@@ -551,6 +551,8 @@ func _h_frozen() -> void:
 		await frames(1)
 	var states: Dictionary = {}
 	for u in men:
+		if not is_instance_valid(u):
+			continue
 		var st: int = (u as Unit).state
 		states[st] = int(states.get(st, 0)) + 1
 	print("  ожидание остановки: %d кадров, ещё в движении %d, состояния %s" % [
@@ -558,7 +560,8 @@ func _h_frozen() -> void:
 
 	var before: Array = []
 	for u in men:
-		before.append((u as Node3D).global_position)
+		# Правило 5: павший между кадрами боец — свободный объект
+		before.append((u as Node3D).global_position if is_instance_valid(u) else Vector3.INF)
 	var sqd: Dictionary = ai.squads[0]
 	var issued_before: bool = bool(sqd["issued"])
 	# Диагностика: ровно те три числа, по которым заморозка и принимает решение
@@ -592,18 +595,18 @@ func _h_frozen() -> void:
 
 	var woken := 0
 	for i1 in range(men.size()):
-		var u1 := men[i1] as Unit
-		if not bool(was_idle[i1]) or not is_instance_valid(u1):
+		if not bool(was_idle[i1]) or not is_instance_valid(men[i1]):
 			continue
+		var u1 := men[i1] as Unit
 		if u1.state != Unit.State.IDLE:
 			woken += 1
 	await frames(2)
 
 	var shifted := 0.0
 	for i in range(men.size()):
-		var u := men[i] as Unit
-		if not is_instance_valid(u):
+		if not is_instance_valid(men[i]):
 			continue
+		var u := men[i] as Unit
 		shifted = maxf(shifted, (u.global_position as Vector3).distance_to(before[i]))
 	print("  после повторного такта: разбужено %d из %d, худший сдвиг %.2f м" % [
 		woken, men.size(), shifted])

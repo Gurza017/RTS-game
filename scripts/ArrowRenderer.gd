@@ -105,6 +105,14 @@ func write_flight(idx: int, pos: Vector3, axis: Vector3, fade: float) -> void:
 	GameManager.army.rb_write_color(core_id, idx,
 		axis.x * 0.5 + 0.5, axis.y * 0.5 + 0.5, axis.z * 0.5 + 0.5, fade)
 
+## ── КУВЫРОК — СВОЙСТВО СЛОЯ, А НЕ СНАРЯДА ─────────────────────────────────
+## Оборотов в секунду у ЛЕТЯЩИХ снарядов этого слоя (ноль — не крутятся).
+## Материал у бакета один на всех, поэтому и ручка одна; кто именно сейчас
+## летит, шейдер узнаёт по длине упакованной оси (см. mm_arrow.gdshader)
+func set_spin(turns: float) -> void:
+	if mat != null:
+		mat.set_shader_parameter("spin_turns", turns)
+
 func hide(idx: int) -> void:
 	if idx >= 0 and core_id >= 0:
 		GameManager.army.rb_hide_slot(core_id, idx)
@@ -115,27 +123,76 @@ var _flights: Dictionary = {}
 
 func register_flight(id: int, arrow: Node3D) -> void:
 	_flights[id] = arrow
+	_flight_since[id] = Engine.get_physics_frames()
+
+## Когда полёт зарегистрирован (для срока полёта под ядром)
+var _flight_since: Dictionary = {}
+var flights_expired: int = 0     # стендам: сколько полётов погашено сроком
+
+## ── ЖЁСТКИЙ СРОК ПОЛЁТА ПОД ЯДРОМ (спринт 18) ──────────────────────────────
+## Пока летит ядро, у узла выключен _process, а с ним и MAX_FLIGHT_SEC: полёт,
+## чьё событие потерялось, висел бы вечно (кость крутится на месте — жалоба
+## владельца). Раз в секунду: старше MAX_FLIGHT_SEC — гасим принудительно
+func sweep_flights(max_sec: float) -> void:
+	if _flights.is_empty():
+		return
+	# ИГРОВОЕ время (физкадры), не стенные часы: под нагрузкой шлюза физика
+	# отстаёт от стены, и честный полёт в 3 с длится 10+ с стены — стенные
+	# часы гасили бы живые стрелы (qa_full_game_4k A1 под шлюзом)
+	var now: int = Engine.get_physics_frames()
+	var lim: int = int(max_sec * float(Engine.physics_ticks_per_second))
+	var dead: Array = []
+	for id in _flights:
+		if now - int(_flight_since.get(id, now)) > lim:
+			dead.append(id)
+	for id2 in dead:
+		var a = _flights.get(id2)
+		_flights.erase(id2)
+		_flight_since.erase(id2)
+		flights_expired += 1
+		if a != null and is_instance_valid(a) and a.has_method("_despawn"):
+			a.call("_despawn")
 
 func unregister_flight(id: int) -> void:
 	_flights.erase(id)
+	_flight_since.erase(id)
 
 func flight_count() -> int:
 	return _flights.size()
 
-## Разобрать события ядра за кадр: касание чужого или приземление
+## Разобрать события ядра за кадр: касание чужого или приземление.
+## ── СОБЫТИЯ — ОДИН СПИСОК НА ВСЕ СЛОИ (спринт 18, «зависшие кости») ──────
+## take_arrow_events отдаёт события ВСЕХ полётов и очищает список. Пока
+## каждый слой брал его сам, слой стрел (первый) забирал и события костей —
+## и терял их: кость никогда не получала core_event, узел висел «в полёте» с
+## выключенным _process, а слот крутился на месте вечно. Теперь события
+## берёт GameManager один раз и раздаёт по слоям (dispatch_events)
+static func dispatch_events(ev: Array, layers: Array) -> int:
+	var n: int = ev.size()
+	var k := 0
+	var routed := 0
+	while k + 3 < n:
+		var id: int = int(ev[k])
+		for l in layers:
+			if l == null or not is_instance_valid(l):
+				continue
+			var a = l._flights.get(id)
+			if a == null:
+				continue
+			l._flights.erase(id)
+			l._flight_since.erase(id)
+			if is_instance_valid(a):
+				a.core_event(ev[k + 1], ev[k + 2], ev[k + 3])
+			routed += 1
+			break
+		k += 4
+	return routed
+
+## Совместимость: слой в одиночку (стенды) — забирает и раздаёт сам себе
 func drain_events() -> void:
 	if _flights.is_empty():
 		return
-	var ev: Array = GameManager.army.take_arrow_events()
-	var n: int = ev.size()
-	var k := 0
-	while k + 3 < n:
-		var id: int = int(ev[k])
-		var a = _flights.get(id)
-		_flights.erase(id)
-		if a != null and is_instance_valid(a):
-			a.core_event(ev[k + 1], ev[k + 2], ev[k + 3])
-		k += 4
+	dispatch_events(GameManager.army.take_arrow_events(), [self])
 
 func set_layer_visible(v: bool) -> void:
 	if mmi != null and is_instance_valid(mmi):

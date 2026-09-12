@@ -1,0 +1,19 @@
+[remap]
+
+importer="mp3"
+type="AudioStreamMP3"
+uid="uid://okagsyha41ly"
+path="res://.godot/imported/bow_and_arrow_shot.mp3-3a0a4794f62c343fac25751fba7657ac.mp3str"
+
+[deps]
+
+source_file="res://assets/factions/humans/Sounds Human/bow_and_arrow_shot.mp3"
+dest_files=["res://.godot/imported/bow_and_arrow_shot.mp3-3a0a4794f62c343fac25751fba7657ac.mp3str"]
+
+[params]
+
+loop=false
+loop_offset=0
+bpm=0
+beat_count=0
+bar_beats=4

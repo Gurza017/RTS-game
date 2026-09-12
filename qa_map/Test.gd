@@ -94,8 +94,33 @@ func _check_river() -> void:
 	var deep_z: float = main.FORD_Z + main.FORD_HALF + 30.0
 	var rx: float = main.river_x(deep_z)
 	verdict("B1 середина русла — вода", main.is_water(rx, deep_z))
-	verdict("B2 берега — суша", not main.is_water(rx + main.RIVER_HALF_W + 2.0, deep_z)
-		and not main.is_water(rx - main.RIVER_HALF_W - 2.0, deep_z))
+	# ── СУША НАЧИНАЕТСЯ ЗА ОТКОСОМ, А НЕ В ДВУХ МЕТРАХ ОТ РУСЛА ───────────
+	# Стояло RIVER_HALF_W + 2.0, то есть 11 м от оси. Со спринта 15 вода — это
+	# «грунт ушёл под зеркало» (Main.SHORE_DRY), и в 11 м от оси он под ним
+	# честно: откос тянется до RIVER_HALF_W + RIVER_BANK = 12.5 м. Проверка
+	# утверждала прежнюю МЕРУ берега, а не его существование, — берём точку за
+	# кромкой откоса, где суша обязана быть по построению
+	var dry_off: float = main.RIVER_HALF_W + main.RIVER_BANK + 0.5
+	verdict("B2 берега — суша", not main.is_water(rx + dry_off, deep_z)
+		and not main.is_water(rx - dry_off, deep_z))
+	# ── И НОГИ У НЕЁ СУХИЕ (заказ спринта 15) ─────────────────────────────
+	# Жалоба со скриншотом: «юниты сидят ногами в воде у береговой линии».
+	# Свойство: НИ ОДНА проходимая точка не лежит ниже зеркала воды. Меряем
+	# поперёк русла с мелким шагом на нескольких широтах
+	var wet_steps := 0
+	var worst := 0.0
+	for zi in range(6):
+		var zz: float = deep_z + float(zi) * 7.0
+		for xi in range(400):
+			var xx: float = main.river_x(zz) - 20.0 + float(xi) * 0.1
+			if main.is_water(xx, zz):
+				continue
+			var sink: float = main.water_surface_y(xx, zz) - main.get_terrain_height(xx, zz)
+			if sink > 0.0:
+				wet_steps += 1
+				worst = maxf(worst, sink)
+	verdict("B2б проходимой земли под водой нет", wet_steps == 0,
+		"точек под зеркалом %d, глубже всего %.2f м" % [wet_steps, worst])
 	verdict("B3 брод — проходимая суша посреди русла", not main.is_water(main.river_x(main.FORD_Z), main.FORD_Z)
 		and not main.is_water(main.river_x(main.FORD_Z) + main.RIVER_HALF_W * 0.8, main.FORD_Z))
 	var h_deep: float = main.get_terrain_height(rx, deep_z)
@@ -118,7 +143,20 @@ func _check_river() -> void:
 			wet += 1
 	verdict("B6 ни дерева, ни руды в воде", wet == 0, "в воде %d" % wet)
 	# Обход берега ведёт к броду: шаг в воду с северного берега уходит на +Z
-	var from := Vector3(rx - main.RIVER_HALF_W - 1.0, 0.0, deep_z)
+	# ── НАЧИНАТЬ НАДО С СУХОГО БЕРЕГА, А ШАГАТЬ — В ВОДУ ─────────────────
+	# Из воды slide_around_water уводит кратчайшим путём на сушу (своя ветка,
+	# заведена против выхода из гарнизона в озеро), и вдоль берега к броду он
+	# тогда не ведёт вовсе. А если шаг в воду НЕ попал, функция честно вернёт
+	# его как есть. Прежняя точка (RIVER_HALF_W + 1) со спринта 15 лежит в
+	# воде сама. Поэтому кромку ИЩЕМ, а не назначаем числом: сушу берём на
+	# полметра снаружи от неё, шаг делаем ровно до неё
+	var shore: float = dry_off
+	for i in range(200):
+		var dd: float = dry_off - float(i) * 0.1
+		if main.is_water(rx - dd, deep_z):
+			shore = dd
+			break
+	var from := Vector3(rx - shore - 0.5, 0.0, deep_z)
 	var step := Vector3(1.0, 0.0, 0.0)
 	var got: Vector3 = main.slide_around_water(from, step)
 	verdict("B7 шаг в воду скользит вдоль берега к броду",

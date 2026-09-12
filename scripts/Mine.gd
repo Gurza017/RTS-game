@@ -52,6 +52,12 @@ const FLAG_OFFSET := Vector3(-1.7, 0.0, 0.8)
 const FLAG_Y := 1.55
 
 signal captured(new_faction)
+## ── ТРЕВОГА (спринт 17) ────────────────────────────────────────────────────
+## Рудник бьют или начали захватывать чужие — владельцу (орде) пора собираться.
+## Сигнал один на оба события, кто и откуда — в аргументах
+signal attacked(by_faction, at)
+## Стенды: сколько раз рудник поднимал тревогу
+var alarms: int = 0
 
 ## Рабочие внутри (скрыты, как гарнизон)
 var workers: Array = []
@@ -112,7 +118,10 @@ func _process(delta: float) -> void:
 	if _tick_t >= CAPTURE_TICK:
 		_tick_capture(_tick_t)
 		_tick_t = 0.0
-	if faction == Constants.FACTION_PLAYER or faction == Constants.FACTION_ENEMY:
+	# Доход капает и орде (спринт 17): «условно золото капает гоблинам» —
+	# в банк третьей стороны, игроку он не показывается
+	if faction == Constants.FACTION_PLAYER or faction == Constants.FACTION_ENEMY \
+			or faction == Constants.FACTION_GOBLIN:
 		_income_acc += delta * income_per_sec()
 		if _income_acc >= 1.0:
 			var whole: float = floor(_income_acc)
@@ -136,10 +145,23 @@ func _tick_capture(dt: float) -> void:
 		if u is Worker:
 			continue
 		var f: int = int(u.faction)
-		if f == Constants.FACTION_PLAYER or f == Constants.FACTION_ENEMY:
+		# ── ОРДА ЗАХВАТЫВАЕТ НАРАВНЕ С ЛЮДЬМИ (спринт 17) ─────────────────
+		# Прежде гоблины только «защищали»: при них захват стоял. Теперь
+		# рудник — цель всех трёх сторон; тролли по-прежнему лишь мешают
+		if f == Constants.FACTION_PLAYER or f == Constants.FACTION_ENEMY \
+				or (f == Constants.FACTION_GOBLIN and u.stat_id != "troll"):
 			present[f] = int(present.get(f, 0)) + 1
 		else:
 			contested = true
+	# ── ТРЕВОГА РУДНИКА ОРДЫ (спринт 17) ───────────────────────────────────
+	# Чужой боец на площадке — владельцу пора собираться, даже если охрана
+	# рядом и захват не идёт. Не чаще раза в ALARM_GAP_SEC: сигнал только
+	# продлевает тревогу вожака, а счётчик стендов иначе считал бы такты
+	if faction == Constants.FACTION_GOBLIN:
+		for pf in present:
+			if int(pf) != faction:
+				_raise_alarm(int(pf))
+				break
 	if contested or present.size() != 1:
 		_capture_by = -1
 		_capture_t = 0.0
@@ -317,6 +339,34 @@ func _release(u: Unit, at: Vector3) -> void:
 		u.call("on_construction_finished")
 
 ## Урон по укрытому внутри получает рудник (см. Unit.take_damage)
+const ALARM_GAP_SEC := 2.0
+var _alarm_at_ms: int = -100000
+
+func _raise_alarm(by: int) -> void:
+	var now: int = Time.get_ticks_msec()
+	if now - _alarm_at_ms < int(ALARM_GAP_SEC * 1000.0):
+		return
+	_alarm_at_ms = now
+	alarms += 1
+	attacked.emit(by, global_position)
+
+## Удар по руднику орды — тревога владельцу (см. attacked)
+func take_damage(amount: float, attacker: Node = null) -> void:
+	if not _dead and faction == Constants.FACTION_GOBLIN and attacker != null \
+			and is_instance_valid(attacker):
+		var afv: Variant = attacker.get("faction")
+		var af: int = int(afv) if afv != null else -1
+		if af != faction:
+			_alarm_at_ms = -100000
+			_raise_alarm(af)
+	super.take_damage(amount, attacker)
+
+## Захват снаружи (стартовый рудник орды ставится уже захваченным)
+func set_owner_faction(f: int) -> void:
+	if f == faction:
+		return
+	_capture(f)
+
 func absorb_damage_for(_u: Unit, amount: float, attacker: Node3D = null) -> void:
 	take_damage(amount, attacker)
 
@@ -343,7 +393,16 @@ func _die() -> void:
 	if _dead:
 		return
 	release_all()
+	var f: int = faction
+	var at: Vector3 = global_position
 	super._die()
+	# ── АВТО-ВОССТАНОВЛЕНИЕ У ИИ И ОРДЫ (спринт 18): через MINE_RESTORE_SEC
+	# руина сама становится рудником прежнего владельца, если её не отстроил
+	# кто-то раньше. Игроку — нет: он отстраивает рабочим сам
+	if f == Constants.FACTION_ENEMY or f == Constants.FACTION_GOBLIN:
+		GameManager.schedule_mine_restore(at, f, MINE_RESTORE_SEC)
+
+const MINE_RESTORE_SEC := 60.0
 
 func ruin_sprite_override() -> String:
 	return SPRITE_DESTROYED

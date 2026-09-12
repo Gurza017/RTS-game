@@ -82,6 +82,11 @@ func _banner_nodes() -> int:
 		for ch in node.get_children():
 			stack.append(ch)
 		if node is MeshInstance3D and node.get_script() == scr:
+			# Флажок захваченного рудника — тот же SquadBanner, но не отрядный
+			# (спринт 17: рудник орды у деревни стоит захваченным с первого
+			# кадра). Считаем только знамёна в МИРЕ, а не детей построек
+			if node.get_parent() is Building:
+				continue
 			n += 1
 	return n
 

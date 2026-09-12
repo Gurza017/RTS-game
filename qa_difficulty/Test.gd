@@ -109,8 +109,8 @@ func _b_normal_is_neutral() -> void:
 	verdict("B4 время найма не тронуто ни у кого",
 		is_equal_approx(_Diff.train_time(Constants.FACTION_ENEMY, 30.0), 30.0)
 		and is_equal_approx(_Diff.train_time(Constants.FACTION_PLAYER, 30.0), 30.0))
-	verdict("B5 спячка орды равна базовой",
-		is_equal_approx(_Diff.goblin_dormant_sec(), _GobCfg.DORMANT_UNTIL_SEC))
+	verdict("B5 мирная фаза орды равна базовой",
+		is_equal_approx(_Diff.goblin_peace_sec(), _GobCfg.PEACE_SEC))
 	verdict("B6 доход хижины равен базовому",
 		is_equal_approx(_Diff.goblin_hut_food_per_min(), _GobCfg.HUT_FOOD_PER_MIN))
 	# Стартовый состав орды на Normal обязан совпасть с конфигом ПОСТРОЧНО
@@ -157,7 +157,7 @@ func _c_monotonic() -> void:
 		peace.append(_Diff.ai_peace_seconds())
 		train.append(_Diff.train_time(Constants.FACTION_ENEMY, 30.0))
 		food.append(_Diff.goblin_hut_food_per_min())
-		dormant.append(_Diff.goblin_dormant_sec())
+		dormant.append(_Diff.goblin_peace_sec())
 	verdict("C1 лимит армии растёт с сложностью",
 		int(limits[0]) < int(limits[1]) and int(limits[1]) < int(limits[2]),
 		"отрядов: %s" % str(limits))
@@ -173,7 +173,7 @@ func _c_monotonic() -> void:
 	verdict("C5 доход орды растёт",
 		float(food[0]) < float(food[1]) and float(food[1]) < float(food[2]),
 		str(food))
-	verdict("C6 орда просыпается раньше",
+	verdict("C6 мирная фаза орды короче (к центру выходит раньше)",
 		float(dormant[0]) > float(dormant[1]) and float(dormant[1]) > float(dormant[2]),
 		str(dormant))
 	# Стартовый гарнизон ИИ появляется не раньше, чем на самой тяжёлой

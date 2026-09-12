@@ -14,6 +14,7 @@ class_name Arrow
 ## Прицеливание с УПРЕЖДЕНИЕМ и разбросом считает стрелок (см. Archer.gd):
 ## сюда приходит уже готовая точка попадания.
 
+const _GobCfgA := preload("res://scripts/goblin/goblin_config.gd")
 const _Opt := preload("res://scripts/perf_config.gd")
 const _AXIS_SHADER := preload("res://shaders/axis_billboard.gdshader")
 
@@ -49,6 +50,26 @@ const MAX_FLIGHT_SEC := 10.5
 # Прежние 9.5 с стирали следы обстрела раньше, чем игрок успевал довести туда
 # камеру
 const STUCK_LIFETIME := 45.0
+## ── КОСТЬ ЛЕЖИТ ПЯТЬ СЕКУНД, А НЕ СОРОК ПЯТЬ (заказ спринта 15) ───────────
+## Гноллов у пня три отряда, и бросают они вчетверо чаще, чем стреляет
+## лучник: за минуту боя поле вокруг пня превращалось в сплошной ковёр из
+## костей (скриншот владельца). Срок у снаряда теперь СВОЙ по виду, а не
+## общий; растворение сжато соразмерно — четыре секунды из пяти были бы не
+## «лежит и тает», а «мигает с первой секунды»
+const BONE_STUCK_LIFETIME := 5.0
+const BONE_STUCK_FADE := 1.5
+## Жёсткий потолок ПОЛЁТА кости (пятое письмо спринта 18): бросок гнолла на
+## GNOLL_THROW_RANGE ~8.5 м длится меньше секунды, и всё, что летит дольше
+## двух, — потерянное событие ядра, а не снаряд. Общий MAX_FLIGHT_SEC (10.5)
+## рассчитан на длинную дугу стрелы и для кости слишком терпелив
+const BONE_MAX_FLIGHT_SEC := 2.0
+
+## Сколько этому снаряду лежать на земле и сколько из этого растворяться
+func _life_total() -> float:
+	return BONE_STUCK_LIFETIME if bone else STUCK_LIFETIME
+
+func _fade_total() -> float:
+	return BONE_STUCK_FADE if bone else STUCK_FADE
 # Сколько из этого срока уходит на растворение. Мгновенно пропадающая стрела
 # читается как сбой отрисовки — та же оговорка, что у трупов (CorpseRenderer)
 const STUCK_FADE := 4.0
@@ -165,6 +186,8 @@ func core_event(victim, pos: Vector3, axis: Vector3) -> void:
 			var who: Node = shooter if (is_instance_valid(shooter) 				and not shooter.is_queued_for_deletion()) else null
 			b.take_damage(damage, who)
 			_hit_node = null
+			_land_on_building()
+			return
 	_stick_into_ground()
 ## Исходный порог среза альфы. На время растворения он снимается в ноль:
 ## срез по альфе не умеет гасить плавно, он просто выключает пиксель
@@ -213,7 +236,8 @@ func launch() -> void:
 		_next_flight_id += 1
 		_layer().register_flight(_flight_id, self)
 		GameManager.army.arrow_launch(_flight_id, _layer().core_id,
-			_slot_i, _start_pos, _end_pos, _arc_height, _speed / _dist, faction)
+			_slot_i, _start_pos, _end_pos, _arc_height, _speed / _dist, faction,
+			axis_scale())
 		set_process(false)
 		return
 	set_process(true)
@@ -359,6 +383,16 @@ var bone: bool = false
 func _layer():
 	return GameManager.bones_mm if bone else GameManager.arrows_mm
 
+## ── МАСШТАБ ОСИ = ПРИЗНАК «Я СЕЙЧАС ЛЕЧУ И КУВЫРКАЮСЬ» ────────────────────
+## Шейдер ось нормирует, поэтому её модуль свободен и несёт один бит даром:
+## укороченная — снаряд в полёте, ровно единица — воткнулся и лежит смирно.
+## Иначе пришлось бы либо занимать пятый канал instance-цвета (его нет), либо
+## заводить костям второй слой отрисовки ради одного признака
+func axis_scale() -> float:
+	if bone and not _spent and not _pooled:
+		return _GobCfgA.GNOLL_BONE_AXIS_K
+	return 1.0
+
 var _slot_i: int = -1
 ## Поколение слоя, у которого взят слот: слой пересобирается на смене сцены,
 ## и слот прошлого поколения возвращать некуда (см. ArrowRenderer.release)
@@ -395,6 +429,12 @@ func _build_visual() -> void:
 		_arrow_aspect = 6.0
 	var length: float = BONE_LENGTH if bone else ARROW_LENGTH
 	if _layer().ensure(get_parent() as Node3D, tex, length, _arrow_aspect):
+		# КУВЫРОК ВКЛЮЧАЕТСЯ У СЛОЯ, А НЕ У СНАРЯДА: материал один на бакет,
+		# и ставить ручку каждому снаряду значило бы обращаться в сервер
+		# отрисовки на каждый выстрел. Кто именно сейчас летит, шейдер узнаёт
+		# сам — по длине упакованной оси (см. axis_scale)
+		if bone:
+			_layer().set_spin(_GobCfgA.GNOLL_BONE_SPIN)
 		_slot_i = _layer().acquire()
 		_slot_gen = _layer().gen
 
@@ -473,7 +513,7 @@ func _apply_axis(dir: Vector3) -> void:
 func _push_visual() -> void:
 	if _slot_i >= 0:
 		_layer().write_flight(_slot_i, global_position,
-			_axis_now, _fade_now)
+			_axis_now * axis_scale(), _fade_now)
 
 func _process(delta: float) -> void:
 	# ЗДЕСЬ ЖИВЁТ ТОЛЬКО ЛЕТЯЩАЯ. Срок торчащей считает общий обход реестра
@@ -520,11 +560,23 @@ func _process(delta: float) -> void:
 				var who: Node = shooter if (is_instance_valid(shooter) 					and not shooter.is_queued_for_deletion()) else null
 				b.take_damage(damage, who)
 				_hit_node = null
+				_land_on_building()
+				return
 		_stick_into_ground()
 
 # ПРОМАХ: стрела долетела до расчётной точки, никого не задев — ВТЫКАЕТСЯ
 # в землю НАКОНЕЧНИКОМ вперёд и торчит там до конца MAX_LIFETIME, выступая
 # над грунтом на STUCK_EXPOSED своей длины.
+## ── НА ЗДАНИИ СТРЕЛА НЕ ТОРЧИТ, А РАСТВОРЯЕТСЯ (заказ спринта 15) ───────────
+## Жалоба со скриншотом: пень тролля утыкан стрелами, как ёж. Втыкаться в
+## стену нарисованной постройки некуда — древко висело в воздухе перед ней.
+## Стрела ложится тем же путём, что и промах (учёт торчащих, потолок, пул),
+## но срок ей ставится в доли секунды: тот же fade_out_in, которым вытесняют
+## лишние. Второго пути «исчезнуть» не заведено
+func _land_on_building() -> void:
+	_stick_into_ground()
+	fade_out_in(_GobCfgA.ARROW_BUILDING_FADE)
+
 func _stick_into_ground() -> void:
 	# ── СВОЙ _process ВЫКЛЮЧАЕТСЯ, СРОК СЧИТАЕТ ОБЩИЙ ОБХОД ────────────────
 	# Здесь стояло прямо обратное («_process НЕ выключаем: на нём висит отсчёт
@@ -627,14 +679,14 @@ func fade_out_in(sec: float) -> void:
 	# считает обычный _tick_stuck
 	if _in_corpse:
 		_in_corpse = false
-		_stuck_life = STUCK_LIFETIME - want
+		_stuck_life = _life_total() - want
 		# Включать себе _process больше не нужно: счёт всем торчащим ведёт
 		# общий обход реестра (GameManager._sweep_stuck_arrows), а в реестре
 		# стрела состоит с самого втыкания
 		return
-	var left: float = STUCK_LIFETIME - _stuck_life
+	var left: float = _life_total() - _stuck_life
 	if want < left:
-		_stuck_life = STUCK_LIFETIME - want
+		_stuck_life = _life_total() - want
 
 ## Тело догорело — снять стрелу немедленно. Через пул, а не queue_free:
 ## переиспользование стрел ради того и заведено
@@ -658,13 +710,13 @@ func _tick_stuck(delta: float) -> void:
 	if _in_corpse:
 		return
 	_stuck_life += delta
-	if _stuck_life >= STUCK_LIFETIME:
+	if _stuck_life >= _life_total():
 		_despawn()
 		return
-	var left: float = STUCK_LIFETIME - _stuck_life
-	if left <= STUCK_FADE:
+	var left: float = _life_total() - _stuck_life
+	if left <= _fade_total():
 		_fading = true
-		_set_fade(left / STUCK_FADE)
+		_set_fade(left / _fade_total())
 
 ## Непрозрачность стрелы. Вместе с ней СНИМАЕТСЯ СРЕЗ АЛЬФЫ: срез отбрасывает
 ## пиксель целиком по порогу и потому не умеет гасить плавно — стрела с ним

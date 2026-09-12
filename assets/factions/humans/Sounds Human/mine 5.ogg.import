@@ -1,0 +1,19 @@
+[remap]
+
+importer="oggvorbisstr"
+type="AudioStreamOggVorbis"
+uid="uid://b6boepo5s3p2t"
+path="res://.godot/imported/mine 5.ogg-1f2b8c046262a18ca526dedf00c69d5c.oggvorbisstr"
+
+[deps]
+
+source_file="res://assets/factions/humans/Sounds Human/mine 5.ogg"
+dest_files=["res://.godot/imported/mine 5.ogg-1f2b8c046262a18ca526dedf00c69d5c.oggvorbisstr"]
+
+[params]
+
+loop=false
+loop_offset=0
+bpm=0
+beat_count=0
+bar_beats=4

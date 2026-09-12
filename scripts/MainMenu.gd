@@ -26,6 +26,7 @@ const FACTION_LABELS = ["Люди", "Нежить", "Орки", "Эльфы", "�
 const FACTION_KEYS   = ["humans", "undead", "orc", "elves", "dwarves"]
 
 const _GS       := preload("res://scripts/game_settings.gd")
+const _UIAssets := preload("res://scripts/UIAssets.gd")
 const _SSParser := preload("res://scripts/SpriteSheetParser.gd")
 ## Пресеты сложности: подписи, подсказки и сам выбор живут там
 const _Diff     := preload("res://scripts/game_difficulty_config.gd")
@@ -54,6 +55,9 @@ func _ready() -> void:
 	# ВЫБОР ЧИТАЕТСЯ С ДИСКА ДО ВЁРСТКИ: списки строятся уже с прошлым выбором
 	_Diff.load_saved()
 	_GS.load_view_settings()
+	# Игровой курсор — с первого кадра меню, а не после старта партии
+	_UIAssets.install_cursor()
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	_build_ui()
 	# Панель выбора расы играет основную тему
 	AudioManager.play_menu_music()
@@ -446,5 +450,69 @@ func _on_start() -> void:
 	# Кэш спрайт-листов держит НАБОРЫ ПО ПУТЯМ и переживает смену сцены —
 	# сбрасываем, чтобы новая партия не подхватила цвета прошлой
 	_SSParser.clear_cache()
-
+	# ── ИГРОВОЙ ЭКРАН ЗАГРУЗКИ ВМЕСТО СИСТЕМНОГО КРУЖКА (спринт 17) ─────────
+	# Сцена партии строится синхронно (рельеф, лес, тысяча бойцов), и на это
+	# время окно не отвечает: ОС показывала свой курсор ожидания поверх меню.
+	# Теперь на экран выводится игровая плашка загрузки, ей даётся два кадра
+	# на отрисовку, курсор на время сборки прячется (Main вернёт его вместе с
+	# игровым курсором), и только потом грузится сцена
+	_show_loader()
+	await get_tree().process_frame
+	await get_tree().process_frame
+	Input.mouse_mode = Input.MOUSE_MODE_HIDDEN
 	get_tree().change_scene_to_file("res://scenes/Main.tscn")
+
+## Плашка загрузки: затемнение, надпись и вращающийся кольцевой индикатор
+## (крутится, пока кадры идут; на время синхронной сборки замирает — это
+## честная картинка, а не системный кружок). Стенд ловит её по имени узла
+var loader_shown: int = 0
+
+func _show_loader() -> void:
+	var layer := CanvasLayer.new()
+	layer.name = "LoadingLayer"
+	layer.layer = 100
+	var back := ColorRect.new()
+	back.name = "LoadingBack"
+	back.color = Color(0.03, 0.05, 0.03, 0.96)
+	back.anchor_right = 1.0
+	back.anchor_bottom = 1.0
+	layer.add_child(back)
+	var spin := _LoaderSpinner.new()
+	spin.name = "LoadingSpinner"
+	spin.anchor_left = 0.5
+	spin.anchor_right = 0.5
+	spin.anchor_top = 0.5
+	spin.anchor_bottom = 0.5
+	spin.offset_left = -40
+	spin.offset_right = 40
+	spin.offset_top = -80
+	spin.offset_bottom = 0
+	layer.add_child(spin)
+	var lbl := Label.new()
+	lbl.name = "LoadingLabel"
+	lbl.text = "Загрузка карты…"
+	lbl.add_theme_font_size_override("font_size", 26)
+	lbl.add_theme_color_override("font_color", Color(0.85, 0.95, 0.80))
+	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	lbl.anchor_left = 0.0
+	lbl.anchor_right = 1.0
+	lbl.anchor_top = 0.5
+	lbl.anchor_bottom = 0.5
+	lbl.offset_top = 12
+	lbl.offset_bottom = 52
+	layer.add_child(lbl)
+	add_child(layer)
+	loader_shown += 1
+
+## Кольцевой индикатор, нарисованный кодом: дуга бежит по кругу
+class _LoaderSpinner extends Control:
+	var _t: float = 0.0
+	func _process(delta: float) -> void:
+		_t += delta
+		queue_redraw()
+	func _draw() -> void:
+		var c: Vector2 = size * 0.5
+		var r: float = minf(size.x, size.y) * 0.42
+		draw_arc(c, r, 0.0, TAU, 48, Color(0.25, 0.35, 0.22), 6.0, true)
+		var a0: float = fmod(_t * 4.0, TAU)
+		draw_arc(c, r, a0, a0 + TAU * 0.3, 24, Color(0.45, 0.95, 0.35), 6.0, true)

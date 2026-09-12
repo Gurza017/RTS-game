@@ -223,6 +223,12 @@ func _build_site_sprite() -> bool:
 	_site_sprite.position.y = quad.size.y * 0.5
 	add_child(_site_sprite)
 	_site_tex = tex
+	# Обмер рисунка — для точек стояния строителей (edge_distance): нарисованный
+	# фундамент уже коробки габарита, и рабочий обязан стоять у РИСУНКА
+	var r: Rect2 = _BBUtil2.opaque_rect(tex)
+	_draw_half_w = quad.size.x * r.size.x * 0.5
+	_draw_cx     = quad.size.x * (r.position.x + r.size.x * 0.5 - 0.5)
+	_draw_base_y = quad.size.y * (1.0 - r.end.y) * _BBUtil2.V_STRETCH
 	return true
 
 ## НАСКОЛЬКО РАБОЧИЙ ОТСТУПАЕТ ОТ СТЕНЫ, встав на работу. Ровно на длину
@@ -240,9 +246,23 @@ const WORK_PAD := 0.25
 ## жалоба «стоит на расстоянии от фундамента». Теперь считается честное
 ## пересечение луча из центра с коробкой габарита: с любой стороны рабочий
 ## подходит к своей стене, а не к воображаемому кругу вокруг здания
+## ── СТЕНА — ПО РИСУНКУ, А НЕ ПО КОРОБКЕ (спринт 19, письмо 9) ─────────────
+## Картинка стройки — вертикальный билборд, низ которого стоит в ЦЕНТРЕ
+## габарита: нарисованный фундамент лежит на центральной линии, а коробка
+## габарита тянется ещё на hz к камере. Рабочий у «стены» коробки (у крепости
+## это 4 м от центра) стоял на экране в трёх метрах НИЖЕ нарисованных досок —
+## скриншот владельца «зазор между фундаментом и рабочими». Теперь стена по
+## направлению к камере (+Z) — это низ рисунка (FRONT_EDGE от центра), вбок —
+## полуширина рисунка, назад (за картинку) — прежняя коробка
+const FRONT_EDGE := 0.6
+
 func edge_distance(dir: Vector3) -> float:
 	var hx: float = build_size.x * 0.5
 	var hz: float = build_size.z * 0.5
+	if _draw_half_w >= 0.0:
+		hx = minf(hx, _draw_half_w)
+		if dir.z > 0.0:
+			hz = minf(hz, FRONT_EDGE)
 	var dx: float = absf(dir.x)
 	var dz: float = absf(dir.z)
 	var n: float = sqrt(dx * dx + dz * dz)
@@ -258,11 +278,22 @@ func edge_distance(dir: Vector3) -> float:
 ## Точка, куда рабочему идти: край площадки, а не её центр.
 ## Запас за габаритом — WORK_PAD (25 см): рабочий стоит ВПЛОТНУЮ к стене/лесам
 func work_position(from: Vector3) -> Vector3:
-	var dir := from - global_position
-	dir.y = 0.0
-	if dir.length() < 0.01:
-		dir = Vector3.FORWARD
-	dir = dir.normalized()
+	var o := from - global_position
+	o.y = 0.0
+	if o.length() < 0.01:
+		o = Vector3.FORWARD
+	var hx: float = build_size.x * 0.5
+	var hz: float = build_size.z * 0.5
+	# ── СПЕРЕДИ — ОТРЕЗОК НАРИСОВАННОГО ОСНОВАНИЯ (письмо 12) ──────────────
+	# Точка стояния — ближайшая к рабочему точка стены: спереди это отрезок
+	# |x| ≤ полуширины рисунка на z = FRONT_EDGE, и рабочий встаёт ПОД СОБОЙ,
+	# а не в одной точке с остальными; сзади и сбоку — периметр коробки
+	if _draw_half_w >= 0.0:
+		hx = minf(hx, _draw_half_w)
+		if o.z > 0.0:
+			var cx: float = clampf(o.x, -hx, hx)
+			return global_position + Vector3(cx, 0.0, FRONT_EDGE + WORK_PAD)
+	var dir: Vector3 = o.normalized()
 	return global_position + dir * (edge_distance(dir) + WORK_PAD)
 
 # Недострой считает прогресс — тикает, пока не готов
