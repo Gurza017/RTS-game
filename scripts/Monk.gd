@@ -36,6 +36,25 @@ var resurrected_total: int = 0
 var _xp_acc: float = 0.0
 var heal_xp_kills: int = 0
 ## Ауры и дистанция — свои редкие такты
+## ── ОТСТУПЛЕНИЕ, ЩИТ И СПАСЕНИЯ (заказ 13.09.2026) ────────────────────────
+## Монах не дерётся вовсе, и единственный его ответ на удар — отойти. Откат
+## нужен, чтобы под градом стрел он не дёргался каждый кадр
+var _retreat_cd: float = 0.0
+## Куда отходим сейчас. Пока точка задана, монах К ПАЦИЕНТУ НЕ ИДЁТ: иначе
+## отход гасится подходом через секунду, и на экране вместо пяти метров
+## выходит полметра дрожи (замер qa_monk_forge E3). Разделяет их ФАКТ
+## ПРИХОДА, а не срок — тот же приём, что у выхода из боя у пехоты
+var _retreat_goal: Vector3 = Vector3.INF
+var _retreat_give_up: float = 0.0
+var _invuln_until: int = 0
+## Щит «Святой Щит» (4c): поглощение, тает под уроном, копится вне боя
+var shield_hp: float = 0.0
+var _shield_calm: float = 0.0
+## Стенды: сколько раз отходил, спасался и потратил ли самовоскрешение
+var retreats: int = 0
+var death_saves: int = 0
+var self_res_used: bool = false
+
 var _aura_t: float = 0.0
 var _space_t: float = 0.0
 var aura_touched: int = 0
@@ -117,6 +136,9 @@ func tick_physics(delta: float, prof: bool = false, bm: bool = true,
 	_ride_heal_vfx()
 	_step_t = maxf(_step_t - delta, 0.0)
 	_res_cool = maxf(_res_cool - delta, 0.0)
+	_retreat_cd = maxf(_retreat_cd - delta, 0.0)
+	_tick_retreat(delta)
+	_tick_shield(delta)
 	_tick_aura(delta)
 	_tick_spacing(delta)
 	# Канал воскрешения идёт своим ходом; без «Двойного попечения» лечение
@@ -139,6 +161,12 @@ func _tick_spacing(delta: float) -> void:
 	if _space_t > 0.0:
 		return
 	_space_t = 1.0
+	# ── ВО ВРЕМЯ ОТХОДА РАССТАНОВКА МОЛЧИТ ────────────────────────────────
+	# Иначе она перебивает отход своим приказом: монах, вставший на секунду
+	# (такт расстановки ловит именно IDLE), получал новую точку в полуметре
+	# и до точки отхода не доходил (замер qa_monk_forge E3: 3.3 м из пяти)
+	if _retreat_goal.x != INF:
+		return
 	if state != State.IDLE or player_order_active() or _panicked or retreating:
 		return
 	var mp: Vector3 = global_position
@@ -208,8 +236,48 @@ func _credit_heal_xp(amount: float) -> void:
 # ═════════════════════════════════════════════════════════════════════════════
 # ВОСКРЕШЕНИЕ (письмо 12, forge monk_3d)
 # ═════════════════════════════════════════════════════════════════════════════
+## ── ВОСКРЕШЕНИЕ ОТКРЫВАЕТ БОНУС РЯДА 2, А НЕ 3d ──────────────────────────
+## Ветка переставлена заказом 13.09.2026: 2d «Первое Чудо» включает подъём,
+## 4d поднимает двоих, 5d — конвейер по 3-4
 func can_resurrect() -> bool:
-	return GameManager.is_researched(faction, "monk_3d")
+	return _node("2d") or _node("4d") or _node("5d")
+
+## Скольких павших поднимает ОДИН канал
+func max_resurrect_count() -> int:
+	if _node("5d"):
+		return 4
+	if _node("4d"):
+		return 2
+	return 1
+
+## Доля запаса, с которой встаёт поднятый
+func res_health_frac() -> float:
+	return 0.5 if (_node("4d") or _node("5d")) else 0.3
+
+## Откат между каналами: 15 / 12 / 3 с у конвейера
+func res_cooldown() -> float:
+	if _node("5d"):
+		return 3.0
+	if _node("4d"):
+		return 12.0
+	return 15.0
+
+## Самовоскрешение — бонус ряда 3, один раз за бой
+func has_self_revive() -> bool:
+	return _node("3d") and not self_res_used
+
+## Сколько живых в отряде. Состав читается НАПРЯМУЮ: squad_members() не
+## читатель — он распускает опустевший отряд прямо в геттере, а спрашиваем
+## мы именно про опустевший
+func _squad_alive(sid: int) -> int:
+	var raw: Variant = GameManager.squads.get(sid)
+	if raw == null:
+		return 0
+	var n := 0
+	for m in (raw as Dictionary).get("members", []):
+		if m != null and is_instance_valid(m) and not (m as Unit).is_dead():
+			n += 1
+	return n
 
 ## «Двойное попечение» (monk_4d): лечит во время канала, канал короче
 func parallel_care() -> bool:
@@ -231,12 +299,123 @@ func res_left() -> float:
 func _try_resurrect() -> bool:
 	if not can_resurrect() or _res_cool > 0.0 or GameManager.corpses == null:
 		return false
-	var c = GameManager.corpses.find_raisable(faction, global_position, heal_radius())
+	# ── ПРИОРИТЕТ: СНАЧАЛА ПАВШИЕ МОНАХИ ─────────────────────────────────
+	# Прямой заказ. Приоритет ПО РОДУ, а не по отряду: «свой отряд» у монахов —
+	# это Ctrl-группа игрока (сам монах — отряд из одного), а Ctrl-группы
+	# живут списком ЖИВЫХ узлов, и у тела спросить его группу уже нечем
+	var c = GameManager.corpses.find_raisable_priority(faction, global_position,
+		heal_radius(), "monk")
 	if c == null:
+		return false
+	# ── ПОЛНОСТЬЮ ВЫБИТЫЙ ОТРЯД НЕ ПОДНИМАЕТСЯ ВОВСЕ («Дух-Спас») ─────────
+	# НО ЭТО НЕ КАСАЕТСЯ ОДИНОЧЕК: у павшего монаха живых в отряде НОЛЬ
+	# всегда, и общее правило запретило бы подъём монахов насовсем
+	var csid: int = int(c.squad_id) if ("squad_id" in c) else 0
+	if csid > 0 and not GameManager.squad_is_single_agent(csid) \
+		and _squad_alive(csid) == 0:
 		return false
 	_res_target = c
 	_res_left = res_sec()
+	_res_cool = res_cooldown()
 	return true
+
+# ═════════════════════════════════════════════════════════════════════════════
+# УРОН ПО МОНАХУ: ЩИТ → ВТОРОЕ ДЫХАНИЕ → САМОВОСКРЕШЕНИЕ → ОТХОД
+# ═════════════════════════════════════════════════════════════════════════════
+## Порядок здесь и есть баланс: щит съедает урон ДО запаса жизни, «Второе
+## Дыхание» ловит смертельный удар по запасу, самовоскрешение — последний
+## рубеж. Все спасения ловят удар ДО базового take_damage: после него монах
+## уже снят со строки ядра, из сетки и из отряда, тело уложено в слой павших,
+## и «поднять его обратно» означало бы собрать бойца заново
+func take_damage(amount: float, attacker: Node3D = null) -> void:
+	if is_dead():
+		return
+	# Неуязвимость «Второго Дыхания»
+	if _invuln_until > now_ms:
+		_step_away_from(attacker)
+		return
+	# «Святой Щит» (4c)
+	if shield_hp > 0.0 and amount > 0.0:
+		var eaten: float = minf(shield_hp, amount)
+		shield_hp -= eaten
+		amount -= eaten
+	_shield_calm = SHIELD_CALM_SEC
+	# «Второе Дыхание» (5c): смертельный удар оставляет 1 HP и 5 с неуязвимости
+	if _node("5c") and amount >= current_health:
+		current_health = 1.0
+		_invuln_until = now_ms + int(SECOND_WIND_SEC * 1000.0)
+		death_saves += 1
+		_soa_push_stats()
+		_step_away_from(attacker)
+		return
+	# Самовоскрешение (бонус ряда 3): один раз за бой, половина запаса
+	if amount >= current_health and has_self_revive():
+		self_res_used = true
+		current_health = max_health * SELF_REVIVE_FRAC
+		_soa_push_stats()
+		_res_flash(global_position)
+		_step_away_from(attacker)
+		return
+	super.take_damage(amount, attacker)
+	if is_dead():
+		return
+	_step_away_from(attacker)
+
+## Отход кончается ПРИХОДОМ, а не часами. Потолок нужен на случай, когда
+## дойти нельзя вовсе (упёрся в своих, в воду, в край карты), и ВЫВОДИТСЯ
+## ИЗ ШАГА: монах медленный, и жёсткие три секунды обрывали отход на
+## трёх метрах из пяти (замер qa_monk_forge E3)
+func _retreat_timeout() -> float:
+	return RETREAT_DIST / maxf(move_speed, 0.5) + 1.5
+
+func _tick_retreat(delta: float) -> void:
+	if _retreat_goal.x == INF:
+		return
+	_retreat_give_up -= delta
+	var d: float = Vector2(global_position.x - _retreat_goal.x,
+		global_position.z - _retreat_goal.z).length()
+	if d <= ARRIVE_RADIUS or _retreat_give_up <= 0.0:
+		_retreat_goal = Vector3.INF
+
+## ── ЩИТ КОПИТСЯ ВНЕ БОЯ ──────────────────────────────────────────────────
+## Узел не изучен — щита нет вовсе, и такт стоит одно сравнение
+func _tick_shield(delta: float) -> void:
+	if not _node("4c"):
+		shield_hp = 0.0
+		return
+	if _shield_calm > 0.0:
+		_shield_calm -= delta
+		return
+	if shield_hp < SHIELD_MAX:
+		shield_hp = minf(SHIELD_MAX, shield_hp + SHIELD_REGEN_PER_SEC * delta)
+
+## ── ОТХОД ПОД УРОНОМ ─────────────────────────────────────────────────────
+## Обычным command_move: своей механики ходьбы у монаха нет и быть не должно —
+## движение мимо пакетного шага означало бы движение мимо проверки чужих тел,
+## воды и границ карты. Лечение при этом НЕ прерывается: такт ауры идёт в
+## tick_physics и на состояние MOVING не смотрит вовсе
+## ИМЯ НЕ `_retreat_from`: в Unit так зовётся ПОЛЕ (точка начала отхода, по
+## ней считается билет прохода). Совпадение имён метода и поля базы GDScript
+## ловит как «Member is not a function» — и ловит только при компиляции
+func _step_away_from(attacker: Node3D) -> void:
+	if _retreat_cd > 0.0 or is_dead() or garrisoned:
+		return
+	# Приказ игрока важнее: послали стоять — значит стоять
+	if player_order_active():
+		return
+	var mp: Vector3 = global_position
+	var away := Vector3(1.0, 0.0, 0.0)
+	if attacker != null and is_instance_valid(attacker):
+		var v := Vector3(mp.x - attacker.global_position.x, 0.0,
+			mp.z - attacker.global_position.z)
+		if v.length_squared() > 1e-4:
+			away = v.normalized()
+	_retreat_cd = RETREAT_CD
+	retreats += 1
+	var goal: Vector3 = GameManager.land_target(mp + away * RETREAT_DIST)
+	_retreat_goal = goal
+	_retreat_give_up = _retreat_timeout()
+	command_move(goal)
 
 func _stop_res() -> void:
 	_res_target = null
@@ -365,14 +544,54 @@ func _keep_or_pick() -> Unit:
 ## ── БОНУСЫ КУЗНИЦЫ (спринт 16) ──────────────────────────────────────────────
 ## Темп (короче такт), объём (больше за такт) и радиус — те же ключи, что в
 ## forge_config, читаются через unit_bonus, как bonus_range у лучника
+## ── УЗЛЫ ВЕТКИ МОНАХА ЧИТАЮТСЯ ОДНИМ СПОСОБОМ ─────────────────────────────
+## Один помощник на пятнадцать узлов и пять бонусов: по функции на узел — это
+## двадцать почти одинаковых чтений реестра исследований
+func _node(cell: String) -> bool:
+	return GameManager.is_researched(faction, "monk_" + cell)
+
+## Доля отданного исцеления, которую монах забирает себе («Самохил I», 1c)
+func self_heal_frac() -> float:
+	return 0.30 if _node("1c") else 0.0
+
+## Скольких раненых накрывает один такт: 1 — как было, 3 — «Троичный Поток»
+## (1d), весь отряд — «Опека» (3d) и прежняя «Благодать»
+func max_heal_targets() -> int:
+	if _node("3d") or aoe_active():
+		return 1000000
+	if _node("1d"):
+		return 3
+	return 1
+
+## «Непрерывный Поток» (4b) задаёт такт АБСОЛЮТНО, а не долей
+const FLOW_TICK := 0.3
+## «Абсолютное Целительство» (5b): такт восполняет живым весь запас
+func full_heal_tick() -> bool:
+	return _node("5b")
+
+const RETREAT_DIST := 5.0
+const RETREAT_CD := 1.0
+const SHIELD_MAX := 150.0
+const SHIELD_CALM_SEC := 6.0
+const SHIELD_REGEN_PER_SEC := 15.0
+const SECOND_WIND_SEC := 5.0
+const SELF_REVIVE_FRAC := 0.5
+
 func heal_tick_sec() -> float:
 	var k: float = 1.0 + GameManager.unit_bonus(faction, "monk", "bonus_heal_rate")
-	return _MCfg.MONK_HEAL_TICK / maxf(k, 0.1)
+	var t: float = _MCfg.MONK_HEAL_TICK / maxf(k, 0.1)
+	if _node("4b"):
+		t = minf(t, FLOW_TICK)
+	return t
 
 func heal_amount_mult() -> float:
 	return 1.0 + GameManager.unit_bonus(faction, "monk", "bonus_heal_amount")
 
 func heal_radius() -> float:
+	# «Глобальный Покров» (5a): аура на всю карту. ЧИСЛОМ, а не признаком —
+	# все, кто радиус читает, продолжают читать метры
+	if _node("5a"):
+		return 1.0e6
 	return _MCfg.MONK_HEAL_RADIUS + GameManager.unit_bonus(faction, "monk", "bonus_heal_radius")
 
 ## AOE-перк «Благодать» изучен и включён (переключатель, как залп у лучников)
@@ -383,6 +602,67 @@ func aoe_active() -> bool:
 
 ## Один такт AOE: все раненые свои в радиусе, каждый — на MONK_AOE_RATE долю
 ## одиночного. Цель поиска/подхода остаётся самым раненым (VFX на нём)
+## ── ТАКТ ПО НЕСКОЛЬКИМ ЦЕЛЯМ ──────────────────────────────────────────────
+## Накрывает max_heal_targets() самых раненых в ауре. Прежний «Благодатный»
+## путь (весь отряд, каждому MONK_AOE_RATE доля) — его частный случай.
+## «Абсолютное Целительство» (5b) восполняет запас ЦЕЛИКОМ: это не прибавка
+## к объёму, а другое правило, и потому стоит отдельной веткой
+func _heal_pulse_many(best: Unit) -> void:
+	var tick: float = heal_tick_sec()
+	var cap: int = max_heal_targets()
+	var full: bool = full_heal_tick()
+	# При лечении многих каждому достаётся меньше — иначе «лечит весь отряд»
+	# было бы просто умножением силы монаха на число целей
+	var share: float = _MCfg.MONK_AOE_RATE if cap > 3 else 1.0
+	var per: float = tick / _MCfg.MONK_HEAL_SEC_PER_MAN * heal_amount_mult() * share
+	var hurt: Array = []
+	for n in GameManager.unit_grid.query_radius(global_position, heal_radius()):
+		if n == null or not is_instance_valid(n):
+			continue
+		var u := n as Unit
+		if not _may_heal(u):
+			continue
+		hurt.append([u.current_health / maxf(u.max_health, 1.0), u])
+	if hurt.is_empty():
+		return
+	# Самые раненые первыми: при потолке в три цели выбор обязан быть осмысленным
+	hurt.sort_custom(func(a, b): return float(a[0]) < float(b[0]))
+	var given := 0.0
+	var touched := 0
+	for row in hurt:
+		if touched >= cap:
+			break
+		var u2 := (row[1]) as Unit
+		if u2 == null or not is_instance_valid(u2) or u2.is_dead():
+			continue
+		touched += 1
+		var before2: float = u2.current_health
+		if full:
+			u2.current_health = u2.max_health
+		else:
+			u2.current_health = minf(u2.max_health, u2.current_health + u2.max_health * per)
+		var got: float = u2.current_health - before2
+		given += got
+		healed_total += got
+		_credit_heal_xp(got)
+		u2._soa_push_stats()
+	if touched > 0:
+		_play_attack_anim("heal", int(tick * 1000.0) + 120)
+		_bind_heal_vfx(best)
+		_self_heal(given)
+
+## ── САМОХИЛ (1c): доля ОТДАННОГО исцеления возвращается монаху ────────────
+## Считается от того, что реально зашло в чужие полоски, а не от заявленного
+## объёма: целый боец не лечится, и платить монаху за несделанное незачем
+func _self_heal(given: float) -> void:
+	var k: float = self_heal_frac()
+	if k <= 0.0 or given <= 0.0 or is_dead():
+		return
+	var was: float = current_health
+	current_health = minf(max_health, current_health + given * k)
+	if current_health > was:
+		_soa_push_stats()
+
 func _heal_pulse_aoe(best: Unit) -> void:
 	var tick: float = heal_tick_sec()
 	var per: float = tick / _MCfg.MONK_HEAL_SEC_PER_MAN * heal_amount_mult() * _MCfg.MONK_AOE_RATE
@@ -423,11 +703,22 @@ func _heal_pulse() -> void:
 	# упор, и «лечит через полполя» было бы ровно тем, на что жалуется заказ
 	var gap: float = global_position.distance_to(best.global_position)
 	if best != self and gap > _MCfg.MONK_CAST_RANGE:
+		# ── ВО ВРЕМЯ ОТХОДА К ПАЦИЕНТУ НЕ ИДЁМ ────────────────────────────
+		# Иначе подход тут же перебивает отход: пациент нередко стоит РЯДОМ С
+		# ОБИДЧИКОМ, и монах, получив стрелу, делал шаг назад и тем же тактом
+		# возвращался лечить — на экране это полметра дрожи вместо отхода
+		# (замер qa_monk_forge E3: 0.5 м вместо пяти). Лечить он при этом не
+		# перестаёт: до тех, кто уже в дистанции каста, такт дотягивается
+		if _retreat_goal.x != INF:
+			_stop_heal_vfx()
+			return
 		_walk_to_patient(best)
 		_stop_heal_vfx()
 		return
-	if aoe_active():
-		_heal_pulse_aoe(best)
+	# Один — как было; три — «Троичный Поток» (1d); весь отряд — «Опека» (3d)
+	# и прежняя «Благодать». Многоцелевой путь ОДИН на всех
+	if aoe_active() or max_heal_targets() > 1:
+		_heal_pulse_many(best)
 		return
 	var amount: float = best.max_health * heal_tick_sec() / _MCfg.MONK_HEAL_SEC_PER_MAN \
 		* heal_amount_mult()
@@ -440,6 +731,7 @@ func _heal_pulse() -> void:
 	best._soa_push_stats()
 	_play_attack_anim("heal", int(heal_tick_sec() * 1000.0) + 120)
 	_bind_heal_vfx(best)
+	_self_heal(best.current_health - before)
 
 ## ── ПОДХОД — ЭТО ПРИКАЗ, А НЕ ВТОРАЯ МЕХАНИКА ХОДЬБЫ ──────────────────────
 ## Монах идёт к пациенту обычным command_move, тем же, каким его двигает игрок.

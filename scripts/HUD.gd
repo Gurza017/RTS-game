@@ -1162,6 +1162,10 @@ const TOP_RIGHT_MARGIN_T := 8.0
 var _match_seconds: float = 0.0
 var _timer_label: Label  = null
 var _fps_label:   Label  = null
+## Индикатор режима построения ([1] широкий / [2] коробочка). Заведён вместе
+## с тем, что режим стал ЗАПОМИНАТЬСЯ: невидимый запомненный строй читается
+## игроком как самоволка игры (разбор — в SelectionManager, у снятого сброса)
+var _formation_label: Label = null
 var _pause_btn:   Button = null
 
 func _build_top_right_widget() -> void:
@@ -1220,6 +1224,17 @@ func _build_top_right_widget() -> void:
 	_fps_label.add_theme_font_size_override("font_size", 12)
 	_fps_label.add_theme_color_override("font_color", Color(0.55, 0.95, 0.55))
 	hbox.add_child(_fps_label)
+
+	# ── РЕЖИМ СТРОЯ ВИДЕН ВСЕГДА (заказ 13.09.2026) ───────────────────────
+	# Он теперь переживает растяг и смену выделения, а значит обязан быть
+	# написан на экране: иначе игрок не знает, каким строем пойдёт
+	# следующий приказ. Цифра в скобках — та самая клавиша
+	var sep_f := VSeparator.new(); hbox.add_child(sep_f)
+	_formation_label = Label.new()
+	_formation_label.add_theme_font_size_override("font_size", 12)
+	_formation_label.add_theme_color_override("font_color", Color(0.95, 0.85, 0.55))
+	_formation_label.text = "строй [1] широкий"
+	hbox.add_child(_formation_label)
 
 	var sep2 := VSeparator.new(); hbox.add_child(sep2)
 
@@ -1331,6 +1346,23 @@ func _update_top_right(delta: float) -> void:
 		_timer_label.text += "  ·  перемирие %s" % _format_match_time(tl)
 	if _fps_label and _fps_label.visible:
 		_fps_label.text = "FPS: %d" % Engine.get_frames_per_second()
+	# ── ИНДИКАТОР СТРОЯ ───────────────────────────────────────────────────
+	# Читается ПРЯМО ИЗ КОНТРОЛЛЕРА ВЫДЕЛЕНИЯ, а не дублируется полем в HUD:
+	# второй источник правды о текущем режиме разошёлся бы с первым на первом
+	# же нажатии клавиши
+	if _formation_label != null and is_instance_valid(_formation_label):
+		var sm = GameManager.main.selection_manager if GameManager.main != null else null
+		if sm != null:
+			var deep: bool = int(sm.formation_mode) == int(sm.FORM_DEEP)
+			var txt: String = "строй [2] коробочка" if deep else "строй [1] широкий"
+			if int(sm.formation_front) != 0:
+				txt += " · авангард [3]"
+			if _formation_label.text != txt:
+				_formation_label.text = txt
+				# Коробочка подсвечена: запомненный НЕ-дефолтный режим обязан
+				# бросаться в глаза, иначе он и читается как самоволка игры
+				_formation_label.add_theme_color_override("font_color",
+					Color(1.0, 0.72, 0.25) if deep else Color(0.95, 0.85, 0.55))
 	if _pause_btn:
 		_pause_btn.text = "▶" if get_tree().paused else "⏸"
 
@@ -2120,6 +2152,7 @@ func _refresh_panel() -> void:
 			_train_cmd(u, "worker",  Color(0.18, 0.32, 0.18), big, CASTLE_ICON_BOOST)
 			_train_cmd(u, "warrior", Color(0.30, 0.14, 0.28), big, CASTLE_ICON_BOOST)
 			_train_cmd(u, "monk",    Color(0.22, 0.26, 0.14), big, CASTLE_ICON_BOOST)
+			_keep_vet_cmd(u, big)
 
 		elif u is TownCenter and u.faction == Constants.FACTION_PLAYER:
 			# Тот же единый стандарт производственного здания, что у Замка и Бараков
@@ -4461,6 +4494,74 @@ func _afford_color(base: Color, ok: bool) -> Color:
 		return base.lerp(AFFORD_OK_TINT, AFFORD_OK_MIX)
 	return base.lerp(AFFORD_LACK_TINT, AFFORD_LACK_MIX).darkened(0.15)
 
+## Ранг, с которым выйдет заказанный отряд (0 — обычный найм).
+## Спрашивается СВОЙСТВО здания (is_stronghold), а не его имя: башня и хижина
+## орды тоже наследуют Castle, и элиту они не куют
+## ── КНОПКА УЛУЧШЕНИЯ РАНГА ЭЛИТЫ КРЕПОСТИ (заказ 13.09.2026) ───────────────
+## «Под иконкой мечников — кнопка улучшения уровня ветеранства с римскими
+## цифрами». Своей машинерии исследований она не заводит: ранг это ОДНО число
+## на фракцию (GameManager.keep_vet_level), и кнопка просто двигает его
+## вверх, списывая цену из таблицы KEEP_VET_UPGRADES.
+##
+## На потолке кнопка не прячется, а становится НЕНАЖИМАЕМОЙ подписью: исчезни
+## она — игрок не увидел бы, что ветка пройдена до конца
+func _keep_vet_cmd(bld: Building, size: float) -> void:
+	if bld == null or bld.faction != Constants.FACTION_PLAYER:
+		return
+	if not bld.has_method("is_stronghold") or not bool(bld.call("is_stronghold")):
+		return
+	var cur: int = GameManager.keep_warrior_vet(bld.faction)
+	var nxt: int = GameManager.keep_vet_next(bld.faction)
+	if nxt == 0:
+		var done := _cmd("Мечники [ %s ] — предел" % _UCfg.roman(cur),
+			Color(0.20, 0.20, 0.22), func(): pass,
+			String(UNIT_ICONS.get("warrior", "")),
+			{"title": "Ветеранство Крепости",
+			 "lines": ["Открыт высший ранг найма: %s" % _UCfg.roman(cur),
+				"Дальше отряд растёт только в бою"]},
+			size, CASTLE_ICON_BOOST)
+		if done != null:
+			done.disabled = true
+		return
+	var cost: Dictionary = GameManager.keep_vet_cost(bld.faction)
+	var ok: bool = ResourceManager.can_afford(bld.faction, cost)
+	var base := Color(0.30, 0.24, 0.10)
+	var label: String = "Мечники [ %s ] → [ %s ]" % [
+		_UCfg.roman(cur), _UCfg.roman(nxt)]
+	var card := {
+		"title": label,
+		"lines": [
+			"Открывает найм мечников ранга %s (%d лычки)" % [
+				_UCfg.roman(nxt), nxt],
+			"Уже нанятые отряды не меняются — правило действует на НОВЫЕ",
+			"Содержание растёт: еды ×%.2f, золота %.2f/с за отряд" % [
+				_UCfg.keep_food_mult(nxt), _UCfg.keep_gold_rate(nxt)],
+		],
+		"cost": cost,
+	}
+	var btn := _cmd(label, _afford_color(base, ok),
+		func(): _on_keep_vet_buy(bld),
+		String(UNIT_ICONS.get("warrior", "")), card, size, CASTLE_ICON_BOOST)
+	_watch_afford(btn, base, cost, bld.faction, "", bld)
+
+func _on_keep_vet_buy(bld: Building) -> void:
+	if bld == null or not is_instance_valid(bld):
+		return
+	if GameManager.keep_vet_buy(bld.faction):
+		AudioManager.play_ui("smith_pick")
+		# Панель пересобирается штатно — числа придут настоящими, из реестра
+		# Панель пересобирается штатно — числа придут настоящими, из реестра
+		var sm = GameManager.main.selection_manager if GameManager.main != null else null
+		if sm != null:
+			GameManager.on_selection_changed(sm.selected_units, true)
+
+func _keep_vet_for(bld: Building, unit_id: String) -> int:
+	if unit_id != "warrior" or bld == null:
+		return 0
+	if not bld.has_method("is_stronghold") or not bool(bld.call("is_stronghold")):
+		return 0
+	return GameManager.keep_warrior_vet(bld.faction)
+
 func _train_cmd(bld: Building, unit_id: String, col: Color, size: float = 0.0,
 		icon_boost: float = 1.0) -> void:
 	var c: Dictionary = _UCfg.train_cfg(bld.building_id, unit_id)
@@ -4475,6 +4576,14 @@ func _train_cmd(bld: Building, unit_id: String, col: Color, size: float = 0.0,
 	var title: String = String(UNIT_TITLES.get(unit_id, unit_id))
 	if squad > 1:
 		title += " ×%d" % squad
+	# ── ЭЛИТА КРЕПОСТИ: РАНГ ВИДЕН ПРЯМО НА КНОПКЕ (заказ 13.09.2026) ──────
+	# «Иконка найма должна сразу отображать лычку». Глифы берутся из того же
+	# veteran_badge_text, которым рисуется значок ранга в панели отряда и
+	# флажки наград: разойтись с знаменем в мире они так не могут
+	var keep_vet: int = _keep_vet_for(bld, unit_id)
+	if keep_vet > 0:
+		title += "  [ %s ] %s" % [_UCfg.roman(keep_vet),
+			_UCfg.veteran_badge_text(keep_vet)]
 	var card: Dictionary = _unit_card(unit_id, bld.faction, cost, squad)
 	card["title"] = title
 	var lines: Array = card.get("lines", [])
@@ -4489,6 +4598,12 @@ func _train_cmd(bld: Building, unit_id: String, col: Color, size: float = 0.0,
 				GameManager.pop_squad_cap(bld.faction), _UCfg.HOUSE_SQUAD_SLOTS])
 	if unit_id == "monk":
 		lines.append("Одиночный юнит, не больше %d; лечит раненых рядом" % _UCfg.MONK_LIMIT)
+	if keep_vet > 0:
+		lines.append("Выходит готовым ветераном: ранг %s (%d %s)" % [
+			_UCfg.roman(keep_vet), keep_vet,
+			"лычка" if keep_vet == 1 else "лычки"])
+		lines.append("Содержание: еды ×%.2f и золота %.2f/с за отряд" % [
+			_UCfg.keep_food_mult(keep_vet), _UCfg.keep_gold_rate(keep_vet)])
 	lines.append("ЛКМ — заказать, ПКМ — отменить (с возвратом)")
 	card["lines"] = lines
 	var btn := _cmd(title, color, func(): bld.train_from_config(unit_id),

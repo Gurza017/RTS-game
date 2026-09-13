@@ -909,6 +909,40 @@ func _drop_arrows(cc: Corpse) -> void:
 ## и панель, в покадровом пути таких вызовов нет
 ## ── КОГО ПОДНЯТЬ (письмо 12): ближайшее целое тело своей стороны ───────────
 ## Тело на растворении не поднимается (его уже нет наполовину)
+## ── ТО ЖЕ, НО С ПРИОРИТЕТОМ ПО РОДУ ВОЙСК (заказ 13.09.2026) ──────────────
+## Монах поднимает СНАЧАЛА павших монахов, и только потом пехоту.
+##
+## ПРИОРИТЕТ ПО РОДУ, А НЕ ПО ОТРЯДУ, И ЭТО НЕ УПРОЩЕНИЕ. «Свой отряд» у
+## монаха — это Ctrl-группа игрока (монах сам по себе отряд из одного,
+## SQUAD_SIZE_MONKS = 1), а Ctrl-группы живут в SelectionManager списком
+## ЖИВЫХ узлов: павший из них выбывает, и у тела спросить его группу уже
+## нечем. По роду войск ответ выходит тот же самый — монахов на поле
+## единицы, — и не требует второго реестра, который пришлось бы вести
+## через смерть.
+func find_raisable_priority(fac: int, at: Vector3, radius: float,
+	want_id: String, _asker_squad: int = 0):
+	var best_want = null
+	var best_any = null
+	var dw: float = radius * radius
+	var da: float = radius * radius
+	for c in _list:
+		var cc := c as Corpse
+		if cc == null or cc.index < 0 or not cc.raisable or cc.fade_left >= 0.0:
+			continue
+		if cc.faction != fac:
+			continue
+		var dx: float = cc.pos.x - at.x
+		var dz: float = cc.pos.z - at.z
+		var d2: float = dx * dx + dz * dz
+		if cc.unit_id == want_id:
+			if d2 < dw:
+				dw = d2
+				best_want = cc
+		elif d2 < da:
+			da = d2
+			best_any = cc
+	return best_want if best_want != null else best_any
+
 func find_raisable(fac: int, at: Vector3, radius: float):
 	var best: Corpse = null
 	var bd: float = radius * radius

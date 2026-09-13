@@ -121,11 +121,22 @@ func _a_config() -> void:
 		"не найдено: %d %s" % [missing.size(), str(missing.slice(0, 5))])
 
 	# A5 — у каждого узла есть имя и цена: пустой узел на панели выглядит багом
+	# ── БЕСПЛАТНЫЙ БОНУСНЫЙ УЗЕЛ — ЭТО НЕ ПУСТОЙ УЗЕЛ (заказ 13.09.2026) ──
+	# У ветки монаха четвёртый столбец выдаётся САМ, даром и мгновенно, когда
+	# изучены все три узла ряда. Требование «у каждого узла ненулевая цена»
+	# развёрнуто для таких узлов: название у них обязано быть по-прежнему, а
+	# цена обязана быть НУЛЕВОЙ — платный узел даром не выдаётся вовсе
+	# (GameManager._grant_row_bonuses)
 	var empty: Array = []
 	for n in _Forge.all_nodes():
 		var d: Dictionary = n
 		var cost: Dictionary = _UCfg.upgrade_cost(d)
-		if String(d.get("name", "")).is_empty() or cost.is_empty():
+		if String(d.get("name", "")).is_empty():
+			empty.append(String(d.get("id", "")))
+			continue
+		var free_bonus: bool = String(d.get("id", "")).ends_with("d") \
+			and float(d.get("research_time", 0.0)) == 0.0
+		if cost.is_empty() and not free_bonus:
 			empty.append(String(d.get("id", "")))
 	verdict("A5 у каждого узла есть название и ненулевая цена", empty.is_empty(),
 		"пустых: %d %s" % [empty.size(), str(empty.slice(0, 5))])

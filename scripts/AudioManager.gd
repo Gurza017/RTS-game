@@ -516,6 +516,13 @@ const SFX_BANK := {
 					"Sword_hit_armor 3.mp3", "Sword_hit_armor 4.mp3"],
 	"spear_hit":   ["WHSH_Whoosh_HoveAud_SwordCombat_07.wav",
 					"WHSH_Whoosh_HoveAud_SwordCombat_26.wav"],
+	# ── БОЛЬШОЙ ГОБЛИН (13.09.2026) ───────────────────────────────────────
+	# СВОИХ ФАЙЛОВ У ТУШИ НЕТ И НЕ ЗАВОДИТСЯ: тяжесть делают ПИТЧ И ГРОМКОСТЬ
+	# поверх готовых сэмплов. Новый сэмпл ради двух событий — это лишний
+	# мегабайт в паке и лишняя строка в реестре прогрева
+	"big_step":    ["Sword_hit_armor 1.mp3", "Sword_hit_armor 3.mp3"],
+	"big_sweep":   ["WHSH_Whoosh_HoveAud_SwordCombat_07.wav",
+					"WHSH_Whoosh_HoveAud_SwordCombat_26.wav"],
 	"vox_action":  ["VOXEfrt_ActionGrunt_HoveAud_SwordCombat_01.wav",
 					"VOXEfrt_ActionGrunt_HoveAud_SwordCombat_07.wav",
 					"VOXEfrt_ActionGrunt_HoveAud_SwordCombat_23.wav",
@@ -610,6 +617,10 @@ const SFX_LIMITS := {
 	"sword_hit":    {"voices": 6, "gap": 0.045, "db": -4.0},
 	"nom_nom":      {"voices": 2, "gap": 0.30,  "db": -2.0},
 	"spear_hit":    {"voices": 6, "gap": 0.04,  "db": -6.0},
+	# Туша: шаг РЕДКИЙ и НИЗКИЙ (питч вниз), свип — низкий протяжный замах.
+	# Голосов мало намеренно: пять туш в отряде не должны перекрикивать бой
+	"big_step":     {"voices": 3, "gap": 0.25, "db": -9.0, "pitch": [0.55, 0.68]},
+	"big_sweep":    {"voices": 3, "gap": 0.20, "db": -3.0, "pitch": [0.55, 0.70]},
 	# Голоса — редкая приправа поверх гула, их лимиты почти не тронуты
 	"vox_action":   {"voices": 3, "gap": 0.90,  "db": -8.0},
 	"vox_death":    {"voices": 4, "gap": 0.20,  "db": -3.0},

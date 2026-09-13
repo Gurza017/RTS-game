@@ -35,6 +35,7 @@ extends Unit
 
 const _SSParser := preload("res://scripts/SpriteSheetParser.gd")
 const _GobCfgG  := preload("res://scripts/goblin/goblin_config.gd")
+const _OptG     := preload("res://scripts/perf_config.gd")
 
 const SHEET_DIR := "res://assets/factions/orc/Troll/Gnoll/"
 ## Ключи те же, что знает базовый автомат внешности; hit — лента получения
@@ -69,6 +70,8 @@ var _throw_miss: bool = false
 var _patrol_t: float = 0.0
 var _kite_t: float = 0.0
 var _flank_t: float = 0.0
+## Своя доля интервала: скан после промаха взводится не у всех разом
+var _scan_phase: float = 0.0
 ## ── КАЙТ ПО ФАКТУ, А НЕ ПО ТАЙМЕРУ ────────────────────────────────────────
 ## Точка, из которой начат последний отход, и срок, к которому он обязан дать
 ## заметное смещение. Не дал — отбегать некуда (свои тела), кайт глушится и
@@ -97,6 +100,17 @@ func _ready() -> void:
 	display_name = "Гнолл"
 	super._ready()
 	_setup_visual()
+	# Фаза скана — от номера узла, а не от randf(): два прогона одного боя
+	# обязаны дать одно поле (то же правило, что у угла втыкания стрелы)
+	_scan_phase = float(get_instance_id() % _GobCfgG.GNOLL_SCAN_PHASES) \
+		/ float(_GobCfgG.GNOLL_SCAN_PHASES)
+
+## Взвести интервал после ПРОМАХА скана: врага в радиусе не нашлось.
+## Без ручки возвращает ноль — то есть прежнее «сканируем каждый тик»
+func _miss_gate(sec: float) -> float:
+	if not _OptG.gnoll_scan_gate:
+		return 0.0
+	return sec * (0.75 + 0.5 * _scan_phase)
 
 func _setup_visual() -> void:
 	# Лента броска НЕ зациклена: бросок проигрывается один раз и возвращает
@@ -334,6 +348,8 @@ func _tick_kite(delta: float) -> bool:
 		return false
 	var foe: Node3D = _nearest_melee_foe(_GobCfgG.GNOLL_KITE_IN)
 	if foe == null:
+		# ПРОМАХ ТОЖЕ ВЗВОДИТ ЧАСЫ: иначе скан идёт каждый физтик (см. _miss_gate)
+		_kite_t = _miss_gate(_GobCfgG.GNOLL_KITE_MISS_SEC)
 		return false
 	_kite_t = _GobCfgG.GNOLL_KITE_SEC
 	var away: Vector3 = global_position - foe.global_position
@@ -407,6 +423,9 @@ func _tick_flank(delta: float) -> bool:
 	var foe: Node3D = _nearest_foe_at((lair as Node3D).global_position,
 		_GobCfgG.GNOLL_DEFEND_RANGE)
 	if foe == null:
+		# Самый дорогой скан в классе (r = 34 м): без взвода часов он идёт
+		# КАЖДЫЙ физтик у каждого гнолла всю партию — см. _miss_gate
+		_flank_t = _miss_gate(_GobCfgG.GNOLL_FLANK_MISS_SEC)
 		return false
 	_flank_t = _GobCfgG.GNOLL_FLANK_SEC
 	var line: Vector3 = foe.global_position - lair.global_position

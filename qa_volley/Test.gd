@@ -250,7 +250,13 @@ func _d_cluster() -> void:
 	ResourceManager.add_resource(f, Constants.RESOURCE_GOLD, 99999.0)
 	GameManager.squad_buy_ability(sid, nid)
 	GameManager.squad_set_ability(sid, nid, true)
-	await frames(180)
+	# ЖДЁМ ФИЗКАДРЫ, А НЕ КАДРЫ ОТРИСОВКИ (правило 11): при снятом
+	# ограничении кадров отрисовка обгоняет физику, и `frames(180)` — это
+	# заметно меньше трёх игровых секунд. Поймано центровым нодом отряда: он
+	# добавляет к первому назначению до полусекунды ИГРОВОГО времени, и
+	# проверка читала точку залпа раньше, чем отряд успевал её получить
+	for _pf in range(180):
+		await get_tree().physics_frame
 
 	var aim: Vector3 = GameManager.squad_volley_aim(sid)
 	var c: Vector3 = GameManager.squad_centroid(foe)

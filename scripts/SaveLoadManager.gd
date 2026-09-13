@@ -111,6 +111,7 @@ static func capture(main: Node) -> Dictionary:
 		"meta": _capture_meta(main),
 		"resources": _capture_resources(),
 		"research": _capture_research(),
+		"keep_vet": _capture_keep_vet(),
 		"squads": _capture_squads(),
 		"buildings": _capture_buildings(main),
 	}
@@ -158,6 +159,22 @@ static func _capture_research() -> Dictionary:
 				ids.append(String(k))
 		out[int(f)] = ids
 	return out
+
+## ── РАНГ ЭЛИТЫ КРЕПОСТИ (заказ 13.09.2026) ────────────────────────────────
+## Купленные ступени I..IV — это ОДНО число на фракцию, и без него загруженная
+## партия возвращала бы игроку найм первого ранга после того, как он оплатил
+## четвёртый. Поле читается с умолчанием, поэтому старые файлы читаются как
+## «ранг по умолчанию» и FORMAT_VERSION поднимать не нужно
+static func _capture_keep_vet() -> Dictionary:
+	var out: Dictionary = {}
+	for f in GameManager.keep_vet_level:
+		out[int(f)] = int(GameManager.keep_vet_level[f])
+	return out
+
+static func _restore_keep_vet(src: Dictionary) -> void:
+	GameManager.keep_vet_level.clear()
+	for f in src:
+		GameManager.keep_vet_level[int(f)] = int(src[f])
 
 static func _capture_squads() -> Array:
 	var out: Array = []
@@ -332,6 +349,7 @@ static func apply(main: Node, state: Dictionary) -> void:
 	_wipe_live_world(main)
 	_restore_resources(state.get("resources", {}))
 	_restore_research(state.get("research", {}))
+	_restore_keep_vet(state.get("keep_vet", {}))
 	var sid_map: Dictionary = _restore_squads(state.get("squads", []))
 	_restore_buildings(main, state.get("buildings", []))
 	_restore_units(main, state.get("units", {}), sid_map)

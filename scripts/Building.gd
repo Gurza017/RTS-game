@@ -29,6 +29,7 @@ const PRELOAD_SCENES := {
 	"goblin_rider":    preload("res://scenes/units/GoblinPigRider.tscn"),
 	"troll":           preload("res://scenes/units/Troll.tscn"),
 	"gnoll":           preload("res://scenes/units/Gnoll.tscn"),
+	"big_goblin":      preload("res://scenes/units/BigGoblin.tscn"),
 }
 
 ## Есть ли чем исполнить заказ на такого бойца. Спрашивают и очередь найма, и
@@ -762,6 +763,21 @@ func _process(delta: float) -> void:
 			# живут как единое целое — выделяются и получают приказы вместе
 			var unit_name: String = String(current["name"])
 			var sid: int = GameManager.new_squad(faction, unit_name)
+			# ── ИЗ КРЕПОСТИ МЕЧНИКИ ВЫХОДЯТ УЖЕ С ЛЫЧКАМИ (заказ 13.09.2026) ─
+			# Ранг задаёт не здание вообще, а именно СТОЛИЦА (is_stronghold):
+			# башня и хижина орды тоже наследуют Castle, и элиту они не куют.
+			#
+			# ЗДЕСЬ ТОЛЬКО ЗАПИСЬ НАМЕРЕНИЯ, А НЕ ВЫДАЧА. Выдать ранг прямо тут
+			# нельзя: отряд ещё ПУСТ (бойцы доезжают следующими кадрами через
+			# _pending_spawns), а раздача наград идёт через squad_members(), и
+			# ТОТ РАСПУСКАЕТ ПУСТОЙ ОТРЯД ПРЯМО В ГЕТТЕРЕ. Первая версия так и
+			# сделала: заказ проходил, очередь дотикивала до нуля, а отряда на
+			# карте не появлялось вовсе (стенд qa_keep_elite B1, sid 0)
+			if unit_name == "warrior" and has_method("is_stronghold") \
+				and bool(call("is_stronghold")):
+				var kv: int = GameManager.keep_warrior_vet(faction)
+				if kv > 0 and GameManager.squads.has(sid):
+					GameManager.squads[sid]["keep_vet_pending"] = kv
 			# СВОЯ ПОЛОСА ВЫХОДА У КАЖДОГО ОТРЯДА. Раньше все заказы здания шли
 			# в одну точку сбора, и два отряда из одного барака вставали друг в
 			# друга (замер QA: центры масс в 1.86 м, 13 бойцов из 50 вплотную к
@@ -1591,6 +1607,16 @@ func _place_spawned(unit: Unit, gate: Vector3, rally: Vector3,
 		unit.global_position = gate
 	if squad_id > 0:
 		GameManager.add_to_squad(squad_id, unit)
+		# Ранг элиты выдаётся, КОГДА В ОТРЯДЕ ПОЯВИЛСЯ ПЕРВЫЙ БОЕЦ (разбор — у
+		# записи намерения в очереди найма). Ключ снимается сразу: раздача одна
+		var sqr: Variant = GameManager.squads.get(squad_id)
+		if sqr != null and (sqr as Dictionary).has("keep_vet_pending"):
+			var kvp: int = int((sqr as Dictionary)["keep_vet_pending"])
+			(sqr as Dictionary).erase("keep_vet_pending")
+			if GameManager.main != null \
+				and GameManager.main.has_method("grant_squad_veterancy"):
+				GameManager.main.grant_squad_veterancy(squad_id, kvp,
+					kvp * _UCfgB.KEEP_WARRIOR_PICKS_PER_VET, [])
 	unit.command_move(rally, false, exit_dir)
 
 ## Прямоугольник площадки: центр, ось вперёд, ось вбок, полуширина, полуглубина.

@@ -63,6 +63,18 @@ func _squad(uid: String, at: Vector3, n: int) -> Array:
 		men.append(u)
 	return men
 
+## Отпустить ПКМ ТЕМ ЖЕ ПУТЁМ, каким это делает игра: событие в
+## `_unhandled_input`. Дёргать поля напрямую нельзя — именно в обработчике
+## отпускания и стоял сброс режима, который проверяется
+func _release_rmb(_world_at: Vector3) -> void:
+	var sm = main.selection_manager
+	var ev := InputEventMouseButton.new()
+	ev.button_index = MOUSE_BUTTON_RIGHT
+	ev.pressed = false
+	# Дальше порога протяжки — иначе отпускание прочтётся как одиночный клик
+	ev.position = sm._rmb_screen_start + Vector2(400, 0)
+	sm._unhandled_input(ev)
+
 func _key(code: Key) -> void:
 	var ev := InputEventKey.new()
 	ev.keycode = code
@@ -278,6 +290,7 @@ func _run() -> void:
 				break
 	verdict("D3 приказ по отпусканию раздал места коробочки (те же, что превью)",
 		got == all.size(), "%d из %d" % [got, all.size()])
+	await _e_persist(all, a, b)
 	_finish()
 
 func _front_type(plan: Dictionary, facing: Vector3) -> String:
@@ -317,3 +330,77 @@ func _echelon_order(plan: Dictionary, facing: Vector3) -> Array:
 	var types: Array = acc.keys()
 	types.sort_custom(func(x, y): return float(acc[x]) / float(cnt[x]) > float(acc[y]) / float(cnt[y]))
 	return types
+
+# ═════════════════════════════════════════════════════════════════════════════
+# E. РЕЖИМ СТРОЯ ПЕРЕЖИВАЕТ РАСТЯГ, ВЫДЕЛЕНИЕ И ПРИКАЗ (заказ 13.09.2026)
+# ═════════════════════════════════════════════════════════════════════════════
+## Жалоба: «после каждого растяга режим сбрасывается на широкий фронт, и [2]
+## приходится жать заново». Сбрасывала его одна строка в обработчике
+## отпускания ПКМ (спринт 20). Здесь проверяется, что её больше нет — и что
+## менять режим по-прежнему может ТОЛЬКО игрок клавишей
+func _e_persist(all: Array, a: Vector3, b: Vector3) -> void:
+	var sm = main.selection_manager
+	print("
+═════ E. ЗАПОМИНАНИЕ РЕЖИМА ═════")
+	sm.selected_units = all.duplicate()
+	# Растяг: зажали ПКМ, увели мышь дальше порога, нажали [2]
+	sm._rmb_down = true
+	sm._rmb_dragging = true
+	sm._rmb_press_over_ui = false
+	sm._rmb_world_start = a
+	sm._fp_mouse = Vector2(300, 300)
+	sm._rmb_screen_start = Vector2(100, 300)
+	_key(KEY_2)
+	verdict("E1 [2] при растяге включает коробочку",
+		sm.formation_mode == sm.FORM_DEEP)
+	# ОТПУСКАЕМ ПКМ — тем же путём, каким это делает игра
+	_release_rmb(b)
+	verdict("E2 отпускание ПКМ режим НЕ сбрасывает",
+		sm.formation_mode == sm.FORM_DEEP,
+		"режим %d" % sm.formation_mode)
+	# Смена выделения
+	sm.selected_units = [all[0]]
+	GameManager.on_selection_changed(sm.selected_units, true)
+	await pframes(2)
+	verdict("E3 смена выделения режим не сбрасывает",
+		sm.formation_mode == sm.FORM_DEEP, "режим %d" % sm.formation_mode)
+	# Снятие выделения
+	sm.selected_units = []
+	GameManager.on_selection_changed(sm.selected_units, true)
+	await pframes(2)
+	verdict("E4 снятие выделения режим не сбрасывает",
+		sm.formation_mode == sm.FORM_DEEP, "режим %d" % sm.formation_mode)
+	# Обычный приказ на движение
+	sm.selected_units = all.duplicate()
+	sm._execute_line_formation(a, b)
+	await pframes(2)
+	verdict("E5 приказ на движение режим не сбрасывает",
+		sm.formation_mode == sm.FORM_DEEP, "режим %d" % sm.formation_mode)
+	# ── ВТОРОЙ РАСТЯГ ИДЁТ УЖЕ КОРОБОЧКОЙ ────────────────────────────────
+	# Это и есть суть жалобы: игрок растягивает второй раз и ждёт тот же строй
+	# МЕРИМ НА ЛУЧНИКАХ, А НЕ НА КОПЕЙЩИКАХ: к этому блоку «Стена копий»
+	# уже изучена (блок B), и копейщики ложатся в три шеренги при ЛЮБОМ
+	# режиме (_block_formation_slots, спринт 20) — на них два режима
+	# неразличимы по построению, и проверка краснела бы на исправном коде
+	var arch: Array = _squad("archer", a + Vector3(0.0, 0.0, -40.0), 20)
+	await pframes(4)
+	var line_dir: Vector3 = (b - a).normalized()
+	var a2 := a + Vector3(0.0, 0.0, -40.0)
+	var b2 := b + Vector3(0.0, 0.0, -40.0)
+	var again: Dictionary = sm._mono_formation_slots(a2, b2, arch)
+	var e2: Vector2 = _extent(again["slots"], line_dir)
+	sm.formation_mode = sm.FORM_WIDE
+	var wide2: Dictionary = sm._mono_formation_slots(a2, b2, arch)
+	var ew2: Vector2 = _extent(wide2["slots"], line_dir)
+	print("  второй растяг: глубина коробочки %.1f м против широкого %.1f м" % [
+		e2.y, ew2.y])
+	verdict("E6 второй растяг без нажатий идёт коробочкой, а не широким фронтом",
+		e2.y > ew2.y + 0.5, "%.1f против %.1f м" % [e2.y, ew2.y])
+	# ── РУЧНОЙ ВОЗВРАТ ───────────────────────────────────────────────────
+	sm.formation_mode = sm.FORM_DEEP
+	sm._rmb_down = true
+	sm._rmb_dragging = true
+	_key(KEY_1)
+	verdict("E7 [1] возвращает широкий фронт — режим меняет только игрок",
+		sm.formation_mode == sm.FORM_WIDE, "режим %d" % sm.formation_mode)
+	_release_rmb(b)

@@ -320,7 +320,7 @@ func _class_bottleneck(id: String, prof: Dictionary) -> String:
 		"worker": return "стройка/добыча/овцы (Worker.tick: свой шаг мимо пакета, _move_blocked)"
 		"archer": return "process_attack %.1f мс: выбор цели, залп (squad_volley_mode), упреждение" % atk
 		"monk": return "поиск раненых (query_radius в heal_radius), аура раз в 1 с, VFX"
-		"gnoll": return "кайт/фланг (command_move раз в такт) + бросок"
+		"gnoll": return "скан обороны пня r=34 м и кайта r=6 м (см. qa_gnoll_bench)"
 		"troll": return "дуга дубины (query_radius каждый взмах), окружение (_foes_around)"
 		_: return "process_attack %.1f / process_move %.1f / auto_aggro %.1f мс: сетка боя, шаг" % [atk, mv, aggro]
 

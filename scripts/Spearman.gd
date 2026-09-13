@@ -614,7 +614,7 @@ func _own_enemy_dir() -> Vector3:
 		dir.y = 0.0
 	if dir.length_squared() < 1e-6:
 		# Цель уже мертва/не назначена — берём ближайшего врага в радиусе удара
-		var near := _find_nearest_enemy_in_range(attack_range * 1.5)
+		var near := _find_nearest_enemy_in_range(attack_range * 1.5, "spear_charge")
 		if near != null:
 			dir = near.global_position - (position if _local_xform else global_position)
 			dir.y = 0.0

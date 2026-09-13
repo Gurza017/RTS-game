@@ -456,6 +456,13 @@ func _physics_process(delta: float) -> void:
 	if army_ticks % VOLLEY_SWEEP_EVERY == 0:
 		_sweep_volleys()
 	if _prof: _Opt.prof_add("squad_volley", Time.get_ticks_usec() - _t0)
+	# ── ЦЕНТРОВЫЕ НОДЫ СТРЕЛКОВЫХ ОТРЯДОВ (см. _sweep_squad_radar) ─────────
+	# ДО обхода бойцов: открытый здесь огонь стрелки застанут в этом же кадре.
+	# Свои часы в миллисекундах, поэтому такт свода кадрам не подчинён
+	if _prof: _t0 = Time.get_ticks_usec()
+	_sweep_squad_radar()
+	_sweep_march_radar()
+	if _prof: _Opt.prof_add("squad_radar", Time.get_ticks_usec() - _t0)
 	# ── ОТРЯДЫ, ИДУЩИЕ МАТРИЦЕЙ (Этап 1) ────────────────────────────────────
 	# ПОСЛЕ коридоров (они и дают ответ «путь чист») и ДО обхода бойцов: те,
 	# кого повела матрица, свой тик пропустят
@@ -2026,6 +2033,47 @@ func finish_research(faction: int, upgrade_id: String) -> void:
 	if is_researched(faction, upgrade_id):
 		return
 	_accumulate_upgrade(faction, slot, upgrade_id)
+	_grant_row_bonuses(faction, upgrade_id)
+
+## ── БОНУСНЫЙ СТОЛБЕЦ ВЫДАЁТСЯ САМ, ДАРОМ И МГНОВЕННО ──────────────────────
+## Заказ 13.09.2026 (ветка монаха): изучены все три узла ряда — четвёртый
+## открывается без цены и без времени. Проверка идёт ПО ФАКТУ (изучены ли все
+## три ячейки ряда), а не по событию «закончился третий»: вторым способом
+## бонус терялся бы у того, кто изучал ряд не по порядку или загрузил партию
+## с двумя узлами из трёх.
+##
+## ПЛАТНЫЙ УЗЕЛ СЮДА НЕ ПОПАДАЕТ ВОВСЕ. Если владелец однажды впишет в
+## бонусную ячейку цену, выдача даром стала бы подарком в обход склада —
+## поэтому нулевая цена здесь не предположение, а условие
+func _grant_row_bonuses(faction: int, just_done: String) -> void:
+	var sep: int = just_done.rfind("_")
+	if sep <= 0:
+		return
+	var tab: String = just_done.substr(0, sep)
+	for cell in _Forge.cells():
+		var c: String = String(cell)
+		if not c.ends_with("d"):
+			continue
+		var bid: String = _Forge.node_id(tab, c)
+		if is_researched(faction, bid):
+			continue
+		var slot: Dictionary = _UCfg.get_upgrade_slot(bid)
+		if slot.is_empty():
+			continue
+		if float(slot.get("cost_gold", 0.0)) > 0.0 \
+			or float(slot.get("cost_wood", 0.0)) > 0.0 \
+			or float(slot.get("cost_stone", 0.0)) > 0.0:
+			continue
+		var ready := true
+		for need in _Forge.ability_row_cells(c):
+			if not is_researched(faction, _Forge.node_id(tab, String(need))):
+				ready = false
+				break
+		if not ready:
+			continue
+		if researching.has(faction):
+			(researching[faction] as Dictionary).erase(bid)
+		_accumulate_upgrade(faction, slot, bid)
 
 ## ОТМЕНИТЬ исследование: снимает пометку «в работе» и возвращает 100% цены.
 ## Возврат полный и без штрафа — по прямому требованию владельца: игрок ткнул
@@ -4547,6 +4595,413 @@ func squad_volley_mode(sid: int) -> bool:
 ## стреляют на своём тике, а не ждут такта залпов и его порога
 var volley_primes: int = 0
 
+## ═══════════════════════════════════════════════════════════════════════════
+## ЦЕНТРОВОЙ НОД ОТРЯДА (SQUAD RADAR) — ОДИН СКАН НА ОТРЯД, ДВЕ ФАЗЫ
+## ═══════════════════════════════════════════════════════════════════════════
+## Заказ владельца (13.09.2026): скан целей переносится с бойца на отряд,
+## ровно 2 раза в секунду, радиус обнаружения 25 м при дальности лука 20 м;
+## засёк на 21-25 м — отряд разворачивается и ЖДЁТ (`TARGET_LOCKED`), враг
+## пересёк 20 м — залп всем отрядом в тот же кадр.
+##
+## ПОЧЕМУ ЭТО СВОД, А НЕ УЗЕЛ-НА-ОТРЯД. Сто отрядов узлами — это сто входов
+## из движка в GDScript каждый кадр ради одного таймера; ровно от этого в
+## проекте уже отказались у торчащих стрел (`_sweep_stuck_arrows`) и у тел
+## павших. Состояние «нода» живёт в записи отряда, а обходит их один свод —
+## снаружи это тот же центровой нод, только без платы за нотификацию.
+##
+## РАДИУС ОБНАРУЖЕНИЯ ВЫВОДИТСЯ, А НЕ СТОИТ ЧИСЛОМ: дальность лука растёт от
+## кузницы (см. `STATS.archer.attack_range_cap`), и вписанные в код 25 м
+## означали бы, что у прокачанного отряда упреждение исчезло, а у
+## подрезанного — стало вдвое больше дальности. Упреждение — это НАДБАВКА.
+const RADAR_INTERVAL_MS := 500          # ровно 2 Гц (прямой заказ)
+const RADAR_MARGIN := 5.0               # 25 м при луке 20 м
+const RADAR_IDLE := 0
+const RADAR_LOCKED := 1
+const RADAR_FIRE := 2
+## Счётчики для бенчмарка: сколько сканов сделал свод и сколько залпов открыл
+var radar_scans: int = 0
+var radar_fires: int = 0
+
+## ═══════════════════════════════════════════════════════════════════════════
+## ЭЛИТА КРЕПОСТИ: ДО КАКОГО РАНГА ПРОКАЧАН НАЙМ МЕЧНИКОВ
+## ═══════════════════════════════════════════════════════════════════════════
+## Одно число на фракцию — «докуда открыто», а не список купленных узлов:
+## ранги идут лестницей, и второй способ описать то же самое разошёлся бы с
+## первым на первой же загрузке партии
+signal keep_vet_changed(faction: int, level: int)
+
+var keep_vet_level: Dictionary = {}
+
+func keep_warrior_vet(faction: int) -> int:
+	return int(keep_vet_level.get(faction, _UCfg.KEEP_WARRIOR_VET))
+
+## Следующий доступный ранг (0 — потолок уже взят)
+func keep_vet_next(faction: int) -> int:
+	var nxt: int = keep_warrior_vet(faction) + 1
+	if nxt > _UCfg.KEEP_WARRIOR_VET_MAX or not _UCfg.KEEP_VET_UPGRADES.has(nxt):
+		return 0
+	return nxt
+
+## Цена следующего ранга в том же виде, в каком её принимает склад
+func keep_vet_cost(faction: int) -> Dictionary:
+	var nxt: int = keep_vet_next(faction)
+	if nxt == 0:
+		return {}
+	var cfg: Dictionary = _UCfg.KEEP_VET_UPGRADES[nxt]
+	return {
+		Constants.RESOURCE_WOOD: float(cfg.get("cost_wood", 0.0)),
+		Constants.RESOURCE_GOLD: float(cfg.get("cost_gold", 0.0)),
+		Constants.RESOURCE_STONE: float(cfg.get("cost_stone", 0.0)),
+	}
+
+## Купить следующий ранг. true — списали и подняли
+func keep_vet_buy(faction: int) -> bool:
+	var nxt: int = keep_vet_next(faction)
+	if nxt == 0:
+		return false
+	var costs: Dictionary = keep_vet_cost(faction)
+	if not ResourceManager.can_afford(faction, costs):
+		return false
+	ResourceManager.spend(faction, costs)
+	keep_vet_level[faction] = nxt
+	emit_signal("keep_vet_changed", faction, nxt)
+	return true
+
+## ═══════════════════════════════════════════════════════════════════════════
+## ТРЁХТОЧЕЧНЫЙ РЛС ОТРЯДА НА МАРШЕ (заказ владельца, 13.09.2026)
+## ═══════════════════════════════════════════════════════════════════════════
+## Проверка заслона на марше (`Unit` — метка скана `blocker_reach`) идёт у
+## КАЖДОГО идущего раз в AGGRO_INTERVAL_HOT. Заказ: заменить её двухфазной
+## схемой — отряд щупает фронт раз в 2-3 с из трёх точек, и пока там пусто,
+## личный скан не зовёт никто.
+##
+## ТРИ ТОЧКИ, А НЕ ДВЕ (уточнение заказа): растянутый отряд широк, и помеха
+## ровно по центру строя между двумя угловыми лучами пролезает. Точки —
+## левый фланг, центр, правый фланг; берутся ПРОЕКЦИЕЙ мест бойцов на ось,
+## поперечную курсу, то есть работают при любой ширине и любом повороте.
+##
+## ЩУП — ДИСК, А НЕ ЛУЧ. Луч в проекте пускать нечем: физтел у бойцов нет
+## (`collision_mask` = 0), и «трассировка» обернулась бы своим перебором
+## сетки, то есть тем же сканом. Диск радиусом MARCH_RADAR_RANGE вокруг точки
+## ещё и надёжнее: он не может пропустить помеху, стоящую чуть в стороне.
+## ПЕРИОД УДВОЕН ПОСЛЕ ПРИЁМКИ (заказ 13.09.2026: «снизь частоту с 2.5 до
+## 4-5 с»). Ценой этому — запаздывание касательного перехвата на один щуп:
+## замер qa_infantry_radar блок E меряет его прямо (первый контакт на ходу)
+const MARCH_RADAR_SEC := 5.0            # было 2.5; заказ: 4.0-5.0 с
+const MARCH_RADAR_RANGE := 10.0         # заказ: дальний РЛС 10 м
+const MARCH_RADAR_CONTACT := 4.0        # заказ: ближний контакт 3-5 м
+const MARCH_RADAR_CLEAR := 0
+const MARCH_RADAR_OBSTACLE := 1
+## Счётчики для бенчмарка
+var march_radar_scans: int = 0
+
+func _sweep_march_radar() -> void:
+	if not _Opt.march_radar:
+		return
+	var now: int = Time.get_ticks_msec()
+	var step: int = int(MARCH_RADAR_SEC * 1000.0)
+	for key in squads.keys():
+		var sid: int = int(key)
+		var sq: Dictionary = squads[key]
+		var due: Variant = sq.get("mradar_next")
+		if due == null:
+			# Фазы отрядов разведены по номеру — иначе сто отрядов щупают
+			# фронт в один и тот же кадр и горб съезжает, а не исчезает
+			sq["mradar_next"] = now + (sid * 53) % step
+			continue
+		if now < int(due):
+			continue
+		sq["mradar_next"] = now + step
+		_march_radar_scan(sid, sq)
+
+## Три точки фронта: левый фланг, центр, правый фланг
+func _march_radar_points(sq: Dictionary, course: Vector3) -> Array:
+	var side := Vector3(-course.z, 0.0, course.x)
+	var lo: float = INF
+	var hi: float = -INF
+	var lo_p := Vector3.ZERO
+	var hi_p := Vector3.ZERO
+	var acc := Vector3.ZERO
+	var n := 0
+	for m in sq.get("members", []):
+		if m == null or not is_instance_valid(m):
+			continue
+		var u := m as Unit
+		if u == null or u.is_dead():
+			continue
+		var p: Vector3 = u.position if u._local_xform else u.global_position
+		var t: float = p.x * side.x + p.z * side.z
+		if t < lo:
+			lo = t
+			lo_p = p
+		if t > hi:
+			hi = t
+			hi_p = p
+		acc += p
+		n += 1
+	if n == 0:
+		return []
+	# Центр — СРЕДНЕЕ мест, а не медиана: здесь это щуп, а не точка приказа,
+	# и расколотому отряду среднее между кучами тоже полезно прощупать
+	return [lo_p, acc / float(n), hi_p]
+
+func _march_radar_scan(sid: int, sq: Dictionary) -> void:
+	# Щупаем только ИДУЩИЙ отряд: стоящему заслон на марше не грозит, а его
+	# округу и так стережёт коридорный ответ `_clear_enemy`
+	var course: Vector3 = squad_course(sid)
+	var moving := false
+	for m in sq.get("members", []):
+		if m == null or not is_instance_valid(m):
+			continue
+		var u := m as Unit
+		if u != null and not u.is_dead() and u.state == Unit.State.MOVING:
+			moving = true
+			break
+	if not moving:
+		sq["mradar_phase"] = MARCH_RADAR_OBSTACLE   # не наше дело — старый путь
+		return
+	if course.length_squared() < 1e-4:
+		course = Vector3(0.0, 0.0, -1.0)
+	course = course.normalized()
+	var pts: Array = _march_radar_points(sq, course)
+	if pts.is_empty():
+		sq["mradar_phase"] = MARCH_RADAR_OBSTACLE
+		return
+	var fac: int = int(sq.get("faction", 0))
+	var best: float = INF
+	for p in pts:
+		var pp: Vector3 = p
+		march_radar_scans += 1
+		for f in Constants.other_factions(fac):
+			var cand = army.nearest_of_side(pp.x, pp.z, int(f), MARCH_RADAR_RANGE)
+			if cand == null or not is_instance_valid(cand):
+				continue
+			var cu := cand as Unit
+			if cu == null or cu.is_dead():
+				continue
+			var q: Vector3 = cu.position if cu._local_xform else cu.global_position
+			var d: float = Vector2(q.x - pp.x, q.z - pp.z).length()
+			if d < best:
+				best = d
+	sq["mradar_dist"] = best
+	# ── ФАЗА 2 ВЗВОДИТСЯ ЗАРАНЕЕ, А НЕ ПО ФАКТУ КОНТАКТА ──────────────────
+	# Между щупами проходит MARCH_RADAR_SEC, и за это время отряд успевает
+	# пройти несколько метров. Поэтому в фазу 2 переходим, когда помеха
+	# ближе «контакта плюс путь до следующего щупа»: иначе помеха, замеченная
+	# на 6 м, была бы пропущена до самого упора телом
+	var lead: float = MARCH_RADAR_CONTACT + MARCH_RADAR_SEC * 3.0
+	sq["mradar_phase"] = MARCH_RADAR_OBSTACLE if best <= lead else MARCH_RADAR_CLEAR
+
+## Пусто ли впереди у отряда по данным РЛС. false — старый путь (в том числе
+## у бойца без отряда и пока РЛС ни разу не щупал)
+func squad_march_clear(sid: int) -> bool:
+	if not _Opt.march_radar or sid <= 0:
+		return false
+	var raw: Variant = squads.get(sid)
+	if raw == null:
+		return false
+	return int((raw as Dictionary).get("mradar_phase", MARCH_RADAR_OBSTACLE)) \
+		== MARCH_RADAR_CLEAR
+
+## Свод центровых нодов. Зовётся из _physics_process рядом с тактом залпов
+func _sweep_squad_radar() -> void:
+	if not _Opt.squad_radar:
+		return
+	var now: int = Time.get_ticks_msec()
+	for key in squads.keys():
+		var sid: int = int(key)
+		var sq: Dictionary = squads[key]
+		# Дешёвый отсев ПО ТИПУ до всего прочего — тот же приём, что у такта
+		# залпов: у пехоты и рабочих упреждающего радиуса нет
+		if String(sq.get("type", "")) != "archer":
+			continue
+		var due: Variant = sq.get("radar_next")
+		if due == null:
+			# ФАЗЫ ОТРЯДОВ РАЗВЕДЕНЫ ПО НОМЕРУ: сто отрядов, заведённых одним
+			# кадром, иначе сканируют в один и тот же кадр — горб просто
+			# съезжает, а не исчезает (та же грабля, что у фаз анимации)
+			sq["radar_next"] = now + (sid * 37) % RADAR_INTERVAL_MS
+			continue
+		if now < int(due):
+			continue
+		sq["radar_next"] = now + RADAR_INTERVAL_MS
+		_radar_scan(sid, sq)
+
+func _radar_scan(sid: int, sq: Dictionary) -> void:
+	# ── СКАНИРУЕТ ЗНАМЕНОСЕЦ ───────────────────────────────────────────────
+	# Та же точка отсчёта, что у прежнего отрядного кэша и у поводка агро:
+	# медиана у расколотого отряда садится в пустое поле между кучами, а
+	# знаменосец — живое тело в середине строя (см. _squad_cached_enemy)
+	var scout: Unit = _radar_scout(sid)
+	if scout == null:
+		sq["radar_foe"] = null
+		sq["radar_phase"] = RADAR_IDLE
+		return
+	var detect: float = scout.attack_range + RADAR_MARGIN
+	radar_scans += 1
+	var foe: Node3D = scout.radar_scan(detect)
+	var was: int = int(sq.get("radar_phase", RADAR_IDLE))
+	if foe == null:
+		sq["radar_foe"] = null
+		sq["radar_phase"] = RADAR_IDLE
+		return
+	sq["radar_foe"] = foe
+	var sp: Vector3 = scout.position if scout._local_xform else scout.global_position
+	var fu := foe as Unit
+	var fp: Vector3 = fu.position if (fu != null and fu._local_xform) \
+		else foe.global_position
+	var d: float = Vector2(fp.x - sp.x, fp.z - sp.z).length()
+	if d <= scout.fire_range_to(foe):
+		sq["radar_phase"] = RADAR_FIRE
+		# ЗАЛП ОТДАЁТСЯ НА ПЕРЕСЕЧЕНИИ ГРАНИЦЫ, А НЕ КАЖДЫЙ ТАКТ: повторная
+		# раздача command_attack всем тридцати каждые полсекунды перетирала бы
+		# личные цели, набранные боем, и стоила бы ровно того, что экономит.
+		# НО ТЕХ, КТО ЦЕЛЬ ПОТЕРЯЛ, ДОБИРАТЬ ОБЯЗАТЕЛЬНО: жертва гибнет или
+		# выходит из дальности, боец остаётся ни с чем, а сам он больше не
+		# сканирует — это же и есть смысл центрового нода. Без добора отряд
+		# после первого залпа замолкал: точка залпа считается по центру масс
+		# ЦЕЛЕЙ, и без целей она вырождается в ноль (qa_volley D1)
+		_radar_open_fire(sid, foe, was == RADAR_FIRE)
+	else:
+		sq["radar_phase"] = RADAR_LOCKED
+		if was != RADAR_LOCKED:
+			_radar_face(sid, foe)
+
+## Кто ведёт скан за отряд: знаменосец, а если его нет — первый живой
+func _radar_scout(sid: int) -> Unit:
+	var b = squad_bearer(sid)
+	if b != null and is_instance_valid(b):
+		var bu := b as Unit
+		if bu != null and not bu.is_dead():
+			return bu
+	var raw: Variant = squads.get(sid)
+	if raw == null:
+		return null
+	var sq: Dictionary = raw
+	# Состав читается НАПРЯМУЮ: squad_members() не читатель — он распускает
+	# опустевший отряд прямо в геттере (см. разбор такта марша)
+	for m in sq.get("members", []):
+		if m != null and is_instance_valid(m):
+			var u := m as Unit
+			if u != null and not u.is_dead():
+				return u
+	return null
+
+## Фаза 1: отряд развернулся на цель, но не стреляет
+func _radar_face(sid: int, foe: Node3D) -> void:
+	var raw: Variant = squads.get(sid)
+	if raw == null:
+		return
+	var sq: Dictionary = raw
+	var fp: Vector3 = foe.global_position
+	for m in sq.get("members", []):
+		if m == null or not is_instance_valid(m):
+			continue
+		var u := m as Unit
+		if u == null or u.is_dead() or u.target_lock:
+			continue
+		u.face_towards(fp)
+
+## Фаза 2: враг пересёк дистанцию огня — залп всем отрядом В ЭТОТ ЖЕ КАДР
+func _radar_open_fire(sid: int, foe: Node3D, only_idle: bool = false) -> void:
+	var raw: Variant = squads.get(sid)
+	if raw == null:
+		return
+	var sq: Dictionary = raw
+	radar_fires += 1
+	# ── ЦЕЛЬ ОДНА НА ОТРЯД, НО ЖЕРТВА У КАЖДОГО СВОЯ ──────────────────────
+	# ПЕРВАЯ ВЕРСИЯ ДАВАЛА ВСЕМ ТРИДЦАТИ ОДНУ И ТУ ЖЕ МОДЕЛЬ, И ЭТО ЛОМАЛО
+	# ЗАЛП: точка залпа считается по центру масс ЦЕЛЕЙ (squad_volley_point), а
+	# когда цель у всех одна, туча схлопывается в неё — замер qa_volley D1/D5:
+	# «залп (0,0), ранено 2 из 16» вместо накрытия чужого строя.
+	# Жертву внутри вражеского отряда разбирает тот же squad_pick_member
+	# («наименее обстрелянный»), которым её разбирает приказ игрока: один
+	# способ выбирать жертву на все источники приказа, а не второй свой
+	var foe_sq: int = 0
+	var fu := foe as Unit
+	if fu != null:
+		foe_sq = fu.squad_id
+	for m in sq.get("members", []):
+		if m == null or not is_instance_valid(m):
+			continue
+		var u := m as Unit
+		if u == null or u.is_dead():
+			continue
+		# Приказ игрока центровой нод не перебивает: замок цели — приоритет №1
+		if u.target_lock:
+			continue
+		# Добор: трогаем только тех, у кого цели нет вовсе или она мертва
+		if only_idle:
+			var cur: Node3D = u.attack_target
+			if cur != null and is_instance_valid(cur):
+				var cu := cur as Unit
+				if cu == null or not cu.is_dead():
+					continue
+		var victim: Node3D = foe
+		if foe_sq != 0:
+			victim = squad_pick_member(foe_sq, u.global_position, foe)
+		u.command_attack(victim, false)
+	# ── ОКНО ЗАЛПА ОТКРЫВАЕТСЯ ТОЛЬКО НА ПЕРЕХОДЕ ─────────────────────────
+	# Праймить его на КАЖДОМ такте радара нельзя: пока окно открыто, такт
+	# залпов пропускает отряд целиком (`now < volley_until` → continue) и не
+	# успевает посчитать ТОЧКУ ЗАЛПА — она считается по центру масс целей
+	# именно там. Отряд стрелял, но туча вырождалась в ноль (qa_volley D1).
+	# На переходе окно нужно: готовые отстреляются на своём же тике, не
+	# дожидаясь такта залпов (раз в VOLLEY_SWEEP_EVERY кадров)
+	# ОКНО ЗАЛПА РАДАР НЕ ОТКРЫВАЕТ ВОВСЕ — ЭТО ДЕЛО ТАКТА ЗАЛПОВ.
+	# Прайм отсюда пробовали и сняли: окно, открытое мимо `_sweep_volleys`,
+	# уносит с собой и расчёт ТОЧКИ залпа (он живёт там же), а после такого
+	# залпа отряд больше не набирал «готовых» и замолкал навсегда — замер
+	# qa_volley: able=12, ready=0 на каждом такте. Такт залпов идёт раз в
+	# VOLLEY_SWEEP_EVERY кадров, то есть открывает окно в пределах 50 мс
+	# после того, как радар раздал цели: «мгновенно» от этого не страдает
+
+## Есть ли у отряда живой центровой нод (иначе боец опрашивает по-старому)
+func squad_radar_active(sid: int) -> bool:
+	if not _Opt.squad_radar:
+		return false
+	var raw: Variant = squads.get(sid)
+	if raw == null:
+		return false
+	return String((raw as Dictionary).get("type", "")) == "archer"
+
+## Цель, по которой отряду РАЗРЕШЕНО стрелять. В фазе прицеливания ответ
+## пустой намеренно: отряд смотрит на врага и ждёт, пока тот войдёт в дальность
+func squad_radar_foe(sid: int) -> Node3D:
+	var raw: Variant = squads.get(sid)
+	if raw == null:
+		return null
+	var sq: Dictionary = raw
+	if int(sq.get("radar_phase", RADAR_IDLE)) != RADAR_FIRE:
+		return null
+	var n: Variant = sq.get("radar_foe")
+	if n == null or not is_instance_valid(n):
+		return null
+	var u := n as Unit
+	if u != null and u.is_dead():
+		return null
+	return n
+
+func squad_radar_phase(sid: int) -> int:
+	var raw: Variant = squads.get(sid)
+	if raw == null:
+		return RADAR_IDLE
+	return int((raw as Dictionary).get("radar_phase", RADAR_IDLE))
+
+## СБРОС ПО КЛИКУ ИГРОКА: такт обнуляется, цель приказа становится целью
+## отряда немедленно — ждать своего такта после явного приказа нельзя
+func squad_radar_kick(sid: int, target: Node3D = null) -> void:
+	if not _Opt.squad_radar:
+		return
+	var raw: Variant = squads.get(sid)
+	if raw == null:
+		return
+	var sq: Dictionary = raw
+	sq["radar_next"] = 0
+	if target != null and is_instance_valid(target):
+		sq["radar_foe"] = target
+		sq["radar_phase"] = RADAR_FIRE
+
 func squad_volley_prime(sid: int) -> void:
 	if sid <= 0 or not squads.has(sid):
 		return
@@ -5662,6 +6117,8 @@ func _sweep_food(delta: float) -> void:
 		var f: int = int(f0)
 		var workers := 0
 		var combat := 0
+		var food_extra := 0.0
+		var gold_rate := 0.0
 		for key in squads.keys():
 			var sq: Dictionary = squads[key]
 			if int(sq["faction"]) != f:
@@ -5677,14 +6134,35 @@ func _sweep_food(delta: float) -> void:
 				workers += alive
 			elif squad_is_combat(sid):
 				combat += 1
+				# ── ЭЛИТА ЕСТ БОЛЬШЕ, И ЕЩЁ ЗОЛОТО (заказ 13.09.2026) ──────
+				# Отряд с лычками содержится дороже новобранца: еды больше на
+				# долю за лычку, плюс отдельная статья золотом. Ранг берётся у
+				# САМОГО ОТРЯДА — правило накрывает и элиту Крепости, и отряд,
+				# доросший до лычек в бою: платят за ОПЫТ, а не за место найма
+				var vet: int = int(sq.get("level", 0))
+				if vet > 0:
+					food_extra += _UCfg.FOOD_UPKEEP_SQUAD_PER_SEC \
+						* (_UCfg.keep_food_mult(vet) - 1.0)
+					gold_rate += _UCfg.keep_gold_rate(vet)
 		var rate: float = float(workers) * _UCfg.FOOD_UPKEEP_WORKER_PER_SEC \
-			+ float(combat) * _UCfg.FOOD_UPKEEP_SQUAD_PER_SEC
+			+ float(combat) * _UCfg.FOOD_UPKEEP_SQUAD_PER_SEC + food_extra
 		food_upkeep_rate[f] = rate
 		food_upkeep_workers[f] = workers
 		food_upkeep_squads[f] = combat
 		ResourceManager.set_upkeep(f, Constants.RESOURCE_FOOD, rate)
 		var short: float = ResourceManager.consume(f, Constants.RESOURCE_FOOD, rate * _UCfg.FOOD_UPKEEP_TICK)
 		food_starving[f] = short > 0.0
+		# ЗОЛОТО ЗА СОДЕРЖАНИЕ ЭЛИТЫ. Нехватка золота — НЕ голод: мораль
+		# она не трогает (это дело еды), а бьёт по кошельку — платить
+		# нечем, значит нечем и нанимать
+		gold_upkeep_rate[f] = gold_rate
+		ResourceManager.set_upkeep(f, Constants.RESOURCE_GOLD, gold_rate)
+		if gold_rate > 0.0:
+			ResourceManager.consume(f, Constants.RESOURCE_GOLD,
+				gold_rate * _UCfg.FOOD_UPKEEP_TICK)
+
+## Сколько золота в секунду уходит на содержание элиты (для панели ресурсов)
+var gold_upkeep_rate: Dictionary = {}
 
 func is_starving(faction: int) -> bool:
 	return bool(food_starving.get(faction, false))
@@ -5797,18 +6275,64 @@ func _start_panic(sid: int) -> void:
 	if away.length_squared() < 1e-6:
 		away = Vector3.BACK
 	away = away.normalized()
-	var herd: Vector3 = base + away * _UCfg.PANIC_FLEE_DIST
+	# ── ОТ КРАЯ КАРТЫ ОТВОРАЧИВАЕМ (заказ 13.09.2026) ──────────────────────
+	away = _panic_slide_from_edge(base, away)
+	var herd: Vector3 = _panic_inside(base + away * _UCfg.PANIC_FLEE_DIST)
+	# Ось конуса и его половина в радианах
+	var ax: float = atan2(away.z, away.x)
+	var half: float = deg_to_rad(_UCfg.PANIC_CONE_DEG)
 	for i in range(men.size()):
 		var u := men[i] as Unit
 		if u == null or not is_instance_valid(u) or u.is_dead():
 			continue
-		var ang: float = spin + float(i) * 2.39996
+		# ── КОНУС, А НЕ ПОЛНЫЙ КРУГ ────────────────────────────────────────
+		# Направление внутри ±PANIC_CONE_DEG от вектора бегства. Жребий
+		# детерминированный (золотой угол по номеру бойца, сбитый номером
+		# узла): два прогона одного боя обязаны давать одно поле
+		var t: float = fmod(spin + float(i) * 2.39996, TAU) / TAU   # 0..1
+		var ang: float = ax + (t * 2.0 - 1.0) * half
 		# Разброс ВНУТРИ круга связности, а не на всю дальность бегства
 		var r: float = _UCfg.PANIC_SPREAD * sqrt(
 			float((i * 7 + 3) % maxi(men.size(), 1) + 1) / float(maxi(men.size(), 1)))
 		var spot := herd + Vector3(cos(ang), 0.0, sin(ang)) * r
-		u.panic_flee(land_target(spot))
+		u.panic_flee(land_target(_panic_inside(spot)))
 	_show_panic_flag(sid, true)
+
+## ── ТОЧКА БЕГСТВА ДЕРЖИТСЯ ПОДАЛЬШЕ ОТ КРОМКИ МИРА ─────────────────────────
+## `land_target` зажимает приказ границей карты, и отряд, бегущий наружу,
+## получал точку РОВНО НА КРОМКЕ — все до одного. Здесь запас берётся ДО
+## зажима: беглец уходит вдоль края, а не втыкается в него
+func _panic_inside(p: Vector3) -> Vector3:
+	if map_lim_x >= 1e8:
+		return p                     # границы сняты (стенды) — не наше дело
+	var m: float = _UCfg.PANIC_EDGE_MARGIN
+	var lx: float = maxf(map_lim_x - m, 1.0)
+	var lz: float = maxf(map_lim_z - m, 1.0)
+	return Vector3(clampf(p.x, -lx, lx), p.y, clampf(p.z, -lz, lz))
+
+## Вектор бегства, смотрящий за край, ЗАВАЛИВАЕТСЯ ВДОЛЬ границы.
+## Просто зажать точку мало: тогда весь отряд получает одну и ту же кромку и
+## копится на ней. Снимаем составляющую, направленную наружу; если после
+## этого не осталось ничего (угол карты), уходим по касательной к ближней
+## стороне — «беги по краю», а не «беги в угол»
+func _panic_slide_from_edge(base: Vector3, away: Vector3) -> Vector3:
+	if map_lim_x >= 1e8:
+		return away
+	var m: float = _UCfg.PANIC_EDGE_MARGIN
+	var v := Vector3(away.x, 0.0, away.z)
+	if base.x > map_lim_x - m and v.x > 0.0: v.x = 0.0
+	if base.x < -(map_lim_x - m) and v.x < 0.0: v.x = 0.0
+	if base.z > map_lim_z - m and v.z > 0.0: v.z = 0.0
+	if base.z < -(map_lim_z - m) and v.z < 0.0: v.z = 0.0
+	if v.length_squared() > 1e-6:
+		return v.normalized()
+	# Угол карты: обе составляющие срезаны. Идём вдоль ТОЙ стороны, до которой
+	# дальше — так беглец уходит в поле, а не вдоль короткой кромки обратно
+	var dx: float = map_lim_x - absf(base.x)
+	var dz: float = map_lim_z - absf(base.z)
+	if dx > dz:
+		return Vector3(-signf(base.x), 0.0, 0.0)
+	return Vector3(0.0, 0.0, -signf(base.z))
 
 ## ── ПАНИКУЮЩИХ, УЕХАВШИХ СЛИШКОМ ДАЛЕКО, ЗОВЁМ ОБРАТНО ─────────────────────
 ## Точки бегства раздаются ОДИН раз, в момент срыва, и внутри круга связности —

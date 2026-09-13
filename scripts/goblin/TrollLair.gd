@@ -170,6 +170,38 @@ func troll_respawn_left() -> float:
 ## (goblin_config.SQUAD_SIZE), раскладка — толпой, тем же путём, каким выходят
 ## все отряды орды: Main.spawn_goblin_squad. Второго кода спавна орды в
 ## проекте быть не должно
+## ── ОТРЯДЫ БОЛЬШИХ ГОБЛИНОВ У ЛОГОВА (заказ 13.09.2026) ───────────────────
+## Тот же путь, что у стаи гноллов: уставной размер из конфига, раскладка
+## толпой, единственный в проекте спавн орды (Main.spawn_goblin_squad).
+## Второго кода спавна орды заводить нельзя
+var big_squads: Array = []
+var big_squads_total: int = 0
+
+func spawn_big_squads(n: int) -> int:
+	if n <= 0 or is_dead():
+		return 0
+	var main = GameManager.main
+	if main == null or not is_instance_valid(main) \
+			or not main.has_method("spawn_goblin_squad"):
+		return 0
+	var size: int = int(_GobCfgL.SQUAD_SIZE.get("big_goblin", 5))
+	var made := 0
+	for i in range(n):
+		# Отряды разводятся по кольцу вокруг пня: туши крупные и медленные,
+		# и вышедшие в одну точку расталкивались бы долго
+		var a: float = TAU * float(big_squads_total) * 0.618 + 2.1
+		var r: float = _GobCfgL.GNOLL_PATROL_RADIUS * 0.45
+		var px: float = global_position.x + cos(a) * r
+		var pz: float = global_position.z + sin(a) * r
+		var base: Vector3 = GameManager.land_target(Vector3(px, 0.0, pz))
+		var sid: int = int(main.call("spawn_goblin_squad", "big_goblin", size, base))
+		if sid <= 0:
+			continue
+		big_squads.append(sid)
+		big_squads_total += 1
+		made += 1
+	return made
+
 func spawn_gnoll_squads(n: int) -> int:
 	if n <= 0 or is_dead():
 		return 0
@@ -236,6 +268,12 @@ func on_lair_attacked() -> void:
 		_gnoll_timer.timeout.connect(_on_gnoll_wave)
 	_gnoll_timer.wait_time = _GobCfgL.GNOLL_WAVE_SEC
 	_gnoll_timer.start()
+	# ── ЗАЩИТА ЛОГОВА ТУШАМИ: МГНОВЕННО (заказ 13.09.2026) ────────────────
+	# «При атаке на логово мгновенно спавнятся ещё 2 защитных отряда».
+	# Именно мгновенно, без часов: гноллы приходят волной через GNOLL_WAVE_SEC,
+	# а туши — ответ на удар прямо сейчас. Один раз за жизнь логова (сюда
+	# пускает тот же сторож _gnoll_alarmed, что и волны)
+	spawn_big_squads(_GobCfgL.BIG_DEFENSE_SQUADS)
 
 ## Удар по гноллу — тот же сигнал тревоги, что и удар по троллю
 func on_gnoll_hit(_g: Node, _attacker: Node3D) -> void:
@@ -344,6 +382,8 @@ func _on_gnoll_wave() -> void:
 	if gnoll_wave < _GobCfgL.GNOLL_WAVES_MAX:
 		gnoll_wave += 1
 		spawn_gnoll_squads(_GobCfgL.GNOLL_WAVE_SQUADS)
+		# Волна «родника»: вместе со стаей выходит один отряд туш (заказ)
+		spawn_big_squads(_GobCfgL.BIG_WAVE_SQUADS)
 		# ПОСЛЕ ТРЕТЬЕЙ ВОЛНЫ — ДЛИННЫЙ ОТКАТ, а не остановка: пень жив,
 		# значит стая когда-нибудь восстановится (прямой заказ)
 		if _gnoll_timer != null:

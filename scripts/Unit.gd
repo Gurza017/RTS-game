@@ -2025,7 +2025,7 @@ func command_move(target_pos: Vector3, slow_march: bool = false, face_dir: Vecto
 		# есть ли чужое тело на длине руки. Скан здесь бесплатен — это
 		# ПРИКАЗ, а не покадровый путь: игрок щёлкает разы в секунду,
 		# а не шестьдесят раз в неё
-		_pass_earned = was_stuck or _find_nearest_enemy_in_range(LOCK_BLOCKER_RANGE) != null
+		_pass_earned = was_stuck or _find_nearest_enemy_in_range(LOCK_BLOCKER_RANGE, "pass_earned") != null
 		# ОТКУДА ВЫБИРАЕТСЯ. По этой точке билет и гаснет — по факту выхода из
 		# тел, а не по часам (см. _forced_move_pass)
 		_pass_from = position if _local_xform else global_position
@@ -2280,6 +2280,11 @@ func command_attack(target: Node3D, forced: bool = true, charge: bool = false,
 		_aggro_timer = 0.0
 		if squad_id > 0:
 			GameManager.squad_volley_prime(squad_id)
+			# ── СБРОС ПО КЛИКУ (заказ: «таймер 0.5 с мгновенно обнуляется») ──
+			# Центровой нод отряда берёт цель игрока СЛЕДУЮЩИМ ЖЕ тактом, а не
+			# через полсекунды: ждать своего такта после явного приказа —
+			# это ровно то «зависание мозгов», ради которого правка и делалась
+			GameManager.squad_radar_kick(squad_id, target)
 
 ## ── ПОТОЛОК ДАЛЬНОСТИ ─────────────────────────────────────────────────────
 ## Зажимает СУММУ «база + всё, что дала кузница» (см. STATS.attack_range_cap).
@@ -5048,14 +5053,23 @@ func _process_move(delta: float) -> void:
 			# дальность внимания чужих нет — перехватывать некого, скан не нужен.
 			# При физическом упоре ответ отряда не спрашиваем вовсе: тело перед
 			# нами есть по факту, каким бы ни был кэш коридора
-			if wall or not _clear_enemy:
+			# ИЗМЕРИТЕЛЬ ПОТОЛКА (см. perf_config.march_blocker_scan): без
+			# ручки скан по таймеру не идёт вовсе, остаётся перехват по
+			# физическому упору. Режимом игры это не является
+			# ── ФАЗА 1 ТРЁХТОЧЕЧНОГО РЛС: ВПЕРЕДИ ПУСТО — СКАНА НЕТ ─────
+			# Отряд прощупал фронт из трёх точек на MARCH_RADAR_RANGE и
+			# доложил «чисто»; значит, и личной проверки заслона не нужно
+			# никому. Упор телом (`wall`) через этот гейт проходит всегда:
+			# его ставит пакетный шаг ядра, и он и есть настоящий контакт
+			var radar_clear: bool = not wall 				and GameManager.squad_march_clear(squad_id)
+			if (wall or not _clear_enemy) and (wall or _Opt.march_blocker_scan) 					and not radar_clear:
 				var reach_i: float = attack_range + INTERCEPT_MARGIN
 				# Разбор — у MARCH_INTERCEPT_MELEE. При физическом упоре (wall)
 				# радиус не расширяем: там помеха и так под рукой
 				if MARCH_INTERCEPT_MELEE and not wall and pursues_target() \
 						and attack_range <= MARCH_INTERCEPT_MELEE_MAX:
 					reach_i = maxf(reach_i, AGGRO_RADIUS)
-				var blocker := _find_nearest_enemy_in_range(reach_i)
+				var blocker := _find_nearest_enemy_in_range(reach_i, "blocker_reach")
 				# ── РАЗДЕЛИТЕЛЯ «ИДУ ПРОЧЬ» ЗДЕСЬ НЕТ, И ЭТО ЗАМЕР ──────────
 				# Снимать перехват тому, кто идёт прочь от помехи, пробовал в
 				# трёх видах: по продвижению к точке приказа, по росту дистанции
@@ -5263,7 +5277,7 @@ func _process_attack(delta: float) -> void:
 		# так что уйти из своего боя за дальней целью по нему нельзя
 		var pick: Node3D = GameManager.squad_duel_target(squad_id, self, seek)
 		if pick == null:
-			pick = _find_nearest_enemy_in_range(seek)
+			pick = _find_nearest_enemy_in_range(seek, "retarget_lost")
 		set_attack_target(pick)
 		# Приказ остаётся в силе, только пока замена нашлась поблизости
 		_attack_is_forced = was_forced and attack_target != null
@@ -5436,7 +5450,7 @@ func _process_attack(delta: float) -> void:
 				_enemy_contact = false
 				_aggro_timer = AGGRO_INTERVAL_HOT
 				if not target_lock and not _clear_enemy:
-					var at_reach := _find_nearest_enemy_in_range(attack_range)
+					var at_reach := _find_nearest_enemy_in_range(attack_range, "hold_at_reach")
 					if at_reach != null and at_reach != attack_target 							and _in_phalanx_front(at_reach):
 						command_attack(at_reach, false)
 			return
@@ -5584,7 +5598,7 @@ func _process_attack(delta: float) -> void:
 		# соседа — _lock_next_victim вернёт бойца к назначенному отряду
 		if not _stance_holds_ground() and not retreating and not sprinting:
 			if _tick_stuck(delta, dist) and _stuck_streak >= STUCK_RETARGET_STREAK:
-				var alt := _find_nearest_enemy_in_range(STUCK_RETARGET_RANGE)
+				var alt := _find_nearest_enemy_in_range(STUCK_RETARGET_RANGE, "stuck_retarget")
 				if alt != null and alt != attack_target:
 					_reset_stuck()
 					stuck_retargets += 1
@@ -5607,7 +5621,7 @@ func _process_attack(delta: float) -> void:
 			if _enemy_contact or _aggro_timer <= 0.0:
 				_enemy_contact = false
 				_aggro_timer = AGGRO_INTERVAL_HOT
-				var blocker := _find_nearest_enemy_in_range(blk_range)
+				var blocker := _find_nearest_enemy_in_range(blk_range, "blocker_march")
 				if blocker != null and blocker != attack_target:
 					velocity = Vector3.ZERO
 					command_attack(blocker, false)
@@ -5941,7 +5955,7 @@ func _phalanx_march(delta: float) -> bool:
 	if _enemy_contact or _aggro_timer <= 0.0:
 		_enemy_contact = false
 		_aggro_timer = AGGRO_INTERVAL_HOT
-		var at_hand := _find_nearest_enemy_in_range(attack_range)
+		var at_hand := _find_nearest_enemy_in_range(attack_range, "march_at_hand")
 		if at_hand != null and at_hand != attack_target:
 			set_attack_target(at_hand)
 			velocity = Vector3.ZERO
@@ -5955,6 +5969,14 @@ func _phalanx_march(delta: float) -> bool:
 ## МОЖНО ЛИ БИТЬ ПРЯМО СЕЙЧАС, когда перезарядка уже вышла.
 ## По умолчанию да — обычный боец ни у кого разрешения не спрашивает.
 ## Переопределяет только лучник в режиме залпового огня (см. Archer)
+## ── ВО СКОЛЬКО РАЗ БОЛЬНЕЕ БЬЁТ ПО МНЕ СТРЕЛА ─────────────────────────────
+## Свойство ЦЕЛИ, а не стрелка, и читается ОДИН раз — в момент попадания
+## (`Arrow._strike`). В горячем пути рукопашной его нет вовсе: пехота за
+## уязвимость крупных мишеней не платит ни одного сравнения.
+## Единица у всех, кроме туш: крупная мишень — подарок для лучников
+func ranged_damage_mult() -> float:
+	return 1.0
+
 func _may_strike_now() -> bool:
 	return true
 
@@ -6840,7 +6862,7 @@ func _check_auto_aggro() -> void:
 		# (GameManager._sweep_phalanx_press раз в PHALANX_PRESS_SEC), а не
 		# отдельный боец. Константа оставлена — её читает радиус наблюдения
 		if PHALANX_PULL_UP_SINGLE and at_hand == null and in_fight:
-			var step_up := _find_nearest_enemy_in_range(PULL_UP_RANGE)
+			var step_up := _find_nearest_enemy_in_range(PULL_UP_RANGE, "pull_up")
 			if step_up != null and _in_phalanx_front(step_up):
 				_aggro_timer = AGGRO_INTERVAL_HOT
 				command_attack(step_up, true)
@@ -6877,7 +6899,19 @@ func _check_auto_aggro() -> void:
 	# фаланги выше)
 	if in_fight:
 		watch = maxf(watch, PULL_UP_RANGE)
-	var nearby := _squad_cached_enemy(watch)
+	# ── ЦЕНТРОВОЙ НОД ОТРЯДА ОТВЕЧАЕТ ЗА ВЕСЬ ОТРЯД ────────────────────────
+	# У стрелкового отряда скан ведёт GameManager._sweep_squad_radar — ровно
+	# 2 Гц, один на отряд, и с УПРЕЖДЕНИЕМ (радиус обнаружения больше
+	# дальности оружия). Боец здесь не сканирует вовсе: он читает готовый
+	# ответ. Пока цель в фазе прицеливания (дальше дистанции огня), ответ
+	# пустой — отряд развёрнут на врага, но не стреляет, и это требование,
+	# а не экономия. Без ручки — прежний путь: личный опрос с отрядным кэшем
+	var nearby: Node3D = null
+	if _Opt.squad_radar and squad_id > 0 and _is_ranged() \
+			and GameManager.squad_radar_active(squad_id):
+		nearby = GameManager.squad_radar_foe(squad_id)
+	else:
+		nearby = _squad_cached_enemy(watch)
 	# ПОВОДОК ДЕЙСТВУЕТ, ПОКА ОТРЯД НЕ В БОЮ. Он придуман против ИНИЦИАТИВЫ —
 	# чтобы свежий отряд не срывался за первым замеченным через полкарты. Но
 	# отряд, КОТОРЫЙ УЖЕ ДЕРЁТСЯ, никакой инициативы не проявляет: он уже
@@ -6918,7 +6952,7 @@ func _check_auto_aggro() -> void:
 		if away > aggro_leash():
 			# Далеко от поста: гнаться нельзя, но если враг уже вплотную —
 			# отвечаем, не сходя с места
-			var at_hand2 := _find_nearest_enemy_in_range(attack_range)
+			var at_hand2 := _find_nearest_enemy_in_range(attack_range, "leash_at_hand")
 			if at_hand2 != null:
 				command_attack(at_hand2, false)
 			return
@@ -6933,7 +6967,7 @@ func _check_auto_aggro() -> void:
 		# поводка. Стрелку, до которого дострелить и так, это не мешает:
 		# правило только для тех, кому надо СОЙТИ С МЕСТА
 		if far and GameManager.nav_unreachable(mypos, nb_pos, aggro_leash()):
-			var at_hand5 := _find_nearest_enemy_in_range(attack_range)
+			var at_hand5 := _find_nearest_enemy_in_range(attack_range, "nav_at_hand")
 			if at_hand5 != null:
 				command_attack(at_hand5, false)
 			return
@@ -6954,7 +6988,7 @@ func _check_auto_aggro() -> void:
 		if far:
 			var fu := nearby as Unit
 			if fu != null and (fu.is_panicked() or fu.retreating):
-				var at_hand3 := _find_nearest_enemy_in_range(attack_range)
+				var at_hand3 := _find_nearest_enemy_in_range(attack_range, "fleeing_at_hand")
 				if at_hand3 != null:
 					command_attack(at_hand3, false)
 				return
@@ -7289,7 +7323,7 @@ func _upgrade_damage_bonus() -> float:
 ## задана таймером авто-агро (0.5–2 с), а не кадром
 func _squad_cached_enemy(range_limit: float) -> Node3D:
 	if not _Opt.squad_target_cache or squad_id == 0:
-		return _find_nearest_enemy_in_range(range_limit)
+		return _find_nearest_enemy_in_range(range_limit, "cache_off")
 	# ЧАСЫ АРМИИ ВМЕСТО ВЫЗОВА В ДВИЖОК. Time.get_ticks_msec() стоял здесь на
 	# каждого спросившего, а now_ms снимается один раз за тик на всю армию
 	# (см. GameManager._physics_process). Запасной путь — для стендов, которые
@@ -7312,7 +7346,7 @@ func _squad_cached_enemy(range_limit: float) -> Node3D:
 		# Ответ отряда мне не подходит — ищу сам. Кэш при этом НЕ перетираем:
 		# для того, кто его положил, он верен, и обнулять чужой верный ответ
 		# ради своего промаха значило бы гонять скан по всему отряду по кругу
-		return _find_nearest_enemy_in_range(range_limit)
+		return _find_nearest_enemy_in_range(range_limit, "cache_miss_range")
 	# ── ОТВЕТ ОТРЯДА ИЩЕТ ЗНАМЕНОСЕЦ, А НЕ ПЕРВЫЙ СПРОСИВШИЙ ────────────────
 	# ЗАКАЗ ВЛАДЕЛЬЦА: «все расчёты агро и выбора цели отряда производить
 	# СТРОГО от позиции знаменосца; куда агрится знаменосец, туда фокусирует
@@ -7338,18 +7372,46 @@ func _squad_cached_enemy(range_limit: float) -> Node3D:
 		var bu := bearer as Unit
 		if bu != null and not bu.is_dead():
 			scout = bu
-	var found: Node3D = scout._find_nearest_enemy_in_range(range_limit)
+	var found: Node3D = scout._find_nearest_enemy_in_range(range_limit, "squad_cache_fill")
 	GameManager.squad_target_put(squad_id, range_limit, found, now)
 	return found
+
+## Развернуться на точку и пометить позу грязной. Фаза прицеливания
+## центрового нода отряда: отряд смотрит на врага, но огня ещё не открывает.
+## Поза метится здесь же — иначе разворот доедет до картинки только со
+## следующим полным разбором позы, то есть через такт (правило E3)
+func face_towards(p: Vector3) -> void:
+	var mp: Vector3 = position if _local_xform else global_position
+	var v := Vector3(p.x - mp.x, 0.0, p.z - mp.z)
+	if v.length_squared() < 1e-4:
+		return
+	_facing = v.normalized()
+	_pose_dirty = true
+
+## ── СКАН ПО ЗАКАЗУ ЦЕНТРОВОГО НОДА ОТРЯДА ─────────────────────────────────
+## Публичная обёртка над единственным сканом в проекте: её зовёт
+## GameManager._sweep_squad_radar у ОДНОГО бойца отряда (знаменосца) вместо
+## того, чтобы тридцать лучников спрашивали каждый за себя. Своего скана здесь
+## нет намеренно — учёт поиска цели обязан оставаться одной точкой
+func radar_scan(range_limit: float) -> Node3D:
+	return _find_nearest_enemy_in_range(range_limit, "radar")
+
+## Дистанция, с которой этот боец открывает огонь по цели: дальность оружия
+## плюс поправка на габарит (у здания меряется до стены, см. _target_pad)
+func fire_range_to(target: Node3D) -> float:
+	return attack_range + _pad_of(target)
 
 ## Счётчик atk_find_enemy — ЕДИНАЯ точка учёта поиска цели. Сюда сходятся все
 ## поводы искать: добор цели после гибели прежней, проверка заслона на подходе
 ## и промах общего кэша отряда. Именно этот счётчик отвечает на вопрос «сколько
 ## стоит поиск целей», и он намеренно один: разделять его по поводам было бы
 ## честно, но поводы сходятся в один и тот же скан сетки
-func _find_nearest_enemy_in_range(range_limit: float) -> Node3D:
+func _find_nearest_enemy_in_range(range_limit: float, site: String = "?") -> Node3D:
 	var _prof: bool = _prof_on
 	var _t: int = Time.get_ticks_usec() if _prof else 0
+	# Счёт сканов для бенчмарка: одно сравнение bool, когда выключен
+	if _Opt.scan_meter:
+		_Opt.scan_hit(site)
 	# Юниты — одним проходом по сетке, БЕЗ сборки промежуточного массива
 	# (см. SpatialGrid.best_enemy: раньше query_radius() оставлял здесь
 	# мусорный Array на каждый вызов, а вызовов в свалке сотни в секунду)
