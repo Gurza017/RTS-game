@@ -232,6 +232,7 @@ func spawn_gnoll_squads(n: int) -> int:
 			if u == null or not is_instance_valid(u):
 				continue
 			u.set("lair", self)
+			u.set("home_pos", global_position)
 			(u as Unit).post_pos = (u as Unit).global_position
 			gnolls.append(u)
 	return made
@@ -593,6 +594,7 @@ func spawn_guards(n: int) -> Array:
 		var u: Unit = _TrollScene.instantiate()
 		u.faction = Constants.FACTION_GOBLIN
 		u.set("lair", self)
+		u.set("home_pos", global_position)
 		parent.add_child(u)
 		var a: float = TAU * float(_spawned_total) * 0.618 + 0.4
 		var r: float = maxf(build_size.x, build_size.z) * 0.5 + 3.0
@@ -632,6 +634,13 @@ func call_guards(n: int, wounded: Node3D) -> void:
 ## 10.09.2026) снят: TROLL_AGGRO_HELPERS/BONUS = 0, спавн −20 %
 var _hit_at: Dictionary = {}          # тролль (id) → часы удара
 var solidarity_calls: int = 0
+## Волна защиты пня (13.09.2026): второй страж получил урон — выходят
+## TROLL_DEFENSE_WAVE троллей; часы последней волны и счётчик для стендов
+var _defense_wave_at: float = -1.0e9
+var defense_waves: int = 0
+
+func defense_wave_ready(now: float) -> bool:
+	return now - _defense_wave_at >= _GobCfgL.TROLL_DEFENSE_WAVE_CD
 
 func _lair_clock() -> float:
 	var m = GameManager.main
@@ -672,6 +681,14 @@ func on_guard_hit(troll: Node, attacker: Node3D) -> void:
 					if ou.is_dead() or ou.attack_target != null:
 						continue
 					ou.command_attack(attacker, true, true)
+				# ── ВОЛНА ЗАЩИТЫ: ВТОРОЙ СТРАЖ ПОЛУЧИЛ УРОН ──────────────────
+				if defense_wave_ready(now) and _GobCfgL.TROLL_DEFENSE_WAVE > 0:
+					_defense_wave_at = now
+					defense_waves += 1
+					var wave: Array = spawn_guards(_GobCfgL.TROLL_DEFENSE_WAVE)
+					for w in wave:
+						if attacker != null and is_instance_valid(attacker):
+							(w as Unit).command_attack(attacker, true, true)
 	if not aggro_enabled or aggro_wave != 0 or is_dead():
 		return
 	aggro_wave = 1

@@ -37,6 +37,11 @@ const SHEETS := {
 
 ## Логово, которое тролль охраняет (TrollLair). Null — вольный тролль
 var lair: Node3D = null
+## Домашняя точка стража (ставит логово при рождении; INF — без дома)
+var home_pos: Vector3 = Vector3.INF
+## Откуда началась погоня за текущей целью — от неё меряется поводок
+## TROLL_CHASE_RADIUS (ТЗ 14.09.2026, п. 5)
+var _chase_from: Vector3 = Vector3.INF
 
 var _swings: int = 0
 var _winded_until_ms: int = 0
@@ -206,6 +211,34 @@ func ring_oval() -> Vector2:
 	return _GobCfgT.TROLL_RING_OVAL
 
 ## Стрелок целится в СЕРЕДИНУ ТУШИ, а не в точку на земле
+## Тролля снайпер не убивает с одной стрелы (ТЗ 14.09.2026)
+func snipe_one_shot() -> bool:
+	return false
+
+func giant_class() -> bool:
+	return true
+
+## Голова на лежащем теле: тело — свой билборд (_leave_corpse), а не слот
+## общего слоя. Голова в ленте Troll_Dead слева; при зеркале — справа
+func snipe_head_spot() -> Vector3:
+	var mi: Node3D = _corpse_node if (_corpse_node != null and is_instance_valid(_corpse_node)) else null
+	if mi == null:
+		return Vector3.INF
+	var q := mi.mesh as QuadMesh
+	if q == null:
+		return mi.global_position
+	var cam := get_viewport().get_camera_3d() if is_inside_tree() else null
+	var rgt: Vector3 = Vector3.RIGHT
+	if cam != null:
+		rgt = cam.global_transform.basis.x
+		rgt.y = 0.0
+		if rgt.length_squared() > 0.0001:
+			rgt = rgt.normalized()
+	var side: float = 1.0 if bool(mi.get_meta("mirror", false)) else -1.0
+	var p: Vector3 = mi.global_position + rgt * (q.size.x * 0.33 * side)
+	p.y = GameManager.get_terrain_height(p.x, p.z) + q.size.y * 0.55
+	return p
+
 func aim_height() -> float:
 	return _GobCfgT.TROLL_AIM_HEIGHT
 
@@ -253,6 +286,8 @@ const DEATH_FPS := 8.0
 const DEATH_LIFE_SEC := 900.0     # как у тел общего слоя (CorpseRenderer.LIFE_SEC)
 const CORPSE_NAME := "TrollCorpse"
 var _last_hit_from: Vector3 = Vector3.INF
+## Узел лежащего тела (для стрелы снайпера в голове, см. snipe_head_spot)
+var _corpse_node: Node3D = null
 
 func _falls_screen_right() -> bool:
 	if _last_hit_from.x == INF:
@@ -307,6 +342,7 @@ func _leave_corpse() -> void:
 	var mi := MeshInstance3D.new()
 	mi.name = CORPSE_NAME
 	mi.mesh = q
+	_corpse_node = mi
 	# ── ПАДАЕТ ПОД РАЗНЫМИ УГЛАМИ (заказ владельца 10.09.2026) ────────────
 	# Туша валилась строго вертикально, и лежащий тролль читался как стоящий.
 	# Квад ставится в МИРОВОЙ ориентации (world_fixed у материала — ракурс
@@ -394,8 +430,12 @@ func _shout_chance() -> float:
 func _sfx_death() -> String:
 	return "troll_growl"
 
+## Свой рёв на каждый замах дубиной (15.09.2026), вместо позаимствованного у
+## людей "sword_attack". Зовётся ОБЩИМ путём — Unit._process_attack бьёт
+## AudioManager.play_3d(_sfx_swing(), ...) на каждый удар любого бойца, — так
+## что здесь достаточно поменять саму категорию, второго места вызова нет
 func _sfx_swing() -> String:
-	return "sword_attack"
+	return "troll_attack"
 
 func _sfx_hit() -> String:
 	return "sword_hit"
@@ -665,7 +705,9 @@ func tick_physics(delta: float, prof: bool = false, bm: bool = true,
 			var a: float = randf() * TAU
 			var r: float = _GobCfgT.TROLL_PATROL_RADIUS * randf_range(0.4, 1.0)
 			var p: Vector3 = lair.global_position + Vector3(cos(a) * r, 0.0, sin(a) * r)
+			if _Opt.cmd_meter: _Opt.cmd_src = "troll_patrol"
 			command_move(GameManager.land_target(p))
+			if _Opt.cmd_meter: _Opt.cmd_src = ""
 
 # ═════════════════════════════════════════════════════════════════════════════
 # РЕЙД ЗА ОВЦАМИ (спринт 18, второе письмо)
@@ -920,8 +962,18 @@ func _tick_chase(delta: float) -> bool:
 	if t != _chase_target:
 		_chase_target = t
 		_chase_t = 0.0
+		_chase_from = global_position
 	_chase_t += delta
-	if _chase_t < _GobCfgT.TROLL_CHASE_SEC:
+	# ── ПОВОДОК ПО РАССТОЯНИЮ (ТЗ 14.09.2026, п. 5) ──────────────────────
+	# Радиус преследования: дальше TROLL_CHASE_RADIUS от точки, где погоня
+	# за ЭТОЙ целью началась, тролль цель бросает и идёт домой. Считается от
+	# начала погони, а не от пня: погоня начинается в патруле у пня, и зона
+	# получается «патруль + поводок»; а тролль, поставленный стендом за
+	# сотню метров от логова, поводком не ломается
+	var far_chase: bool = _chase_from.x != INF and Vector2(
+		global_position.x - _chase_from.x, global_position.z - _chase_from.z).length() \
+		> _GobCfgT.TROLL_CHASE_RADIUS
+	if _chase_t < _GobCfgT.TROLL_CHASE_SEC and not far_chase:
 		return false
 	# Не догнал за отведённое — агро сброшено, домой
 	chase_resets += 1

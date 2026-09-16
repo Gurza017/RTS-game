@@ -127,7 +127,8 @@ func best_enemy(node: Node3D, radius: float, crowd_penalty: float) -> Node3D:
 	var u := node as Unit
 	if u == null or u._soa < 0:
 		return null
-	return _core().BestEnemy(u._soa, radius, crowd_penalty)
+	# Стрелок читает вес цели (большие гоблины ×2, ТЗ 14.09.2026, п. 10)
+	return _core().BestEnemyW(u._soa, radius, crowd_penalty, u.target_prio_scan())
 
 ## Все бойцы в радиусе от точки. Холодный путь (разбор клика)
 func query_radius(pos: Vector3, radius: float) -> Array:

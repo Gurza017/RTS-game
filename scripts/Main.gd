@@ -222,6 +222,17 @@ var voice: Node                = null     # голосовое управлен�
 ## красным ИИ у них только базовые механики бойца — а они живут в Unit
 var goblin_ai: Node            = null     # см. scripts/goblin/GoblinAI.gd
 const _GoblinAI  := preload("res://scripts/goblin/GoblinAI.gd")
+## Сценарий глобального ИИ (13.09.2026): дремлющий резерв орды за лагерем и
+## контроллер гноллов (зона ответственности, охота на рабочих)
+var goblin_reserve: Node = null
+var gnoll_ai: Node = null
+## Охрана крепости красного ИИ (15.09.2026): спящие отряды за замком, будит
+## только штурм. См. scripts/ai/HomeGuard.gd и _spawn_home_defense
+var enemy_guard: Node = null
+const _HomeGuard := preload("res://scripts/ai/HomeGuard.gd")
+const _TowerS := preload("res://scripts/Tower.gd")
+const _DormantReserve := preload("res://scripts/goblin/DormantReserve.gd")
+const _GnollAI := preload("res://scripts/goblin/GnollAI.gd")
 const _VoiceControl := preload("res://scripts/VoiceControl.gd")
 const _GoblinHut := preload("res://scripts/goblin/GoblinHut.gd")
 const _TrollLair := preload("res://scripts/goblin/TrollLair.gd")
@@ -245,8 +256,13 @@ const BASE_CLEAR_RADIUS := 11.0
 ## десять хижин сеткой (см. goblin_config.hut_offsets), а вокруг них кольцо
 ## стартовых отрядов
 const GOBLIN_VILLAGE_CLEAR := 34.0
-# ── СТАРТОВЫЕ УГЛЫ: ИГРОК И ИИ ПО ДИАГОНАЛИ ──────────────────────────────────
-# Игрок — НИЖНИЙ ЛЕВЫЙ угол (−X, −Z), ИИ — ВЕРХНИЙ ПРАВЫЙ (+X, +Z).
+# ── СТАРТОВЫЕ УГЛЫ: ИГРОК И ИИ НА ОДНОМ БЕРЕГУ (ТЗ 14.09.2026, п. 3) ─────────
+# Игрок — ВЕРХНИЙ ЛЕВЫЙ угол экрана (−X, −Z), ИИ — НИЖНИЙ ЛЕВЫЙ (−X, +Z).
+# Прежде ИИ стоял по диагонали, в нижнем правом углу, — то есть на берегу
+# орды, в сотне метров от её деревни и в 42 м от своего пня: гоблины из
+# ближайших зон вырезали его первым. Теперь оба человеческих замка на ЛЕВОМ
+# берегу, река и деревня орды — по ту сторону брода; между замками, напротив
+# брода, — «красный пень» (goblin_config.LAIR_AI_SPOT).
 # Якоря отсчитываются ОТ УГЛОВ ПОЛЯ, а не литералами: изменится форма карты —
 # базы сами останутся в своих углах. Отступ подобран так, чтобы расчищенная
 # зона базы (BASE_CLEAR_RADIUS = 11) и кольцо своих ресурсов (15 м) целиком
@@ -261,8 +277,11 @@ const PLAYER_START_SHIFT := 20.0
 const PLAYER_BASE_ANCHOR := Vector3(
 	-MAP_HALF_X + BASE_CORNER_INSET + PLAYER_START_SHIFT, 0.0,
 	-MAP_HALF_Z + BASE_CORNER_INSET + PLAYER_START_SHIFT)
+## ИИ — тот же сдвиг от угла, что у игрока: база ИИ стоит зеркально игроку
+## по Z (равные стартовые условия)
 const ENEMY_BASE_ANCHOR  := Vector3(
-	 MAP_HALF_X - BASE_CORNER_INSET, 0.0,  MAP_HALF_Z - BASE_CORNER_INSET)
+	-MAP_HALF_X + BASE_CORNER_INSET + PLAYER_START_SHIFT, 0.0,
+	 MAP_HALF_Z - BASE_CORNER_INSET - PLAYER_START_SHIFT)
 # Кольцо, на котором у базы стоят своя жила золота и своя каменоломня
 const BASE_RESOURCE_DIST := 15.0
 
@@ -368,6 +387,10 @@ func _ready() -> void:
 	goblin_ai = _GoblinAI.new()
 	goblin_ai.name = "GoblinAI"
 	add_child(goblin_ai)
+	gnoll_ai = _GnollAI.new()
+	gnoll_ai.name = "GnollAI"
+	add_child(gnoll_ai)
+	gnoll_ai.setup(self)
 	# Голосовое управление (прототип): свой бус захвата, свой слой интерфейса,
 	# распознаватель в фоновом потоке. См. scripts/VoiceControl.gd
 	voice = _VoiceControl.new()
@@ -456,6 +479,7 @@ func start_game() -> void:
 	if _camera != null:
 		_camera.jump_to(PLAYER_BASE_ANCHOR, _camera.min_height)
 	_reveal_start_area()
+	_prewarm_art()
 	_phase = Phase.PLAYING
 	# Лес заводится на весь бой; основная тема будет подмешиваться раз в 10 минут
 	AudioManager.start_game_audio()
@@ -484,6 +508,13 @@ func start_game() -> void:
 		# загрузке на следующем рестарте
 		GameManager.pending_load = {}
 		_SaveLoad.apply(self, state)
+		# Охрана крепости ИИ приехала в слепке с признаком home_guard —
+		# усыновить заново (см. HomeGuard.adopt_loaded)
+		if _AICfg.HOME_DEFENSE_ENABLED:
+			enemy_guard = _HomeGuard.new()
+			enemy_guard.name = "EnemyHomeGuard"
+			add_child(enemy_guard)
+			enemy_guard.adopt_loaded(self)
 
 ## ТОЧКА СБОРА ИИ «В ПОЛЕ» — середина карты.
 ## Спрашивается из EnemyAI: тот не знает ни про озеро, ни про класс Main
@@ -492,6 +523,9 @@ func ai_rally_point() -> Vector3:
 		var away := Vector3(1.0, 0.0, 1.0).normalized()
 		var p := LAKE_CENTER + away * (LAKE_RADIUS + 6.0)
 		return Vector3(p.x, 0.0, p.z)
+	# Река с бродом — центр это сам брод (13.09.2026)
+	if RIVER_ENABLED:
+		return ford_point()
 	# Озера нет — центр карты это ровно середина между базами
 	var mid := (PLAYER_BASE_ANCHOR + ENEMY_BASE_ANCHOR) * 0.5
 	return Vector3(mid.x, 0.0, mid.z)
@@ -565,6 +599,8 @@ func _setup_reserved_zones() -> void:
 			_reserve(spot, BASE_ORE_CLEAR)
 	for gm in gold_mine_spots():
 		_reserve(gm, GOLD_MINE_CLEAR)
+	if AI_MINE_ENABLED:
+		_reserve(ai_mine_spot(), GOLD_MINE_CLEAR)
 
 func _reserve(center: Vector3, radius: float) -> void:
 	_reserved.append({"c": center, "r": radius})
@@ -637,6 +673,38 @@ func _setup_fog() -> void:
 ## вовсе: круг игроку дают сами рабочие (FogOfWar._collect_unit_sources,
 ## радиус vision_radius ≈ VISION_MIN), а крепость расширяет его до
 ## CASTLE_VISION, когда встанет
+## ── ПРОГРЕВ КАРТИНОК, КОТОРЫЕ РИСУЮТСЯ КОДОМ (qa_melee_bench, 14.09.2026) ──
+## Первое знамя, первый белый флаг и первая аура монаха собирались попиксельно
+## В МОМЕНТ СОБЫТИЯ: первый срыв отряда в бою стоил кадра в 25 мс
+## (tail_morale в пике — это refresh_squad_banner → BannerArt._render), первое
+## лечение — 4-6 мс. Кэши у них статические, поэтому греем на старте партии,
+## под экраном загрузки, а не в разгар боя
+const _BannerArtM := preload("res://scripts/BannerArt.gd")
+const _MonkM := preload("res://scripts/Monk.gd")
+var _prewarm_hold: Array = []
+func _prewarm_art() -> void:
+	for lvl in range(1, 8):
+		_BannerArtM.texture_for(lvl)
+	_BannerArtM.white_flag_texture()
+	_MonkM._aura_texture()
+	# Лента лечения монаха: первый такт лечения стоил 3.8 мс (monk_build_vfx)
+	# — это НЕ load() (он кэширован), а BillboardUtil._detect_frame_count:
+	# get_image() плюс скан ширины листа по пикселям в GDScript ради числа
+	# кадров. Кэш у него по пути — греем тем же вызовом
+	for fac in [Constants.FACTION_PLAYER, Constants.FACTION_ENEMY]:
+		var folder: String = GameManager.unit_sprite_folder(fac, "monk")
+		var path: String = folder + "/Heal_Effect.png"
+		if folder.is_empty() or not ResourceLoader.exists(path):
+			path = _MonkM.HEAL_VFX_FALLBACK
+		if ResourceLoader.exists(path):
+			var tex := load(path) as Texture2D
+			if tex != null:
+				_BBUtil.frame_count(tex)
+				# Кэш ResourceLoader — СЛАБЫЙ: ресурс без единой ссылки выгружается
+				# сразу, и load() в такте лечения снова шёл с диска (1.7 мс).
+				# Держим ссылку до конца партии
+				_prewarm_hold.append(tex)
+
 func _reveal_start_area() -> void:
 	if fog == null:
 		return
@@ -820,6 +888,19 @@ func _input(event: InputEvent) -> void:
 			_toggle_fullscreen()
 			get_viewport().set_input_as_handled()
 			return
+	# ── ОТПУСКАНИЕ ЛКМ ПОСЛЕ КЛИКА РАЗМЕЩЕНИЯ — ТОЖЕ НАШЕ (13.09.2026) ──────
+	# Жалоба владельца: «поставил здание — панель построек рабочего тут же
+	# закрывается». Нажатие ЛКМ здесь съедалось, а ОТПУСКАНИЕ шло дальше, в
+	# SelectionManager._unhandled_input: тот видел «клик по пустой земле» и
+	# СНИМАЛ ВЫДЕЛЕНИЕ с рабочих — панель пропадала вместе с ним. С зажатым
+	# Shift клик аддитивный и выделение цело — потому «с Shift работает».
+	# Проверка стоит ДО проверки фазы: без Shift размещение уже перевело
+	# фазу в PLAYING к моменту, когда отпускание доезжает
+	if _swallow_lmb_release and event is InputEventMouseButton \
+			and not event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
+		_swallow_lmb_release = false
+		get_viewport().set_input_as_handled()
+		return
 	if _phase != Phase.PLACING_CASTLE and _phase != Phase.PLACING_BUILDING:
 		return
 	if event is InputEventMouseButton and event.pressed:
@@ -830,6 +911,7 @@ func _input(event: InputEvent) -> void:
 		if hud != null and hud.point_over_ui(event.position):
 			return
 		if event.button_index == MOUSE_BUTTON_LEFT:
+			_swallow_lmb_release = true
 			if _phase == Phase.PLACING_CASTLE:
 				_try_place_castle(event.position)
 			else:
@@ -873,6 +955,8 @@ func _refund_and_cancel() -> void:
 ## тот и повторит заказ (GameManager.try_worker_build — списание, артель)
 var _placing_repeat: Callable = Callable()
 var placements_done: int = 0
+## Нажатие ЛКМ ушло в размещение — его отпускание до выделения не доходит
+var _swallow_lmb_release: bool = false
 
 func enter_building_placement(cost: Dictionary, ghost_size: Vector3, build_fn: Callable,
 		building_name: String = "Здание", building_id: String = "",
@@ -2438,6 +2522,16 @@ func _spawn_goblin_village() -> void:
 		goblin_ai.setup(self, center)
 		for gid in garrison_ids:
 			goblin_ai.register_garrison(int(gid))
+	# ── ДРЕМЛЮЩИЙ РЕЗЕРВ ЗА ЛАГЕРЕМ (13.09.2026) ────────────────────────────
+	# Загруженная партия везёт свои отряды в слепке — резерв заводится
+	# только в новой (см. DormantReserve)
+	if _GobCfg.RESERVE_ENABLED and GameManager.pending_load.is_empty():
+		goblin_reserve = _DormantReserve.new()
+		goblin_reserve.name = "GoblinReserve"
+		add_child(goblin_reserve)
+		goblin_reserve.spawn(self, center, goblin_ai)
+		if goblin_ai != null:
+			goblin_ai.attach_reserve(goblin_reserve)
 
 ## ВЫПУСТИТЬ ОТРЯД ОРДЫ ТОЛПОЙ ВОКРУГ ТОЧКИ. Один путь на стартовую орду и на
 ## «месть гоблинов» (GoblinAI): раскладка по диску (goblin_config.horde_offset),
@@ -2469,10 +2563,17 @@ func spawn_goblin_squad(uid: String, n: int, base: Vector3) -> int:
 ## ═════════════════════════════════════════════════════════════════════════════
 ## За горой от замка игрока, «ниже» его по экрану (+Z): Замок → Гора → Логово.
 ## Смещения — goblin_config.LAIR_OFFSET / HILL_OFFSET от якоря базы игрока
+## ── ПЕНЬ «ИГРОКА» ТЕПЕРЬ НА БЕРЕГУ ОРДЫ (ТЗ 14.09.2026, п. 3) ──────────────
+## Обе человеческие базы переехали на левый берег, и середина между ними
+## занята «красным пнём» (troll_lair_center_ai). Первому пню там места нет —
+## он стоит на правом берегу, в бывшем углу ИИ: правый берег — земля орды
+## (деревня вверху, пень внизу), и обе базы людей от него отделяет брод.
+## Точка АБСОЛЮТНАЯ (goblin_config.LAIR_SPOT), а не смещение от якоря: якорь
+## игрока на другом берегу, и смещение от него означало бы ничего
 func troll_lair_center() -> Vector3:
-	var o: Vector2 = _GobCfg.LAIR_OFFSET
-	var x: float = clampf(PLAYER_BASE_ANCHOR.x + o.x, -GEN_HALF_X, GEN_HALF_X)
-	var z: float = clampf(PLAYER_BASE_ANCHOR.z + o.y, -GEN_HALF_Z, GEN_HALF_Z)
+	var o: Vector2 = _GobCfg.LAIR_SPOT
+	var x: float = clampf(o.x, -GEN_HALF_X, GEN_HALF_X)
+	var z: float = clampf(o.y, -GEN_HALF_Z, GEN_HALF_Z)
 	return Vector3(x, get_terrain_height(x, z), z)
 
 ## ── НИЧЕЙНЫЕ ЗОЛОТЫЕ РУДНИКИ (заказ 10.09.2026) ─────────────────────────────
@@ -2481,17 +2582,58 @@ func troll_lair_center() -> Vector3:
 ## захвата пехотой (Mine). Площадки зарезервированы от леса и руды
 ## (_setup_reserved_zones), точка уводится с воды land_target
 const GOLD_MINE_T := [0.34, 0.66]
-const GOLD_MINE_SIDE := -34.0
+## Сдвиг ПОПЕРЁК пути между замками, в сторону реки (ТЗ 14.09.2026: путь
+## теперь идёт вдоль левого края, и прежний сдвиг «по Z» лёг бы вдоль него)
+const GOLD_MINE_SIDE := 110.0
 const GOLD_MINE_CLEAR := 9.0
+## ── РУДНИК КРАСНОГО ИИ НА НИЖНЕЙ ГОРУШКЕ (ТЗ 14.09.2026, п. 3) ─────────────
+## Третий рудник стоит на вершине нижнего плато (PLATEAU_SPECS[1]) и с
+## рождения принадлежит красному ИИ — его зона влияния. Захватить его может
+## любая сторона, как и прочие рудники
+const AI_MINE_ENABLED := true
+func ai_mine_spot() -> Vector3:
+	var s0: Array = PLATEAU_SPECS[1]
+	return Vector3(float(s0[0]), 0.0, float(s0[1]))
+
+## ── РУДНИК У БРОДА — ГЛАВНАЯ ТОЧКА КОНФЛИКТА (заказ 13.09.2026) ───────────
+## Третий ничейный рудник стоит на песке брода, у его южной кромки
+## (FORD_MINE_OFFSET по Z от середины): за него дерутся обе стороны и орда.
+## Он же — «центр карты» для обоих ИИ (ai_rally_point)
+## РАЗВЁРНУТО ВЛАДЕЛЬЦЕМ В ТОТ ЖЕ ДЕНЬ: «на самом броде рудника быть не
+## должно». Механизм оставлен под выключателем; штатных ничейных рудника два
+## (на плато у пути), плюс рудник орды у деревни. Центром карты для ИИ
+## остаётся САМА ТОЧКА БРОДА (ford_point)
+const FORD_MINE_ENABLED := false
+const FORD_MINE_OFFSET_Z := 12.0
+
+## Середина брода — точка на суше посреди переправы
+func ford_point() -> Vector3:
+	return Vector3(river_x(FORD_Z), 0.0, FORD_Z)
+
+func ford_mine_spot() -> Vector3:
+	var z: float = FORD_Z + FORD_MINE_OFFSET_Z
+	return Vector3(river_x(z), 0.0, z)
 
 func gold_mine_spots() -> Array:
 	var out: Array = []
+	# Поперечник пути, направленный к середине карты (к реке)
+	var dir: Vector3 = ENEMY_BASE_ANCHOR - PLAYER_BASE_ANCHOR
+	dir.y = 0.0
+	if dir.length() < 0.01:
+		dir = Vector3(0.0, 0.0, 1.0)
+	dir = dir.normalized()
+	var perp := Vector3(-dir.z, 0.0, dir.x)
+	var mid: Vector3 = (PLAYER_BASE_ANCHOR + ENEMY_BASE_ANCHOR) * 0.5
+	if perp.dot(Vector3(-mid.x, 0.0, -mid.z)) < 0.0:
+		perp = -perp
 	for t in GOLD_MINE_T:
 		var p: Vector3 = PLAYER_BASE_ANCHOR.lerp(ENEMY_BASE_ANCHOR, float(t))
-		p.z += GOLD_MINE_SIDE
+		p += perp * GOLD_MINE_SIDE
 		p.x = clampf(p.x, -GEN_HALF_X, GEN_HALF_X)
 		p.z = clampf(p.z, -GEN_HALF_Z, GEN_HALF_Z)
 		out.append(Vector3(p.x, 0.0, p.z))
+	if FORD_MINE_ENABLED and RIVER_ENABLED:
+		out.append(ford_mine_spot())
 	return out
 
 func _spawn_gold_mines() -> void:
@@ -2502,6 +2644,16 @@ func _spawn_gold_mines() -> void:
 		m.faction = Constants.FACTION_NEUTRAL
 		_world.add_child(m)
 		m.global_position = Vector3(spot.x, get_terrain_height(spot.x, spot.z), spot.z)
+	# Рудник красного ИИ на нижней горушке (ТЗ 14.09.2026, п. 3)
+	if AI_MINE_ENABLED:
+		var ap: Vector3 = GameManager.land_target(ai_mine_spot())
+		_clear_area_of_resources(ap, GOLD_MINE_CLEAR)
+		var am := Mine.new()
+		am.faction = Constants.FACTION_NEUTRAL
+		_world.add_child(am)
+		am.global_position = Vector3(ap.x, get_terrain_height(ap.x, ap.z), ap.z)
+		am.set_owner_faction(Constants.FACTION_ENEMY)
+		GameManager.ai_mine = am
 
 ## ── РУДНИК ОРДЫ (заказ спринта 17) ─────────────────────────────────────────
 ## В MINE_OFFSET метрах от деревни к центру карты, с рождения захвачен ордой
@@ -2655,12 +2807,15 @@ func _dress_lair_glade(c: Vector3) -> void:
 			tree.global_position = Vector3(px, get_terrain_height(px, pz), pz)
 			lair_glade_trees += 1
 
-## Центр второго логова: от якоря ИИ смещение LAIR_OFFSET по X зеркально
-## (к реке), по Z — то же (вниз)
+## «КРАСНЫЙ ПЕНЬ» — СТРОГО МЕЖДУ БАЗАМИ ИГРОКА И ИИ, НАПРОТИВ БРОДА
+## (ТЗ 14.09.2026, п. 3): по Z — середина между якорями (она же FORD_Z),
+## по X — от середины на LAIR_AI_SPOT.x к реке. Точка выводится из якорей,
+## а не стоит числом: сдвинутся базы — пень останется посередине
 func troll_lair_center_ai() -> Vector3:
-	var o: Vector2 = _GobCfg.LAIR_AI_OFFSET
-	var x: float = clampf(ENEMY_BASE_ANCHOR.x + o.x, -GEN_HALF_X, GEN_HALF_X)
-	var z: float = clampf(ENEMY_BASE_ANCHOR.z + o.y, -GEN_HALF_Z, GEN_HALF_Z)
+	var mid: Vector3 = (PLAYER_BASE_ANCHOR + ENEMY_BASE_ANCHOR) * 0.5
+	var o: Vector2 = _GobCfg.LAIR_AI_SPOT
+	var x: float = clampf(mid.x + o.x, -GEN_HALF_X, GEN_HALF_X)
+	var z: float = clampf(mid.z + o.y, -GEN_HALF_Z, GEN_HALF_Z)
 	return Vector3(x, get_terrain_height(x, z), z)
 
 ## ВЫДАТЬ ОТРЯДУ РАНГ ПРИ РОЖДЕНИИ И РАЗДАТЬ ЗА НЕГО НАГРАДЫ.
@@ -2751,6 +2906,106 @@ func _spawn_enemy_base() -> void:
 	# который подставляет в неё свой список, не трогая кода
 	_spawn_start_squads(Constants.FACTION_ENEMY, _Diff.ai_start_squads(),
 		anchor + ENEMY_START_SQUAD_OFFSET, _AICfg.START_VETERAN_PREFERENCE)
+	# ── СТАРТОВАЯ ОБОРОНА КРЕПОСТИ (15.09.2026) ─────────────────────────────
+	# Три башни с лучниками на кольце, лучники на крыше замка и спящая охрана
+	# за ним. В загруженной партии не заводится: башни и охрана едут в слепке
+	# (охрану усыновляет HomeGuard.adopt_loaded после SaveLoadManager.apply)
+	if _AICfg.HOME_DEFENSE_ENABLED and GameManager.pending_load.is_empty():
+		_spawn_home_defense(castle)
+
+## ВЫВЕСТИ ОДИН ОТРЯД ПРЯМОУГОЛЬНИКОМ ПО ОСЯМ БАЗЫ. Колонки — вбок от оси,
+## шеренги — ВГЛУБЬ (против front); `origin` — центр первой шеренги. Та же
+## раскладка, по которой охрана возвращается на пост (HomeGuard.post_spot) —
+## иначе «домой» она шла бы в другие места, чем стояла при рождении.
+## Возвращает id отряда, 0 — сцены такого рода войск нет
+func _spawn_squad_block(uid: String, faction: int, origin: Vector3, front: Vector3,
+		side: Vector3, n: int, cols: int, spacing: float) -> int:
+	var scene: PackedScene = Building.PRELOAD_SCENES.get(uid)
+	if scene == null or n <= 0:
+		return 0
+	var sid: int = GameManager.new_squad(faction, uid)
+	var c: int = maxi(cols, 1)
+	for k in range(n):
+		var u: Unit = scene.instantiate()
+		u.faction = faction
+		_world.add_child(u)
+		var lateral: float = (float(k % c) - float(c - 1) * 0.5) * spacing
+		var depth: float = float(k / c) * spacing
+		var p: Vector3 = origin + side * lateral - front * depth
+		p = GameManager.land_target(Vector3(p.x, 0.0, p.z))
+		u.global_position = Vector3(p.x, get_terrain_height(p.x, p.z), p.z)
+		u.sync_row()
+		u.post_pos = u.global_position
+		GameManager.add_to_squad(sid, u)
+	return sid
+
+## Точка стартовой обороны: в пределах карты, на суше, без леса вокруг
+func _home_defense_spot(p: Vector3, clear_r: float) -> Vector3:
+	var q := Vector3(clampf(p.x, -MAP_CLAMP_X, MAP_CLAMP_X), 0.0,
+		clampf(p.z, -MAP_CLAMP_Z, MAP_CLAMP_Z))
+	q = GameManager.land_target(q)
+	_clear_area_of_resources(q, clear_r)
+	return Vector3(q.x, get_terrain_height(q.x, q.z), q.z)
+
+func _spawn_home_defense(castle: Castle) -> void:
+	var ef: int = Constants.FACTION_ENEMY
+	var cpos: Vector3 = castle.global_position
+	var front: Vector3 = castle.front_dir()
+	var side := Vector3(-front.z, 0.0, front.x)
+	# 1) БАШНИ НА КОЛЬЦЕ, В КАЖДОЙ — ОТРЯД ЛУЧНИКОВ. Отряд рождается у подножия
+	#    и тем же кадром зачисляется внутрь (garrison_now): к воротам не идёт
+	var n_ar: int = _UCfg.squad_size("archer")
+	for row in _AICfg.HOME_TOWERS:
+		var d: Dictionary = row
+		var ang: float = deg_to_rad(float(d["angle_deg"]))
+		var dist: float = float(d["dist"])
+		var p: Vector3 = _home_defense_spot(
+			cpos + front * (cos(ang) * dist) + side * (sin(ang) * dist), 3.5)
+		var tower: Castle = _TowerS.new()
+		tower.faction = ef
+		_world.add_child(tower)
+		tower.global_position = p
+		for _k in range(_AICfg.HOME_TOWER_ARCHERS):
+			var sid: int = _spawn_squad_block("archer", ef, p + side * 2.5, front, side,
+				n_ar, START_SQUAD_COLS, START_SQUAD_SPACING)
+			# Места нет (лимит башни — один отряд) — отряд остаётся у подножия
+			if sid > 0:
+				tower.garrison_now(sid)
+	# 2) ЛУЧНИКИ НА КРЫШЕ КРЕПОСТИ (roof_accepts: стрелки садятся на крышу,
+	#    а не в лазарет — см. RoofGarrison, LAYOUT_KEEP)
+	for _k in range(_AICfg.HOME_CASTLE_ARCHERS):
+		var sid_c: int = _spawn_squad_block("archer", ef, cpos + front * 6.0, front, side,
+			n_ar, START_SQUAD_COLS, START_SQUAD_SPACING)
+		if sid_c > 0:
+			castle.garrison_now(sid_c)
+	# 3) ОХРАНА — КОЛОННОЙ ЗА ЗАМКОМ, В ГЛУБИНЕ БАЗЫ. Между базовыми жилами
+	#    (они на ±35° от той же оси, см. _base_resource_spots) остаётся проход
+	#    шире строя в START_SQUAD_COLS колонок; отряды идут вглубь один за другим
+	enemy_guard = _HomeGuard.new()
+	enemy_guard.name = "EnemyHomeGuard"
+	add_child(enemy_guard)
+	enemy_guard.setup(self, castle)
+	var depth: float = _AICfg.HOME_GUARD_DEPTH
+	for row in _AICfg.home_guard_squads():
+		var d: Dictionary = row
+		var uid: String = String(d["unit"])
+		var n: int = int(d["count"])
+		var cols: int = mini(START_SQUAD_COLS, maxi(n, 1))
+		var rows: int = int(ceil(float(n) / float(cols)))
+		var post: Vector3 = _home_defense_spot(cpos - front * depth, 4.5)
+		var sid: int = _spawn_squad_block(uid, ef, post, front, side, n, cols, START_SQUAD_SPACING)
+		depth += float(rows) * START_SQUAD_SPACING + _AICfg.HOME_GUARD_GAP
+		if sid <= 0:
+			continue
+		if int(d["vet"]) > 0:
+			grant_squad_veterancy(sid, int(d["vet"]), int(d["picks"]),
+				_AICfg.START_VETERAN_PREFERENCE)
+		# Копейщики охраны стоят с опущенными копьями: стойка ставится ДО сна,
+		# у стоящего отряда она строй не перестраивает (ТЗ 14.09.2026, п. 8)
+		if uid == "spearman":
+			for m in GameManager.squad_members(sid):
+				(m as Unit).set_stance("defense")
+		enemy_guard.adopt(sid, post, cols, START_SQUAD_SPACING)
 
 ## Куда становятся стартовые отряды ИИ относительно своего замка: между замком
 ## и центром карты, то есть лицом к противнику. Числом, а не «вокруг замка»:
@@ -3261,7 +3516,9 @@ func get_terrain_height(x: float, z: float) -> float:
 func plateau_list() -> Array:
 	if not _plateaus.is_empty():
 		return _plateaus
-	var spots: Array = gold_mine_spots()
+	# ПЛАТО ТОЛЬКО ПОД РУДНИКАМИ НА ПУТИ: рудник у брода стоит на песке
+	# переправы, и плато под ним завалило бы реку и сам брод
+	var spots: Array = gold_mine_spots().slice(0, GOLD_MINE_T.size())
 	var toward: Array = [PLAYER_BASE_ANCHOR, ENEMY_BASE_ANCHOR]
 	for i in range(spots.size()):
 		var p: Vector3 = spots[i]

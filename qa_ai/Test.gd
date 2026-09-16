@@ -144,10 +144,48 @@ func _test_start() -> void:
 	print("  рабочих=%d (конфиг START_WORKERS=%d), БОЕВЫХ=%d (должно быть 0)" % [
 		workers, _AICfg.START_WORKERS, combat])
 	print("  постройки ИИ: %s" % str(blds))
-	var only_castle: bool = blds.size() == 1 and String(blds[0]) == "Замок"
-	verdict("2 старт: 0 боевых, %d рабочих, только замок" % _AICfg.START_WORKERS,
-		combat == 0 and workers == _AICfg.START_WORKERS and only_castle,
-		"боевых=%d рабочих=%d постройки=%s" % [combat, workers, str(blds)])
+	# 14.09.2026: рудник ИИ на нижней горушке принадлежит ему с рождения —
+	# он не постройка ИИ по замыслу стенда (Main._spawn_gold_mines), отсеиваем
+	var own: Array = []
+	for nm in blds:
+		if not String(nm).begins_with("Золотой рудник"):
+			own.append(nm)
+	# ── СТАРТОВАЯ ОБОРОНА КРЕПОСТИ (15.09.2026) ─────────────────────────────
+	# Прежнее свойство «0 боевых, только замок» РАЗВЁРНУТО заказом: ИИ выходит
+	# с башнями (HOME_TOWERS), лучниками в них и на крыше (сняты с карты —
+	# в enemy_units их нет) и спящей ОХРАНОЙ за замком. Полевой армии при этом
+	# по-прежнему ноль: каждый боевой на карте обязан быть отрядом охраны и
+	# спать (home_guard + dormant); строит и нанимает ИИ всё так же с нуля
+	var towers := 0
+	var other: Array = []
+	for nm in own:
+		if String(nm) == "Замок":
+			continue
+		if String(nm).begins_with("Башня") or String(nm).begins_with("Сторожевая"):
+			towers += 1
+		else:
+			other.append(nm)
+	var has_castle: bool = own.has("Замок")
+	var want_towers: int = _AICfg.HOME_TOWERS.size() if _AICfg.HOME_DEFENSE_ENABLED else 0
+	var want_guard := 0
+	if _AICfg.HOME_DEFENSE_ENABLED:
+		for row in _AICfg.home_guard_squads():
+			want_guard += int((row as Dictionary)["count"])
+	var guard_ok := true
+	for n in get_tree().get_nodes_in_group("enemy_units"):
+		if n is Worker:
+			continue
+		var u := n as Unit
+		if u == null or u.is_dead():
+			continue
+		if not GameManager.squad_is_home_guard(u.squad_id) or not u.dormant:
+			guard_ok = false
+	verdict("2 старт: %d рабочих, замок + %d башен, боевых на карте %d и все — спящая охрана" % [
+			_AICfg.START_WORKERS, want_towers, want_guard],
+		workers == _AICfg.START_WORKERS and has_castle and towers == want_towers
+			and other.is_empty() and combat == want_guard and guard_ok,
+		"боевых=%d (надо %d, охрана+сон=%s) рабочих=%d башен=%d постройки=%s" % [
+			combat, want_guard, str(guard_ok), workers, towers, str(blds)])
 	await frames(1)
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -392,7 +430,10 @@ func _snap_surplus() -> void:
 		roles[r] = int(roles.get(r, 0)) + 1
 	if ai.squads.size() <= want_guard:
 		return
-	if int(roles.get("guard", 0)) < want_guard:
+	# Рудник, рейд, группа на брод и вылазка берутся ДО гарнизона (спринт 17,
+	# сценарий карты 13.09.2026): «гарнизон полон» — с поправкой на них
+	var expansion: int = int(roles.get("mine", 0)) + int(roles.get("raid", 0)) 		+ int(roles.get("field", 0)) + int(roles.get("hunt", 0))
+	if int(roles.get("guard", 0)) + expansion < want_guard:
 		return
 	# Заодно меряем разнос гарнизонных постов именно в этом режиме: при
 	# SEND_SURPLUS_TO_LAKE=false домой садятся ВСЕ отряды, и кольцо постов
@@ -482,16 +523,27 @@ func _test_roles() -> void:
 	var scr_course: Vector3 = ai._defense_course(castle) if castle != null else Vector3.FORWARD
 	var ring_ok := true
 	var ring_r: Array = []
+	# СРЕДНЯЯ глубина по роду войск (15.09.2026), а не последний пост: с
+	# несколькими башнями (стартовая оборона крепости + пограничные) пары
+	# периметра стоят у РАЗНЫХ башен, и «последний копейщик» против «последнего
+	# лучника» сравнивал посты разных башен. Свойство прежнее: копейщики в
+	# среднем глубже по курсу на врага, чем лучники
+	var depth_sum: Dictionary = {}
+	var depth_n: Dictionary = {}
 	var depth_by_type: Dictionary = {}
 	for pi in range(guard_posts.size()):
 		var pv: Vector3 = guard_posts[pi]
 		var d: float = pv.distance_to(castle.global_position) if castle != null else 0.0
 		ring_r.append(snappedf(d, 0.1))
 		var depth: float = (pv - castle.global_position).dot(scr_course) if castle != null else 0.0
-		depth_by_type[String(guard_post_type[pi])] = snappedf(depth, 0.1)
+		var ty: String = String(guard_post_type[pi])
+		depth_sum[ty] = float(depth_sum.get(ty, 0.0)) + depth
+		depth_n[ty] = int(depth_n.get(ty, 0)) + 1
 		# Ни один пост не смотрит в тыл: заслон стоит между замком и врагом
 		if depth <= 0.0:
 			ring_ok = false
+	for ty in depth_sum:
+		depth_by_type[ty] = snappedf(float(depth_sum[ty]) / float(maxi(int(depth_n[ty]), 1)), 0.1)
 	if depth_by_type.has("spearman") and depth_by_type.has("archer"):
 		if float(depth_by_type["spearman"]) <= float(depth_by_type["archer"]):
 			ring_ok = false
@@ -522,18 +574,23 @@ func _test_roles() -> void:
 		# уходят в заслон (line) и патрули (patrol), см. EnemyAI._command_squads_defensive
 		# СПРИНТ 17: отряд на рудник и рейд-отряд берутся ДО гарнизона —
 		# гарнизон вправе недосчитаться ровно их
-		var expansion: int = int(by_role.get(ai.ROLE_MINE, 0)) + int(by_role.get(ai.ROLE_RAID, 0))
-		verdict("5 гарнизон укомплектован до потолка каждого типа (минус рудник и рейд)",
+		# СЦЕНАРИЙ КАРТЫ (13.09.2026): до гарнизона берутся ещё ударная группа
+		# на рудник у брода (роль field, ровно ford_group) и вылазка на
+		# троллей (hunt) — гарнизон вправе недосчитаться и их
+		var ford_n: int = ai.red.ford_group.size()
+		var expansion: int = int(by_role.get(ai.ROLE_MINE, 0)) + int(by_role.get(ai.ROLE_RAID, 0)) \
+			+ ford_n + int(by_role.get(ai.ROLE_HUNT, 0))
+		verdict("5 гарнизон укомплектован до потолка каждого типа (минус рудник, рейд, брод, вылазка)",
 			guard_total + expansion >= want_guard and guard_total <= want_guard,
-			"guard=%d, ожидалось %d, рудник+рейд=%d, по типам %s" % [
+			"guard=%d, ожидалось %d, рудник+рейд+брод+вылазка=%d, по типам %s" % [
 				guard_total, want_guard, expansion, str(guard_by_type)])
-		verdict("5 оборона: штурмовых ролей нет",
-			int(by_role.get("assault", 0)) == 0 and int(by_role.get("field", 0)) == 0,
-			"роли=%s" % str(by_role))
+		verdict("5 оборона: штурмовых ролей нет (полевая — только группа на брод)",
+			int(by_role.get("assault", 0)) == 0 and int(by_role.get("field", 0)) == ford_n,
+			"роли=%s, группа на брод=%d" % [str(by_role), ford_n])
 		var line_n: int = int(by_role.get("line", 0))
 		var patrol_n: int = int(by_role.get("patrol", 0))
 		verdict("5 оборона: излишки в заслоне или патруле",
-			(line_n + patrol_n) > 0 or ai.squads.size() <= want_guard,
+			(line_n + patrol_n) > 0 or ai.squads.size() <= want_guard + expansion,
 			"line=%d, patrol=%d, всего отрядов=%d" % [line_n, patrol_n, ai.squads.size()])
 		verdict("5 оборона: патрулей не больше PATROL_SQUADS",
 			patrol_n <= _AICfg.PATROL_SQUADS,

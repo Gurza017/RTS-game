@@ -90,7 +90,7 @@ const FORMAT_VERSION := 1
 ## чужой рельеф (та же причина, что у версий 2 и 3)
 ## 6 (спринт 18): площадка второго пня у ИИ резервируется от леса — лес
 ## сеется иначе, то же зерно даёт другую карту
-const WORLD_GEN_VERSION := 6
+const WORLD_GEN_VERSION := 8   # 14.09.2026: ИИ на левом берегу, пни и рудники переставлены
 
 ## Сколько слотов сохранения показывает интерфейс
 const SLOT_COUNT := 3
@@ -112,6 +112,7 @@ static func capture(main: Node) -> Dictionary:
 		"resources": _capture_resources(),
 		"research": _capture_research(),
 		"keep_vet": _capture_keep_vet(),
+		"keep_vet_research": _capture_keep_vet_research(),
 		"squads": _capture_squads(),
 		"buildings": _capture_buildings(main),
 	}
@@ -176,6 +177,24 @@ static func _restore_keep_vet(src: Dictionary) -> void:
 	for f in src:
 		GameManager.keep_vet_level[int(f)] = int(src[f])
 
+## Идущее исследование ранга (13.09.2026): золото за него уже списано, и
+## потерять при загрузке минуту часов вместе с 7000 золота нельзя. Своя
+## запись рядом с уровнем, чтобы старый формат «фракция → ранг» не менялся
+static func _capture_keep_vet_research() -> Dictionary:
+	var out: Dictionary = {}
+	for f in GameManager.keep_vet_research:
+		var r: Dictionary = GameManager.keep_vet_research[f]
+		out[int(f)] = {"target": int(r.get("target", 0)),
+			"left": float(r.get("left", 0.0)), "total": float(r.get("total", 0.0))}
+	return out
+
+static func _restore_keep_vet_research(src: Dictionary) -> void:
+	GameManager.keep_vet_research.clear()
+	for f in src:
+		var r: Dictionary = src[f]
+		GameManager.keep_vet_research[int(f)] = {"target": int(r.get("target", 0)),
+			"left": float(r.get("left", 0.0)), "total": float(r.get("total", 0.0))}
+
 static func _capture_squads() -> Array:
 	var out: Array = []
 	for sid in GameManager.squads:
@@ -194,10 +213,16 @@ static func _capture_squads() -> Array:
 			"chosen":   (sq["chosen"] as Array).duplicate(),
 			"bonuses":  (sq["bonuses"] as Dictionary).duplicate(),
 			"abilities": (sq["abilities"] as Dictionary).keys(),
+			# Охрана крепости ИИ (15.09.2026): по этому признаку HomeGuard
+			# усыновляет отряд заново после загрузки
+			"home_guard": bool(sq.get("home_guard", false)),
 		})
 	return out
 
-static func _capture_buildings(main: Node) -> Array:
+## ПОСТРОЙКИ В ПОРЯДКЕ СЛЕПКА. Один обход на снятие слепка и на нумерацию
+## хозяев гарнизона (см. _capture_units): индекс постройки в этом списке и есть
+## её номер в файле, и оба места обязаны идти одним и тем же порядком
+static func _buildings_list(main: Node) -> Array:
 	var out: Array = []
 	if main == null:
 		return out
@@ -210,12 +235,39 @@ static func _capture_buildings(main: Node) -> Array:
 				continue
 			# Стройплощадка в файл не идёт: её building_id пуст по построению
 			# (см. ConstructionSite._ready), и эта же проверка её и отсеивает
-			out.append({
-				"id":      String(bld.building_id),
-				"faction": int(bld.faction),
-				"pos":     bld.global_position,
-				"hp":      float(bld.current_health),
-			})
+			out.append(bld)
+	return out
+
+static func _capture_buildings(main: Node) -> Array:
+	var out: Array = []
+	for b in _buildings_list(main):
+		var bld := b as Building
+		out.append({
+			"id":      String(bld.building_id),
+			"faction": int(bld.faction),
+			"pos":     bld.global_position,
+			"hp":      float(bld.current_health),
+		})
+	return out
+
+## УКРЫТЫЕ В ЗДАНИЯХ БОЙЦЫ (15.09.2026). Гарнизон снят с карты и из групп
+## фракции (Castle.absorb_unit), поэтому обход _live_units его не видит — до
+## этой правки любой гарнизон (лучники в башне, отряд в лазарете) на загрузке
+## пропадал молча. Возвращает [Unit, индекс постройки-хозяина в _buildings_list]
+static func _garrisoned_units(main: Node) -> Array:
+	var out: Array = []
+	var blds: Array = _buildings_list(main)
+	for i in range(blds.size()):
+		var c := blds[i] as Castle
+		if c == null:
+			continue
+		for rec in c.garrison:
+			var sid: int = int((rec as Dictionary).get("sid", 0))
+			if sid <= 0 or not GameManager.squads.has(sid):
+				continue
+			for m in GameManager.squads[sid]["members"]:
+				if is_instance_valid(m) and (m as Unit).garrisoned and not (m as Unit).is_dead():
+					out.append([m, i])
 	return out
 
 ## БОЙЦЫ ЛОЖАТСЯ КОЛОНКАМИ, А НЕ СПИСКОМ СЛОВАРЕЙ.
@@ -230,11 +282,17 @@ static func _capture_units(main: Node) -> Dictionary:
 	var col_sid  := PackedInt32Array()
 	var col_pos  := PackedFloat32Array()
 	var col_hp   := PackedFloat32Array()
+	# Хозяин-здание укрытого бойца: индекс в списке построек слепка, -1 — на карте
+	var col_host := PackedInt32Array()
 	if main == null:
 		return {"types": types, "type": col_type, "faction": col_fac,
-			"squad": col_sid, "pos": col_pos, "hp": col_hp}
+			"squad": col_sid, "pos": col_pos, "hp": col_hp, "host": col_host}
+	var rows: Array = []
 	for u in _live_units(main):
-		var unit := u as Unit
+		rows.append([u, -1])
+	rows.append_array(_garrisoned_units(main))
+	for r in rows:
+		var unit := r[0] as Unit
 		var t: String = String(unit.stat_id)
 		if not type_ix.has(t):
 			type_ix[t] = types.size()
@@ -245,8 +303,9 @@ static func _capture_units(main: Node) -> Dictionary:
 		var p: Vector3 = unit.global_position
 		col_pos.append(p.x); col_pos.append(p.y); col_pos.append(p.z)
 		col_hp.append(float(unit.current_health))
+		col_host.append(int(r[1]))
 	return {"types": types, "type": col_type, "faction": col_fac,
-		"squad": col_sid, "pos": col_pos, "hp": col_hp}
+		"squad": col_sid, "pos": col_pos, "hp": col_hp, "host": col_host}
 
 # ═════════════════════════════════════════════════════════════════════════════
 # ЗАПИСЬ И ЧТЕНИЕ ФАЙЛА
@@ -350,9 +409,10 @@ static func apply(main: Node, state: Dictionary) -> void:
 	_restore_resources(state.get("resources", {}))
 	_restore_research(state.get("research", {}))
 	_restore_keep_vet(state.get("keep_vet", {}))
+	_restore_keep_vet_research(state.get("keep_vet_research", {}))
 	var sid_map: Dictionary = _restore_squads(state.get("squads", []))
-	_restore_buildings(main, state.get("buildings", []))
-	_restore_units(main, state.get("units", {}), sid_map)
+	var blds: Array = _restore_buildings(main, state.get("buildings", []))
+	_restore_units(main, state.get("units", {}), sid_map, blds)
 	# Часы партии — последними: орда читает их каждый такт, и до расстановки
 	# войск ей нечего было бы будить
 	var meta: Dictionary = state.get("meta", {})
@@ -371,6 +431,17 @@ static func _wipe_live_world(main: Node) -> void:
 	# правит те самые группы, по которым мы идём (та же грабля, что и у
 	# расформирования отряда — см. SelectionManager.disband_selected)
 	var doomed: Array = _live_units(main)
+	# УКРЫТЫХ — СПЕРВА НАРУЖУ. Удар по укрытому принимает здание
+	# (Unit.take_damage → absorb_damage_for), и убить его внутри нельзя; а
+	# здание ниже сносится без эвакуации — боец остался бы невидимым сиротой
+	# с живой строкой в ядре
+	var blds: Array = _buildings_list(main)
+	for g in _garrisoned_units(main):
+		var gu := g[0] as Unit
+		var host := blds[int(g[1])] as Castle
+		if host != null and is_instance_valid(host):
+			host.release_unit(gu, host.global_position)
+		doomed.append(gu)
 	for u in doomed:
 		if is_instance_valid(u) and not (u as Unit).is_dead():
 			# СМЕРТЬ, А НЕ queue_free: только на этом пути боец снимает с себя
@@ -443,14 +514,20 @@ static func _restore_squads(src: Array) -> Dictionary:
 		for k in (d.get("abilities", []) as Array):
 			ab[String(k)] = true
 		sq["abilities"] = ab
+		if bool(d.get("home_guard", false)):
+			sq["home_guard"] = true
 		map[int(d["id"])] = sid
 	return map
 
-static func _restore_buildings(main: Node, src: Array) -> void:
+## Возвращает восстановленные постройки В ПОРЯДКЕ ФАЙЛА (null — строка не
+## собралась): по этим индексам гарнизон садится обратно к своему хозяину
+static func _restore_buildings(main: Node, src: Array) -> Array:
+	var made: Array = []
 	for row in src:
 		var d: Dictionary = row
 		var b: Building = _make_building(String(d["id"]))
 		if b == null:
+			made.append(null)
 			continue
 		b.faction = int(d["faction"])
 		main.world_add(b)
@@ -458,6 +535,8 @@ static func _restore_buildings(main: Node, src: Array) -> void:
 		# Запас жизни ставится ПОСЛЕ входа в дерево: _ready() здания сам берёт
 		# максимум из конфига и затёр бы сохранённое число
 		b.current_health = float(d.get("hp", b.max_health))
+		made.append(b)
+	return made
 
 ## Фабрика зданий по id. ЗДЕСЬ ЖЕ, А НЕ В ConstructionSite: та строит только то,
 ## что можно заказать рабочим, а сохранение обязано вернуть и хижину гоблинов,
@@ -483,14 +562,23 @@ static func _make_building(id: String) -> Building:
 ## Бойцы разбираются из колонок. Порядок восстановления внутри отряда тот же,
 ## в каком они лежали при снятии слепка, — а значит и знаменосец достанется
 ## тому же бойцу (его выбирает разметка, см. GameManager._assign_bearer)
-static func _restore_units(main: Node, src: Dictionary, sid_map: Dictionary) -> void:
+static func _restore_units(main: Node, src: Dictionary, sid_map: Dictionary,
+		blds: Array = []) -> void:
 	var types: Array = src.get("types", []) as Array
 	var col_type: PackedInt32Array = src.get("type", PackedInt32Array())
 	var col_fac:  PackedInt32Array = src.get("faction", PackedInt32Array())
 	var col_sid:  PackedInt32Array = src.get("squad", PackedInt32Array())
 	var col_pos:  PackedFloat32Array = src.get("pos", PackedFloat32Array())
 	var col_hp:   PackedFloat32Array = src.get("hp", PackedFloat32Array())
+	# Старые файлы колонки хозяев не знают — тогда все на карте
+	var col_host: PackedInt32Array = src.get("host", PackedInt32Array())
 	var n: int = col_type.size()
+	# Гарнизон садится обратно ПОСЛЕ того, как собран весь отряд: garrison_now
+	# зачисляет отряд целиком, а не по одному бойцу. Ключ — «хозяин|отряд»
+	var seats: Dictionary = {}
+	for i in range(n):
+		if i < col_host.size() and col_host[i] >= 0 and sid_map.has(col_sid[i]):
+			seats["%d|%d" % [col_host[i], int(sid_map[col_sid[i]])]] = [col_host[i], int(sid_map[col_sid[i]])]
 	for i in range(n):
 		var tname: String = String(types[col_type[i]]) if col_type[i] < types.size() else ""
 		var scene: PackedScene = Building.PRELOAD_SCENES.get(tname)
@@ -514,3 +602,15 @@ static func _restore_units(main: Node, src: Dictionary, sid_map: Dictionary) -> 
 		u.current_health = minf(float(col_hp[i]), u.max_health)
 	for old_sid in sid_map:
 		GameManager.refresh_squad_banner(int(sid_map[old_sid]))
+	# ── ГАРНИЗОН — ОБРАТНО К ХОЗЯИНУ (15.09.2026) ───────────────────────────
+	# Тем же путём, что стартовая оборона ИИ: отряд уже стоит в точке здания
+	# (так его и сняли), garrison_now зачисляет его внутрь без марша к воротам
+	for key in seats:
+		var pair: Array = seats[key]
+		var hi: int = int(pair[0])
+		if hi < 0 or hi >= blds.size():
+			continue
+		var host := blds[hi] as Castle
+		if host == null or not is_instance_valid(host):
+			continue
+		host.garrison_now(int(pair[1]))

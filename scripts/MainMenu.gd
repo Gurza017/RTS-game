@@ -30,6 +30,7 @@ const _UIAssets := preload("res://scripts/UIAssets.gd")
 const _SSParser := preload("res://scripts/SpriteSheetParser.gd")
 ## Пресеты сложности: подписи, подсказки и сам выбор живут там
 const _Diff     := preload("res://scripts/game_difficulty_config.gd")
+const _GobCfgMM := preload("res://scripts/goblin/goblin_config.gd")   # срок перемирия для подписи
 ## Загрузка сохранённой партии прямо со стартового экрана
 const _SaveLoad := preload("res://scripts/SaveLoadManager.gd")
 
@@ -296,6 +297,20 @@ func _build_options_page(vbox: VBoxContainer) -> void:
 	vbox.add_child(cam_box)
 	cam_box.toggled.connect(func(on: bool):
 		_GS.set_edge_pan(on))
+
+	# ── ПЕРЕМИРИЕ (ТЗ 14.09.2026, п. 2) ─────────────────────────────────────
+	# Та же ручка, что в паузе (HUD._add_armistice_toggle): game_settings.armistice
+	_add_spacer(vbox, 10)
+	vbox.add_child(_caption("Партия"))
+	var truce_box := CheckBox.new()
+	truce_box.name = "ArmisticeCheck"
+	truce_box.text = "Перемирие (первые %d мин без атак ИИ)" % int(round(_GobCfgMM.TRUCE_SEC / 60.0))
+	truce_box.button_pressed = _GS.armistice()
+	truce_box.add_theme_font_size_override("font_size", 15)
+	truce_box.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	vbox.add_child(truce_box)
+	truce_box.toggled.connect(func(on: bool):
+		_GS.set_armistice(on))
 
 	_add_spacer(vbox, 10)
 	vbox.add_child(_back_button())

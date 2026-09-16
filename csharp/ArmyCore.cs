@@ -327,6 +327,10 @@ public partial class ArmyCore : RefCounted
     private float[] _atkDmg = Array.Empty<float>();
     private float[] _atkRange = Array.Empty<float>();
     private float[] _speed = Array.Empty<float>();
+    // ВЕС ЦЕЛИ ДЛЯ СТРЕЛКОВ (ТЗ 14.09.2026, п. 10): BestEnemy с usePrio делит
+    // дистанцию на этот вес — большой гоблин (2.0) выбирается вдвое охотнее.
+    // Единица — «как у всех»; ставится при рождении строки (Unit.target_weight)
+    private float[] _tgtW = Array.Empty<float>();
     private float[] _sepT = Array.Empty<float>();
     // ЛИЧНЫЙ РАДИУС РАСТАЛКИВАНИЯ. Ноль — «как у всех», то есть minDist из
     // аргумента BatchSeparation; ненулевое значение перекрывает его для этой
@@ -387,6 +391,10 @@ public partial class ArmyCore : RefCounted
     /// За этим номером занятых строк нет. Читают стенды: по нему видно, что
     /// граница действительно опускается после гибели армии, а не стоит на пике
     public int Top() => _top;
+    /// GC-зонд для стендов: байт выделено за всё время (churn), число сборок
+    /// по поколениям. Читается раз в фазу замера — не покадрово
+    public long GcAllocated() => GC.GetTotalAllocatedBytes(true);
+    public int GcCount(int gen) => GC.CollectionCount(gen);
 
     // ── ПЛОТНЫЙ СПИСОК ЖИВЫХ СТРОК, И ОН ОТСОРТИРОВАН (сент. 2026) ─────────
     // _top упирается в самого верхнего живого: при рассеянных потерях (а в бою
@@ -735,6 +743,9 @@ public partial class ArmyCore : RefCounted
         for (int ri = _capacity; ri < cap; ri++)
         { _rbB[ri] = -1; _ringB[ri] = -1; _shB[ri] = -1; _hpB[ri] = -1; _anFrame[ri] = -1; }
         Array.Resize(ref _atkDmg, cap); Array.Resize(ref _atkRange, cap);
+        int oldW = _tgtW.Length;
+        Array.Resize(ref _tgtW, cap);
+        for (int w = oldW; w < cap; w++) _tgtW[w] = 1.0f;
         Array.Resize(ref _speed, cap);
         Array.Resize(ref _sepT, cap); Array.Resize(ref _sepR, cap);
         Array.Resize(ref _slX, cap); Array.Resize(ref _slZ, cap);
@@ -778,7 +789,7 @@ public partial class ArmyCore : RefCounted
         _hp[i] = 0; _hpMax[i] = 0;
         _atkCd[i] = 0; _aggroT[i] = 0; _atkReach[i] = 0;
         _rbB[i] = -1; _bobPhase[i] = 0;
-        _atkDmg[i] = 0; _atkRange[i] = 0; _speed[i] = 0;
+        _atkDmg[i] = 0; _atkRange[i] = 0; _speed[i] = 0; _tgtW[i] = 1.0f;
         // Фаза разбора наложения разводится по номеру строки: иначе весь отряд,
         // вышедший из барака одним заказом, разбирается в один и тот же кадр
         _sepT[i] = (i & 7) * 0.008f;
@@ -855,6 +866,7 @@ public partial class ArmyCore : RefCounted
     public void SetSquad(int i, int s) { _sq[i] = s; }
     public void SetCombat(int i, float dmg, float rng, float spd)
     { _atkDmg[i] = dmg; _atkRange[i] = rng; _speed[i] = spd; }
+    public void SetTargetWeight(int i, float w) { if (i >= 0 && i < _capacity) _tgtW[i] = w > 0.01f ? w : 1.0f; }
     public void SetSlot(int i, float ox, float oz) { if (i >= 0) { _slX[i] = ox; _slZ[i] = oz; } }
     public void SetAttackers(int i, int n) { if (i >= 0 && i < _capacity) _attackers[i] = n; }
     /// Строка цели атаки. Пишется по событию из Unit.set_attack_target
@@ -1469,6 +1481,13 @@ public partial class ArmyCore : RefCounted
 
     public GodotObject BestEnemy(int row, float radius, float crowdPenalty)
     {
+        return BestEnemyW(row, radius, crowdPenalty, false);
+    }
+
+    /// usePrio — делить счёт на вес цели (_tgtW): стрелки предпочитают
+    /// больших гоблинов (ТЗ 14.09.2026, п. 10). Рукопашная веса не читает
+    public GodotObject BestEnemyW(int row, float radius, float crowdPenalty, bool usePrio)
+    {
         if (row < 0) return null;
         float x = _px[row], z = _pz[row];
         int myf = _fac[row];
@@ -1509,9 +1528,59 @@ public partial class ArmyCore : RefCounted
                         // Число целящихся — из КОЛОНКИ, а не из поля объекта:
                         // чтение поля через Variant стоило бы дороже всего скана
                         float score = Mathf.Sqrt(d2) + _attackers[j] * crowdPenalty;
+                        if (usePrio) score /= _tgtW[j];
                         if (score < bestScore) { bestScore = score; best = u; }
                         j = _next[j];
                     }
+                }
+            }
+        }
+        return best;
+    }
+
+    /// САМЫЙ РАНЕНЫЙ СВОЙ В РАДИУСЕ (монах, qa_melee_bench 14.09.2026): по
+    /// колонкам hp/hpMax, без Godot-массива на каждый такт. Прежний путь
+    /// (QueryRadius + фильтр в GDScript по 300 бойцам свалки) давал тик
+    /// монаха до 5.8 мс. excludeRow — сам монах (он лечится своим правилом).
+    /// Возвращает null, если раненых нет (доля запаса < 0.999)
+    public GodotObject MostWoundedOfSide(float x, float z, int side, float radius, int excludeRow)
+    {
+        if (_gw == 0) return null;
+        int cx0 = (int)((x - radius - _gx0) * _ginv);
+        int cz0 = (int)((z - radius - _gz0) * _ginv);
+        int cx1 = (int)((x + radius - _gx0) * _ginv);
+        int cz1 = (int)((z + radius - _gz0) * _ginv);
+        if (cx1 < 0 || cz1 < 0 || cx0 >= _gw || cz0 >= _gh) return null;
+        if (cx0 < 0) cx0 = 0;
+        if (cz0 < 0) cz0 = 0;
+        if (cx1 >= _gw) cx1 = _gw - 1;
+        if (cz1 >= _gh) cz1 = _gh - 1;
+        float rSq = radius * radius;
+        int slot = FacSlot(side);
+        int dead = DeadState;
+        GodotObject best = null;
+        float bestFrac = 0.999f;
+        for (int cz = cz0; cz <= cz1; cz++)
+        {
+            int b = cz * _gw;
+            for (int cx = cx0; cx <= cx1; cx++)
+            {
+                int j = _head[(b + cx) * Factions + slot];
+                while (j != -1)
+                {
+                    if (j == excludeRow || _st[j] == dead || _fac[j] != side) { j = _next[j]; continue; }
+                    float mx = _hpMax[j];
+                    if (mx <= 0f) { j = _next[j]; continue; }
+                    float frac = _hp[j] / mx;
+                    if (frac >= bestFrac) { j = _next[j]; continue; }
+                    float dx = x - _px[j];
+                    float dz = z - _pz[j];
+                    if (dx * dx + dz * dz > rSq) { j = _next[j]; continue; }
+                    var u = _unitOf[j];
+                    if (u == null || !GodotObject.IsInstanceValid(u)) { j = _next[j]; continue; }
+                    bestFrac = frac;
+                    best = u;
+                    j = _next[j];
                 }
             }
         }

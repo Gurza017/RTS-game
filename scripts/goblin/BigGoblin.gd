@@ -58,6 +58,15 @@ var scans_skipped: int = 0
 var scans_done: int = 0
 ## Тяжёлый шаг
 var _step_t: float = 0.0
+## ── ОХОТА ВМЕСТО МАРША (ТЗ 14.09.2026, п. 6) ──────────────────────────────
+## Куда шла туша до перехвата (INF — не шла); пока hunting, поводок погони
+## BIG_PURSUIT_LIMIT, а поле чисто — возврат на _resume_to
+var _resume_to: Vector3 = Vector3.INF
+var hunting: bool = false
+var _hunt_t: float = 0.0
+## Стенды: сколько раз марш прерван боем и сколько раз возобновлён
+var hunts_started: int = 0
+var marches_resumed: int = 0
 
 func _ready() -> void:
 	_apply_config_stats("big_goblin")
@@ -114,6 +123,20 @@ func pick_radius() -> float:
 func ring_scale() -> float:
 	return _GobCfgB.BIG_SIZE_SCALE
 
+## Тонкий обвод вместо растянутого кольца бойца (13.09.2026, как у тролля)
+func fine_ring_radius() -> float:
+	return _GobCfgB.BIG_FINE_RING_R
+
+func ring_oval() -> Vector2:
+	return _GobCfgB.BIG_RING_OVAL
+
+## Лёгкое красное мигание при уроне вместо белого
+func hit_flash_peak() -> float:
+	return _GobCfgB.BIG_FLASH_PEAK
+
+func hit_flash_color() -> Color:
+	return _GobCfgB.BIG_FLASH_COLOR
+
 ## Стрелок целится в корпус, а не в ступни
 func aim_height() -> float:
 	return 1.4
@@ -121,6 +144,18 @@ func aim_height() -> float:
 ## ── ×2 УРОНА ОТ СТРЕЛ (заказ) ──────────────────────────────────────────────
 ## Множитель живёт на ЦЕЛИ и применяется в пути стрелы (`Arrow._strike`):
 ## рукопашная за него не платит ни одного сравнения
+## Приоритетная цель стрелков: множитель ×2 (ТЗ 14.09.2026, п. 10)
+func target_weight() -> float:
+	return _GobCfgB.BIG_TARGET_PRIO
+
+## Снайпер тушу не убивает с одной стрелы (ТЗ 14.09.2026): обычный урон с
+## бронепробитием и «Грозой великанов»; добивающий выстрел — стрела в голове
+func snipe_one_shot() -> bool:
+	return false
+
+func giant_class() -> bool:
+	return true
+
 func ranged_damage_mult() -> float:
 	return 2.0
 
@@ -190,6 +225,98 @@ func tick_physics(delta: float, prof: bool = false, bm: bool = true,
 		if _step_t <= 0.0:
 			_step_t = _GobCfgB.BIG_STEP_SEC
 			AudioManager.play_3d("big_step", global_position)
+	_tick_hunt(delta)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ПЕРЕХВАТ НА МАРШЕ: ЧУЖОЙ РЯДОМ ИЛИ УДАР — БРОСИТЬ ТОЧКУ, ДОБИТЬ, ВЕРНУТЬСЯ
+# ─────────────────────────────────────────────────────────────────────────────
+## Жалоба (ТЗ 14.09.2026, п. 6): туши по вейпоинтам орды шли сквозь отряды
+## игрока, получая урон, — к точке. Марш орды идёт command_move, а базовый
+## ответ на удар у идущего гасится (`_may_answer_blow`: «иду прочь»), и
+## контратака отряда (squad_counter_charge) — с откатом и поводком 7 м: за
+## кайтящим стрелком туша не шла. Теперь:
+##   • удар (take_damage) или чужой в BIG_AGGRO_RADIUS на марше → цель, марш
+##     запомнен в _resume_to;
+##   • на охоте поводок BIG_PURSUIT_LIMIT (pursuit_limit), кайт не спасает;
+##   • цель кончилась — ближайший чужой в BIG_HUNT_RADIUS; никого —
+##     возврат на прерванную точку (command_move), охота снята
+func _engage(foe: Node3D) -> void:
+	if foe == null or not is_instance_valid(foe) or _panicked or retreating:
+		return
+	var fu := foe as Unit
+	if fu == null or fu.is_dead() or int(fu.faction) == int(faction):
+		return
+	if not hunting:
+		hunting = true
+		hunts_started += 1
+		_resume_to = move_target if state == State.MOVING else Vector3.INF
+	command_attack(foe, true)
+
+func _hunt_scan(r: float) -> Node3D:
+	var mp: Vector3 = position if _local_xform else global_position
+	var best: Node3D = null
+	var bd := INF
+	for f in Constants.other_factions(faction):
+		var cand = GameManager.army.nearest_of_side(mp.x, mp.z, int(f), r)
+		if cand == null or not is_instance_valid(cand):
+			continue
+		var u := cand as Unit
+		if u == null or u.is_dead() or u.garrisoned:
+			continue
+		var q: Vector3 = u.global_position
+		var d2: float = Vector2(q.x - mp.x, q.z - mp.z).length_squared()
+		if d2 < bd:
+			bd = d2
+			best = u
+	return best
+
+func _tick_hunt(delta: float) -> void:
+	_hunt_t -= delta
+	if _hunt_t > 0.0:
+		return
+	_hunt_t = _GobCfgB.BIG_HUNT_TICK
+	if _panicked or retreating or garrisoned:
+		return
+	var t := attack_target
+	var alive: bool = t != null and is_instance_valid(t) \
+		and not (t is Unit and (t as Unit).is_dead())
+	if not hunting:
+		# На марше: чужой в радиусе агро — перехват
+		if state == State.MOVING and not alive:
+			var foe: Node3D = _hunt_scan(_GobCfgB.BIG_AGGRO_RADIUS)
+			if foe != null:
+				_engage(foe)
+		return
+	if alive:
+		return
+	# Цель кончилась: следующий чужой рядом, иначе — обратно на марш
+	var nxt: Node3D = _hunt_scan(_GobCfgB.BIG_HUNT_RADIUS)
+	if nxt != null:
+		command_attack(nxt, true)
+		return
+	hunting = false
+	if _resume_to.x != INF:
+		marches_resumed += 1
+		var to: Vector3 = _resume_to
+		_resume_to = Vector3.INF
+		command_move(to)
+
+func pursuit_limit() -> float:
+	return _GobCfgB.BIG_PURSUIT_LIMIT if hunting else PURSUIT_LIMIT
+
+## Удар — повод бросить вейпоинт, с любой дистанции (стрела, кость)
+func take_damage(amount: float, attacker: Node3D = null) -> void:
+	super.take_damage(amount, attacker)
+	if state == State.DEAD or attacker == null or not is_instance_valid(attacker):
+		return
+	if not (attacker is Unit):
+		return
+	var t := attack_target
+	var alive: bool = t != null and is_instance_valid(t) \
+		and not (t is Unit and (t as Unit).is_dead())
+	if alive and hunting:
+		return
+	_engage(attacker)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # УДАР: СЕКТОР, ОТБРОС, КОМБО

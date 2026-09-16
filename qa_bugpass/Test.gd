@@ -140,18 +140,24 @@ func _a_volley_area() -> void:
 # ═════════════════════════════════════════════════════════════════════════════
 func _b_lead() -> void:
 	print("\n═════ B. УПРЕЖДЕНИЕ ═════")
-	verdict("B1 доля выноса из конфига и она мала (5-10%)",
-		_UCfg.ARCHER_LEAD_FACTOR > 0.0 and _UCfg.ARCHER_LEAD_FACTOR <= 0.12,
+	# РАЗВОРОТ 15.09.2026 (ТЗ «Lead Targeting»): вынос ПОЛНЫЙ — точка = позиция
+	# + скорость × время полёта; прежние 5-10 % и были «стрелы позади бегущего»
+	verdict("B1 доля выноса из конфига и она полная (точка встречи)",
+		_UCfg.ARCHER_LEAD_FACTOR >= 0.99 and _UCfg.ARCHER_LEAD_FACTOR <= 1.0,
 		"ARCHER_LEAD_FACTOR=%.3f" % _UCfg.ARCHER_LEAD_FACTOR)
-	verdict("B2 у выноса есть потолок в метрах",
-		_UCfg.ARCHER_LEAD_MAX > 0.0 and _UCfg.ARCHER_LEAD_MAX < 6.0,
+	var v_fast: float = _UCfg.stat("goblin_rider", "movement_speed", 4.6)
+	var need: float = _UCfg.stat("archer", "attack_range_cap", 25.0) 		/ maxf(_UCfg.stat("archer", "arrow_speed", 9.0), 0.1) * v_fast
+	verdict("B2 у выноса есть потолок в метрах, и он не режет вынос по всаднику на предельной дальности (%.1f м)" % need,
+		_UCfg.ARCHER_LEAD_MAX > 0.0 and _UCfg.ARCHER_LEAD_MAX >= need,
 		"ARCHER_LEAD_MAX=%.2f м" % _UCfg.ARCHER_LEAD_MAX)
 	var speed: float = _UCfg.stat("archer", "arrow_speed", 9.0)
 	var rng: float = _UCfg.stat("archer", "attack_range", 20.0)
 	var full: float = (rng / maxf(speed, 0.1)) * 2.0        # цель идёт 2 м/с
 	var applied: float = minf(full * _UCfg.ARCHER_LEAD_FACTOR, _UCfg.ARCHER_LEAD_MAX)
-	verdict("B3 стрела не уходит на несколько корпусов вперёд цели",
-		applied <= _UCfg.ARCHER_LEAD_MAX + 0.001 and applied < full * 0.5,
+	# Вынос не БОЛЬШЕ физического (стрела не уходит вперёд цели) и не режется
+	# потолком на типичной дистанции
+	verdict("B3 вынос равен точке встречи: не больше физического и не срезан потолком",
+		applied <= full + 0.001 and applied >= full - 0.001,
 		"полный вынос %.1f м, фактический %.2f м" % [full, applied])
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -403,6 +409,15 @@ func _i_game_over() -> void:
 		else:
 			left_others += 1
 	await pframes(6)
+	# ── ГАРНИЗОН ВЫХОДИТ ИЗ РУИН ЖИВЫМ (15.09.2026) ──────────────────────
+	# Башни стартовой обороны — тоже Castle, и снос выпускает их лучников на
+	# карту (Castle._evacuate_on_death). Живой стрелок у руин — это законное
+	# «у фракции остались живые», а не поломка условия: добиваем и их, как
+	# добил бы игрок, и только потом спрашиваем про разгром
+	for n in get_tree().get_nodes_in_group("enemy_units"):
+		if is_instance_valid(n) and n is Unit and not (n as Unit).is_dead():
+			(n as Unit).take_damage((n as Unit).max_health * 10.0 + 1000.0, null)
+	await pframes(4)
 	var beaten: bool = bool(main.call("_faction_beaten", "enemy_units",
 		"enemy_buildings"))
 	print("  снесено крепостей %d, прочих построек осталось %d" % [killed, left_others])

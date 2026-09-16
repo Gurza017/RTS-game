@@ -1,0 +1,24 @@
+[remap]
+
+importer="wav"
+type="AudioStreamWAV"
+uid="uid://bm24wxf4dtiow"
+path="res://.godot/imported/Sniper_Archer_Attack.wav-9d4b248894c40abcdf51a8b7f648302f.sample"
+
+[deps]
+
+source_file="res://assets/factions/humans/Sounds Human/Sniper_Archer_Attack.wav"
+dest_files=["res://.godot/imported/Sniper_Archer_Attack.wav-9d4b248894c40abcdf51a8b7f648302f.sample"]
+
+[params]
+
+force/8_bit=false
+force/mono=false
+force/max_rate=false
+force/max_rate_hz=44100
+edit/trim=false
+edit/normalize=false
+edit/loop_mode=0
+edit/loop_begin=0
+edit/loop_end=-1
+compress/mode=2

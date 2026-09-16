@@ -80,8 +80,10 @@ func _check_size() -> void:
 	verdict("A2 форма 16:9 сохранена", absf(main.MAP_HALF_X / main.MAP_HALF_Z - 16.0 / 9.0) < 0.01)
 	var pa: Vector3 = main.PLAYER_BASE_ANCHOR
 	var ea: Vector3 = main.ENEMY_BASE_ANCHOR
-	verdict("A3 базы в противоположных углах", pa.x < -main.MAP_HALF_X * 0.7 and pa.z < -main.MAP_HALF_Z * 0.6
-		and ea.x > main.MAP_HALF_X * 0.7 and ea.z > main.MAP_HALF_Z * 0.6,
+	# ТЗ 14.09.2026, п. 3: обе базы на ЛЕВОМ берегу — игрок вверху, ИИ внизу,
+	# зеркально по Z; правый берег — земля орды
+	verdict("A3 базы в углах левого берега, зеркально по Z", pa.x < -main.MAP_HALF_X * 0.7 and pa.z < -main.MAP_HALF_Z * 0.6
+		and ea.x < -main.MAP_HALF_X * 0.7 and ea.z > main.MAP_HALF_Z * 0.6 and absf(pa.z + ea.z) < 0.01,
 		"игрок %s, ИИ %s" % [str(pa), str(ea)])
 	var fog = GameManager.fog
 	verdict("A4 маска тумана накрывает всё поле", fog != null
@@ -280,13 +282,18 @@ func _check_plateaus() -> void:
 	# Мины на плато: рудник стоит на вершине
 	var on_top := 0
 	var mines := 0
+	var fp: Vector3 = main.ford_point()
 	for b in get_tree().get_nodes_in_group("neutral_buildings"):
 		if b is Mine:
-			mines += 1
 			var bp: Vector3 = (b as Node3D).global_position
+			# Рудник У БРОДА (13.09.2026) стоит на песке переправы — плато под
+			# ним нет по замыслу (оно завалило бы реку); судим только рудники пути
+			if Vector2(bp.x - fp.x, bp.z - fp.z).length() < 30.0:
+				continue
+			mines += 1
 			if main.plateau_height(bp.x, bp.z) >= main.PLATEAU_MINE_H * 0.99:
 				on_top += 1
-	verdict("F10 ничейные рудники стоят на вершинах своих плато", mines > 0 and on_top == mines,
+	verdict("F10 ничейные рудники пути стоят на вершинах своих плато", mines > 0 and on_top == mines,
 		"%d из %d" % [on_top, mines])
 
 func _check_hill() -> void:
@@ -295,7 +302,16 @@ func _check_hill() -> void:
 	var top: float = main.get_terrain_height(hc.x, hc.y)
 	var castle: Vector3 = main.PLAYER_BASE_ANCHOR
 	var h_castle: float = main.get_terrain_height(castle.x, castle.z)
-	var far: float = main.get_terrain_height(hc.x + main.HILL_RADIUS * 2.0, hc.y)
+	# «Вдали» — МЕДИАНА по кольцу 2R (восемь направлений), а не одна проба
+	# на +X: с 14.09.2026 в той стороне лежит плато ничейного рудника, и
+	# одна проба мерила бы плато, а не поле
+	var ring: Array = []
+	for k in range(8):
+		var ang: float = TAU * float(k) / 8.0
+		ring.append(main.get_terrain_height(hc.x + cos(ang) * main.HILL_RADIUS * 2.0,
+			hc.y + sin(ang) * main.HILL_RADIUS * 2.0))
+	ring.sort()
+	var far: float = float(ring[4])
 	print("  вершина %.2f м, у замка %.2f, вдали %.2f; центр горы %s, замок %s" % [top, h_castle, far, str(hc), str(castle)])
 	verdict("D1 гора возвышается над окрестностью не меньше чем на %.0f м" % (main.HILL_HEIGHT * 0.8),
 		top - far >= main.HILL_HEIGHT * 0.8 and top - h_castle >= main.HILL_HEIGHT * 0.6,

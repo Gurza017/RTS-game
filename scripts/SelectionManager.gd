@@ -256,21 +256,16 @@ func _unhandled_input(event: InputEvent) -> void:
 							var world_end: Vector3 = hit["position"]
 							world_end.y = 0.0
 							_execute_line_formation(_rmb_world_start, world_end)
-				# ── РЕЖИМ СТРОЯ ПЕРЕЖИВАЕТ РАСТЯГ (заказ 13.09.2026) ────────
-				# ЗДЕСЬ СТОЯЛ СБРОС В ШИРОКИЙ ФРОНТ, и это ТРЕТИЙ разворот
-				# одного требования. История: режим запоминался → владелец
-				# прочёл это как «стена копий раздаётся всем войскам» (спринт
-				# 18, письмо 9) → режим стал жить один растяг (спринт 20) →
-				# теперь снова запоминается, и жалоба звучит ровно наоборот:
-				# «каждый раз приходится жать [2] заново».
-				#
-				# ПРИМИРЯЕТ ИХ ВИДИМОСТЬ, А НЕ СРОК ЖИЗНИ. Прежде запомненный
-				# режим был НЕВИДИМ: игрок не знал, в каком строю пойдёт
-				# следующий приказ, и коробочка выглядела самоволкой игры.
-				# Теперь режим показан в верхней панели (HUD._formation_label),
-				# и запомненная коробочка перестаёт быть сюрпризом.
-				# Меняют режим ТОЛЬКО клавиши [1]/[2] (см. _formation_key):
-				# ни выделение, ни новый приказ, ни отпускание ПКМ его не трогают
+				# ── РЕЖИМ СТРОЯ ПЕРЕЖИВАЕТ РАСТЯГ (ТЗ 14.09.2026, п. 4) ──────
+				# ПЯТЫЙ разворот одной ручки, и на этот раз требование записано
+				# явно: «переключённый пресет запоминается; все последующие
+				# растяги ПКМ строят сетку по текущему запомненному пресету,
+				# пока игрок явно не переключит хоткей». История: запоминался →
+				# один растяг (спринт 20) → запоминался (13.09 утро) → один
+				# растяг (13.09 вечер) → запоминается (14.09). Сброса здесь НЕТ;
+				# режим меняют только клавиши [1]/[2] (_formation_key), а в
+				# верхней панели он написан (HUD._formation_label) — невидимый
+				# запомненный строй и читался прежде как самоволка игры
 				_rmb_down = false
 				_rmb_dragging = false
 
@@ -2043,6 +2038,13 @@ func _handle_right_click(screen_pos: Vector2, run: bool = false) -> void:
 	# ставит точку сбора В КООРДИНАТАХ КЛИКА, кто бы там ни стоял
 	if _rally_click(pos):
 		return
+	# ── ПКМ МОНАХОМ ПО СВОЕМУ БОЙЦУ — ПРИКАЗ ЛЕЧИТЬ (ТЗ 14.09.2026, п. 9) ────
+	# Игрок вручную указал монаху отряд/бойца: автопоиск раненых сброшен,
+	# монах лечит и поднимает павших ЭТОГО отряда до полного исполнения
+	# (Monk.command_heal). Остальным выделенным — обычный марш к точке
+	if target != null and target is Unit and target.faction == Constants.FACTION_PLAYER \
+			and _try_monk_heal_order(target as Unit):
+		return
 	# ── КЛИК ПО ХИТБОКСУ ОТРЯДА, А НЕ ПО ЧЕЛОВЕЧКУ ──────────────────────────
 	# Луч/сетка нашли под курсором только грунт (или своего), а рядом с этой
 	# точкой стоит чужой строй — значит игрок целился в отряд и промазал мимо
@@ -2368,6 +2370,11 @@ const GROUP_CELL_GAP := Unit.SEP_CROSS_SQUAD * Unit.SEP_MIN_DIST + 2.0
 ## заведомо больше любого компактного отряда и заведомо меньше растянутой в
 ## нитку колонны, из-за которой сетка и разъезжалась
 const GROUP_CELL_MAX := 20.0
+## Ниже этого разброса центров отрядов офсетов у группы нет (все в одной
+## точке) — раскладываем сеткой; иначе блок переносится как есть
+const GROUP_SHAPE_MIN_SPREAD := 3.0
+## Стендам: сколько групповых приказов ушло блоком
+var group_block_orders: int = 0
 
 ## Насколько отряды считаются стоящими НА ОДНОЙ ГЛУБИНЕ при раздаче ячеек.
 ## Больше обычного разброса центров масс у выровненной группы и заметно меньше
@@ -2432,114 +2439,105 @@ func _issue_group_grid_move(movable: Array, center: Vector3, run: bool) -> bool:
 		if sid2 <= 0:
 			loose.append_array(arr2)
 
-	# ЕДИНЫЙ КУРС ВСЕЙ ГРУППЫ: от общего центра масс к точке приказа. По нему
-	# же ориентируется сетка, поэтому «слева/справа/сзади» — это слева, справа
-	# и сзади ОТНОСИТЕЛЬНО ХОДА ГРУППЫ, а не сторон света
+	# ── ГРУППА ИДЁТ ЕДИНЫМ БЛОКОМ: ОФСЕТЫ ОТРЯДОВ СОХРАНЯЮТСЯ (ТЗ 14.09.2026, п. 7)
+	# Прежняя сетка ceil(√n) заново раскладывала отряды у точки клика: армия
+	# из 18 отрядов, стоявшая в своём порядке (скриншот 7), у брода получала
+	# другой порядок и ломала строй (скриншот 8). Теперь: центр группы —
+	# медиана центров отрядов, точка клика — куда идёт ЭТОТ центр, каждый
+	# отряд получает свою ячейку = клик + (свой центр − центр группы). Курс
+	# один на всех (иначе фланги приходят веером); полосы брода раздаются
+	# от центра группы со сжатием в ширину переправы (squad_set_ford_lane).
+	# Сетка (_group_grid_cols) осталась для вырожденного случая — когда
+	# отряды стоят друг на друге и офсетов у них нет
 	var course := _group_course(movable, center)
 	if course.length_squared() < 1e-6:
 		course = Vector3.FORWARD
 	var across := Vector3(-course.z, 0.0, course.x)
 
-	# Ячейка одна на всех — по самому крупному отряду: разные размеры ячеек
-	# развалили бы ряды, а одинаковые дают ровную сетку при любом составе
-	var cell_w := 0.0
-	var cell_d := 0.0
-	for s in squads:
-		var e := _squad_extent(s as Array, course, across)
-		cell_w = maxf(cell_w, e.x)
-		cell_d = maxf(cell_d, e.y)
-	# ── ЯЧЕЙКА ПО САМОМУ КРУПНОМУ, НО НЕ ПО САМОМУ ШИРОКОМУ ────────────────
-	# Ячейка одна на всех и берётся по МАКСИМУМУ габаритов — иначе ряды
-	# развалятся. Но максимум по разношёрстному выделению задаёт один
-	# растянутый отряд, и все остальные получают ячейку под него: пять
-	# компактных блоков разъезжались, потому что в выделении был один широкий.
-	# Поэтому габарит зажимается сверху: шире GROUP_CELL_MAX ячейка не растёт,
-	# а отряд, который в неё не влез, просто стоит чуть плотнее к соседу
-	cell_w = minf(cell_w, GROUP_CELL_MAX) + GROUP_CELL_GAP
-	cell_d = minf(cell_d, GROUP_CELL_MAX) + GROUP_CELL_GAP
-
 	var n: int = squads.size()
-	var cols: int = mini(_group_grid_cols(n), n)
-
-	# ── ЯЧЕЙКИ РАЗДАЮТСЯ ПО ФАКТИЧЕСКОМУ ПОЛОЖЕНИЮ ОТРЯДОВ ──────────────────
-	# Порядок в `squads` — это порядок появления отрядов в выделении, то есть по
-	# сути порядок реестра. Раздавать ячейки по нему нельзя: отряд, стоящий на
-	# левом фланге, легко получал ячейку справа и шёл туда НАСКВОЗЬ через соседей.
-	# Десять отрядов при этом пересекались все со всеми, перемешивались и, пока
-	# расталкивание разбирало кашу, разбегались в стороны — ровно жалоба «бегут в
-	# одну точку и встают хаотично».
-	#
-	# Сортируем ровно в том порядке, в каком раскладываются ячейки: сперва по
-	# глубине вдоль курса (передние ряды сетки — передним отрядам), затем внутри
-	# каждого ряда слева направо. Это та же топология, что у шеренг внутри отряда
-	# (см. _topo_order), только единица здесь — отряд, а точка — его центр масс.
-	# Пути перестают пересекаться: группа сдвигается параллельно
 	var cents: Array = []
 	for s in squads:
-		var c := Vector3.ZERO
-		for u in (s as Array):
-			c += (u as Node3D).global_position
-		c /= float(maxi((s as Array).size(), 1))
+		var c: Vector3 = GameManager._centroid_of(s as Array)
+		c.y = 0.0
 		cents.append(c)
-	var order: Array = []
-	for i0 in range(n):
-		order.append(i0)
-	# Сортировка по глубине с ДОПУСКОМ и добором по ширине. Без допуска отряды,
-	# стоящие в одну шеренгу (а это самый обычный случай — они и так выровнены),
-	# имеют почти равную глубину, сравнение решает микрометровая разница, и
-	# порядок выходит случайным: соседние по фронту отряды попадали в разные ряды
-	# сетки вперемешку. С допуском такая группа честно упорядочивается слева
-	# направо, и ряды сетки набираются подряд идущими соседями
-	order.sort_custom(func(a, b):
-		var da: float = (cents[a] as Vector3).dot(course)
-		var db: float = (cents[b] as Vector3).dot(course)
-		if absf(da - db) > GROUP_DEPTH_EPS:
-			return da > db
-		return (cents[a] as Vector3).dot(across) < (cents[b] as Vector3).dot(across))
-	var oi := 0
-	while oi < n:
-		var last: int = mini(oi + cols, n)
-		var row_slice: Array = order.slice(oi, last)
-		row_slice.sort_custom(func(a, b):
-			return (cents[a] as Vector3).dot(across) < (cents[b] as Vector3).dot(across))
-		for k in range(row_slice.size()):
-			order[oi + k] = row_slice[k]
-		oi = last
-	var sorted_squads: Array = []
-	for i1 in order:
-		sorted_squads.append(squads[int(i1)])
-	squads = sorted_squads
+	# Центр группы — медиана центров отрядов (устойчива к застрявшему
+	# в стороне отряду, как и центр самого отряда)
+	var xs: Array = []
+	var zs: Array = []
+	for c0 in cents:
+		xs.append((c0 as Vector3).x)
+		zs.append((c0 as Vector3).z)
+	xs.sort(); zs.sort()
+	var gc := Vector3(float(xs[n / 2]), 0.0, float(zs[n / 2]))
 
 	# ── СВОИ ДРУГ ДРУГУ НЕ ПОМЕХА ──────────────────────────────────────────
-	# Отряды, которым раздают приказ ЭТИМ ЖЕ кликом, уже разведены сеткой
-	# ячеек. Считать их занятыми местами значило бы развести их дважды: сетка
-	# поставила рядом, а разведение растолкало бы ещё дальше — и группа
-	# расползлась бы вместо блока (см. GameManager.free_squad_spot)
+	# Отряды, которым раздают приказ ЭТИМ ЖЕ кликом, уже разведены своими
+	# офсетами. Считать их занятыми местами значило бы развести их дважды
+	# (см. GameManager.free_squad_spot)
 	var same_order: Dictionary = {}
 	for b3 in squads:
 		var arr3: Array = b3
 		if not arr3.is_empty() and arr3[0] is Unit:
 			same_order[(arr3[0] as Unit).squad_id] = true
+
+	# Вырождение: все центры в одной точке (свежие заказы на одной площадке,
+	# отряды друг на друге) — офсетов нет, раскладываем сеткой как прежде
+	var spread := 0.0
+	for c1 in cents:
+		spread = maxf(spread, Vector2((c1 as Vector3).x - gc.x, (c1 as Vector3).z - gc.z).length())
+	var offsets: Array = []
+	if spread < GROUP_SHAPE_MIN_SPREAD:
+		var cols: int = mini(_group_grid_cols(n), n)
+		var cell_w := 0.0
+		var cell_d := 0.0
+		for s1 in squads:
+			var e := _squad_extent(s1 as Array, course, across)
+			cell_w = maxf(cell_w, e.x)
+			cell_d = maxf(cell_d, e.y)
+		cell_w = minf(cell_w, GROUP_CELL_MAX) + GROUP_CELL_GAP
+		cell_d = minf(cell_d, GROUP_CELL_MAX) + GROUP_CELL_GAP
+		for i in range(n):
+			var row: int = i / cols
+			var col: int = i % cols
+			var in_row: int = mini(cols, n - row * cols)
+			var off_a: float = (float(col) - float(in_row - 1) * 0.5) * cell_w
+			offsets.append(across * off_a - course * (float(row) * cell_d))
+	else:
+		for c2 in cents:
+			offsets.append((c2 as Vector3) - gc)
+
+	# ── ПОЛОСЫ БРОДА ОТ ЦЕНТРА ГРУППЫ ─────────────────────────────────────
+	# Вся группа по Z ужимается в проходимую ширину брода (k ≤ 1), порядок
+	# отрядов по Z сохраняется: колонна, а не куча в одной полосе
+	var z_min := INF
+	var z_max := -INF
+	for s2 in squads:
+		for u2 in (s2 as Array):
+			var pz: float = (u2 as Node3D).global_position.z
+			z_min = minf(z_min, pz)
+			z_max = maxf(z_max, pz)
+	var usable: float = 2.0 * maxf(float(GameManager.main.FORD_HALF) - float(GameManager.main.FORD_LANE_MARGIN), 1.0) \
+		if GameManager.main != null else 28.0
+	var k: float = 1.0
+	if z_max - z_min > usable:
+		k = usable / (z_max - z_min)
+	for i2 in range(n):
+		var sid_i: int = ((squads[i2] as Array)[0] as Unit).squad_id
+		GameManager.squad_set_ford_lane(sid_i, ((cents[i2] as Vector3).z - gc.z) * k, k)
+	group_block_orders += 1
+
 	for i in range(n):
-		var row: int = i / cols
-		var col: int = i % cols
-		# Сколько блоков реально стоит в ЭТОМ ряду — по нему ряд и центрируется,
-		# поэтому неполный последний ряд стоит посередине, а не с краю
-		var in_row: int = mini(cols, n - row * cols)
-		var off_a: float = (float(col) - float(in_row - 1) * 0.5) * cell_w
-		# ПЕРВЫЙ РЯД ВСТАЁТ РОВНО В ТОЧКУ КЛИКА, следующие — позади него.
-		# Именно поэтому при трёх отрядах центральный оказывается точно там,
-		# куда показал игрок, а не «где-то в середине общей кучи»
-		var cell_centre: Vector3 = center + across * off_a - course * (float(row) * cell_d)
+		var cell_centre: Vector3 = center + (offsets[i] as Vector3)
 		# Внутренний строй отряда переносится как есть; курс — общий на группу,
 		# иначе фланговые блоки пришли бы веером (см. course_override)
 		_issue_march_keeping_shape(squads[i] as Array, cell_centre, false, run,
 			course, same_order)
-	# Одиночки — своей ячейкой позади сетки: строя у них нет, но приказ есть
+	var rows_n: int = int(ceil(float(n) / float(maxi(_group_grid_cols(n), 1))))
+	var cell_d_loose: float = GROUP_CELL_MAX + GROUP_CELL_GAP
+	# Одиночки — своей ячейкой позади блока: строя у них нет, но приказ есть
 	if not loose.is_empty():
-		var rows_n: int = int(ceil(float(n) / float(maxi(cols, 1))))
 		_issue_march_keeping_shape(loose,
-			center - course * (float(rows_n) * cell_d), false, run, course, same_order)
+			center - course * (float(rows_n) * cell_d_loose), false, run, course, same_order)
 	return true
 
 ## ЗАПОМНИТЬ РАЗМЕТКУ ЗА КАЖДЫМ ОТРЯДОМ ВЫДЕЛЕНИЯ.
@@ -2605,6 +2603,12 @@ func _issue_march_keeping_shape(movable: Array, center: Vector3,
 	# GameManager.free_squad_spot). Лечить это расталкиванием нельзя — оно
 	# разводит тела, но не знает про отряды, и две сотни бойцов, которым велено
 	# стоять в одной точке, оно будет разводить вечно
+	# Приказ вне группы (course_override пуст) — полоса брода снова своя
+	if course_override.length_squared() < 1e-6:
+		for u_l in movable:
+			if u_l is Unit and (u_l as Unit).squad_id > 0:
+				GameManager.squad_set_ford_lane((u_l as Unit).squad_id, 0.0, 1.0)
+				break
 	var my_sid: int = 0
 	for u0 in movable:
 		if u0 is Unit and (u0 as Unit).squad_id > 0:
@@ -2700,14 +2704,47 @@ func current_group_index() -> int:
 			return idx
 	return -1
 
+## ПКМ монахом по своему бойцу: все выделенные монахи получают приказ лечить
+## его отряд (Monk.command_heal). false — монахов в выделении нет
+func _try_monk_heal_order(target: Unit) -> bool:
+	var monks: Array = []
+	for u in selected_units:
+		if is_instance_valid(u) and u is Unit and (u as Unit).has_method("command_heal") \
+				and (u as Unit).faction == Constants.FACTION_PLAYER and not (u as Unit).is_dead():
+			monks.append(u)
+	if monks.is_empty():
+		return false
+	for m in monks:
+		(m as Unit).call("command_heal", target)
+	monk_heal_orders += 1
+	# Не-монахи выделения идут к цели обычным маршем
+	var rest: Array = []
+	for u2 in selected_units:
+		if is_instance_valid(u2) and not monks.has(u2) and u2.has_method("command_move"):
+			rest.append(u2)
+	if not rest.is_empty():
+		var p: Vector3 = target.global_position
+		p.y = 0.0
+		var keep: Array = selected_units
+		selected_units = rest
+		_issue_formation_move(p, false)
+		selected_units = keep
+	return true
+## Стендам: сколько раз ПКМ монахом прочитан как приказ лечить
+var monk_heal_orders: int = 0
+
 ## ПКМ по своей башне с гарнизоном — лучники выходят. false — это не башня,
 ## не своя или внутри пусто
 func _try_release_tower(target) -> bool:
 	if target == null or not is_instance_valid(target) or not (target is Castle):
 		return false
 	var c := target as Castle
-	if c.is_stronghold() or c.faction != Constants.FACTION_PLAYER:
+	if c.faction != Constants.FACTION_PLAYER:
 		return false
+	# Крепость: ПКМ пустым выделением снимает ТОЛЬКО стрелков с крыши, лазарет
+	# внутри не трогается (ТЗ 14.09.2026)
+	if c.is_stronghold():
+		return c.release_roof()
 	if not c.has_method("release_all"):
 		return false
 	return bool(c.call("release_all"))

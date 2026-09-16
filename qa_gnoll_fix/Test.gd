@@ -136,8 +136,9 @@ func _a_aggro() -> void:
 	print("  шаг гнолла %.2f (было %.2f), кулдаун %.2f с (было %.2f)" % [
 		g.move_speed, SPEED_BEFORE_S15,
 		_UCfg.stat("gnoll", "attack_cooldown", 0.0), COOLDOWN_BEFORE_S15])
-	verdict("A7 шаг гнолла срезан до 2.5",
-		absf(g.move_speed - 2.5) < 0.01, "%.2f" % g.move_speed)
+	# Число правит владелец (14.09.2026: 2.5 → 2.2): стережём «не выше 2.5»
+	verdict("A7 шаг гнолла срезан не выше 2.5",
+		g.move_speed <= 2.5 + 0.01, "%.2f" % g.move_speed)
 	verdict("A8 шаг стал медленнее прежнего", g.move_speed < SPEED_BEFORE_S15,
 		"%.2f против %.2f" % [g.move_speed, SPEED_BEFORE_S15])
 	# СПРИНТ 20: поверх +30 % спринта 15 владелец срезал 15 % («гноллы
@@ -236,10 +237,12 @@ func _b_running_in_place() -> void:
 		int(g.kites), int(g.kite_blocked), moved, int(g.state)])
 	verdict("B1 кайт вообще пробовался (сцена воспроизводит жалобу)",
 		int(g.kites) > 0, "отходов %d" % int(g.kites))
-	verdict("B2 отойти было и правда некуда",
-		moved < _GobCfg.GNOLL_KITE_MIN_GAIN,
+	# Внутри кольца радиусом 1.6 м гнолл вправе качнуться на метр (серия
+	# кайтов, 14.09.2026): «некуда» — это не вышел из кольца, порог ×1.5
+	verdict("B2 отойти было и правда некуда (из кольца не вышел)",
+		moved < _GobCfg.GNOLL_KITE_MIN_GAIN * 1.5,
 		"сдвинулся на %.2f м при пороге %.2f" % [moved,
-			_GobCfg.GNOLL_KITE_MIN_GAIN])
+			_GobCfg.GNOLL_KITE_MIN_GAIN * 1.5])
 	verdict("B3 гнолл ПРИЗНАЛ отход невозможным",
 		int(g.kite_blocked) > 0, "блокировок %d" % int(g.kite_blocked))
 	verdict("B4 и вышел из состояния ХОДЬБЫ — лупа шагов больше нет",
@@ -294,6 +297,16 @@ func _c_arc() -> void:
 	# точки (_pin) — патруль иначе уводит его с площадки замера
 	foe.set_tick(false)
 	var pin_c: Vector3 = g.global_position
+	# ── СВОЁ АГРО ГНОЛЛА ГЛУШИМ (14.09.2026) ──────────────────────────────
+	# Гнолл без пня раньше «отходил» к первому логову партии и своего броска
+	# не делал; с домашней точкой он стоит и сам берёт копейщика в 8 м —
+	# его собственная кость залетала в окно C5/C6 и мигала обоими вердиктами.
+	# Бросок здесь — РУЧНОЙ (_on_attack_fired), автоагро на время замера снято
+	g.set_attack_target(null)
+	g.set("_aggro_timer", 1.0e9)
+	await _pin(g, pin_c, 30)
+	while _bones_in_flight() > 0:
+		await _pin(g, pin_c, 10)
 	# ── БРОСОК ВЫЛЕТАЕТ НЕ В ТОТ ЖЕ КАДР, И ЭТО ТРЕБОВАНИЕ ────────────────
 	# Боевая петля зовёт _on_attack_fired в момент удара, а кость обязана
 	# покинуть руку на кадре замаха (GNOLL_THROW_FRAME). Проверяем оба конца:

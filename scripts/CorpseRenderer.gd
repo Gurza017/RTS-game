@@ -42,6 +42,7 @@ extends RefCounted
 
 const _SHADER := preload("res://shaders/mm_corpse.gdshader")
 const _Vis := preload("res://scripts/units/UnitVisuals.gd")
+const _UCfgC := preload("res://scripts/unit_stats_config.gd")
 
 const GROW_STEP := 512
 
@@ -604,6 +605,8 @@ func spawn(unit: Unit, world_root: Node3D, ground_y: float) -> Corpse:
 	c.raisable = c.faction != Constants.FACTION_GOBLIN \
 		and Building.PRELOAD_SCENES.has(c.unit_id) and c.unit_id != "troll"
 	_list.append(c)
+	if c.raisable:
+		_raisable_add(c)
 	spawned_total += 1
 
 	# ── ЛИМИТ: САМЫЕ СТАРЫЕ НАЧИНАЮТ ГАСНУТЬ ───────────────────────────────
@@ -861,14 +864,33 @@ func attach_arrow(c, arrow) -> bool:
 ## ПОД КАКИМ УГЛОМ. Вектор попадания доворачивается на свой для каждого тела
 ## угол: строго по траектории все стрелы на поле смотрели бы в одну сторону,
 ## как расчёска
-func stick_arrows(c, killer, incoming: Vector3) -> bool:
+func stick_arrows(c, killer, incoming: Vector3, head: bool = false) -> bool:
 	var cc := c as Corpse
 	if cc == null or killer == null:
 		return false
 	if not attach_arrow(cc, killer):
 		return false
-	killer.call("stick_decor", _arrow_spot(cc), _arrow_dir(cc, incoming))
+	var spot: Vector3 = _head_spot(cc) if head else _arrow_spot(cc)
+	killer.call("stick_decor", spot, _arrow_dir(cc, incoming))
 	return true
+
+## ── ГОЛОВА ЛЕЖАЩЕГО (снайперская стрела, ТЗ 14.09.2026) ───────────────────
+## Локальный +Y квада (верх рисунка, голова) лежит по (sin yaw, 0, −cos yaw) —
+## та же ось, что «along» у _arrow_spot. Смещение — доля высоты квада
+## (SNIPE_HEAD_ALONG) с масштабом тела: верхняя часть силуэта
+func _head_spot(cc: Corpse) -> Vector3:
+	var qs: Vector2 = (cc.bucket.mm.mesh as QuadMesh).size
+	var along: float = qs.y * cc.scl * _UCfgC.SNIPE_HEAD_ALONG
+	return Vector3(cc.pos.x + sin(cc.yaw) * along,
+		cc.pos.y + 0.02,
+		cc.pos.z - cos(cc.yaw) * along)
+
+## Точка головы тела (для стендов): та же геометрия, что у стрелы
+func head_spot_of(c) -> Vector3:
+	var cc := c as Corpse
+	if cc == null:
+		return Vector3.INF
+	return _head_spot(cc)
 
 ## Точка стрелы в туловище. Считается в осях ТЕЛА и переводится в мировые его
 ## же поворотом — так стрела лежит на теле при любой его ориентации
@@ -919,18 +941,44 @@ func _drop_arrows(cc: Corpse) -> void:
 ## нечем. По роду войск ответ выходит тот же самый — монахов на поле
 ## единицы, — и не требует второго реестра, который пришлось бы вести
 ## через смерть.
+## ── РЕЕСТР ГОДНЫХ К ПОДЪЁМУ — ПО ФРАКЦИИ (qa_melee_bench, 14.09.2026) ──────
+## Монах спрашивает тела раз в такт, и прежний обход шёл по ВСЕМУ слою
+## (до 5000 тел, орда и тролли включительно) — тик монаха до 5.8 мс в
+## замесе. Здесь только тела людей своей стороны; погасшие и снятые
+## отсеиваются лениво, при обходе (swap-remove), второго события не нужно
+var _raisable: Dictionary = {}     # faction → Array[Corpse]
+
+func _raisable_add(c) -> void:
+	var f: int = int(c.faction)
+	var arr: Variant = _raisable.get(f)
+	if arr == null:
+		_raisable[f] = [c]
+	else:
+		(arr as Array).append(c)
+
+## Живые (не снятые, не гаснущие) тела фракции; список чистится по ходу
+func _raisable_list(fac: int) -> Array:
+	var raw: Variant = _raisable.get(fac)
+	if raw == null:
+		return []
+	var arr: Array = raw
+	var i: int = arr.size() - 1
+	while i >= 0:
+		var cc := arr[i] as Corpse
+		if cc == null or cc.index < 0 or cc.fade_left >= 0.0:
+			arr[i] = arr[arr.size() - 1]
+			arr.pop_back()
+		i -= 1
+	return arr
+
 func find_raisable_priority(fac: int, at: Vector3, radius: float,
 	want_id: String, _asker_squad: int = 0):
 	var best_want = null
 	var best_any = null
 	var dw: float = radius * radius
 	var da: float = radius * radius
-	for c in _list:
+	for c in _raisable_list(fac):
 		var cc := c as Corpse
-		if cc == null or cc.index < 0 or not cc.raisable or cc.fade_left >= 0.0:
-			continue
-		if cc.faction != fac:
-			continue
 		var dx: float = cc.pos.x - at.x
 		var dz: float = cc.pos.z - at.z
 		var d2: float = dx * dx + dz * dz
@@ -946,12 +994,8 @@ func find_raisable_priority(fac: int, at: Vector3, radius: float,
 func find_raisable(fac: int, at: Vector3, radius: float):
 	var best: Corpse = null
 	var bd: float = radius * radius
-	for c in _list:
+	for c in _raisable_list(fac):
 		var cc := c as Corpse
-		if cc == null or cc.index < 0 or not cc.raisable or cc.fade_left >= 0.0:
-			continue
-		if cc.faction != fac:
-			continue
 		var dx: float = cc.pos.x - at.x
 		var dz: float = cc.pos.z - at.z
 		var d: float = dx * dx + dz * dz
@@ -961,12 +1005,7 @@ func find_raisable(fac: int, at: Vector3, radius: float):
 	return best
 
 func raisable_count(fac: int) -> int:
-	var n := 0
-	for c in _list:
-		var cc := c as Corpse
-		if cc != null and cc.index >= 0 and cc.raisable and cc.fade_left < 0.0 and cc.faction == fac:
-			n += 1
-	return n
+	return _raisable_list(fac).size()
 
 func count() -> int:
 	_compact()

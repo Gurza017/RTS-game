@@ -82,8 +82,12 @@ func _run() -> void:
 ## отношения не имеют — их стережёт qa_troll
 func _goblins() -> Array:
 	var out: Array = []
+	var ai = main.goblin_ai
 	for u in get_tree().get_nodes_in_group("goblin_units"):
 		if is_instance_valid(u) and String((u as Unit).stat_id) != "troll":
+			# Дремлющий резерв (13.09.2026) спит своим сном и в орду не входит
+			if ai != null and ai.reserve_sids.has((u as Unit).squad_id):
+				continue
 			out.append(u)
 	return out
 
@@ -99,6 +103,9 @@ func _horde_squads() -> Array:
 		# Стража рудника орды (спринт 17) — тоже не стартовый состав деревни
 		var ai = main.goblin_ai
 		if ai != null and ai.mine_guard_sids.has(int((sq as Dictionary).get("id", 0))):
+			continue
+		# Дремлющий резерв за лагерем (13.09.2026) — тоже не стартовый состав
+		if ai != null and ai.reserve_sids.has(int((sq as Dictionary).get("id", 0))):
 			continue
 		out.append(sq)
 	return out

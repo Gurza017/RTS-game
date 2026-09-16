@@ -204,9 +204,14 @@ func _b_phalanx() -> void:
 	for k in rows:
 		lo = mini(lo, int(rows[k]))
 		hi = maxi(hi, int(rows[k]))
+	# СЦЕНАРИЙ КАРТЫ (13.09.2026): на марше вдали от брода копейщики идут
+	# PHALANX_RANKS_MARCH шеренги, глубокий строй — ближе FORD_DEEP_RANGE
+	var near_ford: bool = Vector2(base.x - ai.red.ford_point().x,
+		base.z - ai.red.ford_point().z).length() <= _AICfg.FORD_DEEP_RANGE
+	var want_ranks: int = _AICfg.PHALANX_RANKS if near_ford else _AICfg.PHALANX_RANKS_MARCH
 	verdict("B1 глубина строя равна заданному числу шеренг",
-		depth == _AICfg.PHALANX_RANKS,
-		"шеренг %d при PHALANX_RANKS=%d, состав %s" % [depth, _AICfg.PHALANX_RANKS, rows])
+		depth == want_ranks,
+		"шеренг %d при ожидаемых %d (у брода=%s), состав %s" % [depth, want_ranks, str(near_ford), rows])
 	verdict("B2 шеренги ровные (разница не больше бойца)", hi - lo <= 1,
 		"самая длинная %d, самая короткая %d" % [hi, lo])
 

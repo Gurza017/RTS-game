@@ -141,30 +141,38 @@ func _run() -> void:
 	var sid: int = blk[0]
 	var men: Array = blk[1]
 	verdict("B2 режим виден отряду и включён по умолчанию", GameManager.spear_wall_ready(sid))
-	# Переход в «Защиту» через панель — построение в три шеренги
+	# ── «ЗАЩИТА» У СТОЯЩЕГО ОТРЯДА — БЕЗ ПЕРЕСТРОЕНИЯ (ТЗ 14.09.2026, п. 8) ──
+	# Прежде стена копий по переходу в «Защиту» заново раскладывала три
+	# шеренги и слала command_move каждому — «копейщики переступают ногами и
+	# только потом опускают копья». Стоящий отряд теперь получает стойку на
+	# месте: построений ноль, никто не тронулся; три шеренги — дело растяга
+	# ПКМ (_block_formation_slots, спринт 20)
 	var sm = main.selection_manager
 	sm.select_units(men)
 	var forms0: int = GameManager.spear_wall_forms
 	sm.set_selection_stance("defense")
 	await pframes(2)
-	var slots: Array = (GameManager.squads[sid] as Dictionary).get("slots", [])
-	var depth := 0.0
-	var width := 0.0
-	if slots.size() >= 2:
-		var course: Vector3 = GameManager.squad_course(sid)
-		var mn := 1e9; var mx := -1e9; var wn := 1e9; var wx := -1e9
-		var across := Vector3(-course.z, 0.0, course.x)
-		for sl in slots:
-			var v: Vector3 = sl
-			var d: float = v.dot(course)
-			var w: float = v.dot(across)
-			mn = minf(mn, d); mx = maxf(mx, d); wn = minf(wn, w); wx = maxf(wx, w)
-		depth = mx - mn
-		width = wx - wn
-	verdict("B3 «Защита» строит стену в ТРИ шеренги (глубина = 2 ряда по %.2f м)" % GameManager.BLOCK_ROW_DEPTH,
-		GameManager.spear_wall_forms == forms0 + 1 and slots.size() == men.size()
-		and absf(depth - 2.0 * GameManager.BLOCK_ROW_DEPTH) < 0.05,
-		"построений %d, мест %d, глубина %.2f, ширина %.2f" % [GameManager.spear_wall_forms - forms0, slots.size(), depth, width])
+	var moving := 0
+	var in_def := 0
+	for u in men:
+		if (u as Unit).state == Unit.State.MOVING:
+			moving += 1
+		if (u as Unit).stance == "defense":
+			in_def += 1
+	verdict("B3 «Защита» у стоящего отряда — стойка у всех сразу, перестроения нет",
+		GameManager.spear_wall_forms == forms0 and moving == 0 and in_def == men.size(),
+		"построений %d, идут %d, в обороне %d из %d" % [GameManager.spear_wall_forms - forms0, moving, in_def, men.size()])
+	# Растяг ПКМ у копейщиков со стеной ложится в три шеренги (спринт 20)
+	var la := p0 + Vector3(-3.0, 0.0, 12.0)
+	var lb := p0 + Vector3(3.0, 0.0, 12.0)
+	var plan: Dictionary = sm._block_formation_slots(la, lb, men)
+	var slots: Array = plan.get("slots", [])
+	var rows_max := -1
+	for r in plan.get("rows", []):
+		rows_max = maxi(rows_max, int(r))
+	verdict("B3б растяг ПКМ у стены копий — ТРИ шеренги (SPEAR_WALL_ROWS %d)" % GameManager.SPEAR_WALL_ROWS,
+		slots.size() == men.size() and rows_max + 1 == GameManager.SPEAR_WALL_ROWS,
+		"мест %d, шеренг %d" % [slots.size(), rows_max + 1])
 	await pframes(60 * 4)
 	for u in men:
 		(u as Unit)._facing = Vector3(0.0, 0.0, -1.0)
@@ -336,8 +344,10 @@ func _run() -> void:
 	# закрашено больше прежних 12 %, но меньше сплошной заливки диска
 	# Только тонкий контур: закрашено меньше прежних 12 %, центр прозрачен
 	var cpx: int = monk.AURA_PX / 2
-	verdict("C4 только контур овала, без креста и заливки (закрашено %.1f %% кадра: 2…12 %%)" % (frac * 100.0),
-		frac >= 0.02 and frac < 0.12 and img.get_pixel(cpx, cpx).a < 0.5)
+	# 14.09.2026: контур — круг (квад плашмя), пикселей у круга больше, чем
+	# у сжатого овала: потолок 25 % кадра, центр по-прежнему прозрачен
+	verdict("C4 только контур, без креста и заливки (закрашено %.1f %% кадра: 2…25 %%)" % (frac * 100.0),
+		frac >= 0.02 and frac < 0.25 and img.get_pixel(cpx, cpx).a < 0.5)
 	_kill(monk); _kill(hurt_s); _kill(hurt_a)
 	await pframes(3)
 
@@ -348,9 +358,14 @@ func _run() -> void:
 		var l1: Node3D = lairs[0]
 		var l2: Node3D = lairs[1]
 		var ea: Vector3 = main.ENEMY_BASE_ANCHOR
-		verdict("E2 первое — у игрока (x<0), второе — у ИИ: перед рекой (x между 0 и базой ИИ), внизу (+Z)",
-			l1.global_position.x < 0.0 and l2.global_position.x > 0.0 and l2.global_position.x < ea.x
-			and l2.global_position.z > 0.0,
+		# ТЗ 14.09.2026, п. 3: обе базы людей на левом берегу (x < 0);
+		# «красный пень» (второй) — строго посередине между ними по Z,
+		# напротив брода; первый — на правом берегу (земля орды)
+		var pa: Vector3 = main.PLAYER_BASE_ANCHOR
+		var mid_z: float = (pa.z + ea.z) * 0.5
+		verdict("E2 первое — на берегу орды (x>0), второе — между базами напротив брода (x<0, z у середины)",
+			l1.global_position.x > 0.0 and l2.global_position.x < 0.0
+			and absf(l2.global_position.z - mid_z) < 5.0 and absf(l2.global_position.z - main.FORD_Z) < 8.0,
 			"1: (%.0f, %.0f), 2: (%.0f, %.0f)" % [l1.global_position.x, l1.global_position.z, l2.global_position.x, l2.global_position.z])
 		verdict("E3 у обоих есть тролли и овцы", int(l1.call("trolls_alive")) > 0 and int(l2.call("trolls_alive")) > 0
 			and int(l1.call("sheep_alive")) > 0 and int(l2.call("sheep_alive")) > 0,

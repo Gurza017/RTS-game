@@ -49,6 +49,14 @@ const SHEETS := {
 
 ## Логово (пень), которое гнолл охраняет. Null — вольный гнолл
 var lair: Node3D = null
+## ДОМАШНЯЯ ТОЧКА (ТЗ 14.09.2026, п. 5): пишется вместе с пнём при рождении.
+## Пень снесён или гнолл из слепка — патруль идёт вокруг неё, а не вокруг
+## чужого пня за тысячу метров (прежний фолбэк GameManager.troll_lair и
+## был «хаотичной миграцией» стай через всю карту)
+var home_pos: Vector3 = Vector3.INF
+## Угол кругового патруля и направление обхода (±1, по номеру узла)
+var _patrol_ang: float = NAN
+var _patrol_dir: float = 1.0
 
 ## ── БРОСОК ВЫЛЕТАЕТ С КАДРА ЗАМАХА, А НЕ С НАЧАЛА ЛЕНТЫ ───────────────────
 ## Боевая петля зовёт `_on_attack_fired` в момент УДАРА, а лента броска
@@ -80,6 +88,17 @@ var _scan_phase: float = 0.0
 var _kite_from: Vector3 = Vector3.INF
 var _kite_check_t: float = 0.0
 var _kite_block_t: float = 0.0
+## ── СЕРИЯ КАЙТОВ (14.09.2026) ──────────────────────────────────────────────
+## Гнолл в кольце тел: каждый отдельный отход «удаётся» на метр (внутри
+## кольца есть где качнуться), а суммарно он топчется на месте — отходы
+## меняют направление вслед за ближайшим врагом. Серия: якорь первого кайта
+## и счётчик; GNOLL_KITE_SERIES кайтов подряд без ухода от якоря дальше
+## GNOLL_KITE_MIN_GAIN × 1.5 — отходить некуда, тот же блок
+var _kite_series_from: Vector3 = Vector3.INF
+var _kite_series_n: int = 0
+var _kite_series_t: float = 0.0
+const GNOLL_KITE_SERIES := 2
+const GNOLL_KITE_SERIES_GAP := 3.0
 ## Стенды: сколько раз кайт признан невозможным
 var kite_blocked: int = 0
 ## Бежит прятаться в пень (см. GNOLL_HIDE_HP); внутри — `hidden`
@@ -94,6 +113,83 @@ var _run_back_t: float = 0.0
 var kites: int = 0
 var bones_thrown: int = 0
 var bones_missed: int = 0
+
+## ── ЗОНА ОТВЕТСТВЕННОСТИ И ОХОТА (13.09.2026, GnollAI.gd) ──────────────────
+## Все точки патруля / кайта / фланга зажимаются в зону пня (лес слева,
+## справа и ниже, без полуплоскости «к базе людей» и без брода); ушедший из
+## зоны бросает цель и возвращается. На охоте (hunt) гнолл ПРЕСЛЕДУЕТ
+## рабочего, не кайтит от него и после броска не отходит — закидывает и
+## добивает. Контроллер берётся у Main лениво
+var hunting: bool = false
+var zone_returns: int = 0
+var _zone_t: float = 0.0
+var _zone_ai = null
+var _zone_from: Vector3 = Vector3.INF   # откуда отдан последний возврат в зону
+const ZONE_CHECK_SEC := 0.5
+const ZONE_SLACK := 4.0
+
+func _zone():
+	if _zone_ai == null or not is_instance_valid(_zone_ai):
+		var m = GameManager.main
+		_zone_ai = m.get("gnoll_ai") if m != null and is_instance_valid(m) else null
+	return _zone_ai
+
+func _in_zone_pt(p: Vector3) -> Vector3:
+	var z = _zone()
+	if z == null or lair == null or not is_instance_valid(lair):
+		return p
+	return z.clamp_to_zone(lair, p)
+
+## Охота на рабочего: цель приказом, преследование включено
+func hunt(prey: Node3D) -> void:
+	if prey == null or not is_instance_valid(prey) or hidden or hiding_to_lair:
+		return
+	hunting = true
+	command_attack(prey, true)
+
+## Раз в ZONE_CHECK_SEC: вышел из зоны — цель долой, назад в зону.
+## true — приказ отдан, остальная логика такта пропускается
+func _tick_zone(delta: float) -> bool:
+	_zone_t -= delta
+	if _zone_t > 0.0:
+		return false
+	_zone_t = ZONE_CHECK_SEC
+	var z = _zone()
+	if z == null or lair == null or not is_instance_valid(lair):
+		return false
+	if _kite_block_t > 0.0:
+		return false               # стоим: отходить некуда (см. ниже)
+	if hunting and (attack_target == null or not is_instance_valid(attack_target) \
+			or (attack_target as Unit).is_dead()):
+		hunting = false
+	if attack_target != null and is_instance_valid(attack_target) \
+			and not z.in_zone(lair, attack_target.global_position, ZONE_SLACK * 2.0):
+		set_attack_target(null)
+		hunting = false
+	if not z.in_zone(lair, global_position, ZONE_SLACK):
+		# «ОТОЙТИ НЕКУДА — НЕ БЕЖАТЬ НА МЕСТЕ» (то же правило, что у кайта):
+		# возврат, не давший хода с прошлой проверки, глушится на
+		# GNOLL_KITE_BLOCK_SEC, боец стоит. Иначе зажатый чужими телами гнолл
+		# получал бы command_move каждые полсекунды (qa_gnoll_fix B4/B5)
+		if _zone_from.x != INF and Vector2(global_position.x - _zone_from.x,
+				global_position.z - _zone_from.z).length() < _GobCfgG.GNOLL_KITE_MIN_GAIN:
+			_zone_from = Vector3.INF
+			_kite_block_t = _GobCfgG.GNOLL_KITE_BLOCK_SEC
+			kite_blocked += 1
+			velocity = Vector3.ZERO
+			if state == State.MOVING:
+				state = State.IDLE
+			return false
+		set_attack_target(null)
+		hunting = false
+		zone_returns += 1
+		_zone_from = global_position
+		if _OptG.cmd_meter: _OptG.cmd_src = "gnoll_zone"
+		command_move(GameManager.land_target(z.clamp_to_zone(lair, global_position)))
+		if _OptG.cmd_meter: _OptG.cmd_src = ""
+		return true
+	_zone_from = Vector3.INF
+	return false
 
 func _ready() -> void:
 	_apply_config_stats("gnoll")
@@ -154,7 +250,7 @@ func sep_radius() -> float:
 ## база подменит на достижимую (Unit._prefer_in_range), а сходить с места за
 ## ней он не станет
 func pursues_target() -> bool:
-	return false
+	return hunting
 
 ## Поводок инициативы уже своего рода войск: гнолл не сбегается на далёкий бой
 func aggro_leash() -> float:
@@ -237,6 +333,9 @@ func _release_bone() -> void:
 	if parent == null:
 		return
 	var from_pos: Vector3 = global_position + Vector3(0.0, _GobCfgG.GNOLL_THROW_Y, 0.0)
+	# Звук — ровно в кадре, когда кость покидает руку (не в _on_attack_fired,
+	# где только считается прицел и взводится задержка _throw_delay)
+	AudioManager.play_3d("gnoll_throw", global_position)
 	bones_thrown += 1
 	if _throw_miss:
 		bones_missed += 1
@@ -253,7 +352,7 @@ func _release_bone() -> void:
 	if attack_target == null:
 		return
 	# Отойти некуда (кайт это уже выяснил — _kite_block_t): не бежать на месте
-	if _kite_block_t > 0.0:
+	if _kite_block_t > 0.0 or hunting:
 		return
 	var back: Vector3 = global_position - _throw_aim
 	back.y = 0.0
@@ -262,8 +361,10 @@ func _release_bone() -> void:
 		back.y = 0.0
 	if back.length_squared() > 1e-4:
 		run_backs += 1
+		if _OptG.cmd_meter: _OptG.cmd_src = "gnoll_runback"
 		command_move(GameManager.land_target(
 			global_position + back.normalized() * _GobCfgG.GNOLL_RUN_BACK))
+		if _OptG.cmd_meter: _OptG.cmd_src = ""
 		# Срок отхода — дорога плюс запас: фланговый приказ (_tick_flank) и
 		# патруль иначе перебивали отход в следующий же такт, и гнолл бежал
 		# ОБРАТНО к стрелку (qa_gnoll_behavior B3: «было 7.1, стало 6.9»)
@@ -291,11 +392,20 @@ func tick_physics(delta: float, prof: bool = false, bm: bool = true,
 		if _throw_left <= 0.0:
 			_throw_left = 0.0
 			_release_bone()
-	# Гнолл из сохранённой партии рождается без логова — подхватываем логово
-	# партии, чтобы патруль и оборона пня работали и после загрузки
-	if lair == null and GameManager.troll_lair != null \
-			and is_instance_valid(GameManager.troll_lair):
-		lair = GameManager.troll_lair as Node3D
+	# ── ПЕНЬ ПОТЕРЯН — ПОДХВАТЫВАЕМ ТОЛЬКО БЛИЖНИЙ (ТЗ 14.09.2026, п. 5) ─
+	# Гнолл из слепка или с оставшимся снесённым пнём брал ПЕРВОЕ логово
+	# партии и бежал к нему через всю карту. Теперь: ближайший пень не дальше
+	# GNOLL_HOME_ADOPT_R от дома, иначе — дом (home_pos), патруль вокруг него
+	if lair == null or not is_instance_valid(lair):
+		lair = null
+		if home_pos.x == INF:
+			home_pos = global_position
+		var nl: Node = GameManager.nearest_lair(home_pos)
+		if nl != null and is_instance_valid(nl) and Vector2(
+				(nl as Node3D).global_position.x - home_pos.x,
+				(nl as Node3D).global_position.z - home_pos.z).length() <= _GobCfgG.GNOLL_HOME_ADOPT_R:
+			lair = nl as Node3D
+			home_pos = lair.global_position
 	# ПОРЯДОК ВОРОТ ЗНАЧИМ: кайт важнее и фланга, и патруля. Подошедшая пехота
 	# убивает гнолла за пару ударов, а «отойти» — единственная его защита
 	# ── БЕЖИТ В ПЕНЬ: ничего другого не делает, у ворот прячется ──────────
@@ -311,6 +421,8 @@ func tick_physics(delta: float, prof: bool = false, bm: bool = true,
 			if state != State.MOVING:
 				command_move(GameManager.land_target(lair.global_position))
 			return
+	if _tick_zone(delta):
+		return
 	if _tick_kite(delta):
 		return
 	if _run_back_t > 0.0:
@@ -326,11 +438,21 @@ func tick_physics(delta: float, prof: bool = false, bm: bool = true,
 func _tick_kite(delta: float) -> bool:
 	# ── ПРОВЕРКА ПРЕДЫДУЩЕГО ОТХОДА ────────────────────────────────────────
 	# Отход выдан — смотрим, дал ли он смещение. Не дал — бежать некуда
+	if _kite_series_n > 0:
+		_kite_series_t -= delta
+		if _kite_series_t <= 0.0:
+			_kite_series_n = 0
+			_kite_series_from = Vector3.INF
 	if _kite_check_t > 0.0:
 		_kite_check_t -= delta
 		if _kite_check_t <= 0.0 and _kite_from.x != INF:
 			var gain: float = Vector2(global_position.x - _kite_from.x,
 				global_position.z - _kite_from.z).length()
+			# Серия отходов без ухода от якоря — тоже «некуда» (кольцо тел)
+			if _kite_series_n >= GNOLL_KITE_SERIES and _kite_series_from.x != INF \
+					and Vector2(global_position.x - _kite_series_from.x,
+					global_position.z - _kite_series_from.z).length() < _GobCfgG.GNOLL_KITE_MIN_GAIN * 1.5:
+				gain = 0.0
 			if gain < _GobCfgG.GNOLL_KITE_MIN_GAIN:
 				# Отбегать некуда: глушим кайт и ВСТАЁМ — стоящий метатель
 				# полезнее бегущего на месте, и лупа шагов он не держит
@@ -339,6 +461,8 @@ func _tick_kite(delta: float) -> bool:
 				velocity = Vector3.ZERO
 				if state == State.MOVING:
 					state = State.IDLE
+				_kite_series_n = 0
+				_kite_series_from = Vector3.INF
 			_kite_from = Vector3.INF
 	if _kite_block_t > 0.0:
 		_kite_block_t -= delta
@@ -366,10 +490,16 @@ func _tick_kite(delta: float) -> bool:
 		var lim: float = _GobCfgG.GNOLL_PATROL_RADIUS * 1.6
 		if from_lair.length() > lim:
 			p = lair.global_position + from_lair.normalized() * lim
-	command_move(GameManager.land_target(p))
+	if _OptG.cmd_meter: _OptG.cmd_src = "gnoll_kite"
+	command_move(GameManager.land_target(_in_zone_pt(p)))
+	if _OptG.cmd_meter: _OptG.cmd_src = ""
 	# Точка отсчёта смещения: по ней и решается, удался ли отход
 	_kite_from = global_position
 	_kite_check_t = _GobCfgG.GNOLL_KITE_GIVEUP
+	if _kite_series_n == 0:
+		_kite_series_from = global_position
+	_kite_series_n += 1
+	_kite_series_t = GNOLL_KITE_SERIES_GAP
 	kites += 1
 	return true
 
@@ -401,6 +531,9 @@ func _nearest_melee_foe(r: float) -> Node3D:
 	if u == null:
 		return null
 	if (u as Unit).attack_range > _GobCfgG.GNOLL_MELEE_RANGE_MAX:
+		return null
+	# От рабочего не кайтим: он добыча, а не угроза (охота в лесу)
+	if u is Worker:
 		return null
 	return u
 
@@ -440,23 +573,57 @@ func _tick_flank(delta: float) -> bool:
 		side = -side
 	var p: Vector3 = foe.global_position + side * _GobCfgG.GNOLL_FLANK_SIDE \
 		- line * _GobCfgG.GNOLL_FLANK_BACK
-	command_move(GameManager.land_target(p))
+	if _OptG.cmd_meter: _OptG.cmd_src = "gnoll_flank"
+	command_move(GameManager.land_target(_in_zone_pt(p)))
+	if _OptG.cmd_meter: _OptG.cmd_src = ""
 	return true
 
-## Патруль кольца пня: только в покое и без цели
+## Центр патруля: пень, а без него — домашняя точка
+func _home() -> Vector3:
+	if lair != null and is_instance_valid(lair):
+		return lair.global_position
+	return home_pos
+
+## ── ПАТРУЛЬ — КРУГОВОЙ МАРШ ВОКРУГ ПНЯ (ТЗ 14.09.2026, п. 5) ───────────────
+## Прежде каждая точка бралась случайным углом — прямые векторы через всю
+## поляну. Теперь угол ШАГАЕТ на GNOLL_PATROL_STEP_DEG в своём направлении
+## обхода, радиус держится у GNOLL_PATROL_RADIUS: стая кружит вокруг
+## контрольной точки. Точка отрезка притягивается к ближайшему дереву
+## (GnollAI.forest_spots) — патруль идёт лесом. Только в покое и без цели
 func _tick_patrol(delta: float) -> void:
 	if state != State.IDLE or attack_target != null:
 		return
-	if lair == null or not is_instance_valid(lair):
+	# Отходить некуда (кайт заглушен) — и патрулировать некуда: стоим
+	if _kite_block_t > 0.0:
+		return
+	var home: Vector3 = _home()
+	if home.x == INF:
 		return
 	_patrol_t -= delta
 	if _patrol_t > 0.0:
 		return
 	_patrol_t = _GobCfgG.GNOLL_PATROL_SEC * randf_range(0.7, 1.3)
-	var a: float = randf() * TAU
-	var r: float = _GobCfgG.GNOLL_PATROL_RADIUS * randf_range(0.35, 1.0)
-	var p: Vector3 = lair.global_position + Vector3(cos(a) * r, 0.0, sin(a) * r)
+	if is_nan(_patrol_ang):
+		var here: Vector3 = global_position - home
+		_patrol_ang = atan2(here.z, here.x) if here.length() > 0.5 else randf() * TAU
+		_patrol_dir = 1.0 if (get_instance_id() % 2) == 0 else -1.0
+	_patrol_ang += deg_to_rad(_GobCfgG.GNOLL_PATROL_STEP_DEG) * _patrol_dir * randf_range(0.8, 1.2)
+	var r: float = _GobCfgG.GNOLL_PATROL_RADIUS * randf_range(0.7, 1.0)
+	var p: Vector3 = home + Vector3(cos(_patrol_ang) * r, 0.0, sin(_patrol_ang) * r)
+	p = _in_zone_pt(p)
+	var z = _zone()
+	if z != null and lair != null and is_instance_valid(lair):
+		var tree: Vector3 = z.nearest_forest_spot(lair, p, _GobCfgG.GNOLL_PATROL_TREE_SNAP)
+		if tree.x != INF:
+			# К стволу вплотную не идём — рядом с ним, чтобы не упереться
+			var off: Vector3 = p - tree
+			off.y = 0.0
+			if off.length() < 0.5:
+				off = Vector3(cos(_patrol_ang), 0.0, sin(_patrol_ang))
+			p = tree + off.normalized() * 1.6
+	if _OptG.cmd_meter: _OptG.cmd_src = "gnoll_patrol"
 	command_move(GameManager.land_target(p))
+	if _OptG.cmd_meter: _OptG.cmd_src = ""
 
 ## Ответ на обстрел у гнолла свой (ниже, в take_damage), общий не нужен
 func answers_far_fire() -> bool:

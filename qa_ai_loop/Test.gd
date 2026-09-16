@@ -121,8 +121,9 @@ func _run() -> void:
 	print("\n═════ A. МИР 10 МИНУТ ═════")
 	verdict("A1 мирная фаза ИИ людей — 600 с (10 минут)", is_equal_approx(_AICfg.PEACE_SECONDS, 600.0),
 		"%.0f" % _AICfg.PEACE_SECONDS)
-	verdict("A2 штурм базы игрока — не раньше 35-й минуты (2100 с)",
-		is_equal_approx(_AICfg.AI_ASSAULT_AT_SEC, 2100.0), "%.0f" % _AICfg.AI_ASSAULT_AT_SEC)
+	# 13.09.2026: 30-я минута (1800), одно число с орды
+	verdict("A2 штурм базы игрока — не раньше 30-й минуты (1800 с)",
+		is_equal_approx(_AICfg.AI_ASSAULT_AT_SEC, 1800.0), "%.0f" % _AICfg.AI_ASSAULT_AT_SEC)
 	# Армия: три копейщика, мечники, лучники — все дома в мире
 	var sids: Array = []
 	for i in range(3):

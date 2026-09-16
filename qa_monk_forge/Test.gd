@@ -279,6 +279,7 @@ func _e_retreat() -> void:
 	# Раненый союзник рядом: проверяем, что лечение НЕ прерывается отходом
 	var ally: Unit = _spawn(ALLY, F, spot + Vector3(1.5, 0.0, 0.0))
 	ally.current_health = ally.max_health * 0.3
+	ally._soa_push_stats()   # монах ищет раненого по колонке ядра (14.09.2026)
 	var foe: Unit = _spawn(FOE, Constants.FACTION_GOBLIN, spot + Vector3(-4.0, 0.0, 0.0))
 	foe.set_tick(false)
 	await pframes(10)

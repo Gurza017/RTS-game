@@ -283,9 +283,11 @@ func _check_tower(keep: Castle) -> void:
 	# врага убыл
 	var fr: float = tower.fire_range()
 	var arng: float = (ar[1][0] as Unit).attack_range
-	verdict("B8а дальность огня башни = штатная дальность лучника, а не обзор башни",
-		is_equal_approx(fr, arng) and fr < _UCfg.TOWER_VISION,
-		"огонь %.1f, лук %.1f, обзор %.0f" % [fr, arng, _UCfg.TOWER_VISION])
+	# Бафф высоты (ТЗ 14.09.2026): с площадки лук бьёт на ×GARRISON_RANGE_MULT,
+	# но всё ещё ближе обзора башни
+	verdict("B8а дальность огня башни = дальность лучника × бафф высоты, а не обзор башни",
+		is_equal_approx(fr, arng * _UCfg.GARRISON_RANGE_MULT) and fr < _UCfg.TOWER_VISION,
+		"огонь %.1f, лук %.1f × %.2f, обзор %.0f" % [fr, arng, _UCfg.GARRISON_RANGE_MULT, _UCfg.TOWER_VISION])
 	var foes := _spawn_squad_of(Constants.FACTION_ENEMY, "spearman",
 		tp + Vector3(fr * 0.6, 0.0, 0.0), 8)
 	var shots0: int = tower.shots_fired

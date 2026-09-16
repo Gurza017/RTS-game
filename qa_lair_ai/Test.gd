@@ -88,9 +88,11 @@ func _run() -> void:
 	var danger: float = _GobCfg.TROLL_PATROL_RADIUS + _GobCfg.GNOLL_DEFEND_RANGE + 30.0
 	verdict("A2 пень дальше от крепости ИИ, чем патруль тролля + агро гноллов + 30 м (%.0f м)" % danger,
 		d_anchor > danger, "%.1f м" % d_anchor)
-	var d_player: float = _xz(main.troll_lair_center(), main.PLAYER_BASE_ANCHOR)
-	verdict("A3 и не ближе, чем пень игрока к его крепости (−10 %%)",
-		d_anchor >= d_player * 0.9, "%.1f против %.1f м" % [d_anchor, d_player])
+	# ТЗ 14.09.2026, п. 3: «красный пень» стоит СТРОГО ПОСЕРЕДИНЕ между
+	# базами игрока и ИИ, напротив брода — расстояния до обоих замков равны
+	var d_player: float = _xz(c2, main.PLAYER_BASE_ANCHOR)
+	verdict("A3 пень равноудалён от крепостей игрока и ИИ (посередине)",
+		absf(d_anchor - d_player) < 2.0, "%.1f против %.1f м" % [d_anchor, d_player])
 	# Башни ИИ на границе: на TOWER_BORDER_FRACTION пути к игроку, ±TOWER_SIDE
 	var axis: Vector3 = main.PLAYER_BASE_ANCHOR - anchor
 	axis.y = 0.0
@@ -99,8 +101,8 @@ func _run() -> void:
 	var d_tower: float = minf(_xz(c2, tpos + side), _xz(c2, tpos - side))
 	verdict("A4 башни ИИ на границе вне патруля тролля (%.1f м > %.1f)" % [d_tower, _GobCfg.TROLL_PATROL_RADIUS + 10.0],
 		d_tower > _GobCfg.TROLL_PATROL_RADIUS + 10.0)
-	verdict("A5 пень на суше и на стороне ИИ (x > 0), внизу карты (z > 0)",
-		not GameManager.is_water(c2.x, c2.z) and c2.x > 0.0 and c2.z > 0.0)
+	verdict("A5 пень на суше, на левом берегу (x < 0), напротив брода (z у FORD_Z)",
+		not GameManager.is_water(c2.x, c2.z) and c2.x < 0.0 and absf(c2.z - main.FORD_Z) < 8.0)
 	var trees := 0
 	for n in get_tree().get_nodes_in_group("resource_nodes"):
 		# Спринт 20: глушь у пня — рощицы с LAIR_GLADE_TREES_R; чистое —

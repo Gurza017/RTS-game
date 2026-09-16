@@ -117,8 +117,12 @@ const SCATTER_BASE := 0.35
 ## кузница и выучка резали его так же, как раньше
 const READY_SCATTER_MULT := 1.7
 # Добавка разброса на каждый м/с скорости цели: бегущая пехота ловит
-# заметно больше промахов, чем строй, стоящий на месте
-const SCATTER_PER_SPEED := 0.34
+# заметно больше промахов, чем строй, стоящий на месте.
+# 0.34 → 0.20 (15.09.2026): с полным упреждением промах по бегущему даёт
+# только этот разброс, и 3.3 м радиуса по всаднику (4.6 м/с) означали
+# «в модель не попадает никто» — qa_archer_lead A3 меряет долю попаданий
+# по бегущему против стоящего
+const SCATTER_PER_SPEED := 0.20
 
 # ═════════════════════════════════════════════════════════════════════════════
 # ЗАЛПОВЫЙ ОГОНЬ (способность отряда, forge_config archer_1d)
@@ -190,7 +194,255 @@ func _drill_level() -> int:
 func _effective_cooldown() -> float:
 	var cd: float = super._effective_cooldown()
 	var fire: float = float(_UStats.archer_drill(_drill_level()).get("fire", 1.0))
-	return maxf(cd / maxf(fire, 0.01), _UStats.MIN_COOLDOWN)
+	cd = cd / maxf(fire, 0.01)
+	# «Частота снайперов» (archer_3d): у снайпера своя, короче, перезарядка
+	if _sniper:
+		var k: float = GameManager.unit_bonus(faction, stat_id, "bonus_snipe_cd")
+		if k > 0.0:
+			cd *= (1.0 - minf(k, 0.8))
+	return maxf(cd, _UStats.MIN_COOLDOWN)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# СНАЙПЕРСКИЙ ВЫСТРЕЛ (ТЗ 14.09.2026, forge_config archer_2d / archer_3d)
+# ═════════════════════════════════════════════════════════════════════════════
+# Снайперы — первые N по порядковому номеру в отряде (GameManager.squad_snipers):
+# выбыл один — снайпером становится следующий. Снайпер стреляет ПО ПРЯМОЙ
+# (дуга 0), на SNIPE_RANGE м, стрелой в SNIPE_SPEED_MULT раз быстрее, своим
+# звуком, и НЕ в ту же точку, что отряд: сам выбирает цель — отступающих,
+# паникующих и одиночек в приоритете, иначе конкретную модель целевого
+# отряда, не занятую другим снайпером (заявка GameManager.snipe_claim).
+# Трое стреляют не разом, а «раз-два-три»: k-й снайпер с задержкой
+# k × SNIPE_STAGGER_SEC (отложенный выстрел ведёт tick_physics).
+#
+# ДАЛЬНОСТЬ 25 м — ЭТО ЛИЧНОЕ attack_range СНАЙПЕРА: поле читают все горячие
+# ветки (скан целей, замок, обзор), и подменять его на лету нельзя — статус
+# пересчитывается раз в SNIPER_RECHECK_SEC и вписывает дальность в поле, как
+# это делает кузница (см. Unit._ready / _apply_range_bonus_now)
+const SNIPER_RECHECK_SEC := 0.5
+var _sniper: bool = false
+var _sniper_t: float = 0.0
+var _snipe_pending_t: float = -1.0   # < 0 — отложенного выстрела нет
+var _snipe_target = null             # сырая ссылка (правило 5)
+var _snipe_dmg: float = 0.0
+## Счётчики для стендов
+static var snipe_shots: int = 0
+static var snipe_p1_picks: int = 0   # цель взята из приоритета 1 (бегущие/одиночки)
+
+func is_sniper() -> bool:
+	return _sniper
+
+## Бафф высоты (ТЗ 14.09.2026): укрытый стрелок бьёт дальше; читает снайпер
+## для своего радиуса поиска, урон множит сам модуль крыши
+func garrison_mult() -> float:
+	return _UStats.GARRISON_RANGE_MULT if garrisoned else 1.0
+
+## Тик укрытого: сам боец не тикает (снят с тика хозяином), а статус снайпера
+## и отложенный «раз-два-три» жить обязаны — их дёргает RoofGarrison
+func roof_tick(delta: float) -> void:
+	_sniper_t -= delta
+	if _sniper_t <= 0.0:
+		_sniper_t = SNIPER_RECHECK_SEC
+		_refresh_sniper()
+	if _snipe_pending_t >= 0.0:
+		_snipe_pending_t -= delta
+		if _snipe_pending_t <= 0.0:
+			_snipe_pending_t = -1.0
+			_snipe_launch()
+
+func tick_physics(delta: float, prof: bool = false, bm: bool = true,
+		bonus_ver: int = -1) -> void:
+	super.tick_physics(delta, prof, bm, bonus_ver)
+	if garrisoned or state == State.DEAD:
+		return
+	_sniper_t -= delta
+	if _sniper_t <= 0.0:
+		_sniper_t = SNIPER_RECHECK_SEC
+		_refresh_sniper()
+	if _snipe_pending_t >= 0.0:
+		_snipe_pending_t -= delta
+		if _snipe_pending_t <= 0.0:
+			_snipe_pending_t = -1.0
+			_snipe_launch()
+	elif _sniper:
+		_snipe_autonomous(delta)
+
+## ── СНАЙПЕР СНИМАЕТ БЕГЛЕЦА САМ (15.09.2026) ───────────────────────────────
+## Отряд стоит без цели (радар даёт цель с 20 м, огонь — с дальности лука), а
+## одиночка или бегущий проходит в 20-25 м — раньше снайпер молчал: его
+## выстрел шёл только из отрядного _on_attack_fired. Теперь стоящий снайпер
+## без цели раз в перезарядку сам ищет ПРИОРИТЕТНУЮ цель (одиночка, паника,
+## отход — lone_only) в SNIPE_RANGE и стреляет. Отрядные цели он не берёт:
+## иначе три снайпера тянули бы весь отряд в бой с 25 м
+var _snipe_self_cd: float = 0.0
+var snipe_self_shots: int = 0
+
+func _snipe_autonomous(delta: float) -> void:
+	_snipe_self_cd -= delta
+	if _snipe_self_cd > 0.0:
+		return
+	_snipe_self_cd = SNIPER_RECHECK_SEC
+	if state != State.IDLE or attack_target != null or _panicked or retreating 			or _disengaging or player_order_active():
+		return
+	var t: Node3D = _snipe_pick(null, true)
+	if t == null:
+		return
+	_snipe_self_cd = _effective_cooldown()
+	snipe_self_shots += 1
+	face_towards(t.global_position)
+	_snipe_schedule(t, _strike_damage() + _upgrade_damage_bonus())
+
+## Статус снайпера и личная дальность: пересчёт по такту, запись в поле
+func _refresh_sniper() -> void:
+	var n: int = GameManager.squad_snipers(squad_id)
+	var want: bool = false
+	if n > 0:
+		var ord: int = GameManager.squad_member_ordinal(squad_id, self)
+		want = ord >= 0 and ord < n
+	if want == _sniper:
+		return
+	_sniper = want
+	_apply_sniper_range()
+
+## Дальность заново: база + кузница (как при рождении), снайперу — не меньше
+## SNIPE_RANGE. Потолок держит clamp_attack_range (у снайпера он выше)
+func _apply_sniper_range() -> void:
+	var base: float = _UStats.stat(stat_id, "attack_range", attack_range) \
+		+ GameManager.unit_bonus(faction, stat_id, "bonus_range")
+	if _sniper:
+		base = maxf(base, _UStats.SNIPE_RANGE)
+	attack_range = clamp_attack_range(base)
+	if _soa >= 0 and not garrisoned:
+		_soa_push_stats()
+
+func clamp_attack_range(r: float) -> float:
+	if _sniper:
+		var cap: float = _UStats.stat(stat_id, "attack_range_cap", 0.0)
+		return minf(r, maxf(cap, _UStats.SNIPE_RANGE))
+	return super.clamp_attack_range(r)
+
+## Номер снайпера в отряде: 0, 1, 2… — от него задержка «раз-два-три»
+func _snipe_slot() -> int:
+	return maxi(GameManager.squad_member_ordinal(squad_id, self), 0)
+
+## Выбор цели снайпера. Приоритет 1 — бегущие (паника, отход) и одиночки
+## (отряд из одного) в SNIPE_RANGE, не занятые другим снайпером; приоритет
+## 2 — незанятая модель, желательно из отряда общей цели; занятые — крайний
+## случай; совсем никого — цель отряда. Скан — событие (раз в перезарядку),
+## не покадровый путь: массив от query_radius здесь допустим
+func _snipe_pick(default_target: Node3D, lone_only: bool = false) -> Node3D:
+	var mp: Vector3 = global_position
+	var r: float = _UStats.SNIPE_RANGE * garrison_mult()
+	var r2: float = r * r
+	var best1: Node3D = null
+	var best2: Node3D = null
+	var claimed_best: Node3D = null
+	var d1: float = INF
+	var d2: float = INF
+	var d3: float = INF
+	var tsq: int = 0
+	if default_target != null and is_instance_valid(default_target) and default_target is Unit:
+		tsq = (default_target as Unit).squad_id
+	for n in GameManager.unit_grid.query_radius(mp, r):
+		if n == null or not is_instance_valid(n):
+			continue
+		var u := n as Unit
+		if u == null or u.faction == faction or u.is_dead() or u.garrisoned:
+			continue
+		if u.faction == Constants.FACTION_NEUTRAL:
+			continue
+		var up: Vector3 = u.global_position
+		var d: float = (up.x - mp.x) * (up.x - mp.x) + (up.z - mp.z) * (up.z - mp.z)
+		if d > r2:
+			continue
+		if GameManager.snipe_claimed(squad_id, u):
+			if d < d3:
+				claimed_best = u
+				d3 = d
+			continue
+		var lone: bool = u.is_panicked() or u.retreating \
+			or GameManager.squad_member_count(u.squad_id) <= 1
+		if lone:
+			if d < d1:
+				best1 = u
+				d1 = d
+		else:
+			# Модель ЦЕЛЕВОГО отряда предпочтительнее чужой в четверо ближе
+			var dd: float = d if (tsq > 0 and u.squad_id == tsq) else d * 4.0
+			if dd < d2:
+				best2 = u
+				d2 = dd
+	if best1 != null:
+		snipe_p1_picks += 1
+		return best1
+	if lone_only:
+		return null
+	if best2 != null:
+		return best2
+	if claimed_best != null:
+		return claimed_best
+	return default_target
+
+## Отложить снайперский выстрел: цель выбрана и заявлена сейчас, стрела
+## уйдёт через k × SNIPE_STAGGER_SEC (k — номер снайпера)
+func _snipe_schedule(target: Node3D, damage: float) -> void:
+	var t: Node3D = _snipe_pick(target)
+	if t == null:
+		return
+	GameManager.snipe_claim(squad_id, t)
+	_snipe_target = t
+	_snipe_dmg = damage
+	var delay: float = float(_snipe_slot()) * _UStats.SNIPE_STAGGER_SEC
+	if delay <= 0.0:
+		_snipe_launch()
+	else:
+		_snipe_pending_t = delay
+
+## Сам выстрел: прямая стрела (дуга 0), быстрее на SNIPE_SPEED_MULT, свой звук
+## ── УПРЕЖДЕНИЕ (ТЗ 15.09.2026, п. 3.2) ─────────────────────────────────────
+## Точка прицела = позиция цели + её скорость × время полёта; время зависит
+## от точки, поэтому два прохода. Вынос не дальше ARCHER_LEAD_MAX (страховка:
+## по цели за пределами дальности стрела и так не долетит). Одна функция на
+## обычную стрелу, залп и снайпера — три расчёта разошлись бы по знаку
+func _lead_point(from_pos: Vector3, tbase: Vector3, tvel: Vector3, speed: float) -> Vector3:
+	var aim: Vector3 = tbase
+	var lead_k: float = _UStats.ARCHER_LEAD_FACTOR
+	if lead_k <= 0.0 or tvel.length_squared() <= 1e-4:
+		return aim
+	for _i in range(2):
+		var travel: float = from_pos.distance_to(aim) / maxf(speed, 0.1)
+		var lead: Vector3 = tvel * (travel * lead_k)
+		var ll: float = lead.length()
+		if ll > _UStats.ARCHER_LEAD_MAX:
+			lead *= _UStats.ARCHER_LEAD_MAX / ll
+		aim = tbase + lead
+	return aim
+
+func _snipe_launch() -> void:
+	var t = _snipe_target
+	_snipe_target = null
+	if t == null or not is_instance_valid(t) or not (t is Unit) or (t as Unit).is_dead():
+		t = _snipe_pick(null)
+		if t == null or not is_instance_valid(t) or not (t is Unit) or (t as Unit).is_dead():
+			return
+	var parent := get_parent()
+	if parent == null:
+		return
+	var tu := t as Unit
+	_play_attack_anim("attack", 600)
+	AudioManager.play_3d("snipe_shot", global_position)
+	tu.notify_incoming_fire(global_position)
+	var from_pos: Vector3 = global_position + Vector3(0, 1.2, 0)
+	var speed: float = _UStats.stat("archer", "arrow_speed", 9.0) * _UStats.SNIPE_SPEED_MULT
+	# Снайпер бьёт в ТОЧКУ ВСТРЕЧИ (ТЗ 15.09.2026): прямая стрела по бегущему
+	# без выноса ложилась ровно позади цели
+	var tv: Vector3 = tu.velocity
+	tv.y = 0.0
+	var aim: Vector3 = _lead_point(from_pos,
+		tu.global_position + Vector3(0, tu.aim_height(), 0), tv, speed)
+	var dist: float = from_pos.distance_to(aim)
+	GameManager.spawn_arrow(parent, from_pos, aim, dist, speed, 0.0, _snipe_dmg,
+		self, faction, false, true)
+	snipe_shots += 1
 
 func _may_strike_now() -> bool:
 	# Отряда нет (одиночный лучник стенда) или режим выключен — обычная стрельба
@@ -207,8 +459,15 @@ func _damage_on_strike() -> bool:
 ## убежала дальше, значит стрелок остаётся стоять и ищет новую цель в своём
 ## радиусе. Без этого отряд лучников уходил за отступающим противником прямо
 ## к его замку и погибал там. См. Unit.pursues_target / _engaged_once
+## Стрелок выбирает цель с весом: большие гоблины ×2 (ТЗ 14.09.2026, п. 10)
+func target_prio_scan() -> bool:
+	return true
+
 func pursues_target() -> bool:
 	return false
+
+func _announces_squad_shot() -> bool:
+	return not _sniper
 
 # У лучника нет ни замаха мечом, ни тычка копьём: весь его звук — тетива
 # в _on_attack_fired и прилёт стрелы в Arrow.gd
@@ -219,6 +478,10 @@ func _sfx_hit() -> String:
 	return ""
 
 func _on_attack_fired(target: Node3D, damage: float) -> void:
+	# ── СНАЙПЕР СТРЕЛЯЕТ СВОИМ ПУТЁМ (по бойцам; по зданию — как все) ──────
+	if _sniper and (target == null or target is Unit):
+		_snipe_schedule(target, damage)
+		return
 	_play_attack_anim("attack", 600)   # анимация выстрела (Shoot-Sheet)
 	# Щелчок тетивы — в момент выстрела. Попадание и втыкание в землю звучат
 	# позже и отдельно, когда стрела реально долетит (см. Arrow.gd)
@@ -262,19 +525,8 @@ func _on_attack_fired(target: Node3D, damage: float) -> void:
 	elif target != null and target.has_method("aim_height"):
 		aim_h = float(target.call("aim_height"))
 	var tbase: Vector3 = target.global_position + Vector3(0, aim_h, 0)
-	var aim := tbase
-	var lead_k: float = _UStats.ARCHER_LEAD_FACTOR
-	if lead_k > 0.0 and tvel.length_squared() > 1e-4:
-		# Два прохода: время полёта зависит от точки, а точка — от времени
-		for _i in range(2):
-			var travel: float = from_pos.distance_to(aim) / maxf(speed, 0.1)
-			var lead: Vector3 = tvel * (travel * lead_k)
-			# ПОТОЛОК ВЫНОСА. Без него длинный полёт по быстрой цели уводил
-			# точку прицеливания на несколько корпусов вперёд — в пустое поле
-			var ll: float = lead.length()
-			if ll > _UStats.ARCHER_LEAD_MAX:
-				lead *= _UStats.ARCHER_LEAD_MAX / ll
-			aim = tbase + lead
+	var aim: Vector3 = _lead_point(from_pos, tbase, tvel, speed)
+	var lead_vec: Vector3 = aim - tbase
 
 	# ── ЗАЛП: ОБЩАЯ ТОЧКА ВМЕСТО СВОЕЙ ЦЕЛИ ─────────────────────────────────
 	# Отряд бьёт в центр масс чужого строя, а стрелок берёт своё место в туче.
@@ -289,6 +541,11 @@ func _on_attack_fired(target: Node3D, damage: float) -> void:
 		# полсекунды назад. Свежий центр стоит одного вызова на выстрел
 		var vp: Vector3 = GameManager.squad_volley_point(squad_id)
 		if vp != Vector3.ZERO:
+			# Упреждение и у залпа (ТЗ 15.09.2026): туча ложилась в центр
+			# строя ТАМ, ГДЕ ОН БЫЛ, и по бегущей цели весь залп падал позади —
+			# «дорога из стрел» за спиной. Вынос считается по скорости своей
+			# цели: отряд идёт как целое, и его центр движется той же скоростью
+			vp += lead_vec
 			# НАКРЫТИЕ ЕСТЬ ВСЕГДА. Габарит вражеского строя — это лишь ВЕРХНЯЯ
 			# граница тучи; нижняя (VOLLEY_MIN_SPREAD) не даёт залпу схлопнуться
 			# в точку по одиночной цели, по отряду из одного бойца или по зданию

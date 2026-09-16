@@ -161,7 +161,7 @@ func _run() -> void:
 	verdict("B6 охрана патрулирует (сменила место)", moved >= 2, "сдвинулись %d из 3" % moved)
 	verdict("B7 и не уходит от рудника", far == 0, "ушло %d" % far)
 	verdict("B8 охрана не в полевых отрядах волны", ai._field_squads() == ai.squads.size() \
-		- ai.mine_guard_sids.size() - ai.garrison_sids.size(),
+		- ai.mine_guard_sids.size() - ai.garrison_sids.size() - ai.reserve_sids.size(),   # резерв (13.09.2026) — особая роль, не поле
 		"в поле %d из %d" % [ai._field_squads(), ai.squads.size()])
 
 	print("\n═════ C. ТРЕВОГА ═════")

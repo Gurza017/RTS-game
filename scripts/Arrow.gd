@@ -31,6 +31,11 @@ var _arc_height: float = 3.0
 # ── Боевые параметры (задаёт стрелок перед add_child) ────────────────────────
 var damage:  float   = 0.0
 var shooter: Node3D  = null
+## ── СНАЙПЕРСКАЯ СТРЕЛА (ТЗ 14.09.2026) ─────────────────────────────────────
+## Ставится GameManager.spawn_arrow ДО launch: полёт прямой (дуга 0 приходит
+## снаружи, arc_factor = 0), по пехоте — насмерть сверх брони, застревает в
+## голове павшего (CorpseRenderer.stick_arrows(..., head = true))
+var snipe: bool = false
 var faction: int     = -1          # чьей фракции стрела: своих не задевает
 
 # Радиус «наконечника»: попадание засчитывается при входе в этот объём
@@ -347,7 +352,26 @@ func _strike(u: Unit) -> void:
 	# Множитель — свойство ЦЕЛИ (`Unit.ranged_damage_mult`), и читается он
 	# здесь, в пути стрелы: в рукопашной его нет вовсе. У всех, кроме туш,
 	# он равен единице, и умножение на неё ничего не меняет
-	u.take_damage(damage * u.ranged_damage_mult(), valid_shooter)
+	var dmg: float = damage * u.ranged_damage_mult()
+	# ── «ГРОЗА ВЕЛИКАНОВ» (ТЗ 14.09.2026, ветка лучника 4b/5b) ────────────
+	# Множитель по крупным (туша, тролль, конница) копится ключом bonus_giant
+	# у рода войск стрелка: 0.5 → ×1.5, 1.0 → ×2.0. Читается раз на попадание
+	if u.giant_class():
+		var sid_shooter: String = "archer"
+		if valid_shooter != null and valid_shooter is Unit:
+			sid_shooter = (valid_shooter as Unit).stat_id
+		dmg *= 1.0 + GameManager.unit_bonus(faction, sid_shooter, "bonus_giant")
+	# ── СНАЙПЕРСКАЯ СТРЕЛА: ПО ПЕХОТЕ НАСМЕРТЬ (ТЗ 14.09.2026) ────────────
+	# «Выстрел в голову»: гарантированно фатально сверх брони и щита —
+	# сумма, которую не удержит ни один множитель снижения (MIN_DAMAGE_FRACTION
+	# и щит режут долей, а не до нуля). Крупные (snipe_one_shot = false) берут
+	# обычный урон с бронепробитием и множителем выше
+	if snipe and u.snipe_one_shot():
+		dmg = maxf(dmg, u.max_health * 1000.0 + 1000.0)
+	strikes += 1
+	if snipe:
+		snipe_strikes += 1
+	u.take_damage(dmg, valid_shooter)
 	# ── СТРЕЛА, УБИВШАЯ БОЙЦА, ОСТАЁТСЯ В ТЕЛЕ ─────────────────────────────
 	# Урон списан выше, и если он оказался смертельным, боец уже прошёл _die()
 	# и уже положил своё тело на грунт (Unit._leave_corpse). Стрела втыкается
@@ -358,7 +382,15 @@ func _strike(u: Unit) -> void:
 	# за ним не поедет. Торчащая в бегущем бойце и отстающая от него стрела
 	# выглядела бы хуже, чем её отсутствие
 	if is_instance_valid(u) and u.is_dead():
-		_stick_into_corpse(u)
+		# СНАЙПЕРСКАЯ — В ГОЛОВУ ПАВШЕГО: у бойца с телом в общем слое точку
+		# знает CorpseRenderer (head = true), у тролля — сам тролль
+		if snipe:
+			var hs: Vector3 = u.snipe_head_spot()
+			if hs.x != INF:
+				stick_decor(hs, _velocity_dir(_progress))
+				snipe_head_pins += 1
+				return
+		_stick_into_corpse(u, snipe)
 		return
 	# ── ЗАСТРЯЛА В ТУШЕ ЖИВОГО (заказ 10.09.2026) ────────────
 	# Оговорка выше («раненый стрелу не уносит: стрела за ним не
@@ -787,7 +819,13 @@ func stick_decor(at: Vector3, dir: Vector3) -> void:
 # на высоте груди убитого. Угол — вектор скорости в момент попадания, с той же
 # страховкой от настильного выстрела, что и при промахе: почти горизонтальную
 # стрелу доворачиваем вниз, иначе она легла бы плашмя
-func _stick_into_corpse(victim: Unit) -> void:
+## Счётчик стрел, воткнутых в голову (стенд qa_archer_snipe)
+static var snipe_head_pins: int = 0
+## Стендам: попадания в живых (все стрелы и отдельно снайперские)
+static var strikes: int = 0
+static var snipe_strikes: int = 0
+
+func _stick_into_corpse(victim: Unit, head: bool = false) -> void:
 	# ── СТРЕЛА ПРИПИСЫВАЕТСЯ К КОНКРЕТНОМУ ТЕЛУ ────────────────────────────
 	# Тело уже положено (Unit._die → _leave_corpse отработал внутри
 	# take_damage), и стрела встаёт к нему в список: когда тело начнёт таять,
@@ -805,5 +843,8 @@ func _stick_into_corpse(victim: Unit) -> void:
 	# углом и на какой высоте, знает CorpseRenderer; стрела знает только, что
 	# попала. Признаки втыкания ставит stick_decor, которую тело и позовёт
 	if not GameManager.corpses.stick_arrows(body, self,
-			_velocity_dir(_progress)):
+			_velocity_dir(_progress), head):
 		_despawn()
+		return
+	if head:
+		snipe_head_pins += 1

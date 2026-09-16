@@ -483,6 +483,11 @@ func set_selected(value: bool) -> void:
 
 var _dead := false
 
+## Когда по постройке били в последний раз (Time.get_ticks_msec). Событие, а не
+## сигнал: охрана крепости ИИ (scripts/ai/HomeGuard.gd) спрашивает его раз в
+## такт — «замок под ударом?» — и заводить ради этого подписку незачем
+var last_hit_ms: int = -1000000
+
 func take_damage(amount: float, attacker: Node = null) -> void:
 	if _dead:
 		return
@@ -492,6 +497,7 @@ func take_damage(amount: float, attacker: Node = null) -> void:
 			and (attacker as Unit).faction == Constants.FACTION_GOBLIN \
 			and not GameManager.goblin_may_raze(self):
 		return
+	last_hit_ms = Time.get_ticks_msec()
 	current_health -= amount
 	_update_hp_bar()
 	if current_health <= 0.0:

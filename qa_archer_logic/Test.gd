@@ -230,6 +230,11 @@ func _b_first_for_all() -> void:
 	# продержалось, печатается числом. Что будет ПОСЛЕ, меряет зонд ниже,
 	# и вердикта у него нет
 	var wandered := 0.0
+	# Челнок — это ОТХОД после подхода: дистанция растёт от своего минимума.
+	# Подтягивание задних рядов на SQUAD_SHOT_SLACK (15.09.2026) челноком не
+	# является — оно монотонно
+	var d_min: float = far0
+	var back_off := 0.0
 	var held := 0
 	var win: int = int(_UCfg.stat("archer", "attack_cooldown", 2.0) * 3.0 * 60.0) + 90
 	for _i in range(win):
@@ -237,8 +242,10 @@ func _b_first_for_all() -> void:
 			break
 		await get_tree().physics_frame
 		held += 1
-		wandered = maxf(wandered,
-			absf(_centre(men).distance_to(target.global_position) - far0))
+		var d_now: float = _centre(men).distance_to(target.global_position)
+		wandered = maxf(wandered, absf(d_now - far0))
+		d_min = minf(d_min, d_now)
+		back_off = maxf(back_off, d_now - d_min)
 	print("  приказ держался %.1f с из %.1f отведённых" % [
 		float(held) / 60.0, float(win) / 60.0])
 	var far1: float = _centre(men).distance_to(target.global_position)
@@ -249,8 +256,11 @@ func _b_first_for_all() -> void:
 	print("  за 2.5 с после объявления: центр %.1f → %.1f м, шагают %d из %d, выстрелов +%d" % [
 		far0, far1, moving, men.size(),
 		GameManager.arrows_fired - shots_at_moment])
-	verdict("B3 отряд ВСТАЛ: центр к цели дальше не подполз",
-		far1 > far0 - 1.5,
+	# С 15.09.2026 задние ряды подтягиваются на SQUAD_SHOT_SLACK сверх своей
+	# дальности (лучники «тупили» в 26 м от цели); нитки за целью нет — центр
+	# не уходит дальше этого зазора
+	verdict("B3 отряд ВСТАЛ: центр к цели не подполз дальше зазора подтягивания (%.0f м)" % Unit.SQUAD_SHOT_SLACK,
+		far1 > far0 - Unit.SQUAD_SHOT_SLACK - 0.5,
 		"%.1f → %.1f м" % [far0, far1])
 	verdict("B3б замер вообще состоялся: приказ прожил хотя бы перезарядку",
 		float(held) / 60.0 >= _UCfg.stat("archer", "attack_cooldown", 2.0),
@@ -267,13 +277,16 @@ func _b_first_for_all() -> void:
 		"прошёл %.1f м" % centre0.distance_to(centre_at_moment))
 
 	print("\n═════ C. НЕТ ХАОТИЧНОЙ ПОГОНИ ═════")
-	print("  за окно огня центр гулял на %.2f м" % wandered)
-	verdict("C1 отряд не бегает челноком к цели и обратно", wandered < 2.0,
-		"гулял на %.2f м" % wandered)
+	print("  за окно огня центр гулял на %.2f м, отходил от минимума на %.2f м" % [wandered, back_off])
+	verdict("C1 отряд не бегает челноком к цели и обратно", back_off < 1.5
+		and wandered < Unit.SQUAD_SHOT_SLACK + 0.5,
+		"гулял на %.2f м, отход от минимума %.2f м" % [wandered, back_off])
 	# Стреляют только те, кто достаёт, а их в колонне единицы, и число залпов
 	# зависит и от перезарядки, и от того, сколько прожил приказ. Требование —
 	# «ведёт огонь всё это время», то есть не меньше выстрела на перезарядку
-	var want_shots: int = maxi(int(float(held) / 60.0
+	# Первый выстрел приходит не в нулевую секунду окна (личный таймер агро,
+	# прицеливание): ожидание — полные перезарядки ПОСЛЕ первой
+	var want_shots: int = maxi(int((float(held) / 60.0 - _UCfg.stat("archer", "attack_cooldown", 2.0))
 		/ maxf(_UCfg.stat("archer", "attack_cooldown", 2.0), 0.1)), 1)
 	verdict("C2 и стрелял он всё это время, а не разово",
 		GameManager.arrows_fired - shots_at_moment >= want_shots,
@@ -397,40 +410,68 @@ func _f_on_march() -> void:
 	var mine: Array = _squad("archer", Constants.FACTION_PLAYER, spot, 8, 1.2)
 	var men: Array = mine[1]
 	var rng: float = (men[0] as Unit).attack_range
-	# Противник стоит В СТОРОНЕ от маршрута, но в пределах выстрела
+	# Противник стоит В СТОРОНЕ от маршрута, но в пределах выстрела — и ЗА
+	# ближним марш-РЛС пехоты (MARCH_RADAR_RANGE + полуширина строя): помеха
+	# внутри него законно зовёт личный перехват у любого рода войск. С базой
+	# 15 м (ТЗ 14.09.2026) 0.7 × 15 = 10.5 м попадало внутрь
+	var lateral: float = maxf(rng * 0.7, GameManager.MARCH_RADAR_RANGE + 3.0)
+	# …и в дальности лука ОТ ТОЧКИ ПРИКАЗА (goal ниже, +40 по X): по приходу
+	# отряд обязан достать до него (F3)
 	var foe: Array = _squad("spearman", Constants.FACTION_ENEMY,
-		spot + Vector3(30.0, 0.0, rng * 0.7), 4, 1.0)
+		spot + Vector3(35.0, 0.0, lateral), 4, 1.0)
 	var foes: Array = foe[1]
 	await pframes(6)
 	for f in foes:
 		(f as Unit).set_tick(false)
 		(f as Unit).current_health = (f as Unit).max_health * 500.0
-	var goal: Vector3 = spot + Vector3(60.0, 0.0, 0.0)
+	# Точка приказа — в 17 м от врага (внутри 20 м лука): встав, отряд обязан
+	# открыть огонь (F3); по дороге враг проходит в 14 м — в радиусе радара
+	var goal: Vector3 = spot + Vector3(40.0, 0.0, 0.0)
 	var shots0: int = GameManager.arrows_fired
 	for u in men:
 		(u as Unit).command_move(goal, true)
 	# Замок приказа игрока (FORCED_MOVE_SEC) намеренно глушит перехват — это
 	# лечение «отряд отходит и разворачивается стрелять». Ждём его истечения:
 	# заказ про огонь на марше, а не про отмену замка
-	await pframes(int((Unit.FORCED_MOVE_SEC + 1.0) * 60.0))
+	# ── ТЗ 14.09.2026, п. 10: ПРИКАЗ ДВИЖЕНИЯ НЕ ПЕРЕБИВАЕТСЯ ──────────────
+	# Прежде проверялось обратное («на марше встают и стреляют»). Теперь:
+	# на марше радар ВИДИТ врага (radar_foe записан, фаза RADAR_MARCH), но
+	# огня нет и отряд не встаёт; дошёл до точки — боевой режим, огонь
+	var sid: int = (men[0] as Unit).squad_id
+	var seen_on_march := false
+	var fired_on_march := false
 	var guard := 0
-	var stopped := false
-	while guard < 60 * 25:
+	while guard < 60 * 70:
 		await get_tree().physics_frame
 		guard += 1
-		if GameManager.arrows_fired > shots0:
-			stopped = true
+		var sq: Dictionary = GameManager.squads.get(sid, {})
+		if int(sq.get("radar_phase", 0)) == GameManager.RADAR_MARCH:
+			seen_on_march = true
+		if GameManager.arrows_fired > shots0 and (men[0] as Unit).state == Unit.State.MOVING:
+			fired_on_march = true
+		var arrived := true
+		for u in men:
+			if (u as Unit).state == Unit.State.MOVING:
+				arrived = false
+				break
+		if arrived and guard > 30:
 			break
-	verdict("F1 отряд на марше заметил врага в радиусе и открыл огонь", stopped,
-		"выстрелов +%d за %d кадров" % [GameManager.arrows_fired - shots0, guard])
-	# И ВСТАЛ: приказ на движение исполняется дальше только после боя
-	var p0: Vector3 = _centre(men)
-	await pframes(60)
-	var p1: Vector3 = _centre(men)
-	print("  за секунду после первого выстрела центр прошёл %.2f м" % [
-		p0.distance_to(p1)])
-	verdict("F2 и остановился, а не пробежал мимо", p0.distance_to(p1) < 2.0,
-		"прошёл %.2f м" % p0.distance_to(p1))
+	verdict("F1 на марше отряд видит врага в радиусе, но огня не открывает и не встаёт",
+		seen_on_march and not fired_on_march,
+		"видел на марше=%s, стрелял на марше=%s, выстрелов +%d" % [str(seen_on_march), str(fired_on_march), GameManager.arrows_fired - shots0])
+	var pc: Vector3 = _centre(men)
+	verdict("F2 и дошёл до точки приказа", pc.distance_to(goal) < 6.0,
+		"центр в %.1f м от цели" % pc.distance_to(goal))
+	# Встал — боевой режим: цель в 20 м, огонь
+	var shots1: int = GameManager.arrows_fired
+	var fired_after := false
+	for _w in range(60 * 15):
+		await get_tree().physics_frame
+		if GameManager.arrows_fired > shots1:
+			fired_after = true
+			break
+	verdict("F3 встав, отряд открывает огонь по цели в дальности", fired_after,
+		"выстрелов после прихода +%d" % (GameManager.arrows_fired - shots1))
 	for u in men:
 		_kill(u)
 	for f in foes:

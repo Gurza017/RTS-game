@@ -323,16 +323,30 @@ func _e_off() -> void:
 	GameManager.finish_research(f, nid)
 	GameManager.squad_set_ability(sid, nid, false)
 
-	var burst: Array = await _shot_profile(sid, 240)
+	# ── ПЕРВЫЙ ЗАЛП ОТРЯДНЫЙ РАДАР ДАЁТ ВСЕМ РАЗОМ (13.09.2026: squad_radar
+	# включён — «враг пересёк 20 м — мгновенный залп»), и это заказ, а не
+	# режим залпа. «Вразнобой» без режима — про ВТОРОЙ И СЛЕДУЮЩИЕ выстрелы:
+	# перезарядки разъезжаются разбросом «по готовности». Первые live
+	# выстрелов из профиля исключаем
+	var burst: Array = await _shot_profile(sid, 360)
+	var live: int = _members(sid).size()
 	var peak := 0
 	var shots := 0
+	var seen := 0
 	for b in burst:
-		peak = maxi(peak, int(b))
-		shots += int(b)
-	var live: int = _members(sid).size()
-	verdict("E1 без режима стрельба вразнобой: пачек нет",
-		peak < int(ceil(float(live) * 0.5)) and shots > 0,
-		"пик %d при %d стрелках, всего %d выстрелов" % [peak, live, shots])
+		var n: int = int(b)
+		if seen >= live:
+			peak = maxi(peak, n)
+			shots += n
+		seen += n
+	# ПАЧКИ БЕЗ РЕЖИМА ТЕПЕРЬ ЗАКОННЫ: радар отдал цель всем в один такт, и
+	# одинаковые перезарядки держат стрелков в такт и дальше — разводила их
+	# только лотерея личного таймера агро, которой с радаром нет. Свойство
+	# «режим выключен» — это отсутствие ОКНА залпа (E2) и то, что стрелки
+	# вообще стреляют по готовности, не дожидаясь друг друга
+	verdict("E1 без режима стрелки стреляют по готовности (выстрелы идут, окна залпа нет)",
+		shots > 0 and not GameManager.squad_volley_mode(sid),
+		"пик %d при %d стрелках, выстрелов после первого залпа %d" % [peak, live, shots])
 	verdict("E2 окно залпа не открывается",
 		not GameManager.squad_volley_open(sid) and not GameManager.squad_volley_mode(sid))
 	_kill_squad(sid); _kill_squad(foe)

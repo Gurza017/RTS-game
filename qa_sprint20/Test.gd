@@ -153,8 +153,11 @@ func _run() -> void:
 				minx = mini(minx, x); maxx = maxi(maxx, x); miny = mini(miny, y); maxy = maxi(maxy, y)
 	wide = float(maxx - minx + 1)
 	tall = float(maxy - miny + 1)
-	verdict("A2 контур — ОВАЛ (ниже, чем шире: %.0f × %.0f px), тонкий" % [wide, tall],
-		ring_px > 20 and tall < wide * 0.7 and ring_px < _MonkS.AURA_PX * _MonkS.AURA_PX / 6,
+	# ТЗ 14.09.2026, п. 9: квад лежит ПЛАШМЯ на земле, текстура — КРУГ,
+	# овал даёт ракурс камеры (прежний вертикальный квад с овалом читался
+	# кольцом у пояса цели — скриншот 9)
+	verdict("A2 контур — тонкий КРУГ (%.0f × %.0f px), квад плашмя даст овал ракурсом" % [wide, tall],
+		ring_px > 20 and absf(tall - wide) <= 2.0 and ring_px < _MonkS.AURA_PX * _MonkS.AURA_PX / 4,
 		"пикселей контура %d" % ring_px)
 	var mp := Vector3(-60.0, 0.0, -400.0)
 	_clear_trees(mp, 20.0)
@@ -178,10 +181,11 @@ func _run() -> void:
 	var aura: Node3D = monk.get("_heal_aura")
 	var ay: float = (aura.global_position.y - pp.y) if aura != null else -1.0
 	var aq := (aura.mesh as QuadMesh) if aura != null else null
-	verdict("A4 овал лежит под ногами (%.2f м над точкой земли), квад %.2f × %.2f" % [ay,
+	var aura_flat: bool = aura != null and absf(aura.rotation_degrees.x + 90.0) < 0.5
+	verdict("A4 овал ЛЕЖИТ на земле (%.2f м над точкой, квад плашмя %.2f × %.2f)" % [ay,
 		aq.size.x if aq != null else 0.0, aq.size.y if aq != null else 0.0],
-		aura != null and aura.visible and ay < 0.35 and aq != null
-		and aq.size.y < aq.size.x * 0.6 and absf(aq.size.x - _MonkS.AURA_DIAM_M) < 0.01)
+		aura != null and aura.visible and ay < 0.1 and aq != null and aura_flat
+		and absf(aq.size.y - aq.size.x) < 0.01 and absf(aq.size.x - _MonkS.AURA_DIAM_M) < 0.01)
 	_free_all([monk, pat])
 	await pframes(3)
 
@@ -226,8 +230,10 @@ func _run() -> void:
 	print("\n═════ C. ПЕНЬ: ТАЙМЕР, СТРАЖИ, HP, ГНОЛЛЫ ═════")
 	verdict("C1 стражей у пня не больше %d, помощников по удару нет" % _GobCfg.TROLL_GUARDS_MAX,
 		_GobCfg.TROLL_GUARDS_MAX == 2 and _GobCfg.TROLL_AGGRO_HELPERS == 0 and _GobCfg.TROLL_AGGRO_BONUS == 0)
-	verdict("C2 запас тролля −20 %% (%.0f = 12700 × 0.8)" % _UCfg.stat("troll", "health"),
-		absf(_UCfg.stat("troll", "health") - 12700.0 * 0.8) < 1.0)
+	# Число правит владелец (14.09.2026: 10160 → 8160): стережём направление
+	# заказа «не выше −20 % от 12700», а не равенство (правило 10)
+	verdict("C2 запас тролля не выше −20 %% (%.0f ≤ 12700 × 0.8)" % _UCfg.stat("troll", "health"),
+		_UCfg.stat("troll", "health") <= 12700.0 * 0.8 + 1.0)
 	verdict("C3 гнолл бросает на 15 %% чаще (кд %.2f ≈ 2.08 × 0.85)" % _UCfg.stat("gnoll", "attack_cooldown"),
 		absf(_UCfg.stat("gnoll", "attack_cooldown") - 2.08 * 0.85) < 0.02)
 	verdict("C4 стадо: старт 5, излишек сверх %d тролль ест, отара заново по 5" % _GobCfg.TROLL_HUNGRY_FLOCK,
@@ -411,7 +417,9 @@ func _run() -> void:
 	verdict("E3 стена выключена — копейщики прямоугольником по линии (%d шеренга)" % (rows_off + 1),
 		not GameManager.spear_wall_ready(ssid) and rows_off + 1 == 1)
 	GameManager.squad_set_ability(ssid, "spearman_1d", true)
-	# Коробочка [2] не запоминается: после отпускания ПКМ режим снова широкий
+	# Коробочка [2] ЗАПОМИНАЕТСЯ (ТЗ 14.09.2026, п. 4 — пятый разворот ручки):
+	# отпускание ПКМ режим не трогает. Персистентность целиком проверяет
+	# qa_formation_keys, блок E; здесь — что отпускание не сбрасывает
 	sm.formation_mode = sm.FORM_DEEP
 	sm.select_units(wr)
 	sm._rmb_down = true
@@ -424,16 +432,10 @@ func _run() -> void:
 	ev.position = Vector2(400.0, 100.0)
 	sm._unhandled_input(ev)
 	await pframes(2)
-	# ── ТРЕБОВАНИЕ РАЗВЁРНУТО ВЛАДЕЛЬЦЕМ 13.09.2026 ──────────────────────
-	# Здесь проверялось, что отпускание ПКМ СБРАСЫВАЕТ коробочку в широкий
-	# фронт (спринт 20, модуль 4). Жалоба пришла ровно наоборот: «каждый раз
-	# приходится жать [2] заново». Режим теперь ЗАПОМИНАЕТСЯ, а прежнюю
-	# жалобу («стена копий раздаётся всем») снимает не сброс, а ВИДИМОСТЬ:
-	# текущий режим написан в верхней панели. Персистентность целиком
-	# проверяет qa_formation_keys, блок E
-	verdict("E4 режим построения переживает отпускание ПКМ (заказ 13.09.2026)",
+	verdict("E4 отпускание ПКМ режим не сбрасывает — коробочка запомнена",
 		sm.formation_mode == sm.FORM_DEEP,
 		"режим %d" % sm.formation_mode)
+	sm.formation_mode = sm.FORM_WIDE
 	# Оборона: фаланга подаётся к врагу целиком
 	_free_all(wr)
 	await pframes(2)
@@ -520,12 +522,19 @@ func _run() -> void:
 
 	# ═══ G. ПЕРЕМИРИЕ И ИИ ОРДЫ ═════════════════════════════════════════════
 	print("\n═════ G. ПЕРЕМИРИЕ, ЗАЩИТА КРАСНОГО ИИ, РЕЙДЫ ═════")
+	# Чекбокс «Перемирие» (ТЗ 14.09.2026) — стенд не зависит от файла настроек
+	GameManager.truce_override = 1
 	main.set_game_clock(0.0)
 	verdict("G1 первые %.0f с — перемирие (осталось %.0f с)" % [_GobCfg.TRUCE_SEC, GameManager.truce_left()],
 		GameManager.truce_active() and absf(GameManager.truce_left() - _GobCfg.TRUCE_SEC) < 2.0
 		and _AICfg.AI_TRUCE_SEC == _GobCfg.TRUCE_SEC and _GobCfg.PEACE_SEC == _GobCfg.TRUCE_SEC)
 	main.set_game_clock(_GobCfg.TRUCE_SEC + 5.0)
 	verdict("G2 после срока перемирия нет", not GameManager.truce_active())
+	main.set_game_clock(0.0)
+	GameManager.truce_override = 0
+	verdict("G2б чекбокс «Перемирие» выключен — перемирия нет с первой секунды, плашка гаснет",
+		not GameManager.truce_active() and GameManager.truce_left() == 0.0)
+	GameManager.truce_override = 1
 	main.set_game_clock(0.0)
 	var gai = main.goblin_ai
 	if gai == null:

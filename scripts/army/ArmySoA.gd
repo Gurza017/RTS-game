@@ -133,6 +133,12 @@ func used() -> int:
 ## проходы солвера (см. ArmyCore._top): ёмкость растёт под ПИК армии и назад не
 ## сжимается, и после большой рубки обход по ней перебирал бы впустую в разы
 ## больше строк, чем есть бойцов
+## GC-зонд (стенды): байт выделено в C# за всё время, сборок по поколению
+func gc_allocated() -> int:
+	return int(_c.GcAllocated())
+func gc_count(gen: int) -> int:
+	return int(_c.GcCount(gen))
+
 func top() -> int:
 	return _c.Top()
 
@@ -254,6 +260,10 @@ func get_sep_radius(i: int) -> float:
 
 func set_combat(i: int, dmg: float, rng: float, spd: float) -> void:
 	_c.SetCombat(i, dmg, rng, spd)
+
+## Вес цели для стрелков (ТЗ 14.09.2026, п. 10; см. Unit.target_weight)
+func set_target_weight(i: int, w: float) -> void:
+	_c.SetTargetWeight(i, w)
 
 func set_slot(i: int, off_x: float, off_z: float) -> void:
 	_c.SetSlot(i, off_x, off_z)
@@ -541,8 +551,15 @@ func nearest_enemy_offset(row: int, radius: float) -> Vector3:
 func best_enemy(row: int, radius: float, crowd_penalty: float):
 	return _c.BestEnemy(row, radius, crowd_penalty)
 
+func best_enemy_w(row: int, radius: float, crowd_penalty: float, use_prio: bool):
+	return _c.BestEnemyW(row, radius, crowd_penalty, use_prio)
+
 func nearest_of_side(x: float, z: float, want_side: int, radius: float):
 	return _c.NearestOfSide(x, z, want_side, radius)
+
+## Самый раненый свой (доля запаса) в радиусе, без массива; null — раненых нет
+func most_wounded_of_side(x: float, z: float, side: int, radius: float, exclude_row: int):
+	return _c.MostWoundedOfSide(x, z, side, radius, exclude_row)
 
 func query_radius(x: float, z: float, radius: float) -> Array:
 	return _c.QueryRadius(x, z, radius)

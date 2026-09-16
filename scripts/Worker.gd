@@ -902,13 +902,25 @@ func _process_sheep(delta: float) -> void:
 func on_construction_finished() -> void:
 	build_target = null
 	state = State.IDLE
-	# Очередь Shift: следующая площадка — тем же приказом (письмо 12)
+	if _advance_build_queue():
+		return
+	_wake_process()
+
+## ── СЛЕДУЮЩАЯ ПЛОЩАДКА ИЗ ОЧЕРЕДИ SHIFT (13.09.2026) ────────────────────────
+## Жалоба владельца: «три рабочих, пять зданий через Shift — строят только
+## первые два, дальше фундаменты стоят». Причина была ЗДЕСЬ: следующая
+## площадка бралась через command_build(nxt) с queue = false, а такой вызов
+## ОЧИЩАЕТ остаток очереди — после первой стройки вторая начиналась с пустым
+## хвостом. Теперь переход идёт с queue = true: очередь живёт, пока в ней
+## есть хоть одна недостроенная площадка. Достроенные другими и снесённые
+## пропускаются. true — приказ отдан, false — очередь пуста
+func _advance_build_queue() -> bool:
 	while not _build_queue.is_empty():
 		var nxt = _build_queue.pop_front()
-		if nxt != null and is_instance_valid(nxt) and not bool(nxt.get("_done")):
-			command_build(nxt as Node3D)
-			return
-	_wake_process()
+		if nxt != null and is_instance_valid(nxt) and nxt.get("_done") != true:
+			command_build(nxt as Node3D, true)
+			return true
+	return false
 
 ## ДОПУСК ПРИХОДА НА СТРОЙКУ, сверх стены здания. Щедрый по той же причине,
 ## что и SLOT_ARRIVE у жилы: в артели соседи всё время подталкивают друг друга,
@@ -928,9 +940,18 @@ var _build_settled: bool = false
 const BUILD_STAND_PAD := 0.25
 
 func _process_build(delta: float) -> void:
-	if build_target == null or not is_instance_valid(build_target):
+	if build_target == null or not is_instance_valid(build_target) \
+			or build_target.get("_done") == true:
+		# Площадку достроили без нас (артель дошла раньше, а нас в строителях
+		# ещё не было) или снесли — ОЧЕРЕДЬ ПРИ ЭТОМ НЕ ТЕРЯЕТСЯ: следующая
+		# площадка берётся тем же путём, что и по сигналу «достроено».
+		# СРАВНЕНИЕ С true, А НЕ bool(): целью бывает и РУДНИК (тот же утиный
+		# контракт work_position/add_builder), у него поля _done нет, get даёт
+		# null, а bool(null) — SCRIPT ERROR на каждом кадре (qa_gold_mine)
 		build_target = null
 		state = State.IDLE
+		if not _advance_build_queue():
+			_wake_process()
 		return
 	# ── ТОЧКА СТОЯНИЯ — ПОД СОБОЙ У СТЕНЫ (письмо 12) ──────────────────────
 	# Раньше рабочий шёл лучом в ЦЕНТР площадки и вставал там, где луч

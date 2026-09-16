@@ -88,9 +88,12 @@ func _a_numbers() -> void:
 	var squad: int = int(_GobCfg.SQUAD_SIZE.get("goblin_spearman", 0))
 	print("  запас туши %.0f; стандартный отряд орды %d × %.0f = %.0f" % [
 		hp, squad, gob_hp, float(squad) * gob_hp])
-	verdict("A1 запас = суммарный запас стандартного отряда гоблинов",
-		absf(hp - float(squad) * gob_hp) < 1.0,
-		"%.0f против %.0f" % [hp, float(squad) * gob_hp])
+	# 13.09.2026: запас — ДОЛЯ BIG_GOBLIN_HP_SQUADS от отряда (порезан вдвое).
+	# ТЗ 14.09.2026 сделало запас ЧИСЛОМ в таблице (правит владелец: 8250 →
+	# 3250 в тот же день); ручка-доля осталась ПОТОЛКОМ, а не равенством
+	verdict("A1 запас не выше BIG_GOBLIN_HP_SQUADS × запас стандартного отряда гоблинов",
+		hp > 0.0 and hp <= float(squad) * gob_hp * _UCfg.BIG_GOBLIN_HP_SQUADS + 1.0,
+		"%.0f при потолке %.0f" % [hp, float(squad) * gob_hp * _UCfg.BIG_GOBLIN_HP_SQUADS])
 	verdict("A1б размер отряда орды в двух конфигах совпадает",
 		squad == _UCfg.BIG_GOBLIN_HORDE_SQUAD,
 		"%d против %d" % [squad, _UCfg.BIG_GOBLIN_HORDE_SQUAD])
@@ -132,8 +135,9 @@ func _b_size() -> void:
 			big.ring_scale(), gob.ring_scale(), big.sep_radius(), gob.sep_radius()])
 	verdict("B3 стрелок целится в корпус, а не в ступни",
 		big.aim_height() > 1.0, "%.1f м" % big.aim_height())
-	verdict("B4 спрайт втрое крупнее людского",
-		absf(_GobCfg.BIG_PIXEL_SIZE / 0.0108 - 3.0) < 0.01,
+	verdict("B4 спрайт крупнее людского в BIG_SIZE_SCALE раз (13.09.2026: 2.4, −20 %)",
+		absf(_GobCfg.BIG_PIXEL_SIZE / 0.0108 - _GobCfg.BIG_SIZE_SCALE) < 0.01
+			and _GobCfg.BIG_SIZE_SCALE <= 2.4 + 0.01,
 		"×%.2f" % (_GobCfg.BIG_PIXEL_SIZE / 0.0108))
 	# ── ×2 ОТ СТРЕЛ ───────────────────────────────────────────────────────
 	verdict("B5 стрела бьёт тушу вдвое больнее",
@@ -198,6 +202,17 @@ func _c_sweep() -> void:
 	verdict("C3 накрытых отбрасывает назад",
 		moved >= 2, "сдвинулось %d из 3" % moved)
 	# ── КОМБО: КАЖДЫЙ ТРЕТИЙ ВЗМАХ ДВОЙНОЙ ────────────────────────────────
+	# ЦЕЛИ — НАЗАД ПОД ДУБИНУ И БЕЗ ТИКА: свип считается только по попаданию,
+	# а каждый взмах отбрасывает цели на BIG_KNOCKBACK; после уменьшения туши
+	# (13.09.2026, радиус разведения меньше) третий взмах заставал их уже за
+	# пределами досягаемости, и «двойной» считался одинарным — замороженная
+	# цель отлётом не двигается, и все четыре взмаха ложатся по ней
+	for i in range(front.size()):
+		var fu := front[i] as Unit
+		fu.global_position = pos0[i]
+		fu.sync_row()
+		fu.set_tick(false)
+	await pframes(2)
 	var sw0: int = int(big.get("sweeps"))
 	for k in range(_GobCfg.BIG_COMBO_EVERY):
 		big.call("_strike_damage")
@@ -269,7 +284,7 @@ func _e_spawn() -> void:
 	for row in _GobCfg.START_SQUADS:
 		if String((row as Dictionary).get("unit", "")) == "big_goblin":
 			base_rows += 1
-	verdict("E2 на базе орды три отряда туш",
+	verdict("E2 на базе орды BIG_BASE_SQUADS отрядов туш (13.09.2026: один)",
 		base_rows == _GobCfg.BIG_BASE_SQUADS,
 		"%d отряда" % base_rows)
 	# ── ЗАЩИТА ЛОГОВА ─────────────────────────────────────────────────────

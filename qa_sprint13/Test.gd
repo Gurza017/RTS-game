@@ -137,8 +137,10 @@ func _b_gnolls() -> void:
 	var g: Dictionary = _UCfg.get_stats("gnoll")
 	var sp: Dictionary = _UCfg.get_stats("goblin_spearman")
 	var ar: Dictionary = _UCfg.get_stats("archer")
-	verdict("B1 гнолл быстрее орды и людской пехоты",
-		float(g.get("movement_speed", 0.0)) > float(sp.get("movement_speed", 99.0)),
+	# Владелец 14.09.2026 уравнял шаг гнолла с ордой (2.5 → 2.2): стережём
+	# «не медленнее», а не «быстрее»
+	verdict("B1 гнолл не медленнее орды",
+		float(g.get("movement_speed", 0.0)) >= float(sp.get("movement_speed", 99.0)),
 		"гнолл %.1f против %.1f у гоблина" % [
 			float(g.get("movement_speed", 0.0)), float(sp.get("movement_speed", 0.0))])
 	verdict("B2 гнолл слабее и хрупче гоблина-копейщика",
@@ -647,6 +649,7 @@ func _h_monk() -> void:
 	if hurt == null:
 		return
 	hurt.current_health = hurt.max_health * 0.4
+	hurt._soa_push_stats()   # монах ищет раненого по колонке ядра (14.09.2026)
 	for _i in range(6):
 		await get_tree().physics_frame
 	m._heal_pulse()

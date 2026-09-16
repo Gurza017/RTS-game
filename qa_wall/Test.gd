@@ -268,10 +268,17 @@ func _block_wall() -> void:
 	verdict("A2 дерутся все, кто дотягивается до врага", best_ratio >= 0.7,
 		"лучший замер %d из %d (%.0f%%)" % [best_has, best_can, best_ratio * 100.0])
 
-	# A3 — БОЙ ВООБЩЕ СОСТОЯЛСЯ
+	# A3 — БОЙ ВООБЩЕ СОСТОЯЛСЯ. Судим по НАНЕСЁННОМУ УРОНУ, а не по убитым:
+	# с отрядным радаром (13.09.2026) стрелы ложатся «наименее обстрелянным»,
+	# урон размазан по 48 рыцарям (340 HP каждый), и за 24 с замера ни один
+	# не гибнет на исправном коде — база и правка дают −900 HP к 11-й секунде
 	var foe_dead: int = _foe_men.size() - _alive(_foe_men).size()
-	verdict("A3 бой состоялся (потери у противника есть)", foe_dead > 0,
-		"выбито %d из %d" % [foe_dead, _foe_men.size()])
+	var foe_hp := 0.0
+	for f in _alive(_foe_men):
+		foe_hp += (f as Unit).current_health
+	var lost: float = float(_foe_men.size()) * (_foe_men[0] as Unit).max_health - foe_hp
+	verdict("A3 бой состоялся (у противника потери или снятый запас)", foe_dead > 0 or lost > 500.0,
+		"выбито %d из %d, снято %.0f HP" % [foe_dead, _foe_men.size(), lost])
 
 	# Убираем поле боя, чтобы следующие разделы мерили себя, а не остатки
 	for u in _wall_men + _foe_men + arch:

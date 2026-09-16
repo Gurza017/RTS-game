@@ -97,6 +97,10 @@ func _panic_at(spot: Vector3, threat_off: Vector3) -> Array:
 		men.append(u)
 	# Угроза: живой противник, от которого и считается вектор бегства
 	var foe := _spawn(FOE, Constants.FACTION_GOBLIN, spot + threat_off)
+	# УГРОЗА ЗАМОРОЖЕНА: одиночный гоблин по своему таймеру агро (лотерея
+	# 0.5-2 с) шёл на отряд и сдвигал ось замера — конус краснел на исправном
+	# коде через раз (14.09.2026: 0 из 24 в конусе при угрозе, ушедшей на 8 м)
+	foe.set_tick(false)
 	foe.max_health = 1e9
 	foe.current_health = 1e9
 	await pframes(30)
@@ -164,6 +168,7 @@ func _c_cone() -> void:
 		GameManager.add_to_squad(sid, u)
 		men.append(u)
 	var foe := _spawn(FOE, Constants.FACTION_GOBLIN, spot + Vector3(0.0, 0.0, -14.0))
+	foe.set_tick(false)   # угроза стоит: ось конуса меряется от неё (см. выше)
 	foe.max_health = 1e9
 	foe.current_health = 1e9
 	await pframes(30)

@@ -61,6 +61,9 @@ const VOICE_HORN_ATTACK := DIR_VOICE + "horn_attacks.mp3"
 ## Лупы шага и бега пехоты
 const DIR_GOBLIN_VOICE := "res://assets/factions/Goblin/Goblins_voice/"
 const DIR_TROLL_VOICE  := "res://assets/factions/orc/Troll/Troll_voice/"
+## Бросок кости гнолла (15.09.2026): папка лежит РЯДОМ с троллем, не внутри
+## Troll_voice — там только голос самого тролля
+const DIR_GNOLL_VOICE  := "res://assets/factions/orc/Troll/Gnoll/"
 ## Эмбиент реки (спринт 18): заменяет прежний файл моря, которого в коде и не
 ## было. Слышен только у русла и брода, см. RIVER_*
 const AMBIENCE_RIVER := DIR_MUSIC + "River Stream Loop.ogg"
@@ -509,6 +512,11 @@ const SFX_BANK := {
 	# Хруст поедания овцы троллем (10.09.2026): синтезированные wav
 	"nom_nom":     ["nom_nom 1.wav", "nom_nom 2.wav"],
 	"bow_attack":  ["Bow Attack 1.ogg", "Bow Attack 2.ogg"],
+	# Снайперский выстрел (15.09.2026): заменён на настоящий сэмпл выстрела
+	# из пака людей — прежний синтезированный snd_snipe_shot.wav снят целиком
+	# (заказ владельца: «старый звук не подходит»), второго файла в категории
+	# больше нет и не остаётся
+	"snipe_shot":  ["Sniper_Archer_Attack.wav"],
 	"bow_impact":  ["Bow Impact Hit 1.ogg", "Bow Impact Hit 2.ogg", "Bow Impact Hit 3.ogg"],
 	"bow_block":   ["Bow Blocked 1.ogg", "Bow Blocked 2.ogg", "Bow Blocked 3.ogg"],
 	"sword_attack": ["Sword Attack 1.ogg", "Sword Attack 2.ogg", "Sword Attack 3.ogg"],
@@ -572,6 +580,19 @@ const SFX_BANK := {
 					DIR_TROLL_VOICE + "troll_growl_3.mp3",
 					DIR_TROLL_VOICE + "troll_growl_4.mp3"],
 	"troll_victory": [DIR_TROLL_VOICE + "troll_victory.mp3"],
+	# ── УДАР ДУБИНОЙ (15.09.2026): свой рёв на КАЖДЫЙ замах, а не growl ─────
+	# Это вешается на общий виртуал _sfx_swing() (см. Unit._process_attack —
+	# он и так зовёт AudioManager.play_3d(_sfx_swing(), ...) на каждый удар
+	# любого бойца), Troll._sfx_swing() переведён с позаимствованного
+	# "sword_attack" на эту категорию
+	"troll_attack": [DIR_TROLL_VOICE + "Troll_Attack_1.wav",
+					  DIR_TROLL_VOICE + "Troll_Attack_2.wav"],
+	# ── БРОСОК КОСТИ ГНОЛЛА (15.09.2026) ────────────────────────────────────
+	# Играется в Gnoll._release_bone() — в кадре, когда кость РЕАЛЬНО покидает
+	# руку (после _throw_delay от начала замаха), а не в _on_attack_fired,
+	# где только считается прицел
+	"gnoll_throw": [DIR_GNOLL_VOICE + "somersault_01.wav",
+					 DIR_GNOLL_VOICE + "somersault_10.wav"],
 }
 
 ## Настройки категории: сколько голосов ей можно занять одновременно,
@@ -608,6 +629,7 @@ const SFX_LIMITS := {
 	"mine_stone":   {"voices": 4, "gap": 0.10, "db": -4.0},
 	# Свист стрел и залпы — самая частая ткань боя, голосов им нужно больше всех
 	"bow_attack":   {"voices": 6, "gap": 0.03,  "db": -7.0},
+	"snipe_shot":   {"voices": 4, "gap": 0.02,  "db": -6.1, "pitch": [0.95, 1.05]},
 	"bow_impact":   {"voices": 6, "gap": 0.035, "db": -4.0},
 	"bow_block":    {"voices": 4, "gap": 0.06,  "db": -8.0},
 	# Сталь: замах тише попадания — так слышно, КТО кого достал.
@@ -655,6 +677,17 @@ const SFX_LIMITS := {
 	# Рык тролля: редкий, тяжёлый; окно держит его от пулемёта при трёх троллях
 	"troll_growl": {"voices": 2, "gap": 1.5, "db": -4.0, "pitch": [0.92, 1.06]},
 	"troll_victory": {"voices": 1, "gap": 2.5, "db": -3.0, "pitch": [0.97, 1.03]},
+	# ── УДАР ДУБИНОЙ (15.09.2026) ────────────────────────────────────────────
+	# Тролль в бою бьёт КАЖДЫЙ attack_cooldown (≈1.17 с), сериями до одышки, а
+	# троллей на карте единицы (TROLL_GUARDS_MAX + разовая волна защиты) — трёх
+	# голосов и паузы короче growl хватает с запасом, без метронома
+	"troll_attack": {"voices": 3, "gap": 0.3, "db": -4.0, "pitch": [0.94, 1.06]},
+	# ── БРОСОК КОСТИ ГНОЛЛА (15.09.2026) ─────────────────────────────────────
+	# Гноллов на карте может быть заметно больше троллей (стаи по 12), и бросок
+	# у них чаще — голосов и джиттер громкости как у goblin_attack, пауза чуть
+	# короче: иначе стая заглушает сама себя после первого же наскока
+	"gnoll_throw": {"voices": 4, "gap": 0.22, "db": -6.0, "pitch": [0.92, 1.08],
+					 "db_jitter": 2.0},
 }
 ## Окно между ХОРАМИ смеха (сек): два выбитых отряда подряд — один хор
 const LAUGH_CHORUS_GAP := 4.0
@@ -980,9 +1013,18 @@ func _listener_node() -> Node3D:
 ## Банк маленький — три десятка коротких сэмплов, — и грузить его целиком
 ## на старте дешевле, чем ловить эти рывки в бою.
 func _preload_sfx() -> void:
+	# ── ПУТЬ РЕЗОЛВИТСЯ ТЕМ ЖЕ ПРАВИЛОМ, ЧТО И В МОМЕНТ ВОСПРОИЗВЕДЕНИЯ ──────
+	# Здесь стояло `DIR_SFX + String(f)` безусловно — для категорий орды/тролля
+	# (goblin_attack, troll_growl, troll_attack, gnoll_throw…), чьи записи в
+	# SFX_BANK уже полные `res://…` пути, это склеивало мусорную строку вида
+	# «.../Sounds Human/res://assets/factions/…», которая нигде не существует:
+	# `_stream()` честно кэшировал по НЕЙ null и молча выходил. Настоящий файл
+	# при этом всё равно проигрывался — но ЛЕНИВО, при первом реальном
+	# `play_3d()` в разгар боя, то есть ровно тот рывок кадра, ради ухода от
+	# которого предзагрузка и заведена (см. комментарий над функцией)
 	for cat in SFX_BANK:
 		for f in SFX_BANK[cat]:
-			_stream(DIR_SFX + String(f))
+			_stream(sfx_path(String(f)))
 
 ## ── ГОЛОСА ИНТЕРФЕЙСА ──────────────────────────────────────────────────────
 var _ui_pool: Array = []          # AudioStreamPlayer (без позиции в мире)

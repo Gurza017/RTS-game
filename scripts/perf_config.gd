@@ -107,7 +107,9 @@ static var march_blocker_scan: bool = true
 ## обнаружением и огнём есть фаза прицеливания (отряд развернулся, но не
 ## стреляет). Выключатель оставлен ради честного A/B (qa_3000_archers_bench):
 ## false — прежний путь (личный опрос + отрядный кэш с TTL).
-static var squad_radar: bool = false
+## 13.09.2026: ВКЛЮЧЁН по заказу («враг в 25 м — готовимся, пересёк 20 —
+## мгновенный залп, целей несколько — ближайшая»); A/B-замер: кадр не двигает
+static var squad_radar: bool = true
 
 ## Счётчик сканов сетки (`Unit._find_nearest_enemy_in_range` — ЕДИНАЯ точка
 ## учёта поиска цели в проекте). Считает ВЫЗОВЫ, а не время: в отличие от
@@ -159,13 +161,110 @@ static var nav_calls: int = 0
 static func class_reset() -> void:
 	_class_usec = {}
 	_class_ticks = {}
+	_class_max = {}
 	_class_frames = 0
+	_state_usec = {}
+	_state_ticks = {}
 	nav_usec = 0
 	nav_calls = 0
 
-static func class_add(id: String, usec: int) -> void:
+## Худший одиночный тик по классу [мкс, состояние бойца] — пики, а не средние
+static var _class_max: Dictionary = {}
+
+static func class_add(id: String, usec: int, state: int = -1) -> void:
 	_class_usec[id] = int(_class_usec.get(id, 0)) + usec
 	_class_ticks[id] = int(_class_ticks.get(id, 0)) + 1
+	var m: Variant = _class_max.get(id)
+	if m == null or usec > int((m as Array)[0]):
+		_class_max[id] = [usec, state]
+	# Раскладка ПО СОСТОЯНИЯМ (зонд BigStand, 16.09.2026): те же часы, что и
+	# по классам, — сколько стоит тик бойца в IDLE / MOVING / ATTACKING
+	_state_usec[state] = int(_state_usec.get(state, 0)) + usec
+	_state_ticks[state] = int(_state_ticks.get(state, 0)) + 1
+
+## ═══════════════════════════════════════════════════════════════════════════
+## ЗОНДЫ BIGSTAND (16.09.2026): состояние, приказы движения, расталкивание
+## ═══════════════════════════════════════════════════════════════════════════
+## Все три — измерители стенда, а не режим игры: в выключенном виде это одно
+## сравнение bool на СОБЫТИЕ (приказ, кадр), в покадровом пути бойца их нет
+static var _state_usec: Dictionary = {}
+static var _state_ticks: Dictionary = {}
+
+## [[state, мс на кадр, мкс на тик, тиков], …] — считается от _class_frames
+static func state_report() -> Array:
+	var rows: Array = []
+	var fr: float = float(maxi(_class_frames, 1))
+	for st in _state_usec:
+		var total: int = int(_state_usec[st])
+		var ticks: int = int(_state_ticks.get(st, 1))
+		rows.append([int(st), float(total) / 1000.0 / fr, float(total) / float(maxi(ticks, 1)), ticks])
+	rows.sort_custom(func(a, b): return float(a[1]) > float(b[1]))
+	return rows
+
+## ── ПРИКАЗЫ ДВИЖЕНИЯ: КТО, КОМУ И ИЗ КАКОГО СОСТОЯНИЯ ─────────────────────
+## Unit.command_move считает вызов (класс бойца, его состояние ДО приказа,
+## источник). Источник — метка cmd_src: её ставит вызывающий (сплочённость,
+## смыкание, подача фаланги, монах, гнолл, ИИ) перед своим вызовом и снимает
+## после; всё без метки — «other». Так видно, КТО именно дёргает стоящих
+static var cmd_meter: bool = false
+static var cmd_src: String = ""
+static var _cmd_counts: Dictionary = {}
+static var cmd_total: int = 0
+
+## Те же события ПО ОТРЯДАМ (src|sid → вызовов): один и тот же отряд, получающий
+## приказ каждую секунду, — это качели, а не разовая перестановка
+static var _cmd_sids: Dictionary = {}
+
+static func cmd_reset() -> void:
+	_cmd_counts.clear()
+	_cmd_sids.clear()
+	cmd_total = 0
+
+static func cmd_hit(cls: String, st: int, sid: int = -1) -> void:
+	cmd_total += 1
+	var src: String = cmd_src if cmd_src != "" else "other"
+	var key: String = "%s|%s|%d" % [src, cls, st]
+	_cmd_counts[key] = int(_cmd_counts.get(key, 0)) + 1
+	var k2: String = "%s|%d" % [src, sid]
+	_cmd_sids[k2] = int(_cmd_sids.get(k2, 0)) + 1
+
+## [[src, sid, calls], …] по убыванию
+static func cmd_sid_report() -> Array:
+	var rows: Array = []
+	for k in _cmd_sids:
+		var p: PackedStringArray = String(k).split("|")
+		rows.append([p[0], int(p[1]), int(_cmd_sids[k])])
+	rows.sort_custom(func(a, b): return int(a[2]) > int(b[2]))
+	return rows
+
+## [[src, cls, state, calls], …] по убыванию
+static func cmd_report() -> Array:
+	var rows: Array = []
+	for k in _cmd_counts:
+		var p: PackedStringArray = String(k).split("|")
+		rows.append([p[0], p[1], int(p[2]), int(_cmd_counts[k])])
+	rows.sort_custom(func(a, b): return int(a[3]) > int(b[3]))
+	return rows
+
+## ── РАСТАЛКИВАНИЕ: СКОЛЬКО СТРОК СДВИНУТО ЗА КАДР ─────────────────────────
+## ArmyCore.BatchSeparation возвращает число применённых поправок; здесь оно
+## копится за окно замера. Это и есть «сколько тел трётся»: каждая поправка —
+## запись Position узла через границу языков плюс пробуждение спящего
+static var sep_meter: bool = false
+static var sep_moved: int = 0
+static var sep_frames: int = 0
+
+static func sep_reset() -> void:
+	sep_moved = 0
+	sep_frames = 0
+
+static func sep_add(n: int) -> void:
+	sep_moved += n
+	sep_frames += 1
+
+static func class_max(id: String) -> Array:
+	var m: Variant = _class_max.get(id)
+	return (m as Array) if m != null else [0, -1]
 
 static func class_frame() -> void:
 	_class_frames += 1
@@ -738,20 +837,28 @@ static var squad_melee: bool = true
 ## В самой игре все стоят внутри карты, и этого эффекта нет.
 static var goblin_village: bool = true
 
+## Худший одиночный вызов ветки (qa_melee_bench, 14.09.2026): среднее прячет
+## событие — один вызов в 4 мс среди двух тысяч по 9 мкс даёт «11 мкс»
+static var _prof_max: Dictionary = {}
+
 static func prof_reset() -> void:
 	_prof_usec.clear()
 	_prof_calls.clear()
+	_prof_max.clear()
 
 static func prof_add(bucket: String, usec: int) -> void:
 	_prof_usec[bucket]  = int(_prof_usec.get(bucket, 0)) + usec
 	_prof_calls[bucket] = int(_prof_calls.get(bucket, 0)) + 1
+	if usec > int(_prof_max.get(bucket, 0)):
+		_prof_max[bucket] = usec
 
-## [[bucket, total_usec, calls, avg_usec], ...] по убыванию total_usec
+## [[bucket, total_usec, calls, avg_usec, max_usec], ...] по убыванию total_usec
 static func prof_report() -> Array:
 	var rows: Array = []
 	for bucket in _prof_usec:
 		var total: int = int(_prof_usec[bucket])
 		var calls: int = int(_prof_calls.get(bucket, 1))
-		rows.append([bucket, total, calls, float(total) / float(maxi(calls, 1))])
+		rows.append([bucket, total, calls, float(total) / float(maxi(calls, 1)),
+			int(_prof_max.get(bucket, 0))])
 	rows.sort_custom(func(a, b): return int(a[1]) > int(b[1]))
 	return rows

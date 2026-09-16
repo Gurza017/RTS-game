@@ -668,8 +668,12 @@ func _b4_orders() -> void:
 	var went := 0
 	var stuck := 0
 	for u5 in watched:
+		# Правило 5: живость — на СЫРОЙ ссылке, до приведения типа (иначе
+		# SCRIPT ERROR «Trying to cast a freed object» в каждом прогоне)
+		if not is_instance_valid(u5):
+			continue
 		var uu2 := u5 as Unit
-		if not is_instance_valid(uu2) or uu2.is_dead():
+		if uu2 == null or uu2.is_dead():
 			continue
 		var d: float = (uu2.global_position - (before[u5] as Vector3)).length()
 		if d > 3.0:
@@ -686,8 +690,11 @@ func _b4_orders() -> void:
 	var with_target := 0
 	var no_ticket := 0
 	for u6 in watched:
+		# Правило 5: живость на СЫРОЙ ссылке, до приведения типа
+		if u6 == null or not is_instance_valid(u6):
+			continue
 		var uu3 := u6 as Unit
-		if not is_instance_valid(uu3) or uu3.is_dead():
+		if uu3 == null or uu3.is_dead():
 			continue
 		if (uu3.global_position - (before[u6] as Vector3)).length() > 3.0:
 			continue
@@ -700,8 +707,10 @@ func _b4_orders() -> void:
 	var goal_far := 0
 	var goal_near := 0
 	for u7 in watched:
+		if u7 == null or not is_instance_valid(u7):
+			continue
 		var uu4 := u7 as Unit
-		if not is_instance_valid(uu4) or uu4.is_dead():
+		if uu4 == null or uu4.is_dead():
 			continue
 		if (uu4.global_position - (before[u7] as Vector3)).length() > 3.0:
 			continue

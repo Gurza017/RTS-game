@@ -1,35 +1,6 @@
 extends RefCounted
-## ═══════════════════════════════════════════════════════════════════════════
-## КОНФИГУРАЦИЯ КУЗНИЦЫ: ДРЕВО ТЕХНОЛОГИЙ
-## ═══════════════════════════════════════════════════════════════════════════
-##
-## Это БАЛАНСНАЯ ТАБЛИЦА ВЛАДЕЛЬЦА, как и unit_stats_config.gd: цены, время,
-## бонусы, тексты, ИКОНКИ и СВЯЗИ правятся здесь и только здесь. Стенды обязаны
-## читать числа отсюда, а не хардкодить их у себя.
-##
-## У каждого типа войск (вкладка в панели кузницы) своя сетка 5 РЯДОВ × 4
-## КОЛОНКИ. Колонки A/B/C — ветки характеристик, колонка D — отдельный столбец,
-## который открывается не стрелкой, а полностью изученным рядом A+B+C.
-##
-## ── ОДНА ТАБЛИЦА, А НЕ ДВЕ (переделано по заказу владельца) ─────────────────
-## Раньше здесь было ДВЕ таблицы: GRID хранил ФОРМУ графа (иконка, prereq, link)
-## одну на все вкладки, а UNITS — только числа. Экономия была настоящая, но у
-## неё было следствие, которое и попросили убрать: сетка была ОБЩЕЙ, то есть
-## поменять иконку или стрелку у лучника, не тронув мечника, было НЕВОЗМОЖНО в
-## принципе — все четыре вкладки рисовались одними и теми же картинками и одним
-## и тем же графом. Теперь `icon`, `prereq` и `link` лежат В ЯЧЕЙКЕ каждого
-## юнита, рядом со своими числами: дерево каждого рода войск полностью
-## самостоятельно, и у рабочего оно честно другой формы, а не копия боевого.
-##
-## Плата за это известна и принята: форма графа боевых веток повторена четыре
-## раза, и при правке САМОГО ДРЕВА её надо править во всех. Взамен любую
-## отдельную вкладку можно менять, ничего не ломая у соседей.
-##
-## ── ID УЗЛА ─────────────────────────────────────────────────────────────────
-## "<тип>_<ячейка>": warrior_1a, archer_3d. Идентификатор ГЛОБАЛЬНО уникален,
-## поэтому узел древа подставляется в существующую систему исследований как
-## обычный слот улучшения (GameManager.researched/researching, накопление
-## бонусов, очередь кузницы) без единой дополнительной ветки в их коде.
+## ДРЕВО КУЗНИЦЫ: UNITS[unit][cell] — узел = слот улучшения.
+## Только параметры; снятые пояснения — docs/CONFIG_NOTES_2026-09-14.md
 
 const ROWS := 5
 const COLS := ["a", "b", "c", "d"]
@@ -37,91 +8,15 @@ const COLS := ["a", "b", "c", "d"]
 const ABILITY_COL := "d"
 
 ## Порядок вкладок в панели кузницы — он же порядок иконок в верхней полосе.
-## РАБОЧИЙ СТОИТ ПЕРВЫМ: экономика раньше войны, и его ветка нужна с первых
-## минут партии, тогда как боевые — уже после первой казармы
 const UNIT_TABS := ["worker", "warrior", "spearman", "archer", "monk"]
 
 ## ═══════════════════════════════════════════════════════════════════════════
-## ТАБЛИЦА ВКЛАДОК — ФОРМА И ЧИСЛА ВМЕСТЕ
 ## ═══════════════════════════════════════════════════════════════════════════
-##
-## Поля ячейки (любое можно опустить):
-##   icon          — файл из unit_stats_config.SMITH_ICONS_DIR (ТОЛЬКО имя!)
-##   prereq        — ЯЧЕЙКИ (не id узлов), которые нужно изучить прежде. Пустой
-##                   список = узел открыт с самого начала. Разворачивается в
-##                   полные id внутри вкладки: "1a" → "warrior_1a".
-##                   Условие И: нужны ВСЕ перечисленные, не любой из них.
-##   link          — ячейки, с которыми узел соединён ГОРИЗОНТАЛЬНОЙ стрелкой.
-##
-##                   ЭТО НАСТОЯЩИЙ ПУТЬ ПО ГРАФУ, но АЛЬТЕРНАТИВНЫЙ, а не
-##                   дополнительный (заказ владельца: «переход разрешён строго
-##                   при наличии видимой стрелки; есть стрелка вбок — можно
-##                   шагнуть вбок»). Узел открывается, если изучено ЛИБО всё,
-##                   что перечислено в prereq (шаг вниз), ЛИБО хотя бы один
-##                   сосед по link (шаг вбок) — см. GameManager.research_blockers.
-##
-##                   РАЗНИЦА ПРИНЦИПИАЛЬНА. Сделать link ТРЕБОВАНИЕМ (И вместе
-##                   с prereq) нельзя: стрелки на макете двусторонние, 2a
-##                   требовал бы 2b, а 2b — 2a, и обе ячейки заперты навсегда.
-##                   Как АЛЬТЕРНАТИВА (ИЛИ) двусторонность безопасна по
-##                   построению: она только разрешает, никогда не запрещает,
-##                   поэтому взаимной блокировки не существует в принципе.
-##                   Проверяется в qa_forge.
-##
-##   name          — подпись в карточке и всплывающем окне
-##   desc          — строка эффекта («+5 к урону»); показывается крупно
-##   cost_gold / cost_wood / cost_stone — цена, списывается при ЗАКАЗЕ
-##   research_time — секунды в кузнице
-##
 ##   ── МОДИФИКАТОРЫ: ЧТО ИМЕННО КРУТИТ КАЖДЫЙ КЛЮЧ ────────────────────────
-##   Ключи те же, что у наград за ветеранство (unit_stats_config.BONUS_KEYS),
-##   и копятся они так же — СЛОЖЕНИЕМ. Все двенадцать пишутся в каждой ячейке,
-##   ненужное нулём: пропуск ключа и ноль означают одно и то же, но полный
-##   список видно глазом, и опечатка в имени сразу бросается в глаза.
-##
-##   ЗНАК ВЕЗДЕ «БОЛЬШЕ — ЛУЧШЕ», включая те два ключа, где само число при этом
-##   УМЕНЬШАЕТСЯ (см. cooldown и spread): иначе владельцу пришлось бы помнить,
-##   где ставить минус, а стенду — знать это за него.
-##
-##     bonus_attack   — + к урону КАЖДОГО удара, единиц (и слабого, и мощного)
-##     bonus_armor    — + к броне: плоское снижение входящего урона, единиц
-##     bonus_defense  — + к защите: второе плоское снижение, поверх брони
-##     bonus_health   — + к максимуму запаса жизни. ЕДИНСТВЕННЫЙ, что поднимает
-##                      и ТЕКУЩЕЕ здоровье уже стоящим на карте: остальные
-##                      читаются вживую, а этот прочитать «на лету» нельзя
-##     bonus_speed    — + к скорости ходьбы, м/с (базовая у пехоты 2.0)
-##     bonus_range    — + к дальности оружия, м. У лучника СУММА зажата
-##                      потолком STATS.archer.attack_range_cap
-##     bonus_cooldown — НА СКОЛЬКО СЕКУНД КОРОЧЕ пауза между ударами. Число
-##                      положительное, вычитается; пол — unit_stats_config.MIN_COOLDOWN
-##     bonus_spread   — НА СКОЛЬКО ТУЖЕ кучность стрельбы (число положительное,
-##                      разброс уменьшается). Ближнего боя не касается вовсе
-##     bonus_push     — + к напору: сила продавливания чужой шеренги
-##     bonus_morale   — + к морали. Она тоже идёт в напор (morale/100)
-##     bonus_carry    — + к грузу рабочего за одну ходку, единиц ресурса
-##     bonus_gather   — НА СКОЛЬКО СЕКУНД КОРОЧЕ цикл добычи (число
-##                      положительное, время уменьшается)
-##   squad_unlock_cost — сколько золота стоит докупить способность КОНКРЕТНОМУ
-##                   отряду уже после её исследования. ИМЕННО ЭТО ПОЛЕ, а не
-##                   колонка, делает узел «способностью»: у рабочего колонка D
-##                   тоже есть, но покупать её отрядом нечего — это обычные
-##                   пассивные улучшения, просто дорогие и за целый ряд
-##
-## Колонка D зависимостей не перечисляет вовсе: её открывает полный ряд
-## (см. ability_row_cells / GameManager.can_research).
-##
-## Значения ниже — тестовые (заказ владельца: «заполни тестовые параметры»).
 const UNITS := {
 # ═════════════════════════════════════════════════════════════════════════════
-# РАБОЧИЙ — ЭКОНОМИЧЕСКАЯ ВЕТКА
 # ═════════════════════════════════════════════════════════════════════════════
-# Своя форма графа, а не копия боевой. Экономика ветвится меньше: горизонтальных
-# переходов всего две пары (2a↔2b и 4a↔4b) вместо цепочки на каждый ряд —
-# «перескочить с вместимости на скорость» это осмысленный размен, а вот прыгать
-# туда-сюда каждый ряд незачем.
-#
-# Колонки: A — ВМЕСТИМОСТЬ (сколько уносит за ходку), B — ТЕМП ДОБЫЧИ (короче
-# цикл), C — ХОДЬБА И ЖИВУЧЕСТЬ, D — крупные экономические улучшения за ряд.
+# РАБОЧИЙ — ЭКОНОМИЧЕСКАЯ ВЕТКА
 "worker": {
 	"1a": {"icon": "icon_trader.png", "prereq": [], "link": [],
 		"name": "Крепкие корзины", "desc": "+2 к грузу за ходку",
@@ -148,8 +43,6 @@ const UNITS := {
 		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	# ── КОЛОНКА D — ОБУЧЕНИЕ И СТРОЙКА (письмо 12) ────────────────────────
-	# bonus_train — доля к темпу найма рабочих в замке (Building.queue_unit),
-	# bonus_build — доля к темпу стройплощадки (ConstructionSite)
 	"1d": {"icon": "icon_hammer.png", "prereq": [], "link": [],
 		"name": "Артельный подряд", "desc": "+20 % к темпу обучения рабочих",
 		"cost_gold": 200.0, "cost_wood": 300.0, "cost_stone": 0.0, "research_time": 25.0,
@@ -291,8 +184,8 @@ const UNITS := {
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 },
 # ═════════════════════════════════════════════════════════════════════════════
-# БОЕВЫЕ ВЕТКИ
 # ═════════════════════════════════════════════════════════════════════════════
+# БОЕВЫЕ ВЕТКИ
 "warrior": {
 	"1a": {"icon": "icon_shield.png", "prereq": [], "link": [],
 		"name": "Щиты", "desc": "+1 к броне",
@@ -319,11 +212,6 @@ const UNITS := {
 		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	# ── ЯРОСТНЫЙ НАБЕГ (заказ спринта 13) ─────────────────────────────────
-	# Прежнее имя узла — «Град ударов», «Серия быстрых атак»: то же самое
-	# другими словами, и кода за ним не стояло вовсе. Теперь у него есть
-	# поведение (Warrior.start_rage_dash): рывок с ЗАФИКСИРОВАННЫМИ щитами и
-	# серия из пяти быстрых ударов «обычный → мощный → обычный → мощный →
-	# обычный». Включается двойным ПКМ по земле (SelectionManager)
 	"1d": {"icon": "icon_dual_sword.png", "prereq": [], "link": [],
 		"name": "Яростный Набег", "desc": "Двойной ПКМ: рывок под щитами и серия из 5 ударов",
 		"cost_gold": 200.0, "cost_wood": 300.0, "cost_stone": 0.0, "research_time": 25.0, "squad_unlock_cost": 400.0,
@@ -487,9 +375,6 @@ const UNITS := {
 		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	# ── СПРИНТ 18: «СТЕНА КОПИЙ» — режим-переключатель (как залп у лучников).
-	# Прежний «Плотный строй» (контратака только в «Защите» по цели всадника,
-	# ×2 от копий) снят целиком: он не срабатывал, когда всадник целил не в
-	# копейщика, и не касался ни тролля, ни бегущей пехоты
 	"1d": {"icon": "icon_trap_spikes.png", "prereq": [], "link": [], "toggle": true,
 		"name": "Стена копий", "desc": "В «Защите» три шеренги и копья вперёд: разгон врага гасится — 300 % урона, остановка, замедление",
 		"cost_gold": 200.0, "cost_wood": 300.0, "cost_stone": 0.0, "research_time": 25.0, "squad_unlock_cost": 400.0,
@@ -587,10 +472,6 @@ const UNITS := {
 		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	# ── НАТИСК ФАЛАНГИ (заказ спринта 13, ЧЕТВЁРТЫЙ слот) ─────────────────
-	# Прежнее имя узла — «Стойкость», «Не отступает»: кода за ним тоже не
-	# стояло. Теперь: строй смыкается, идёт МЕДЛЕННО И СЛАЖЕННО, первые
-	# PHALANX_PUSH_HITS ударов усилены, после них отряд переходит в
-	# ОТТЕСНЕНИЕ — растёт напор и падает входящий урон
 	"4d": {"icon": "icon_skull.png", "prereq": [], "link": [],
 		"name": "Натиск Фаланги", "desc": "Двойной ПКМ: сомкнутый ход, 10 усиленных ударов, затем оттеснение",
 		"cost_gold": 800.0, "cost_wood": 1000.0, "cost_stone": 300.0, "research_time": 60.0, "squad_unlock_cost": 1200.0,
@@ -633,181 +514,117 @@ const UNITS := {
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 },
 "archer": {
-	"1a": {"icon": "icon_shield.png", "prereq": [], "link": [],
-		"name": "Лёгкий доспех", "desc": "+1 к броне",
+	# ══ ВЕТКА ЛУЧНИКА — ТЗ 14.09.2026 (Archer Tech Tree & Snipe Shot) ═════════
+	# Колонка A: дальность (база 15 м → 25) и бронепробитие; B: темп стрельбы и
+	# урон по крупным (туша, тролль, конница); C: урон стрелы; D: залп,
+	# снайперский выстрел, частота снайперов. Доли (0.1 = 10 %) — свойства,
+	# читаются через unit_bonus: bonus_cooldown_pct, bonus_armor_pen,
+	# bonus_giant (+0.5 = ×1.5), bonus_snipers, bonus_snipe_cd
+	"1a": {"icon": "icon_bow.png", "prereq": [], "link": [],
+		"name": "Длинная тетива I", "desc": "+2.5 м к дальности (15 → 17.5)",
 		"cost_gold": 200.0, "cost_wood": 300.0, "cost_stone": 0.0, "research_time": 25.0,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_attack": 0.0, "bonus_armor": 1.0, "bonus_defense": 0.0,
-		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-	"1b": {"icon": "icon_bow.png", "prereq": [], "link": [],
-		"name": "Тугая тетива", "desc": "+1.5 к урону",
+		"bonus_range": 2.5,
+		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+	"1b": {"icon": "icon_tripple_arrows_2.png", "prereq": [], "link": [],
+		"name": "Быстрая рука I", "desc": "Перезарядка −10 %",
 		"cost_gold": 200.0, "cost_wood": 300.0, "cost_stone": 0.0, "research_time": 25.0,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_attack": 1.5, "bonus_armor": 0.0, "bonus_defense": 0.0,
-		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-	"1c": {"icon": "icon_heart.png", "prereq": [], "link": [],
-		"name": "Выучка", "desc": "+12 к запасу HP",
+		"bonus_cooldown_pct": 0.1,
+		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+	"1c": {"icon": "icon_fire_hand.png", "prereq": [], "link": [],
+		"name": "Тугая тетива", "desc": "+1.5 к урону стрелы",
 		"cost_gold": 200.0, "cost_wood": 300.0, "cost_stone": 0.0, "research_time": 25.0,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-		"bonus_health": 12.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-	# ── ЗАЛПОВЫЙ ОГОНЬ: ЕДИНСТВЕННАЯ ПОКА СПОСОБНОСТЬ-ПЕРЕКЛЮЧАТЕЛЬ ─────────
-	# toggle = true означает, что купленная способность не срабатывает сама, а
-	# ВКЛЮЧАЕТСЯ игроком и висит режимом (как «стена щитов» у мечника). Признак
-	# держится в конфиге, а не проверкой «если id == archer_1d» в панели: панель
-	# не должна знать имён способностей, иначе следующая такая же потребует
-	# правки интерфейса
-	"1d": {"icon": "icon_rain_of_arrows.png", "prereq": [], "link": [], "toggle": true,
-		"name": "Залповый огонь", "desc": "Отряд бьёт разом, кучно; +1.5 м дальности",
-		"cost_gold": 200.0, "cost_wood": 300.0, "cost_stone": 0.0, "research_time": 25.0, "squad_unlock_cost": 400.0,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 1.5,
-		"bonus_cooldown": 0.12, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-	"2a": {"icon": "icon_hand.png", "prereq": ["1a"], "link": ["2b"],
-		"name": "Наручи лучника", "desc": "+1 к броне",
+		"bonus_attack": 1.5,
+		"bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+	# ── ЗАЛПОВЫЙ ОГОНЬ: способность-переключатель (toggle) ──────────────────
+	# Отряд бьёт разом и кучно по указанной области навесом (GameManager._sweep_volleys)
+	"1d": {"icon": "icon_rain_of_arrows.png", "prereq": [], "link": [], "toggle": true, "squad_unlock_cost": 400.0,
+		"name": "Залповый огонь", "desc": "Отряд бьёт разом, кучно, навесом; +1 м дальности",
+		"cost_gold": 200.0, "cost_wood": 300.0, "cost_stone": 0.0, "research_time": 25.0,
+		"bonus_range": 1.0, "bonus_cooldown": 0.12,
+		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+	"2a": {"icon": "icon_bow.png", "prereq": ["1a"], "link": ["2b"],
+		"name": "Длинная тетива II", "desc": "+2.5 м к дальности (17.5 → 20)",
 		"cost_gold": 400.0, "cost_wood": 550.0, "cost_stone": 150.0, "research_time": 40.0,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_attack": 0.0, "bonus_armor": 1.0, "bonus_defense": 0.0,
-		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-	"2b": {"icon": "icon_fire_hand.png", "prereq": ["1b"], "link": ["2a", "2c"],
-		"name": "Зажигательные", "desc": "+2 к урону",
+		"bonus_range": 2.5,
+		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+	"2b": {"icon": "icon_tripple_arrows_2.png", "prereq": ["1b"], "link": ["2a", "2c"],
+		"name": "Быстрая рука II", "desc": "Перезарядка −20 % всего",
 		"cost_gold": 400.0, "cost_wood": 550.0, "cost_stone": 150.0, "research_time": 40.0,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_attack": 2.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-	"2c": {"icon": "icon_luck_horseshoe.png", "prereq": ["1c"], "link": ["2b"],
-		"name": "Твёрдая рука", "desc": "+0.2 к скорости",
+		"bonus_cooldown_pct": 0.1,
+		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+	"2c": {"icon": "icon_fire_hand.png", "prereq": ["1c"], "link": ["2b"],
+		"name": "Зажигательные", "desc": "+2 к урону стрелы",
 		"cost_gold": 400.0, "cost_wood": 550.0, "cost_stone": 150.0, "research_time": 40.0,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-		"bonus_health": 0.0, "bonus_speed": 0.2, "bonus_range": 0.0,
-		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-	"2d": {"icon": "icon_crossbow.png", "prereq": [], "link": [],
-		"name": "Прицельный", "desc": "Выстрел по командиру",
-		"cost_gold": 400.0, "cost_wood": 550.0, "cost_stone": 150.0, "research_time": 40.0, "squad_unlock_cost": 700.0,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-	"3a": {"icon": "icon_luck_horseshoe.png", "prereq": ["2a"], "link": ["3b"],
-		"name": "Скорый шаг", "desc": "+0.2 к скорости",
+		"bonus_attack": 2.0,
+		"bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+	# ── СНАЙПЕРСКИЙ ВЫСТРЕЛ: трое стрелков отряда бьют по прямой на 25 м,
+	# быстрее на 30 %, по отступающим и одиночкам, насмерть (Archer/Arrow) ──
+	"2d": {"icon": "icon_crossbow.png", "prereq": [], "link": [], "squad_unlock_cost": 700.0,
+		"name": "Снайперский выстрел", "desc": "3 снайпера в отряде: прямой выстрел на 25 м, насмерть по пехоте",
+		"cost_gold": 400.0, "cost_wood": 550.0, "cost_stone": 150.0, "research_time": 40.0,
+		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+	"3a": {"icon": "icon_bow.png", "prereq": ["2a"], "link": ["3b"],
+		"name": "Большой лук", "desc": "+5 м к дальности (20 → 25)",
 		"cost_gold": 500.0, "cost_wood": 700.0, "cost_stone": 200.0, "research_time": 45.0,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-		"bonus_health": 0.0, "bonus_speed": 0.2, "bonus_range": 0.0,
-		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-	"3b": {"icon": "icon_fireball.png", "prereq": ["2b"], "link": ["3a", "3c"],
-		"name": "Огненный залп", "desc": "+2 к урону",
+		"bonus_range": 5.0,
+		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+	"3b": {"icon": "icon_tripple_arrows_2.png", "prereq": ["2b"], "link": ["3a", "3c"],
+		"name": "Быстрая рука III", "desc": "Перезарядка −30 % всего",
 		"cost_gold": 500.0, "cost_wood": 700.0, "cost_stone": 200.0, "research_time": 45.0,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_attack": 2.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-	"3c": {"icon": "icon_healing_potion.png", "prereq": ["2c"], "link": ["3b"],
-		"name": "Настойки", "desc": "+16 к запасу HP",
+		"bonus_cooldown_pct": 0.1,
+		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+	"3c": {"icon": "icon_fireball.png", "prereq": ["2c"], "link": ["3b"],
+		"name": "Огненный залп", "desc": "+2 к урону стрелы",
 		"cost_gold": 500.0, "cost_wood": 700.0, "cost_stone": 200.0, "research_time": 45.0,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-		"bonus_health": 16.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-	"3d": {"icon": "icon_rain_of_arrows.png", "prereq": [], "link": [],
-		"name": "Ливень стрел", "desc": "Обстрел по площади",
-		"cost_gold": 500.0, "cost_wood": 700.0, "cost_stone": 200.0, "research_time": 45.0, "squad_unlock_cost": 900.0,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-	"4a": {"icon": "icon_trader.png", "prereq": ["3a"], "link": [],
-		"name": "Обозники", "desc": "+16 к морали",
+		"bonus_attack": 2.0,
+		"bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+	"3d": {"icon": "icon_crossbow.png", "prereq": ["2d"], "link": [], "squad_unlock_cost": 900.0,
+		"name": "Частота снайперов", "desc": "Снайперов 3 → 5, их перезарядка −35 %",
+		"cost_gold": 500.0, "cost_wood": 700.0, "cost_stone": 200.0, "research_time": 45.0,
+		"bonus_snipers": 2.0, "bonus_snipe_cd": 0.35,
+		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+	"4a": {"icon": "icon_skull.png", "prereq": ["3a"], "link": [],
+		"name": "Бронебойные I", "desc": "Стрела игнорирует 25 % брони цели",
 		"cost_gold": 800.0, "cost_wood": 1000.0, "cost_stone": 300.0, "research_time": 60.0,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 16.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-	"4b": {"icon": "icon_crossbow.png", "prereq": ["3b"], "link": [],
-		"name": "Бронебойные", "desc": "+2.5 к урону",
+		"bonus_armor_pen": 0.25,
+		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+	"4b": {"icon": "icon_trap.png", "prereq": ["3b"], "link": [],
+		"name": "Гроза великанов I", "desc": "Урон ×1.5 по тушам, троллям и коннице",
 		"cost_gold": 800.0, "cost_wood": 1000.0, "cost_stone": 300.0, "research_time": 60.0,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_attack": 2.5, "bonus_armor": 0.0, "bonus_defense": 0.0,
-		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-	"4c": {"icon": "icon_gold.png", "prereq": ["3c"], "link": [],
-		"name": "Награды", "desc": "+20 к запасу HP",
+		"bonus_giant": 0.5,
+		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+	"4c": {"icon": "icon_fire_hand.png", "prereq": ["3c"], "link": [],
+		"name": "Стальные наконечники", "desc": "+2.5 к урону стрелы",
 		"cost_gold": 800.0, "cost_wood": 1000.0, "cost_stone": 300.0, "research_time": 60.0,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-		"bonus_health": 20.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-	"4d": {"icon": "icon_drop.png", "prereq": [], "link": [],
+		"bonus_attack": 2.5,
+		"bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+	"4d": {"icon": "icon_drop.png", "prereq": [], "link": [], "squad_unlock_cost": 1200.0,
 		"name": "Отравленные", "desc": "Урон по времени",
-		"cost_gold": 800.0, "cost_wood": 1000.0, "cost_stone": 300.0, "research_time": 60.0, "squad_unlock_cost": 1200.0,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-	"5a": {"icon": "icon_trap.png", "prereq": ["4a"], "link": [],
-		"name": "Мастер засад", "desc": "+2 к броне",
+		"cost_gold": 800.0, "cost_wood": 1000.0, "cost_stone": 300.0, "research_time": 60.0,
+		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+	"5a": {"icon": "icon_skull.png", "prereq": ["4a"], "link": [],
+		"name": "Бронебойные II", "desc": "Стрела игнорирует 50 % брони цели",
 		"cost_gold": 1000.0, "cost_wood": 1300.0, "cost_stone": 400.0, "research_time": 75.0,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_attack": 0.0, "bonus_armor": 2.0, "bonus_defense": 0.0,
-		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-	"5b": {"icon": "icon_skull.png", "prereq": ["4b"], "link": [],
-		"name": "Тень", "desc": "+2.5 к урону",
+		"bonus_armor_pen": 0.25,
+		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+	"5b": {"icon": "icon_trap.png", "prereq": ["4b"], "link": [],
+		"name": "Гроза великанов II", "desc": "Урон ×2.0 по тушам, троллям и коннице",
 		"cost_gold": 1000.0, "cost_wood": 1300.0, "cost_stone": 400.0, "research_time": 75.0,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_attack": 2.5, "bonus_armor": 0.0, "bonus_defense": 0.0,
-		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-	"5c": {"icon": "icon_tripple_arrows_2.png", "prereq": ["4c"], "link": [],
-		"name": "Двойной выстрел", "desc": "+2.5 к урону, +16 к морали",
+		"bonus_giant": 0.5,
+		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+	"5c": {"icon": "icon_gold.png", "prereq": ["4c"], "link": [],
+		"name": "Мастер-лучник", "desc": "+2.5 к урону, +16 к морали",
 		"cost_gold": 1000.0, "cost_wood": 1300.0, "cost_stone": 400.0, "research_time": 75.0,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_attack": 2.5, "bonus_armor": 0.0, "bonus_defense": 0.0,
-		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 16.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-	"5d": {"icon": "icon_tripple_arrows_2.png", "prereq": [], "link": [],
+		"bonus_attack": 2.5, "bonus_morale": 16.0,
+		"bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+	"5d": {"icon": "icon_tripple_arrows_2.png", "prereq": [], "link": [], "squad_unlock_cost": 1600.0,
 		"name": "Стрелы-шипы", "desc": "Пробивает строй",
-		"cost_gold": 1000.0, "cost_wood": 1300.0, "cost_stone": 400.0, "research_time": 75.0, "squad_unlock_cost": 1600.0,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		"cost_gold": 1000.0, "cost_wood": 1300.0, "cost_stone": 400.0, "research_time": 75.0,
+		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 },
 "monk": {
 	## ── ВЕТКА МОНАХА: 3 СТОЛБЦА × 5 РЯДОВ + БОНУСНЫЙ СТОЛБЕЦ ──────────────
 	## Заказ владельца 13.09.2026. Столбцы: A — АУРА (радиус), B — ТЕМП И
-	## ОБЪЁМ лечения, C — СТОЙКОСТЬ самого монаха. Столбец D — БОНУС РЯДА:
-	## цены у него нет вовсе и времени тоже, он выдаётся САМ, как только
-	## изучены все три узла своего ряда (GameManager._grant_row_bonuses).
-	## Цена и время — ПО РЯДУ, а не по узлу: 100/15 с, 250/30, 500+50 дерева/45,
-	## 1000+150 камня/60, 2000+300 камня/90.
 	"1a": {"icon": "icon_hand.png", "prereq": [], "link": [],
 		"name": "Расширение Ауры I", "desc": "+3 м к радиусу ауры (5 → 8 м)",
 		"cost_gold": 100.0, "cost_wood": 0.0, "cost_stone": 0.0, "research_time": 15.0,
@@ -892,12 +709,9 @@ const UNITS := {
 }
 
 ## ═══════════════════════════════════════════════════════════════════════════
-## СБОРКА
 ## ═══════════════════════════════════════════════════════════════════════════
 
 ## Кэш собранных деревьев: тип → Array узлов в порядке 1a,1b,1c,1d,2a,…
-## Собирается один раз за запуск: панель кузницы перестраивается на каждый
-## клик по вкладке, а сборка 20 ячеек там ни к чему
 static var _tree_cache: Dictionary = {}
 ## id узла → готовый узел, для быстрого поиска из GameManager
 static var _node_cache: Dictionary = {}
@@ -915,7 +729,6 @@ static func cells() -> Array:
 	return out
 
 ## Три ячейки характеристик того же ряда, что и данная ячейка колонки D.
-## Именно их полное изучение открывает саму D (см. GameManager.can_research)
 static func ability_row_cells(cell: String) -> Array:
 	if cell.length() < 2 or not cell.ends_with(ABILITY_COL):
 		return []
@@ -927,13 +740,6 @@ static func ability_row_cells(cell: String) -> Array:
 			out.append(row + col)
 	return out
 
-## Готовое древо одной вкладки: список узлов, каждый — самодостаточный словарь
-## в формате слота улучшения (unit_stats_config.get_upgrade_slot вернёт его же).
-##
-## ЕДИНСТВЕННЫЙ ЧИТАТЕЛЬ UNITS. Панель кузницы, стрелки, всплывающие окна и
-## GameManager берут узел ОТСЮДА, а не лазают в таблицу сами: иначе «иконку
-## берём из UNITS» пришлось бы повторить в пяти местах и они бы разъехались.
-## Разворачивание ячеек в полные id и вычисление ворот ряда живут тоже здесь
 static func tree(unit_id: String) -> Array:
 	if _tree_cache.has(unit_id):
 		return _tree_cache[unit_id]
@@ -949,8 +755,6 @@ static func tree(unit_id: String) -> Array:
 		node["col"]      = cell.substr(cell.length() - 1, 1)
 		node["unit"]     = unit_id
 		node["icon"]     = String(data.get("icon", ""))
-		# Бонусы копятся ТОЛЬКО своему типу войск: вкладка мечника не должна
-		# усиливать лучников (в отличие от старых общих слотов с ["all"])
 		node["applies_to"] = [unit_id]
 		# Зависимости — полными id, чтобы GameManager не знал про ячейки
 		var reqs: Array = []
@@ -958,10 +762,6 @@ static func tree(unit_id: String) -> Array:
 			reqs.append(node_id(unit_id, String(p)))
 		node["prerequisites"] = reqs
 		# ГОРИЗОНТАЛЬНЫЕ СТРЕЛКИ — ДВА ПРЕДСТАВЛЕНИЯ ОДНОГО И ТОГО ЖЕ.
-		# "link" остаётся ЯЧЕЙКАМИ: по ним рисуются стрелки внутри сетки, а
-		# сетка мыслит ячейками. "link_ids" — те же связи ПОЛНЫМИ id: по ним
-		# GameManager проверяет доступность (см. research_blockers), а он про
-		# ячейки не знает и знать не должен
 		var links: Array = []
 		var link_ids: Array = []
 		for l in data.get("link", []):
@@ -970,16 +770,8 @@ static func tree(unit_id: String) -> Array:
 		node["link"] = links
 		node["link_ids"] = link_ids
 		if node["col"] == ABILITY_COL:
-			# СПОСОБНОСТЬЮ УЗЕЛ ДЕЛАЕТ ЦЕНА ВЫКУПА, А НЕ КОЛОНКА. У боевых веток
-			# это одно и то же (в каждой их ячейке D есть squad_unlock_cost), а
-			# вот у рабочего колонка D — обычные пассивные улучшения: покупать
-			# способность «артели» отдельным отрядом бессмысленно, и кнопка
-			# выкупа за нулевую цену в его панели была бы просто мусором
 			if float(data.get("squad_unlock_cost", 0.0)) > 0.0:
 				node["is_unit_ability"] = true
-			# Ворота ряда — у ВСЕЙ колонки D, независимо от выкупа: это правило
-			# раскладки («колонку D открывает закрытый ряд»), а не свойство
-			# способности
 			var gate: Array = []
 			for g in ability_row_cells(cell):
 				gate.append(node_id(unit_id, String(g)))
@@ -989,8 +781,6 @@ static func tree(unit_id: String) -> Array:
 	_tree_cache[unit_id] = out
 	return out
 
-## Узел по глобальному id ({} — такого нет). Разбирает id сам, чтобы не
-## перебирать все деревья
 static func get_node(id: String) -> Dictionary:
 	if _node_cache.has(id):
 		return _node_cache[id]
@@ -1019,25 +809,16 @@ static func ability_nodes(unit_id: String) -> Array:
 			out.append(d)
 	return out
 
-## Сколько золота стоит докупить способность конкретному отряду
 ## ── ВТОРОЙ ОПЛАТЫ ЗА СПОСОБНОСТЬ БОЛЬШЕ НЕТ (заказ владельца 10.09.2026) ──
-## Было так: исследование в кузнице ОТКРЫВАЛО способность роду войск, а каждый
-## отряд потом покупал её себе отдельно за `squad_unlock_cost` золота. Владелец
-## это отменил: «спец-бонус открывается сразу для всех юнитов соответствующего
-## типа, плату за применение убрать». Поля в таблице оставлены историей —
-## правка баланса ими больше ничего не включает
+## Сколько золота стоит докупить способность конкретному отряду
 static func squad_unlock_cost(_node: Dictionary) -> float:
 	return 0.0
 
 ## СПОСОБНОСТЬ-РЕЖИМ: куплена — и дальше её включает и выключает игрок.
-## Обычная способность срабатывает сама; эта висит переключателем на панели
-## отряда (см. HUD._maybe_add_ability_buttons и GameManager.squad_ability_on)
 static func is_toggle_ability(node: Dictionary) -> bool:
 	return bool(node.get("toggle", false))
 
 ## Первая купленная способность-режим этого рода войск, или {} — таких нет.
-## Нужна тем, кто спрашивает «а есть ли у отряда режим», не зная его id:
-## поиск идёт по конфигу, а не по захардкоженному имени
 static func toggle_ability_of(unit_id: String) -> Dictionary:
 	for n in ability_nodes(unit_id):
 		var d: Dictionary = n
@@ -1046,25 +827,7 @@ static func toggle_ability_of(unit_id: String) -> Dictionary:
 	return {}
 
 # ═════════════════════════════════════════════════════════════════════════════
-# ЕДИНЫЙ ВИД УЗЛА ДЛЯ ЧТЕНИЯ ИЗВНЕ
-#
-# Внутри файла узел хранится «плоско»: name/desc, cost_gold/cost_wood/cost_stone,
-# bonus_attack/bonus_armor/…, зависимости — ячейками. Так удобно ПРАВИТЬ (узел
-# целиком виден глазом в двух строках), но неудобно ЧИТАТЬ снаружи: приходится
-# знать, какие именно ключи бывают.
-#
-# node_view() отдаёт тот же узел в развёрнутом, самоописательном виде:
-#   id, title, description, icon, research_time,
-#   cost         — {"gold": …, "wood": …, "stone": …} (только ненулевое)
-#   prerequisites— ПОЛНЫЕ id узлов, от которых зависит этот (вертикальные стрелки)
-#   links        — полные id соседей по горизонтальным стрелкам (шаг вбок)
-#   stat_bonus   — {"attack": 2, "armor": 1, …} (только ненулевое)
-#
-# ЭТО ИМЕННО ВИД, А НЕ ВТОРАЯ КОПИЯ ДАННЫХ. Числа по-прежнему живут в UNITS в
-# одном экземпляре — иначе две таблицы разъехались бы при первой же правке
-# баланса. Правим UNITS, читаем node_view().
 # ═════════════════════════════════════════════════════════════════════════════
-## Человеческие имена бонусов: ключ конфига → ключ во «вью»
 const _BONUS_VIEW := {
 	"bonus_attack": "attack", "bonus_armor": "armor", "bonus_health": "health",
 	"bonus_speed": "speed", "bonus_push": "push", "bonus_morale": "morale",
@@ -1109,9 +872,5 @@ static func tree_view(unit_id: String) -> Array:
 		out.append(node_view(String((n as Dictionary).get("id", ""))))
 	return out
 
-## Иконки узлов лежат в папке кузницы и в конфиге записаны ОДНИМ ИМЕНЕМ файла;
-## полный путь собирает unit_stats_config.smith_icon_path. Грузим его лениво:
-## forge_config подключается из unit_stats_config, и preload в обратную сторону
-## замкнул бы цикл
 static func _UCfgRef():
 	return load("res://scripts/unit_stats_config.gd")

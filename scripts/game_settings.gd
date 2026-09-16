@@ -148,6 +148,14 @@ const VIEW_CFG := "user://view_settings.cfg"
 static var _view_loaded: bool = false
 static var _show_fps: bool = true
 static var _edge_pan: bool = true
+## ── ПЕРЕМИРИЕ (ТЗ 14.09.2026, п. 2) ──────────────────────────────────────
+## Чекбокс «Перемирие» в опциях и в паузе. Включён — первые TRUCE_SEC партии
+## орда в мирной фазе, красный ИИ не рейдит, в HUD плашка с отсчётом.
+## Выключен — плашка гаснет, перемирие снимается НЕМЕДЛЕННО: обе стороны
+## переходят в боевой режим по своим штатным алгоритмам (GameManager.
+## truce_left отвечает нулём, GoblinAI._peace_sec — нулём, EnemyAI —
+## AI_TRUCE_SEC = 0). Живёт на диске рядом с остальными ручками вида
+static var _armistice: bool = true
 
 static func load_view_settings() -> void:
 	_view_loaded = true
@@ -156,11 +164,13 @@ static func load_view_settings() -> void:
 		return
 	_show_fps = bool(cfg.get_value("view", "show_fps", _show_fps))
 	_edge_pan = bool(cfg.get_value("view", "edge_pan", _edge_pan))
+	_armistice = bool(cfg.get_value("game", "armistice", _armistice))
 
 static func save_view_settings() -> void:
 	var cfg := ConfigFile.new()
 	cfg.set_value("view", "show_fps", _show_fps)
 	cfg.set_value("view", "edge_pan", _edge_pan)
+	cfg.set_value("game", "armistice", _armistice)
 	cfg.save(VIEW_CFG)
 
 ## Читатели ЛЕНИВО подхватывают файл: партия может запуститься и без меню
@@ -181,4 +191,13 @@ static func edge_pan() -> bool:
 
 static func set_edge_pan(on: bool) -> void:
 	_edge_pan = on
+	save_view_settings()
+
+static func armistice() -> bool:
+	if not _view_loaded:
+		load_view_settings()
+	return _armistice
+
+static func set_armistice(on: bool) -> void:
+	_armistice = on
 	save_view_settings()

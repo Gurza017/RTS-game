@@ -95,8 +95,10 @@ func _check_lair() -> void:
 	var lp: Vector3 = (lair as Node3D).global_position
 	var castle: Vector3 = main.PLAYER_BASE_ANCHOR
 	print("  логово в %s, якорь игрока %s" % [str(lp), str(castle)])
-	verdict("A2 логово ниже замка игрока по экрану (+Z) и на его стороне карты",
-		lp.z > castle.z + 40.0 and lp.x < 0.0,
+	# ТЗ 14.09.2026, п. 3: первый пень — на правом берегу (земля орды),
+	# на суше, за бродом от обеих баз людей
+	verdict("A2 логово на правом берегу (x > 0), на суше",
+		lp.x > 0.0 and not GameManager.is_water(lp.x, lp.z),
 		"dz=%.0f, x=%.0f" % [lp.z - castle.z, lp.x])
 	var spikes := 0
 	var bones := 0

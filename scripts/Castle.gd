@@ -2,6 +2,39 @@ extends Building
 class_name Castle
 
 const _UCfg := preload("res://scripts/unit_stats_config.gd")
+const _Roof := preload("res://scripts/RoofGarrison.gd")
+
+## ── ГАРНИЗОН НА КРЫШЕ (ТЗ 14.09.2026) ─────────────────────────────────────
+## Стрелковые отряды, вошедшие в здание, стоят НА КРЫШЕ: видны, стреляют с
+## баффом высоты, ловят стрелы противника — общий модуль RoofGarrison для
+## башни, бараков и крепости. Крепость держит два отряда на крыше сверх
+## обычного лазарета для прочих родов; башня и бараки — по одному, только
+## лучников. Хозяин задаёт раскладку через _roof_setup(); null — крыши нет
+var _roof = null
+
+func _roof_setup():
+	# Крепость: 30 на настиле в центре, по 15 на башнях по краям
+	var r = _Roof.new()
+	r.setup(self, _Roof.LAYOUT_KEEP, int(_UCfg.ROOF_VISIBLE.get("castle", 60)),
+		float(_UCfg.ROOF_FOOT_FRAC.get("castle", 0.66)), _UCfg.CASTLE_FLANK_FOOT_FRAC)
+	return r
+
+## Сколько стрелковых отрядов помещается на крышу
+func roof_squads_max() -> int:
+	return int(_UCfg.ROOF_SQUADS.get(building_id, 0))
+
+## Отряд этого рода войск садится НА КРЫШУ (а не в лазарет)
+func roof_accepts(unit_type: String) -> bool:
+	return _roof != null and unit_type == "archer" and roof_squads_max() > 0
+
+func has_roof_garrison() -> bool:
+	return _roof != null and _roof.squad_id() > 0
+
+## Выпустить всех с крыши (ПКМ пустым выделением / кнопка). false — пусто
+func release_roof() -> bool:
+	if _roof == null:
+		return false
+	return bool(_roof.release_all())
 
 const GLB_PATH    := "res://assets/models/castle.glb"
 const MODEL_SCALE := 1.0
@@ -13,6 +46,7 @@ var _gold_timer: float = 0.0
 
 func _ready() -> void:
 	_configure()
+	_roof = _roof_setup()
 	super._ready()
 
 ## ── НАСТРОЙКА ПОЛЕЙ ВЫНЕСЕНА ИЗ _ready() РАДИ НАСЛЕДНИКОВ ──────────────────
@@ -164,7 +198,11 @@ func request_garrison(squad_id: int) -> bool:
 		return true                        # уже идёт или уже внутри
 	if garrison.size() + _incoming.size() >= garrison_limit():
 		return false
-	if not garrison_accepts(GameManager.squad_type(squad_id)):
+	var utype: String = GameManager.squad_type(squad_id)
+	if not garrison_accepts(utype):
+		return false
+	# Крыша вмещает ограниченное число стрелковых отрядов (ТЗ 14.09.2026)
+	if roof_accepts(utype) and _roof.squads() >= roof_squads_max():
 		return false
 	var members := GameManager.squad_members(squad_id)
 	if members.is_empty():
@@ -181,6 +219,32 @@ func request_garrison(squad_id: int) -> bool:
 		var u := m as Unit
 		u.begin_retreat()
 		u.command_move(gate, false, Vector3.ZERO, true)
+	set_process(true)
+	return true
+
+## ПОСАДИТЬ ОТРЯД ВНУТРЬ СРАЗУ, БЕЗ МАРША К ВОРОТАМ (15.09.2026).
+## Для стартовой расстановки: башни и крыша крепости красного ИИ выходят на
+## карту уже с лучниками. Те же ворота, что у request_garrison (лимит, род
+## войск, вместимость крыши), тот же absorb_unit и та же запись в garrison —
+## отличие ровно одно: бойцы не идут ко входу, а зачисляются здесь и сейчас.
+## false — не годится или места нет; отряд тогда остаётся на карте
+func garrison_now(squad_id: int) -> bool:
+	if squad_id <= 0 or _slot_of(squad_id) >= 0 or _incoming.has(squad_id):
+		return false
+	if garrison.size() + _incoming.size() >= garrison_limit():
+		return false
+	var utype: String = GameManager.squad_type(squad_id)
+	if not garrison_accepts(utype):
+		return false
+	if roof_accepts(utype) and _roof.squads() >= roof_squads_max():
+		return false
+	var members := GameManager.squad_members(squad_id)
+	if members.is_empty():
+		return false
+	GameManager.squad_clear_formation(squad_id)
+	for m in members:
+		absorb_unit(m as Unit)
+	garrison.append({"sid": squad_id, "type": utype, "revive": 0.0})
 	set_process(true)
 	return true
 
@@ -254,6 +318,9 @@ func release_unit(u: Unit, at: Vector3) -> void:
 	# Строку ядра армии тоже надо поправить руками: бойца перенесли В ОБХОД тика
 	# (см. Unit.sync_row), а по ней теперь считается и сетка соседей, и картинка
 	u.sync_row()
+	# Запас, подлеченный внутри (без пуша в ядро на каждый кадр), уезжает в
+	# колонку hp один раз при выходе: монах ищет раненых по ней (14.09.2026)
+	u._soa_push_stats()
 
 ## УДАР ПО УКРЫТОМУ БОЙЦУ ПРИНИМАЕТ ЗДАНИЕ (заказ владельца, 09.09.2026):
 ## запас жизни стен — единственное, что можно снести, пока гарнизон внутри.
@@ -368,6 +435,35 @@ func _die() -> void:
 		return
 	_evacuate_on_death()
 	super._die()
+
+## Пассивное золото — только у столицы; бараки и башня наследуют Castle ради
+## гарнизона, а не ради казны
+func _gives_gold() -> bool:
+	return is_stronghold()
+
+## ── КТО ПОЛУЧАЕТ УРОН: ЛУЧНИК НА КРЫШЕ ИЛИ СТЕНЫ ───────────────────────────
+## Дальний бой (чужие луки, башни) — в лучника на крыше: погиб — тело у
+## подножия со стрелой, на его место встаёт резервист; ближний бой — только
+## в стены. Разделитель — дальность оружия нападающего (MELEE_RANGE_MAX)
+const MELEE_RANGE_MAX := 5.0
+func take_damage(amount: float, attacker: Node = null) -> void:
+	if is_dead() or amount <= 0.0:
+		return
+	# Удар по замку отмечается ДО крыши: стрела, принятая лучником на крыше,
+	# в запас стен не идёт, но «замок под ударом» — уже да (охрана ИИ)
+	last_hit_ms = Time.get_ticks_msec()
+	if _roof != null and _ranged_attacker(attacker) \
+			and bool(_roof.absorb_ranged_hit(amount, attacker)):
+		return
+	super.take_damage(amount, attacker)
+
+func _ranged_attacker(attacker: Node) -> bool:
+	if attacker == null or not is_instance_valid(attacker):
+		return false
+	var u := attacker as Unit
+	if u == null:
+		return attacker is Building
+	return u.attack_range > MELEE_RANGE_MAX
 
 func _evacuate_on_death() -> void:
 	# Копия списка: release_unit/_release_members трогают состав по ходу
@@ -514,7 +610,9 @@ func _process_garrison(delta: float) -> void:
 		# АВТО-ВЫХОД: состав полон и все здоровы — отряду в замке делать нечего,
 		# он сам выкатывается наружу. Иначе игрок обязан помнить про каждый
 		# заведённый отряд и вручную щёлкать по слоту гарнизона
-		if _auto_release() and missing <= 0 and healed:
+		# Отряд на крыше — это ПОСТ, а не лазарет: сам не выходит
+		if _auto_release() and missing <= 0 and healed \
+				and not roof_accepts(String(rec["type"])):
 			release.append(sid)
 			continue
 		keep.append(rec)
@@ -551,7 +649,12 @@ func _process(delta: float) -> void:
 	super._process(delta)
 	if not garrison.is_empty() or not _incoming.is_empty():
 		_process_garrison(delta)
-	if faction == Constants.FACTION_PLAYER:
+	if _roof != null:
+		if not garrison.is_empty():
+			_roof.tick(delta)
+		elif _roof.shown() > 0:
+			_roof.sync()
+	if faction == Constants.FACTION_PLAYER and _gives_gold():
 		_gold_timer += delta
 		if _gold_timer >= GOLD_INTERVAL:
 			_gold_timer = 0.0

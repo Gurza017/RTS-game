@@ -3,6 +3,7 @@ class_name HUD
 
 const _UIAssets := preload("res://scripts/UIAssets.gd")
 const _GSHud := preload("res://scripts/game_settings.gd")
+const _GobCfgH := preload("res://scripts/goblin/goblin_config.gd")   # срок перемирия для подписи чекбокса
 const _UCfg     := preload("res://scripts/unit_stats_config.gd")
 ## Пресеты сложности: подписи и переключение в меню паузы
 const _Diff := preload("res://scripts/game_difficulty_config.gd")
@@ -345,8 +346,12 @@ var _castle_boost: bool = false
 ## (BTN_SIZE * CASTLE_PANEL_BOOST), а сторона кнопки поднята на 30% по заказу
 ## владельца. Число по-прежнему ЖЁСТКОЕ — панель Замка не должна дышать от
 ## содержимого, — просто пересчитано под новый размер иконок
-const CASTLE_PANEL_W := 366.0
-const CASTLE_PANEL_H := 74.0
+## 13.09.2026: панель раздвинута, ряд иконок стоит по центру свободного места
+## с отступами CASTLE_BTN_PAD со всех сторон (колонка рыцаря 45 + 2 + 20 = 67
+## по высоте плюс по 10 сверху и снизу)
+const CASTLE_PANEL_W := 430.0
+const CASTLE_PANEL_H := 88.0
+const CASTLE_BTN_PAD := 10.0
 ## Крупная иконка Замка слева. Больше обычного портрета: заказ владельца
 ## «иконка Замка слева увеличена»
 const CASTLE_PORTRAIT_W := 52.0
@@ -453,6 +458,7 @@ func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	_build_drag_rect()
 	ResourceManager.resources_changed.connect(_on_resources_changed)
+	GameManager.keep_vet_changed.connect(_on_keep_vet_changed)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PLACEMENT HINT
@@ -1161,6 +1167,7 @@ const TOP_RIGHT_MARGIN_T := 8.0
 
 var _match_seconds: float = 0.0
 var _timer_label: Label  = null
+var _truce_label: Label  = null
 var _fps_label:   Label  = null
 ## Индикатор режима построения ([1] широкий / [2] коробочка). Заведён вместе
 ## с тем, что режим стал ЗАПОМИНАТЬСЯ: невидимый запомненный строй читается
@@ -1213,6 +1220,23 @@ func _build_top_right_widget() -> void:
 	_timer_label.add_theme_font_size_override("font_size", 14)
 	_timer_label.add_theme_color_override("font_color", Color(0.85, 0.88, 0.95))
 	hbox.add_child(_timer_label)
+	# ── ПЛАШКА ПЕРЕМИРИЯ (ТЗ 14.09.2026, п. 2) ────────────────────────────
+	# Своя плашка, а не хвост таймера: чекбокс «Перемирие» гасит её целиком
+	# (visible), а таймер партии остаётся. Видна, пока чекбокс включён и
+	# отсчёт не истёк; текст ведёт _update_top_right
+	_truce_label = Label.new()
+	_truce_label.name = "TruceLabel"
+	_truce_label.visible = false
+	_truce_label.add_theme_font_size_override("font_size", 12)
+	_truce_label.add_theme_color_override("font_color", Color(0.75, 0.92, 0.75))
+	var truce_style := StyleBoxFlat.new()
+	truce_style.bg_color = Color(0.10, 0.22, 0.12, 0.85)
+	truce_style.corner_radius_top_left = 4; truce_style.corner_radius_top_right = 4
+	truce_style.corner_radius_bottom_left = 4; truce_style.corner_radius_bottom_right = 4
+	truce_style.content_margin_left = 6; truce_style.content_margin_right = 6
+	truce_style.content_margin_top = 1; truce_style.content_margin_bottom = 1
+	_truce_label.add_theme_stylebox_override("normal", truce_style)
+	hbox.add_child(_truce_label)
 
 	var sep := VSeparator.new(); hbox.add_child(sep)
 
@@ -1340,10 +1364,15 @@ func _update_top_right(delta: float) -> void:
 	if not get_tree().paused:
 		_match_seconds += delta
 	_timer_label.text = _format_match_time(_match_seconds)
-	# Перемирие первых минут (спринт 20): игрок видит, сколько осталось
-	var tl: float = GameManager.truce_left()
-	if tl > 0.0:
-		_timer_label.text += "  ·  перемирие %s" % _format_match_time(tl)
+	# Перемирие первых минут (спринт 20): игрок видит, сколько осталось.
+	# Плашка своя и гаснет вместе с чекбоксом (ТЗ 14.09.2026, п. 2)
+	if _truce_label != null and is_instance_valid(_truce_label):
+		var tl: float = GameManager.truce_left()
+		var show: bool = GameManager.truce_enabled() and tl > 0.0
+		if _truce_label.visible != show:
+			_truce_label.visible = show
+		if show:
+			_truce_label.text = "перемирие %s" % _format_match_time(tl)
 	if _fps_label and _fps_label.visible:
 		_fps_label.text = "FPS: %d" % Engine.get_frames_per_second()
 	# ── ИНДИКАТОР СТРОЯ ───────────────────────────────────────────────────
@@ -2017,6 +2046,7 @@ func _refresh_panel() -> void:
 	_rebuild_squad_strip()
 	_train_badges.clear()   # кнопки пересобираются — старые ярлыки уже мертвы
 	_afford_watch.clear()   # и реестр живой доступности вместе с ними
+	_keep_rank_ui.clear()   # и кнопка ранга рыцарей с её радаром
 	_last_research_id = ""
 
 	# УКРУПНЕНИЕ ЗАМКА ГАСИТСЯ ЗДЕСЬ, а не в конце: ветка Замка ниже взводит его
@@ -2105,7 +2135,7 @@ func _refresh_panel() -> void:
 		# Ветка стоит ПЕРЕД замковой: башня — тоже Castle (ради гарнизона), и
 		# без неё получала бы кнопки найма рабочих и рыцарей
 		if u is Castle and not (u as Castle).is_stronghold() \
-				and u.faction == Constants.FACTION_PLAYER:
+				and not (u is Barracks) and u.faction == Constants.FACTION_PLAYER:
 			portrait.color = Color(0.16, 0.20, 0.30)
 			_show_garrison(u as Castle)
 			_castle_boost = true
@@ -2123,7 +2153,10 @@ func _refresh_panel() -> void:
 						"То же делает ПКМ по башне"]},
 					BTN_SIZE * CASTLE_PANEL_BOOST, CASTLE_ICON_BOOST)
 
-		elif u is Castle and u.faction == Constants.FACTION_PLAYER:
+		elif u is Castle and (u as Castle).is_stronghold() 				and u.faction == Constants.FACTION_PLAYER:
+			# ТОЛЬКО СТОЛИЦА: бараки с 14.09.2026 тоже Castle (крыша для
+			# лучников), и без is_stronghold() их панель уезжала в замковую —
+			# рыцарь с лычками, рабочий, монах, а копейщиков не было вовсе
 			portrait.color = Color(0.12, 0.18, 0.30)
 			_show_garrison(u as Castle)
 			# ЗАМОК: ТРИ ЮНИТА (Рабочий, Рыцарь/Мечник, Монах) — постройки
@@ -2150,9 +2183,11 @@ func _refresh_panel() -> void:
 				_portrait_wrap.size_flags_vertical = Control.SIZE_SHRINK_END
 			var big: float = BTN_SIZE * CASTLE_PANEL_BOOST
 			_train_cmd(u, "worker",  Color(0.18, 0.32, 0.18), big, CASTLE_ICON_BOOST)
-			_train_cmd(u, "warrior", Color(0.30, 0.14, 0.28), big, CASTLE_ICON_BOOST)
+			# РЫЦАРЬ — РОВНО ОДНА ИКОНКА, с лычками на ней; под ней кнопка ранга
+			# [ I ] с радаром исследования (разбор — у _knight_column)
+			var knight := _train_cmd(u, "warrior", Color(0.30, 0.14, 0.28), big, CASTLE_ICON_BOOST)
 			_train_cmd(u, "monk",    Color(0.22, 0.26, 0.14), big, CASTLE_ICON_BOOST)
-			_keep_vet_cmd(u, big)
+			_knight_column(u, knight, big)
 
 		elif u is TownCenter and u.faction == Constants.FACTION_PLAYER:
 			# Тот же единый стандарт производственного здания, что у Замка и Бараков
@@ -2191,6 +2226,15 @@ func _refresh_panel() -> void:
 			# БАРАКИ — ПЕХОТА (09.09.2026): копейщики и мечники; лучники в стрелковой
 			_train_cmd(u, "spearman", Color(0.14, 0.18, 0.36), bbig, CASTLE_ICON_BOOST)
 			_train_cmd(u, "warrior",  Color(0.30, 0.14, 0.28), bbig, CASTLE_ICON_BOOST)
+			# ЛУЧНИКИ НА КРЫШЕ (ТЗ 14.09.2026): полоса гарнизона и кнопка выгрузки
+			_show_garrison(u as Castle)
+			if (u as Castle).has_roof_garrison():
+				_cmd("Выгрузить", Color(0.20, 0.28, 0.16),
+					func(): _on_tower_release(u as Castle),
+					String(UNIT_ICONS.get("archer", "")), {"title": "Выгрузить лучников",
+					"lines": ["Отряд сходит с крыши к воротам",
+						"То же делает ПКМ по баракам пустым выделением"]},
+					bbig, CASTLE_ICON_BOOST)
 
 		elif u is Building and u.building_id == "archery" \
 				and u.faction == Constants.FACTION_PLAYER:
@@ -2349,12 +2393,12 @@ func _portrait_icon_path(units: Array) -> String:
 	if units.is_empty():
 		return ""
 	var u = units[0]
+	if u is Barracks:
+		return _bld_icon("barracks")
 	if u is Castle and not (u as Castle).is_stronghold():
 		return _bld_icon("tower")
 	if u is Castle or u is TownCenter:
 		return _bld_icon("castle")
-	if u is Barracks:
-		return _bld_icon("barracks")
 	if u is Smithy:
 		return _bld_icon("smithy")
 	# Остальные постройки (стрелковая, дома, рудник) — иконка из своей записи
@@ -4245,6 +4289,10 @@ const MOD_SHORT_LABELS := {
 	"bonus_train": "ОБУЧЕНИЕ",
 	"bonus_aura_armor": "АУРА: БРОНЯ", "bonus_aura_attack": "АУРА: УДАР",
 	"bonus_aura_rate": "АУРА: ТЕМП СТРЕЛЬБЫ", "bonus_aura_radius": "АУРА: РАДИУС",
+	# ── ВЕТКА ЛУЧНИКА (ТЗ 14.09.2026) ─────────────────────────────────────
+	"bonus_cooldown_pct": "ПЕРЕЗАРЯДКА, ДОЛЯ", "bonus_armor_pen": "БРОНЕПРОБИТИЕ",
+	"bonus_giant": "УРОН ПО КРУПНЫМ", "bonus_snipers": "СНАЙПЕРОВ",
+	"bonus_snipe_cd": "ПЕРЕЗАРЯДКА СНАЙПЕРА",
 }
 
 var _vet_tip: Control = null
@@ -4459,7 +4507,8 @@ func _build_worker_menu(worker: Worker, crew: Array = [], size: float = 0.0,
 	for build_id in catalog:
 		var bid: String = String(build_id)
 		var d: Dictionary = catalog[bid]
-		var cost: Dictionary = d.get("cost", {})
+		# У крепости цена прогрессивная (ТЗ 14.09.2026): читаем через GameManager
+		var cost: Dictionary = GameManager.build_cost_for(worker.faction, bid)
 		var col: Color = _WORKER_BUILD_COLORS.get(bid, Color(0.24, 0.22, 0.26))
 		# Не хватает ресурсов — кнопка гаснет, но остаётся нажимаемой:
 		# заказ просто не пройдёт проверку в try_worker_build
@@ -4494,67 +4543,172 @@ func _afford_color(base: Color, ok: bool) -> Color:
 		return base.lerp(AFFORD_OK_TINT, AFFORD_OK_MIX)
 	return base.lerp(AFFORD_LACK_TINT, AFFORD_LACK_MIX).darkened(0.15)
 
-## Ранг, с которым выйдет заказанный отряд (0 — обычный найм).
-## Спрашивается СВОЙСТВО здания (is_stronghold), а не его имя: башня и хижина
-## орды тоже наследуют Castle, и элиту они не куют
-## ── КНОПКА УЛУЧШЕНИЯ РАНГА ЭЛИТЫ КРЕПОСТИ (заказ 13.09.2026) ───────────────
-## «Под иконкой мечников — кнопка улучшения уровня ветеранства с римскими
-## цифрами». Своей машинерии исследований она не заводит: ранг это ОДНО число
-## на фракцию (GameManager.keep_vet_level), и кнопка просто двигает его
-## вверх, списывая цену из таблицы KEEP_VET_UPGRADES.
-##
-## На потолке кнопка не прячется, а становится НЕНАЖИМАЕМОЙ подписью: исчезни
-## она — игрок не увидел бы, что ветка пройдена до конца
-func _keep_vet_cmd(bld: Building, size: float) -> void:
-	if bld == null or bld.faction != Constants.FACTION_PLAYER:
+## ═══════════════════════════════════════════════════════════════════════════
+## РЫЦАРИ КРЕПОСТИ: ОДНА ИКОНКА С ЛЫЧКАМИ И КНОПКА РАНГА [ I ] ПОД НЕЙ
+## ═══════════════════════════════════════════════════════════════════════════
+## Заказ 13.09.2026 (вторая правка). Первая версия ставила улучшение ранга
+## ВТОРОЙ КНОПКОЙ В РЯДУ НАЙМА с той же иконкой Warrior — на панели стояли
+## «два рыцаря», покупка была мгновенной и дешёвой (1200 золота при запасе
+## 20 000), и три клика по «второму рыцарю» уводили ранг найма в IV: синий
+## флаг у первых же рыцарей. Теперь:
+##   • иконка рыцаря в ряду ОДНА, лычки ранга нарисованы прямо на ней
+##     (_add_rank_chevrons — те же глифы, что у значка ранга в панели отряда);
+##   • под ней узкая кнопка [ I ] / [ II ] … (_keep_rank_cmd): клик запускает
+##     ИССЛЕДОВАНИЕ (GameManager.keep_vet_buy — золото списано, часы пошли),
+##     поверх кнопки крутится круговой радар прогресса (RadarProgress);
+##   • цифра меняется по завершении — панель пересобирается по сигналу
+##     keep_vet_changed, а не по клику.
+## Иконка и кнопка лежат в ОДНОЙ колонке (VBox внутри сетки кнопок): так
+## «под иконкой» выполняется по построению, а не подбором отступов.
+## Высота кнопки ранга: с иконкой 45 px и просветом колонка обязана уложиться
+## в CASTLE_PANEL_H (74) — панель Крепости фиксированного размера (qa_hud5 C1)
+const KEEP_RANK_BTN_H := 20.0
+const KEEP_RANK_COL_GAP := 2              # просвет иконка — кнопка
+const KEEP_RANK_BASE := Color(0.30, 0.24, 0.10)
+const KEEP_RANK_DONE := Color(0.20, 0.20, 0.22)
+const KEEP_RANK_BUSY := Color(0.22, 0.20, 0.12)
+const RANK_CHEVRON_COLOR := Color(1.0, 0.86, 0.36)
+const _RadarProgress := preload("res://scripts/RadarProgress.gd")
+
+## Живая кнопка ранга на панели: {btn, radar, faction}; пусто — панель без неё
+var _keep_rank_ui: Dictionary = {}
+
+## Колонка «иконка рыцаря + кнопка ранга». Кнопку найма _train_cmd уже
+## положил в сетку — переносим её в VBox и ставим VBox на её место
+func _knight_column(bld: Building, knight_btn: Button, size: float) -> void:
+	if knight_btn == null or not is_instance_valid(knight_btn):
 		return
-	if not bld.has_method("is_stronghold") or not bool(bld.call("is_stronghold")):
+	var idx: int = knight_btn.get_index()
+	button_container.remove_child(knight_btn)
+	var col := VBoxContainer.new()
+	col.name = "KnightColumn"
+	col.add_theme_constant_override("separation", KEEP_RANK_COL_GAP)
+	col.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	col.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	col.add_child(knight_btn)
+	col.add_child(_keep_rank_cmd(bld, size))
+	button_container.add_child(col)
+	button_container.move_child(col, idx)
+
+## Лычки ранга ПРЯМО НА ИКОНКЕ найма (верхний левый угол). Глифы — из того же
+## veteran_badge_text, что у значка в панели отряда и у флажков наград
+func _add_rank_chevrons(btn: Button, vet: int) -> Label:
+	var lbl := Label.new()
+	lbl.name = "RankChevrons"
+	lbl.text = _UCfg.veteran_badge_text(vet)
+	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	lbl.add_theme_font_size_override("font_size", 13)
+	lbl.add_theme_color_override("font_color", RANK_CHEVRON_COLOR)
+	lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+	lbl.add_theme_constant_override("outline_size", 3)
+	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	lbl.vertical_alignment   = VERTICAL_ALIGNMENT_TOP
+	lbl.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	lbl.offset_left = 2
+	lbl.offset_top  = 0
+	btn.add_child(lbl)
+	return lbl
+
+## Кнопка исследования ранга: «[ I ]» — текущий ранг найма. Пока идёт
+## исследование — не нажимается, поверх бежит радар; на потолке — подпись
+func _keep_rank_cmd(bld: Building, width: float) -> Button:
+	var f: int = bld.faction
+	var cur: int = GameManager.keep_warrior_vet(f)
+	var nxt: int = GameManager.keep_vet_next(f)
+	var busy: bool = GameManager.keep_vet_researching(f)
+	var btn := QuietTooltipButton.new()
+	btn.name = "KeepRankButton"
+	btn.custom_minimum_size = Vector2(width, KEEP_RANK_BTN_H)
+	btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	btn.clip_contents = true
+	btn.text = "[ %s ]" % _UCfg.roman(cur)
+	btn.add_theme_font_size_override("font_size", 11)
+	btn.add_theme_color_override("font_color", Color(0.98, 0.92, 0.70))
+	btn.add_theme_color_override("font_disabled_color", Color(0.80, 0.76, 0.62))
+	var card: Dictionary
+	var base: Color = KEEP_RANK_BASE
+	if busy:
+		var target: int = GameManager.keep_vet_research_target(f)
+		btn.tooltip_text = "Ранг рыцарей [ %s ] → [ %s ]: исследуется" % [
+			_UCfg.roman(cur), _UCfg.roman(target)]
+		card = {"title": btn.tooltip_text,
+			"lines": ["Осталось %.0f с" % GameManager.keep_vet_research_left(f),
+				"По завершении новые рыцари Крепости выходят рангом %s" % _UCfg.roman(target)]}
+		base = KEEP_RANK_BUSY
+		btn.disabled = true
+	elif nxt == 0:
+		btn.tooltip_text = "Ранг рыцарей [ %s ] — предел" % _UCfg.roman(cur)
+		card = {"title": btn.tooltip_text,
+			"lines": ["Открыт высший ранг найма: %s" % _UCfg.roman(cur),
+				"Дальше отряд растёт только в бою"]}
+		base = KEEP_RANK_DONE
+		btn.disabled = true
+	else:
+		var cost: Dictionary = GameManager.keep_vet_cost(f)
+		btn.tooltip_text = "Исследовать ранг рыцарей [ %s ] → [ %s ]" % [
+			_UCfg.roman(cur), _UCfg.roman(nxt)]
+		card = {"title": btn.tooltip_text,
+			"lines": [
+				"Новые рыцари Крепости будут выходить рангом %s (%d %s)" % [
+					_UCfg.roman(nxt), nxt, "лычка" if nxt == 1 else "лычки"],
+				"Исследование: %.0f с" % GameManager.keep_vet_time(f),
+				"Уже нанятые отряды не меняются; рыцари из Бараков — новобранцы",
+				"Содержание: еды ×%.2f, золота %.2f/с за отряд" % [
+					_UCfg.keep_food_mult(nxt), _UCfg.keep_gold_rate(nxt)],
+			],
+			"cost": cost}
+		_watch_afford(btn, base, cost, f, "", bld)
+		base = _afford_color(base, ResourceManager.can_afford(f, cost))
+	_style_cmd_button(btn, base, false)
+	btn.mouse_entered.connect(func(): _show_card(btn, card))
+	btn.mouse_exited.connect(_hide_card)
+	btn.tree_exiting.connect(_hide_card)
+	btn.pressed.connect(func(): _on_keep_vet_buy(bld))
+	# Радар живёт на кнопке всегда, но виден только на время исследования
+	var radar: Control = _RadarProgress.new()
+	radar.name = "RankRadar"
+	radar.visible = busy
+	radar.progress = GameManager.keep_vet_progress(f)
+	btn.add_child(radar)
+	_keep_rank_ui = {"btn": btn, "radar": radar, "faction": f}
+	return btn
+
+## Раз в кадр: доля радара по часам исследования (узлы не пересоздаются)
+func _refresh_keep_rank() -> void:
+	if _keep_rank_ui.is_empty():
 		return
-	var cur: int = GameManager.keep_warrior_vet(bld.faction)
-	var nxt: int = GameManager.keep_vet_next(bld.faction)
-	if nxt == 0:
-		var done := _cmd("Мечники [ %s ] — предел" % _UCfg.roman(cur),
-			Color(0.20, 0.20, 0.22), func(): pass,
-			String(UNIT_ICONS.get("warrior", "")),
-			{"title": "Ветеранство Крепости",
-			 "lines": ["Открыт высший ранг найма: %s" % _UCfg.roman(cur),
-				"Дальше отряд растёт только в бою"]},
-			size, CASTLE_ICON_BOOST)
-		if done != null:
-			done.disabled = true
+	var radar = _keep_rank_ui.get("radar")
+	if radar == null or not is_instance_valid(radar):
+		_keep_rank_ui.clear()
 		return
-	var cost: Dictionary = GameManager.keep_vet_cost(bld.faction)
-	var ok: bool = ResourceManager.can_afford(bld.faction, cost)
-	var base := Color(0.30, 0.24, 0.10)
-	var label: String = "Мечники [ %s ] → [ %s ]" % [
-		_UCfg.roman(cur), _UCfg.roman(nxt)]
-	var card := {
-		"title": label,
-		"lines": [
-			"Открывает найм мечников ранга %s (%d лычки)" % [
-				_UCfg.roman(nxt), nxt],
-			"Уже нанятые отряды не меняются — правило действует на НОВЫЕ",
-			"Содержание растёт: еды ×%.2f, золота %.2f/с за отряд" % [
-				_UCfg.keep_food_mult(nxt), _UCfg.keep_gold_rate(nxt)],
-		],
-		"cost": cost,
-	}
-	var btn := _cmd(label, _afford_color(base, ok),
-		func(): _on_keep_vet_buy(bld),
-		String(UNIT_ICONS.get("warrior", "")), card, size, CASTLE_ICON_BOOST)
-	_watch_afford(btn, base, cost, bld.faction, "", bld)
+	var f: int = int(_keep_rank_ui.get("faction", 0))
+	var busy: bool = GameManager.keep_vet_researching(f)
+	radar.visible = busy
+	if busy:
+		radar.progress = GameManager.keep_vet_progress(f)
+
+## Ранг сменился (исследование дошло) — панель Крепости пересобирается, чтобы
+## цифра на кнопке и лычки на иконке пришли настоящими, из реестра
+func _on_keep_vet_changed(faction: int, _level: int) -> void:
+	if faction != Constants.FACTION_PLAYER or _keep_rank_ui.is_empty():
+		return
+	var sm = GameManager.main.selection_manager if GameManager.main != null else null
+	if sm != null:
+		GameManager.on_selection_changed(sm.selected_units, true)
 
 func _on_keep_vet_buy(bld: Building) -> void:
 	if bld == null or not is_instance_valid(bld):
 		return
 	if GameManager.keep_vet_buy(bld.faction):
 		AudioManager.play_ui("smith_pick")
-		# Панель пересобирается штатно — числа придут настоящими, из реестра
-		# Панель пересобирается штатно — числа придут настоящими, из реестра
+		# Панель пересобирается штатно: кнопка гаснет, радар включается
 		var sm = GameManager.main.selection_manager if GameManager.main != null else null
 		if sm != null:
 			GameManager.on_selection_changed(sm.selected_units, true)
 
+## Ранг, с которым выйдет заказанный отряд (0 — обычный найм).
+## Спрашивается СВОЙСТВО здания (is_stronghold), а не его имя: башня и хижина
+## орды тоже наследуют Castle, и элиту они не куют
 func _keep_vet_for(bld: Building, unit_id: String) -> int:
 	if unit_id != "warrior" or bld == null:
 		return 0
@@ -4563,10 +4717,10 @@ func _keep_vet_for(bld: Building, unit_id: String) -> int:
 	return GameManager.keep_warrior_vet(bld.faction)
 
 func _train_cmd(bld: Building, unit_id: String, col: Color, size: float = 0.0,
-		icon_boost: float = 1.0) -> void:
+		icon_boost: float = 1.0) -> Button:
 	var c: Dictionary = _UCfg.train_cfg(bld.building_id, unit_id)
 	if c.is_empty():
-		return
+		return null
 	var cost: Dictionary = _UCfg.train_cost(bld.building_id, unit_id)
 	var squad: int = int(c.get("squad", 1))
 	# Кнопка краснеет и когда нет денег, и когда упёрлись в лимит населения
@@ -4614,6 +4768,10 @@ func _train_cmd(bld: Building, unit_id: String, col: Color, size: float = 0.0,
 	btn.gui_input.connect(func(e: InputEvent): _on_train_rmb(e, bld, unit_id))
 	# ЦИФРА КОЛИЧЕСТВА в углу иконки: сколько заказов этого типа в очереди
 	_train_badges[unit_id] = _add_badge(btn)
+	# ЛЫЧКИ РАНГА НА САМОЙ ИКОНКЕ (Крепость): «сразу видно, что выходит ветеран»
+	if keep_vet > 0:
+		_add_rank_chevrons(btn, keep_vet)
+	return btn
 
 ## Кнопка ПОСТРОЙКИ из замка: цена и габарит — из конфига
 func _build_cmd(build_id: String, col: Color, cb: Callable) -> void:
@@ -5077,6 +5235,12 @@ func _draw_forge_arrows() -> void:
 			var from := Vector2(_forge_cell_center(pc).x,
 				_forge_cell_pos(pc).y + float(FORGE_CELL))
 			var to := Vector2(c.x, _forge_cell_pos(cell).y)
+			# ТОЛЬКО ПРЯМЫЕ СТРЕЛКИ СВЕРХУ ВНИЗ (заказ 13.09.2026): у ветки
+			# монаха бонус ряда (колонка D) зависит от всех трёх узлов ряда,
+			# и три косые линии в боковую колонку читались как искажённая
+			# схема. Зависимость есть, а линии — нет: бонус ряда выдаётся сам
+			if absf(from.x - to.x) > 0.5:
+				continue
 			var col: Color = FORGE_ARROW_ON \
 				if GameManager.is_researched(f, String(p)) else FORGE_ARROW_OFF
 			_forge_arrow(from, to, col)
@@ -5928,6 +6092,7 @@ func _process(_delta: float) -> void:
 	# «В очереди / В ожидании»). Текст в info-колонке остаётся КОРОТКИМ и
 	# постоянной длины — именно его рост раньше раздвигал панель
 	_update_queue_ui(bld)
+	_refresh_keep_rank()
 	if progress_bar == null:
 		return
 	_refresh_train_badges(bld)
@@ -6056,6 +6221,22 @@ func _set_vsync(on: bool) -> void:
 		DisplayServer.VSYNC_ENABLED if on else DisplayServer.VSYNC_DISABLED)
 	# Снятой синхронизации мало: при max_fps > 0 движок всё равно ограничит темп
 	Engine.max_fps = 0
+
+## ── ЧЕКБОКС «ПЕРЕМИРИЕ» (ТЗ 14.09.2026, п. 2) ──────────────────────────────
+## Тот же чекбокс, что в опциях главного меню (MainMenu.PageOptions): ручка
+## одна — game_settings.armistice. Действует НЕМЕДЛЕННО: снятая галочка
+## гасит плашку отсчёта и снимает перемирие у обоих ИИ на следующем такте
+func _add_armistice_toggle(parent: Control) -> void:
+	var box := CheckBox.new()
+	box.name = "ArmisticeCheck"
+	box.text = "Перемирие (первые %d мин без атак ИИ)" % int(round(_GobCfgH.TRUCE_SEC / 60.0))
+	box.button_pressed = _GSHud.armistice()
+	box.process_mode = Node.PROCESS_MODE_ALWAYS
+	box.focus_mode = Control.FOCUS_NONE
+	box.add_theme_font_size_override("font_size", 13)
+	parent.add_child(box)
+	box.toggled.connect(func(on: bool):
+		_GSHud.set_armistice(on))
 
 func _add_vsync_toggle(parent: Control) -> void:
 	var row := HBoxContainer.new()
@@ -6276,6 +6457,7 @@ func _show_pause_menu() -> void:
 		_add_difficulty_row(box)
 		_add_audio_sliders(box)
 		_add_vsync_toggle(box)
+		_add_armistice_toggle(box)
 	vbox.add_child(_make_btn("Выйти в меню", Color(0.25, 0.10, 0.08), func():
 		GameManager.main.restart_game()))
 	vbox.add_child(_make_btn("Выход из игры", Color(0.30, 0.08, 0.08), func(): get_tree().quit()))
@@ -6450,7 +6632,13 @@ func _refresh_afford() -> void:
 		if btn == null or not is_instance_valid(btn):
 			continue
 		keep.append(d)
-		var ok: bool = _afford_ok(d["cost"], int(d["faction"]), String(d["unit"]), d["bld"])
+		# Здание могло быть снесено (правило 5): освобождённый объект в
+		# типизированный аргумент — ошибка «previously freed», а не null
+		var braw = d["bld"]
+		if braw != null and not is_instance_valid(braw):
+			braw = null
+			d["bld"] = null
+		var ok: bool = _afford_ok(d["cost"], int(d["faction"]), String(d["unit"]), braw)
 		if ok == bool(d["ok"]):
 			continue
 		d["ok"] = ok
@@ -6820,6 +7008,10 @@ func _cmd(label_text: String, icon_color: Color, callback: Callable,
 	var btn := QuietTooltipButton.new()
 	btn.custom_minimum_size = Vector2(sz, sz)
 	btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	# СТРОГО КВАДРАТ (заказ 13.09.2026): в ряду Крепости колонка рыцаря выше
+	# квадрата (иконка + кнопка ранга), и GridContainer растягивал соседние
+	# кнопки на её высоту — рабочий и монах выходили прямоугольниками
+	btn.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	btn.clip_contents = true
 	btn.add_theme_font_size_override("font_size", 10)
 	btn.add_theme_color_override("font_color", Color(0.92, 0.90, 0.82))
@@ -7259,11 +7451,17 @@ func _building_card(build_id: String) -> Dictionary:
 		lines.append("Нанимает лучников")
 	elif build_id == "barracks":
 		lines.append("Нанимает копейщиков и мечников")
+	if build_id == "castle":
+		lines.append("Не больше %d крепостей; каждая следующая дороже в %.0f раз" % [
+			_UCfg.CASTLE_MAX_COUNT, _UCfg.CASTLE_COST_MULT])
+		lines.append("На крыше — два отряда лучников: +30 % к дальности и урону")
+	elif build_id == "barracks":
+		lines.append("На крыше — отряд лучников: +30 % к дальности и урону")
 	return {
 		"title": String(cfg.get("name", build_id)),
 		"icon":  String(cfg.get("icon", "")),
 		"hp": hp, "hp_max": hp,
-		"cost": _UCfg.building_cost(build_id),
+		"cost": GameManager.build_cost_for(Constants.FACTION_PLAYER, build_id),
 		"lines": lines,
 	}
 
@@ -7367,11 +7565,15 @@ func _sync_panel_grid_widths() -> void:
 		# CASTLE_BTN_RIGHT_PAD
 		# …а с появлением внутреннего отступа плашки (PANEL_PAD_X) слагаемых
 		# стало четыре: разделитель + распорка + рамка + этот отступ
+		# 13.09.2026: у Крепости ряд кнопок ЦЕНТРУЕТСЯ в свободном месте —
+		# правая распорка тянется наравне с левой, отступ от края — CASTLE_BTN_PAD
 		var pad: float = maxf(0.0,
-			CASTLE_BTN_RIGHT_PAD - float(PANEL_HBOX_SEP) - float(PANEL_BORDER_W)
+			CASTLE_BTN_PAD - float(PANEL_HBOX_SEP) - float(PANEL_BORDER_W)
 			- float(PANEL_PAD_X))
 		_btn_right_pad.custom_minimum_size = \
 			Vector2(pad, 0.0) if _castle_boost else Vector2.ZERO
+		_btn_right_pad.size_flags_horizontal = Control.SIZE_EXPAND_FILL \
+			if _castle_boost else Control.SIZE_FILL
 	# КОЛОНКА «ЧТО ВЫБРАНО» СХЛОПЫВАЕТСЯ, КОГДА ПУСТА. У Замка строка
 	# «Замок N/N HP» живёт в шапке панели (см. _update_castle_caption), а
 	# info_label остаётся пустым — но его минимум INFO_W всё равно резервировал
@@ -7390,13 +7592,21 @@ func _sync_panel_grid_widths() -> void:
 		if _btn_slot != null and is_instance_valid(_btn_slot):
 			_btn_slot.visible = has_btns
 		if has_btns and _castle_boost:
-			# ЗАМОК: РОВНО 2 кнопки укрупнённого размера, ВСЕГДА (найм рабочего
-			# и рыцаря есть у любого своего Замка) — жёсткая сетка на BTN_COLS
-			# тут не нужна, дрожать панели не от чего
+			# ЗАМОК: одна строка укрупнённых кнопок под фактическое число —
+			# жёсткая сетка на BTN_COLS тут не нужна, дрожать панели не от чего.
+			# Просвет между иконками — CASTLE_BTN_PAD (заказ 13.09.2026)
 			var n: int = button_container.get_child_count()
 			var big: float = BTN_SIZE * CASTLE_PANEL_BOOST
 			button_container.columns = n
-			_slot_min(Vector2(n * big + float(n - 1) * BTN_GAP, big))
+			button_container.add_theme_constant_override("h_separation", int(CASTLE_BTN_PAD))
+			# КОЛОНКА РЫЦАРЯ ВЫШЕ КВАДРАТА: под иконкой стоит кнопка ранга.
+			# Высота ряда — по самому высокому ребёнку, а не по стороне кнопки
+			var row_h: float = big
+			for ch in button_container.get_children():
+				var cc := ch as Control
+				if cc != null:
+					row_h = maxf(row_h, cc.get_combined_minimum_size().y)
+			_slot_min(Vector2(n * big + float(n - 1) * CASTLE_BTN_PAD, row_h))
 		elif has_btns and _worker_boost:
 			# АРТЕЛЬ: каталог построек (сейчас 4 — Бараки/Кузница/Рудник/Дом)
 			# всегда укладывается в один ряд при BTN_COLS=5, поэтому здесь тоже
@@ -7408,6 +7618,7 @@ func _sync_panel_grid_widths() -> void:
 			_slot_min(Vector2(wn * wbig + float(wn - 1) * BTN_GAP, wbig))
 		else:
 			button_container.columns = BTN_COLS
+			button_container.add_theme_constant_override("h_separation", BTN_GAP)
 			_slot_min(Vector2(
 				(BTN_COLS * BTN_SIZE + (BTN_COLS - 1) * BTN_GAP) if has_btns else 0.0,
 				COL_H))

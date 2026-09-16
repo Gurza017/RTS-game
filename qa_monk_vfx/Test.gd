@@ -234,6 +234,7 @@ func _c_follow() -> void:
 		_hurt.sync_row()
 		# Раненого лечат — не даём ему вылечиться до конца замера
 		_hurt.current_health = _hurt.max_health * 0.3
+		_hurt._soa_push_stats()
 		await get_tree().physics_frame
 		if i < 10:
 			continue
@@ -257,6 +258,7 @@ func _d_continuous() -> void:
 	# Пять тактов лечения подряд: между ними эффект обязан гореть непрерывно
 	for _i in range(int(_UCfg.MONK_HEAL_TICK * 5.0 * 60.0)):
 		_hurt.current_health = _hurt.max_health * 0.3
+		_hurt._soa_push_stats()
 		await get_tree().physics_frame
 		total += 1
 		if _monk.heal_vfx_target() != _hurt:

@@ -178,9 +178,16 @@ func _run() -> void:
 	verdict("B4 задели двоих — ВСЕ стражи логова идут на обидчика", on_foe == _alive_trolls(lair).size()
 		and int(lair.get("solidarity_calls")) >= 1,
 		"на обидчика %d из %d, вызовов %d" % [on_foe, _alive_trolls(lair).size(), int(lair.get("solidarity_calls"))])
+	# ── ВОЛНА ЗАЩИТЫ (13.09.2026): второй страж получил урон — из пня вышли
+	# TROLL_DEFENSE_WAVE троллей сверх охраны, ОДИН раз на откат
+	var wave_n: int = _alive_trolls(lair).size()
+	verdict("B4б удар по второму стражу поднял волну защиты (+%d троллей)" % _GobCfg.TROLL_DEFENSE_WAVE,
+		wave_n == after.size() + _GobCfg.TROLL_DEFENSE_WAVE and int(lair.get("defense_waves")) == 1,
+		"троллей %d (было %d), волн %d" % [wave_n, after.size(), int(lair.get("defense_waves"))])
 	troll.take_damage(50.0, hitter)
 	await pframes(2)
-	verdict("B5 повторные удары никого не добавляют", _alive_trolls(lair).size() == after.size(),
+	verdict("B5 повторные удары никого не добавляют (волна — раз на откат)",
+		_alive_trolls(lair).size() == wave_n and int(lair.get("defense_waves")) == 1,
 		"троллей %d" % _alive_trolls(lair).size())
 
 	# ── C. Поводок погони и малый радиус агро ──────────────────────────────

@@ -714,6 +714,17 @@ func _soa_push_stats() -> void:
 	var a = GameManager.army
 	a.set_hp(_soa, current_health, max_health)
 	a.set_combat(_soa, attack_damage, attack_range, move_speed)
+	a.set_target_weight(_soa, target_weight())
+
+## ── ПРИОРИТЕТ ЦЕЛЕЙ У СТРЕЛКОВ (ТЗ 14.09.2026, п. 10) ─────────────────────
+## target_weight — свойство ЦЕЛИ (большой гоблин 2.0), едет в колонку ядра;
+## target_prio_scan — читает ли ЭТОТ боец вес при выборе цели (стрелки — да,
+## рукопашная — нет: ей ближайший, кем бы он ни был)
+func target_weight() -> float:
+	return 1.0
+
+func target_prio_scan() -> bool:
+	return false
 
 var _anim_time: float = 0.0
 var _aggro_timer: float = 0.0
@@ -882,6 +893,22 @@ func set_off_map(on: bool) -> void:
 ## случаи нельзя — по этому признаку считается число ходящих бойцов, из
 ## которого выводится количество шардов (GameManager.active_units)
 var dormant: bool = false
+
+## УЛОЖИТЬ СПАТЬ / РАЗБУДИТЬ — ОДИН ПУТЬ НА ВСЕ ФРАКЦИИ (15.09.2026).
+## Раньше тело жило в GoblinAI._set_dormant; охрана крепости красного ИИ
+## (scripts/ai/HomeGuard.gd) спит тем же способом, и второй копии этих
+## строк быть не должно. Гасится ТОЛЬКО физический тик и бит F_DORMANT в
+## ядре: визуальный тик остаётся — боец прячется от чужих глаз сам, веткой
+## внутри tick_visual (см. разбор у GoblinAI._set_dormant)
+func set_dormant(on: bool) -> void:
+	if dormant != on:
+		dormant = on
+		GameManager.note_dormant(on)
+	set_tick(not on)
+	if not on:
+		set_draw(true)
+	if _soa >= 0:
+		GameManager.army.set_dormant(_soa, on)
 
 # ── ОТСТУПЛЕНИЕ В ЗАМОК ──────────────────────────────────────────────────────
 # Отдельный режим, а не «просто приказ идти к замку». Отходящий отряд обязан
@@ -1872,10 +1899,16 @@ func _ford_lane() -> float:
 	if c.x == INF:
 		return 0.0
 	var here: Vector3 = position if _local_xform else global_position
-	return here.z - c.y
+	# Групповой приказ смещает полосу отряда от центра ГРУППЫ (ТЗ 14.09.2026,
+	# п. 7): см. GameManager.squad_ford_lane
+	return GameManager.squad_ford_lane(squad_id, here.z - c.y)
 
 func command_move(target_pos: Vector3, slow_march: bool = false, face_dir: Vector3 = Vector3.ZERO,
 		keep_retreat: bool = false, player_order: bool = false, run: bool = false) -> void:
+	# Зонд BigStand: кто, кому и из какого состояния шлёт приказ (одно
+	# сравнение bool на приказ, покадрового пути здесь нет)
+	if _Opt.cmd_meter:
+		_Opt.cmd_hit(stat_id, state, squad_id)
 	# ── ЗАЛОЧЕННЫЙ СТОЙКОЙ НЕ ИДЁТ НИКУДА, ТОЛЬКО ПОВОРАЧИВАЕТСЯ ───────────
 	# Заказ владельца: в обороне перемещение запрещено на уровне 0.0, разрешён
 	# только разворот строя. Приказ не «откладывается», а НЕ ИСПОЛНЯЕТСЯ вовсе:
@@ -2136,6 +2169,11 @@ func _effective_cooldown() -> float:
 	# ветка выполняется один раз на удар, а не на кадр
 	var cut: float = GameManager.unit_bonus(faction, stat_id, "bonus_cooldown")
 	var cd: float = attack_cooldown / maxf(mult, 0.01) - cut
+	# ДОЛЕВОЕ УСКОРЕНИЕ ИЗ КУЗНИЦЫ (ТЗ 14.09.2026, ветка лучника 1b-3b):
+	# 0.1 = −10 % к перезарядке, копится по рядам до 0.3
+	var pct: float = GameManager.unit_bonus(faction, stat_id, "bonus_cooldown_pct")
+	if pct > 0.0:
+		cd *= (1.0 - minf(pct, 0.8))
 	# «Аура скорострельности» монаха — стрелкам (письмо 12)
 	if attack_range > 3.0 and now_ms < _aura_until_ms and _aura_rate > 0.0:
 		cd *= (1.0 - minf(_aura_rate, 0.6))
@@ -2260,6 +2298,11 @@ func command_attack(target: Node3D, forced: bool = true, charge: bool = false,
 		# Новый противник — новая погоня: поводок отсчитывается от первого
 		# касания ИМЕННО ЭТОЙ цели (см. PURSUIT_LIMIT)
 		_pursuit_anchored = false
+		# ПРИКАЗ ИГРОКА НА НОВУЮ ЦЕЛЬ СНИМАЕТ И ОТРЯДНУЮ ОТМЕТКУ «ВСТАЛИ»
+		# (15.09.2026): её снимал только приказ на движение, и второй ПКМ по
+		# другому противнику вне дальности оставлял стрелков стоять — «тупят»
+		if lock and squad_id > 0:
+			GameManager.squad_pursuit_release(squad_id)
 	set_attack_target(target)
 	_attack_is_forced = forced
 	state             = State.ATTACKING
@@ -5546,7 +5589,7 @@ func _process_attack(delta: float) -> void:
 				var sa: Vector3 = GameManager.squad_pursuit_anchor(squad_id)
 				if sa != Vector3.INF:
 					anch = sa
-			if Vector2(mp.x - anch.x, mp.z - anch.z).length() > PURSUIT_LIMIT:
+			if Vector2(mp.x - anch.x, mp.z - anch.z).length() > pursuit_limit():
 				set_attack_target(null)
 				target_lock = false
 				_pursuit_anchored = false
@@ -5565,7 +5608,16 @@ func _process_attack(delta: float) -> void:
 		# ── «ДОСТРЕЛИЛ» ЧИТАЕТСЯ И У ОТРЯДА, А НЕ ТОЛЬКО У СЕБЯ ────────────
 		# Личный признак верен для того, кто уже дошёл; заказ спринта 14
 		# требует, чтобы вставал ВЕСЬ отряд по первому дотянувшемуся
-		var squad_shot: bool = not pursues_target() and squad_id > 0 			and GameManager.squad_ranged_engaged(squad_id)
+		# ── НО ТЕ, КОМУ ДО ЦЕЛИ ГЛУБИНА СТРОЯ, ПОДТЯГИВАЮТСЯ (15.09.2026) ──
+		# «Первый дострелил — все встали» оставляло задние ряды и ВСЕХ, кто
+		# короче первого (снайпер бьёт на 25, лук на 20), стоять столбом в
+		# 3-6 м от своей дальности: отряд по ПКМ «тупил» — цель в 26 м,
+		# половина не стреляет и не идёт. Отметка держит только тех, кому до
+		# цели дальше SQUAD_SHOT_SLACK сверх своей дальности (это и есть
+		# «нитка за отступающим»); задние ряды доходят и встают в зоне огня
+		var squad_shot: bool = not pursues_target() and squad_id > 0 \
+			and GameManager.squad_ranged_engaged(squad_id) \
+			and dist > rng + SQUAD_SHOT_SLACK
 		if not _attack_is_forced or ((_engaged_once or squad_shot) and not pursues_target()):
 			set_attack_target(null)
 			velocity = Vector3.ZERO
@@ -5774,7 +5826,9 @@ func _process_attack(delta: float) -> void:
 				# Первый дотянувшийся объявляет за всех: дальше ни один
 				# стрелок отряда не подходит, все стоят и бьют то, до чего
 				# достают. Разбор — GameManager.squad_ranged_engaged_set
-				if not pursues_target():
+				# Снайпер (дальность выше отрядной) за отряд не объявляет:
+				# иначе отряд вставал за 25 м, а луки достают на 20
+				if not pursues_target() and _announces_squad_shot():
 					GameManager.squad_ranged_engaged_set(squad_id)
 		_engaged_once = true
 		_attack_timer -= delta
@@ -5867,6 +5921,15 @@ func _process_attack(delta: float) -> void:
 ## один новый флаг: механизм уже был написан для лучников.
 func pursues_target() -> bool:
 	return not _stance_holds_ground()
+
+## Дострелившийся объявляет «встали всем отрядом» (см. squad_ranged_engaged_set).
+## У снайпера дальность выше отрядной — он молчит (Archer)
+func _announces_squad_shot() -> bool:
+	return true
+
+## На сколько метров сверх своей дальности стрелок ещё подтягивается к цели
+## после отрядной отметки «встали» — глубина строя плюс шаг
+const SQUAD_SHOT_SLACK := 6.0
 
 ## ── ДАЛЬНОБОЙНЫЙ ЛИ ЭТО РОД ВОЙСК ──────────────────────────────────────────
 ## Свойство РОДА, а не стойки и не состояния: у пехоты attack_range — это длина
@@ -5976,6 +6039,22 @@ func _phalanx_march(delta: float) -> bool:
 ## Единица у всех, кроме туш: крупная мишень — подарок для лучников
 func ranged_damage_mult() -> float:
 	return 1.0
+
+## ── КРУПНАЯ ЦЕЛЬ ДЛЯ «ГРОЗЫ ВЕЛИКАНОВ» (ТЗ 14.09.2026) ─────────────────────
+## Туша, тролль, конница: множитель урона стрелы bonus_giant. Конница — всё,
+## что умеет разгон (charge_range > 0); туша переопределяет явно
+func giant_class() -> bool:
+	return charge_range > 0.0
+
+## Снайперская стрела убивает С ОДНОГО попадания — всех, кроме крупных
+## (туша, тролль: те переопределяют в false и получают обычный урон)
+func snipe_one_shot() -> bool:
+	return true
+
+## Точка «в голове» для снайперской стрелы у бойца БЕЗ тела в общем слое
+## (тролль рисует своё тело сам). Vector3.INF — брать по телу из CorpseRenderer
+func snipe_head_spot() -> Vector3:
+	return Vector3.INF
 
 func _may_strike_now() -> bool:
 	return true
@@ -6727,6 +6806,11 @@ const COUNTER_CHARGE_RANGE := 12.0
 ## владельца — «десять шагов, 5-8 м». Семь посередине вилки.
 ## Больше этого боец бросает цель, забывает её и возвращается на свой пост
 const PURSUIT_LIMIT := 7.0
+
+## Поводок — СВОЙСТВО РОДА ВОЙСК: большой гоблин на охоте (BigGoblin) гонит
+## кайтящего стрелка дальше пехотных семи метров (ТЗ 14.09.2026, п. 6)
+func pursuit_limit() -> float:
+	return PURSUIT_LIMIT
 
 ## ГЕЙТ ВЫНЕСЕН В ВЫЗЫВАЮЩИЙ tick_physics (см. State.IDLE): раньше эта функция
 ## звалась КАЖДЫЙ кадр на КАЖДОМ простаивающем бойце и тут же выходила по
@@ -7558,11 +7642,14 @@ func take_damage(amount: float, attacker: Node3D = null) -> void:
 	if current_health <= 0.0:
 		# Фраг записывается на ОТРЯД убийцы (см. GameManager.credit_kill):
 		# опыт копится отрядом целиком, а не отдельным бойцом
+		var _dt: int = Time.get_ticks_usec() if _prof_d else 0
 		GameManager.credit_kill(attacker, self)
+		if _prof_d: _Opt.prof_add("die_credit", Time.get_ticks_usec() - _dt); _dt = Time.get_ticks_usec()
 		# Кто добил — читает GameManager._on_squad_wiped (клич тролля,
 		# хор орды над выбитым отрядом). Сырая ссылка, живость там (правило 5)
 		_slain_by = attacker
 		_die()
+		if _prof_d: _Opt.prof_add("die_rest", Time.get_ticks_usec() - _dt)
 	elif (state == State.IDLE or state == State.MOVING) and attacker and attack_damage > 0.0 and not retreating and not sprinting and _may_answer_blow(attacker):
 		var atk_dist: float = global_position.distance_to(attacker.global_position)
 		# ── «ВПЛОТНУЮ» ПОД ЗАМКОМ — ЭТО ДЛИНА РУКИ, А НЕ ДАЛЬНОСТЬ ОРУЖИЯ ───
@@ -7577,6 +7664,13 @@ func take_damage(amount: float, attacker: Node3D = null) -> void:
 		# помеха обязана быть ФИЗИЧЕСКОЙ. Удар в упор ответ по-прежнему получает
 		var hit_close: float = attack_range
 		if target_lock:
+			hit_close = minf(attack_range, LOCK_BLOCKER_RANGE)
+		# ── СТРЕЛОК НА МАРШЕ ОТВЕЧАЕТ ТОЛЬКО НА УДАР В УПОР (ТЗ 14.09.2026, п. 10)
+		# У лучника attack_range 20 м, и «ударили вплотную» на марше читалось
+		# как «в меня попали с двадцати метров»: кость гнолла разворачивала весь
+		# идущий отряд (squad_counter_charge). Приказ движения обязан дойти
+		# до точки; отвечает стрелок, встав (IDLE — ветка ниже, как была)
+		if state == State.MOVING and not pursues_target():
 			hit_close = minf(attack_range, LOCK_BLOCKER_RANGE)
 		if atk_dist <= hit_close:
 			# КОНТАКТНЫЙ УДАР НА МАРШЕ — РАЗВОРАЧИВАЕТСЯ ВЕСЬ ОТРЯД, а не только
@@ -7690,11 +7784,14 @@ func _die() -> void:
 	# жив: сразу за этим идёт queue_free(), и после него ленту уже не спросить.
 	# Ленту, кадр и масштаб труп берёт из самого бойца, поэтому работает для
 	# всех фракций и родов войск без единой развилки
+	var _ct: int = Time.get_ticks_usec() if _Opt.profile_physics else 0
 	_leave_corpse()
+	if _Opt.profile_physics: _Opt.prof_add("die_corpse", Time.get_ticks_usec() - _ct); _ct = Time.get_ticks_usec()
 	# Снять свою «бронь» с цели, иначе её счётчик атакующих останется завышен
 	# и живые бойцы будут считать её занятой (см. _find_nearest_enemy_in_range)
 	set_attack_target(null)
 	died.emit(self)
+	if _Opt.profile_physics: _Opt.prof_add("die_signal", Time.get_ticks_usec() - _ct)
 	queue_free()
 
 ## Положить тело на грунт. Отдельным методом, а не строкой в _die(): гарнизон

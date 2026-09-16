@@ -106,6 +106,10 @@ func _a_scouting() -> void:
 	scout.faction = Constants.FACTION_PLAYER
 	main.world_add(scout)
 	scout.global_position = Vector3(e.x, main.get_terrain_height(e.x, e.z), e.z)
+	# СТРОКА ЯДРА — ВСЛЕД ЗА ТЕЛЕПОРТОМ: источники тумана ядро собирает по
+	# СТРОКАМ (FogRefreshRows), а строка догоняет узел только на своём
+	# шардированном тике — два физкадра этого не гарантируют (A4 мигал)
+	scout.sync_row()
 	await pframes(2)
 	fog.refresh()
 	await frames(2)
@@ -414,11 +418,15 @@ func _c_castle_panel() -> void:
 		absf(btn_mid - panel_mid) <= 2.0,
 		"центр кнопок %.1f, центр панели %.1f" % [btn_mid, panel_mid])
 
-	# C8г — ОТСТУП ОТ ПРАВОГО КРАЯ РОВНО CASTLE_BTN_RIGHT_PAD
+	# C8г — РЯД КНОПОК ОТЦЕНТРОВАН В СВОБОДНОМ МЕСТЕ (заказ 13.09.2026; прежнее
+	# «ровно CASTLE_BTN_RIGHT_PAD от правого края» развёрнуто владельцем):
+	# отступ справа не меньше CASTLE_BTN_PAD и равен отступу слева от бокса очереди
 	var right_gap: float = (pr.position.x + pr.size.x) - (bc_r.position.x + bc_r.size.x)
-	verdict("C8г кнопки найма отступают от правого края на заданные px",
-		absf(right_gap - HUD.CASTLE_BTN_RIGHT_PAD) <= 2.5,
-		"отступ %.1f px, в конфиге %.0f" % [right_gap, HUD.CASTLE_BTN_RIGHT_PAD])
+	var qr: Rect2 = hud._queue_frame.get_global_rect()
+	var left_gap: float = bc_r.position.x - (qr.position.x + qr.size.x)
+	verdict("C8г ряд кнопок найма отцентрован между очередью и правым краем",
+		right_gap >= HUD.CASTLE_BTN_PAD - 0.5 and absf(right_gap - left_gap) <= 4.0,
+		"справа %.1f px, слева %.1f px" % [right_gap, left_gap])
 
 	# C8д — ОЧЕРЕДЬ В ДВА РЯДА: при девяти заказах ячейки стоят на ДВУХ разных
 	# высотах (пять сверху, четыре снизу), а не вытянуты в одну строку

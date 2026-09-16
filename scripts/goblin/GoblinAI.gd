@@ -27,6 +27,7 @@ extends Node
 
 const _GobCfg := preload("res://scripts/goblin/goblin_config.gd")
 const _Diff := preload("res://scripts/game_difficulty_config.gd")
+const _OptGA := preload("res://scripts/perf_config.gd")
 const _UCfg   := preload("res://scripts/unit_stats_config.gd")
 const _Commander := preload("res://scripts/goblin/GoblinAttackCommander.gd")
 
@@ -112,6 +113,20 @@ func register_garrison(sid: int) -> void:
 func register_mine_guard(sid: int) -> void:
 	mine_guard_sids[sid] = true
 
+## ── ДРЕМЛЮЩИЙ РЕЗЕРВ (13.09.2026, DormantReserve.gd) ────────────────────────
+## Отряды резерва — особые: вне волн, вне планов командира, вне пробуждения
+## орды. Спят и просыпаются своим контроллером; вожак берёт у него конницу
+## на вылазку (borrow_cavalry) и ведёт её обычным рейдом
+var reserve = null
+var reserve_sids: Dictionary = {}
+var reserve_raids: int = 0
+
+func register_reserve(sid: int) -> void:
+	reserve_sids[sid] = true
+
+func attach_reserve(r) -> void:
+	reserve = r
+
 func attach_mine(m: Node) -> void:
 	mine = m
 	if m != null and m.has_signal("attacked"):
@@ -138,7 +153,8 @@ func _wave_squads() -> int:
 ## Особые роли не входят ни в волны, ни в планы командира
 func _is_special(sid: int) -> bool:
 	return garrison_sids.has(sid) or mine_guard_sids.has(sid) \
-		or _revenge_sids.has(sid) or (sid > 0 and sid == scout_sid)
+		or _revenge_sids.has(sid) or (sid > 0 and sid == scout_sid) \
+		or reserve_sids.has(sid)
 
 func setup(p_main: Node3D, p_village: Vector3) -> void:
 	main = p_main
@@ -273,11 +289,10 @@ func tick() -> void:
 func _set_dormant(u: Unit, on: bool) -> void:
 	if not _GobCfg.DORMANT_SLEEP_PHYSICS:
 		return
-	if u.dormant != on:
-		# Состояние ДЕЙСТВИТЕЛЬНО меняется — только тогда двигаем счётчик
-		u.dormant = on
-		GameManager.note_dormant(on)
-	u.set_tick(not on)
+	# Само тело — Unit.set_dormant (15.09.2026): тем же путём спит охрана
+	# крепости красного ИИ, здесь остался только гоблинский выключатель
+	# и разбор ниже — почему гасится ровно то, что гасится
+	u.set_dormant(on)
 	# ── ВИЗУАЛЬНЫЙ ТИК СПЯЩЕМУ НЕ ГАСИМ ────────────────────────────────────
 	# Здесь стояло set_draw(not on), и это была дыра в тумане войны. Гоблин
 	# прячется от чужих глаз САМ, веткой внутри tick_visual (Unit._hide_in_fog):
@@ -291,21 +306,27 @@ func _set_dormant(u: Unit, on: bool) -> void:
 	# GameManager._wake_returned_far_units — раз в пятнадцать физкадров и ровно
 	# на один кадр. Тот же путь, которым живут все прочие стоящие войска.
 	# Выключенным остаётся ФИЗИЧЕСКИЙ тик и бит F_DORMANT в солвере — то есть
-	# вся та экономия, ради которой спячка и заводилась
-	if not on:
-		u.set_draw(true)
+	# вся та экономия, ради которой спячка и заводилась.
 	# И ПАКЕТНЫЕ ПРОХОДЫ ТОЖЕ. Тик бойца можно отключить снаружи, а вот
 	# расталкивание союзников идёт по КОЛОНКАМ и о выключенном тике не знает:
 	# семьсот спящих продолжали разводиться каждый кадр. Замер (qa_mass_battle,
 	# 3000 бойцов + деревня): свалка 16.5 -> 11.5 мс на одном этом бите
-	if u._soa >= 0:
-		GameManager.army.set_dormant(u._soa, on)
+
+## Длина мирной фазы: по сложности, а при выключенном чекбоксе «Перемирие»
+## (game_settings.armistice, ТЗ 14.09.2026 п. 2) — ноль: орда сразу в поле
+func _peace_sec() -> float:
+	if not GameManager.truce_enabled():
+		return 0.0
+	return _Diff.goblin_peace_sec()
 
 func _wake_horde() -> void:
 	_awake = true
 	# Проснулись — сначала мирная фаза (патруль границ), если она ещё идёт
-	phase = PHASE_PEACE if clock < _Diff.goblin_peace_sec() else PHASE_CENTER
+	phase = PHASE_PEACE if clock < _peace_sec() else PHASE_CENTER
 	for s in squads:
+		# Резерв спит своим сном — его будит только штурм лагеря
+		if reserve_sids.has(int((s as Dictionary)["id"])):
+			continue
 		for m in (s as Dictionary)["members"]:
 			var u := m as Unit
 			if u != null and is_instance_valid(u):
@@ -523,7 +544,7 @@ func _nearest_hut(from: Vector3) -> Castle:
 func _decide_phase() -> void:
 	match phase:
 		PHASE_PEACE:
-			if clock >= _Diff.goblin_peace_sec():
+			if clock >= _peace_sec():
 				phase = PHASE_CENTER
 				last_action += "|мир кончился, экспансия к центру"
 		PHASE_CENTER:
@@ -699,11 +720,18 @@ func _foreign_mines() -> Array:
 				out.append(b)
 	return out
 
-## Рудник на холме — ближайший к центру карты не наш рудник
+## Рудник на холме — ближайший к центру карты рудник, КРОМЕ рудника деревни.
+## Захваченный ордой рудник холма остаётся «холмом» (14.09.2026): прежде
+## брались только чужие, и резерв, захватив рудник, тут же уходил к
+## следующему чужому за полкарты — «держит его» не выполнялось никогда
 func _hill_mine() -> Node3D:
 	var best: Node3D = null
 	var bd := INF
-	for m in _foreign_mines():
+	var mines: Array = _foreign_mines()
+	for b in main.get_tree().get_nodes_in_group(Constants.building_group(Constants.FACTION_GOBLIN)):
+		if b != null and is_instance_valid(b) and b is Mine and not (b as Building).is_dead() and b != GameManager.goblin_mine:
+			mines.append(b)
+	for m in mines:
 		var d: float = Vector2((m as Node3D).global_position.x,
 			(m as Node3D).global_position.z).length_squared()
 		if d < bd:
@@ -849,6 +877,14 @@ func _tick_raids() -> void:
 		return
 	var want: int = _GobCfg.RAID_SQUADS_BIG if (raids_launched % 2 == 1) else _GobCfg.RAID_SQUADS_SMALL
 	var picked := 0
+	# ── КОННИЦА РЕЗЕРВА — ПЕРВОЙ (13.09.2026) ──────────────────────────────
+	# Вылазка hit & run через брод: 1-2 конных отряда из дремлющего резерва,
+	# режут одиночек и рабочих, при угрозе отходят НА ПОСТ лечиться
+	if reserve != null and is_instance_valid(reserve):
+		for sid_r in reserve.borrow_cavalry(mini(want, _GobCfg.RESERVE_LEND_MAX)):
+			raid_sids[int(sid_r)] = clock
+			picked += 1
+			reserve_raids += 1
 	# Конные — первыми: рейд это скорость
 	for pass_i in range(2):
 		for s in squads:
@@ -953,6 +989,11 @@ func _raid_plan(sq: Dictionary) -> Dictionary:
 		raid_retreats += 1
 		last_action += "|рейд %d отходит (%s)" % [sid,
 			"мало запаса" if weak else ("сопротивление" if resisted else "срок")]
+		# Конница резерва возвращается на СВОЙ пост и лечится там, а не в хижине
+		if reserve_sids.has(sid) and reserve != null and is_instance_valid(reserve):
+			sq["role"] = ROLE_DEFEND
+			var post: Vector3 = reserve.return_squad(sid)
+			return {"sq": sq, "goal": post, "center": c, "retreat": true}
 		sq["role"] = ROLE_HEAL
 		var hut := _nearest_hut(c)
 		if hut != null and hut.request_garrison(sid):
@@ -980,6 +1021,10 @@ func _raid_plan(sq: Dictionary) -> Dictionary:
 	if base == Vector3.ZERO or clock - float(raid_sids.get(sid, clock)) > _GobCfg.RAID_IDLE_SEC:
 		raid_sids.erase(sid)
 		raid_returns += 1
+		if reserve_sids.has(sid) and reserve != null and is_instance_valid(reserve):
+			sq["role"] = ROLE_DEFEND
+			var post2: Vector3 = reserve.return_squad(sid)
+			return {"sq": sq, "goal": post2, "center": c, "wake": true}
 		sq["role"] = ROLE_CENTER
 		last_action += "|рейд %d без добычи — домой" % sid
 		return {"sq": sq, "goal": village if phase == PHASE_DEFEND else Vector3.ZERO,
@@ -1108,12 +1153,18 @@ func _issue_orders(only_revenge: bool = false) -> void:
 			continue                       # ниже, общим путём
 		if sid0 == scout_sid:
 			continue                       # разведчик ведётся своим автоматом ниже
+		# Резерв ведёт DormantReserve; в поле попадает только конница, взятая
+		# на вылазку (она в raid_sids)
+		if reserve_sids.has(sid0) and not raid_sids.has(sid0):
+			continue
 		field.append(sq0)
 	# ── ТРЕВОГА РУДНИКА: вся орда к нему ─────────────────────────────────────
 	if alarm and not only_revenge:
 		for s1 in field:
 			var sq1: Dictionary = s1
 			var sid1: int = int(sq1["id"])
+			if reserve_sids.has(sid1):
+				continue
 			handled[sid1] = true
 			sq1["role"] = ROLE_MINE_ALARM
 			raid_sids.erase(sid1)
@@ -1309,6 +1360,8 @@ func _issue_squad(plan: Dictionary) -> int:
 	var sq: Dictionary = plan["sq"]
 	var members: Array = sq["members"]
 	var issued := 0
+	# Зонд BigStand: источник приказов — вожак орды (метку снимает физтик)
+	if _OptGA.cmd_meter: _OptGA.cmd_src = "horde_ai"
 	# Живость — на СЫРОЙ ссылке, до приведения типа (правило 5): цель могла
 	# пасть, пока запись ждала своего кадра, а типизированное присваивание
 	# освобождённого объекта не даёт null — оно бросает исключение
