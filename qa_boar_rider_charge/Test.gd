@@ -199,7 +199,12 @@ func _check_rows() -> void:
 	var kill_n: int = int(_UStats.stat("goblin_rider", "charge_row_kill", 1))
 	var frac2: float = _UStats.stat("goblin_rider", "charge_row2_frac", 0.3)
 	var p0 := Vector3(-1300.0, 0.0, -1300.0)
-	var blk: Array = _block(WARRIOR, Constants.FACTION_PLAYER, "warrior", p0, depth)
+	# Третий ряд обязан лежать ВНУТРИ круга брызг (charge_splash): накрывает
+	# удар только его — шаг шеренг берётся так, чтобы ряд 2 попал в круг, а
+	# округление по charge_row_depth по-прежнему давало ряды 0/1/2
+	var splash: float = _UStats.stat("goblin_rider", "charge_splash", 2.0)
+	var gap: float = minf(depth, splash * 0.45)
+	var blk: Array = _block(WARRIOR, Constants.FACTION_PLAYER, "warrior", p0, gap)
 	var men: Array = blk[0]
 	for u in men:
 		(u as Unit).set_tick(false)

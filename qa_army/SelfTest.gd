@@ -49,7 +49,11 @@ func _run() -> void:
 		and _Army.F_WORKING == 1 << 10 and _Army.F_STEP_PENDING == 1 << 11
 		and _Army.F_TRUNK_IGNORE == 1 << 12
 		and _Army.F_ATK_SIMPLE == 1 << 14
-		and _Army.F_ORDER_PASS == 1 << 17)
+		and _Army.F_ORDER_PASS == 1 << 17
+		and _Army.F_TICK_ON == 1 << 23 and _Army.F_TICK_ALWAYS == 1 << 24
+		and _Army.F_MATRIX_LED == 1 << 25)
+	# BigStand-5: бит F_TICK_ON — зеркало Unit.tick_on, ставит set_tick и
+	# _ready; список строк на тик (tick_rows) без него пуст
 
 	print("\n───── B. СТРОКА ВЫДАЁТСЯ И ЗАПОЛНЯЕТСЯ ─────")
 	var Spear := load("res://scenes/units/Spearman.tscn") as PackedScene
@@ -73,6 +77,38 @@ func _run() -> void:
 			dup += 1
 		idxs[u._soa] = true
 	ok("B2 номера строк уникальны", dup == 0, "повторов %d" % dup)
+	# ── СПИСОК СТРОК НА ТИК (BigStand-5, этап 1) ────────────────────────────
+	# Диспетчер идёт по ArmyCore.TickRows: тикающий боец обязан быть в списке
+	# (по всем шардам вместе), уснувший по физике — нет, проснувшийся — снова
+	# да. Реестр «строка → узел» отдаёт того же бойца. Стоящий после первого
+	# тика ЖДЁТ такт агро в ядре (F_IDLE_WAIT, этап 1б) — дельта 10 с в
+	# вызове истекает это ожидание, иначе честный стоящий в списке не окажется
+	var probe: Unit = units[0]
+	var listed := func() -> bool:
+		for ph in range(4):
+			var rows: PackedInt32Array = GameManager.army.tick_rows(4, ph, Unit.State.ATTACKING, Unit.State.IDLE, 10.0)
+			if rows.has(probe._soa):
+				return true
+		return false
+	ok("B3 тикающий боец в списке строк ядра (такт агро истёк)", listed.call())
+	var waited := func() -> bool:
+		for ph in range(4):
+			var rows: PackedInt32Array = GameManager.army.tick_rows(4, ph, Unit.State.ATTACKING, Unit.State.IDLE, 0.0)
+			if rows.has(probe._soa):
+				return false
+		return true
+	# После тика стоящий взвёл ожидание заново: с нулевой дельтой его в списке
+	# нет. Стойка «оборона» ожидание не взводит (подтягивание рядов каждый
+	# такт) — копейщика переводим в «атаку»
+	probe.set_stance("attack")
+	await _frames(3)
+	ok("B3а стоящий между тактами агро — вне списка (ждёт в ядре)", waited.call())
+	ok("B3б реестр строка → узел отдаёт того же бойца",
+		GameManager._row_units[probe._soa] == probe)
+	probe.set_tick(false)
+	ok("B3в выключенный тик — вне списка", not listed.call())
+	probe.set_tick(true)
+	ok("B3г снова тикает — снова в списке", listed.call())
 
 	print("\n───── C. КООРДИНАТА, СОСТОЯНИЕ И ЗДОРОВЬЕ СХОДЯТСЯ ─────")
 	# КООРДИНАТЫ ПОПАДАЮТ В СТРОКИ НЕ САМИ. Боец их не пишет — в его покадровый

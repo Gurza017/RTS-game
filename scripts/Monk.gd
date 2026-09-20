@@ -57,8 +57,30 @@ var self_res_used: bool = false
 
 var _aura_t: float = 0.0
 var _space_t: float = 0.0
+## Гистерезис расстановки монахов, м, и пауза после выданного отхода, с
+## (BigStand, этап 1: проверка раз в секунду, приказ — не чаще раза в 4 с)
+const SPACING_HYST := 1.0
+const SPACING_MOVE_SEC := 4.0
 var aura_touched: int = 0
 var spacing_moves: int = 0
+var approach_moves: int = 0
+## Круг КАНАЛА воскрешения — свой узел (ТЗ 17.09.2026): канал идёт
+## параллельно лечению, а круг лечения занят пациентом. Гаснет в _stop_res
+## БЕЗУСЛОВНО — «зависший зелёный круг без модели» был кругом лечения,
+## который канал одалживал и не всегда возвращал
+var _res_aura: MeshInstance3D = null
+
+## Дистанция каста = радиус ауры: монах работает с её границы, а не в упор
+func cast_range() -> float:
+	return heal_radius()
+
+## Где вставать относительно центра отряда-пациента: на доле радиуса ауры,
+## снаружи строя, и стоять там без микро-движений
+func stand_dist() -> float:
+	return heal_radius() * _MCfg.MONK_STAND_FRAC
+
+func res_aura_visible() -> bool:
+	return _res_aura != null and is_instance_valid(_res_aura) and _res_aura.visible
 
 func _ready() -> void:
 	# ФАЗА ТАКТА СВОЯ У КАЖДОГО МОНАХА (qa_melee_bench, 14.09.2026): три монаха
@@ -105,6 +127,8 @@ func command_heal(target: Node3D) -> void:
 	heal_orders += 1
 	# Сразу к отряду — не ждать такта лечения
 	_heal_t = 0.0
+	patient_sid = _order_sid
+	_monk_wake()
 
 ## Приказ ещё в силе: указанный боец жив, либо жив хоть кто-то из его отряда
 ## (15.09.2026: монах СОПРОВОЖДАЕТ отряд, а не одного бойца — гибель
@@ -160,8 +184,9 @@ func _follow_order_squad() -> void:
 		return
 	if d < 0.01:
 		to_me = Vector3(1.0, 0.0, 0.0)
-	var stand: Vector3 = c + to_me.normalized() * (_MCfg.MONK_CAST_RANGE * 0.7)
-	if _step_to != Vector3.INF and _step_to.distance_to(stand) < 1.0 and state == State.MOVING:
+	var stand: Vector3 = c + to_me.normalized() * stand_dist()
+	if _step_to != Vector3.INF and _step_to.distance_to(stand) < _MCfg.MONK_MOVE_SLACK \
+			and state == State.MOVING:
 		return
 	_step_t = _MCfg.MONK_STEP_SEC
 	_step_to = stand
@@ -200,12 +225,26 @@ func _order_patient() -> Unit:
 func _order_corpse():
 	if _order_sid <= 0 or GameManager.corpses == null or not can_resurrect():
 		return null
-	var c = GameManager.corpses.find_raisable_priority(faction, global_position,
-		_MCfg.MONK_RES_SEARCH_RADIUS * 2.0, "monk")
-	if c == null:
-		return null
-	var csid: int = int(c.squad_id) if ("squad_id" in c) else 0
-	return c if csid == _order_sid else null
+	return GameManager.corpses.find_raisable_of_squad(faction, _order_sid,
+		global_position, _MCfg.MONK_RES_SEARCH_RADIUS * 2.0)
+
+## Общий сон по коридору (BigStand, этап 3) монаху не нужен: он засыпает САМ
+## из _monk_step, когда некого лечить и не к кому идти (ТЗ 16.09.2026), и
+## будится ударом, приказом и собственным событием. Коридорный сон мог бы
+## усыпить его посреди канала воскрешения
+func may_sleep_physics() -> bool:
+	return false
+
+## Тик снят (гарнизон, спячка, снятие с карты) — картинки лечения гаснут ТЕМ ЖЕ
+## вызовом. Иначе их некому погасить: и лента, и овал, и круг канала гаснут
+## только из tick_physics, а он после set_tick(false) не идёт (ТЗ 18.09.2026,
+## п. 1: «зелёные круги остаются на земле» — монах, ушедший в крепость
+## лечиться, оставлял овал под последним пациентом)
+func set_tick(enable: bool) -> void:
+	super.set_tick(enable)
+	if not enable:
+		_stop_heal_vfx()
+		_stop_res()
 
 func is_combatant() -> bool:
 	return false
@@ -252,15 +291,29 @@ func _setup_monk_visual() -> void:
 		if mat:
 			mat.albedo_color = Color(0.95, 0.90, 0.55) if faction == Constants.FACTION_PLAYER else Color(0.90, 0.30, 0.30)
 
-## ── ТИК ЛЕЧЕНИЯ ───────────────────────────────────────────────────────────
-## Поверх базового тика: монах ходит и дерётся как все, а лечение — своя
-## редкая работа (раз в MONK_HEAL_TICK), не покадровая
+## ── ТИК МОНАХА: СОБЫТИЯ И РЕДКИЙ СКАН (ТЗ 16.09.2026) ─────────────────────
+## Покадрово тикают только текущие процессы (отход, канал воскрешения, ленты
+## VFX). Всё остальное — по такту heal_tick_sec (MONK_SCAN_SEC, короче у
+## кузницы) или по событию (закончил лечить, получил приказ, ударили): выбор
+## ОТРЯДА-пациента, марш к фронту, сон, ауры. Прежние покадровые такты
+## (лечение 0.5 с, ауры 1 с, расстановка 1 с) сняты — их работу делает один
+## скан
+var _scan_t: float = 0.0
+## Такт дремоты (некого лечить и не к кому идти), с
+const MONK_IDLE_SCAN_SEC := 1.5
+## Отряд-пациент (0 — нет); ставится сканом или приказом ПКМ
+var patient_sid: int = 0
+## Цели лечения последнего такта (для стендов и VFX)
+var heal_targets: Array = []
+## Диагностика: сканов, тактов лечения, маршей к фронту, засыпаний
+var scans: int = 0
+var heal_ticks: int = 0
+var front_moves: int = 0
+var sleeps: int = 0
+
 func tick_physics(delta: float, prof: bool = false, bm: bool = true,
 		bonus_ver: int = -1) -> void:
 	super.tick_physics(delta, prof, bm, bonus_ver)
-	# МОНАХ ВЫБЫЛ — ЭФФЕКТ ГАСНЕТ ТЕМ ЖЕ КАДРОМ. Заказ прямо называет случаи
-	# прекращения («юнит вылечен, монах переключился, монах умер или отошёл»),
-	# и два из них проходят здесь
 	if state == State.DEAD or garrisoned:
 		_stop_heal_vfx()
 		_stop_res()
@@ -271,34 +324,393 @@ func tick_physics(delta: float, prof: bool = false, bm: bool = true,
 	_retreat_cd = maxf(_retreat_cd - delta, 0.0)
 	_tick_retreat(delta)
 	_tick_shield(delta)
-	_tick_aura(delta)
-	_tick_spacing(delta)
-	# Канал воскрешения идёт своим ходом; без «Двойного попечения» лечение
-	# на это время замирает
-	# Бакеты профиля (profile_physics): куда уходит редкий дорогой тик монаха
 	var _pm: bool = _prof_on
 	var _tm: int = Time.get_ticks_usec() if _pm else 0
+	# Канал воскрешения — процесс, идёт покадрово, пока есть тело
+	# ТЗ 17.09.2026: канал идёт ПАРАЛЛЕЛЬНО лечению всегда («Двойное
+	# попечение» 4d теперь только укорачивает канал)
 	if _res_target != null:
 		_tick_res(delta)
 		if _pm: _Opt.prof_add("monk_res", Time.get_ticks_usec() - _tm)
-		if not parallel_care():
-			return
-	_heal_t -= delta
-	if _heal_t > 0.0:
+	_scan_t -= delta
+	if _scan_t > 0.0:
 		return
-	_heal_t = heal_tick_sec()
+	_scan_t = heal_tick_sec()
 	if _pm: _tm = Time.get_ticks_usec()
-	_heal_pulse()
+	_monk_step()
+
 	if _pm: _Opt.prof_add("monk_pulse", Time.get_ticks_usec() - _tm)
 
-# ═════════════════════════════════════════════════════════════════════════════
-# ДИСТАНЦИЯ МЕЖДУ МОНАХАМИ (письмо 12): свободный монах отходит от соседа
-# ═════════════════════════════════════════════════════════════════════════════
+## Событие, требующее немедленного пересмотра (приказ, удар, конец лечения)
+func _monk_wake() -> void:
+	_scan_t = 0.0
+	wake_physics()
+
+## Один шаг автомата монаха. Порядок: отход в силе — ничего; приказ игрока —
+## отряд-пациент задан; иначе скан самого побитого отряда в ауре; есть работа
+## — этап A (раненые) / этап B (тела); нет работы в ауре — марш к ближайшему
+## своему отряду; нет никого — сон
+func _monk_step() -> void:
+	if _retreat_goal.x != INF:
+		# На отходе лечим только тех, кто и так в дистанции каста, — подхода
+		# нет (qa_monk_forge E3/E4: отход не гасится подходом, лечение не
+		# прерывается)
+		if patient_sid > 0 and _care_squad(patient_sid, false):
+			return
+		if _care_lone(false):
+			return
+		_stop_heal_vfx()
+		return
+	scans += 1
+	_tick_aura(0.0, true)
+	# Дистанция между монахами — часть того же скана (гистерезис и пауза
+	# после приказа внутри _tick_spacing; delta 0 = «прошёл один такт скана»)
+	_tick_spacing(0.0)
+	if _order_alive():
+		patient_sid = _order_sid
+	elif not _squad_needs_care(patient_sid):
+		patient_sid = _pick_patient_squad()
+	if patient_sid > 0:
+		if _care_squad(patient_sid):
+			return
+		# Пациент вылечен и укомплектован: приказ исполнен, дальше автономия
+		if _order_alive() and _order_sid == patient_sid:
+			_order_target = null
+			_order_sid = 0
+		patient_sid = 0
+	# Одиночки вне отрядов (рабочий, гарнизонный выходец, сам монах) — по
+	# колонке ядра: самый раненый свой в ауре
+	if _care_lone():
+		return
+	_stop_heal_vfx()
+	# Ни одного раненого в ауре: к фронту
+	if _go_to_front():
+		return
+	# Некому помогать и не к кому идти: ДРЕМОТА — редкий скан раз в
+	# MONK_IDLE_SCAN_SEC. Полный сон физики (set_tick(false)) пробовался и
+	# снят: раненый, появившийся рядом со спящим монахом, не событие — его
+	# заметит только скан (qa_monk_vfx B2). Цена дремоты — одно вычитание
+	# таймера в тике и один обход реестра отрядов раз в несколько секунд
+	if state == State.IDLE and not moved_recently() and may_sleep_now():
+		sleeps += 1
+		_scan_t = MONK_IDLE_SCAN_SEC
+
+func may_sleep_now() -> bool:
+	return _res_target == null and _retreat_goal.x == INF and not player_order_active()
+
+## Отряду нужен монах: есть раненый живой или (с воскрешением) павший
+func _squad_needs_care(sid: int) -> bool:
+	if sid <= 0:
+		return false
+	var raw: Variant = GameManager.squads.get(sid)
+	if raw == null:
+		return false
+	var members: Array = (raw as Dictionary).get("members", [])
+	var alive := 0
+	for m in members:
+		if m == null or not is_instance_valid(m):
+			continue
+		var u := m as Unit
+		if u == null or u.is_dead():
+			continue
+		alive += 1
+		if _may_heal(u):
+			return true
+	if alive == 0:
+		return false
+	return _squad_short(sid, alive)
+
+## Самый побитый свой отряд в ауре: доля недостающего запаса плюс доля
+## недостающих моделей (0..2). Один обход реестра отрядов, без сетки
+func _pick_patient_squad() -> int:
+	var mp: Vector3 = position if _local_xform else global_position
+	var r: float = heal_radius()
+	var r2: float = r * r
+	var best_sid := 0
+	var best_score := 0.0
+	var res_ok: bool = can_resurrect()
+	for key in GameManager.squads:
+		var sid: int = int(key)
+		var sq: Dictionary = GameManager.squads[key]
+		if int(sq.get("faction", -1)) != faction:
+			continue
+		if String(sq.get("type", "")) == "worker":
+			continue
+		var c: Vector2 = GameManager.squad_centre_xz(sid)
+		if c == Vector2.INF:
+			continue
+		var dx: float = c.x - mp.x
+		var dz: float = c.y - mp.z
+		if dx * dx + dz * dz > r2:
+			continue
+		var hp := 0.0
+		var hpmax := 0.0
+		var alive := 0
+		for m in sq.get("members", []):
+			if m == null or not is_instance_valid(m):
+				continue
+			var u := m as Unit
+			if u == null or u.is_dead():
+				continue
+			alive += 1
+			hp += u.current_health
+			hpmax += u.max_health
+		if alive == 0 or hpmax <= 0.0:
+			continue
+		var score: float = 1.0 - hp / hpmax
+		if res_ok:
+			var full: int = int(sq.get("full", alive))
+			if full > alive:
+				score += float(full - alive) / float(full)
+		if score > best_score + 0.001:
+			best_score = score
+			best_sid = sid
+	return best_sid
+
+## Лечить отряд: этап A — раненые (до max_heal_targets за такт, VFX на каждом),
+## этап B — павшие. true — работа была (или идём к ней)
+func _care_squad(sid: int, may_walk: bool = true) -> bool:
+	var raw: Variant = GameManager.squads.get(sid)
+	if raw == null:
+		return false
+	var hurt: Array = []      # [frac, Unit]
+	var alive := 0
+	var first_live: Unit = null
+	for m in (raw as Dictionary).get("members", []):
+		if m == null or not is_instance_valid(m):
+			continue
+		var u := m as Unit
+		if u == null or u.is_dead():
+			continue
+		alive += 1
+		if first_live == null:
+			first_live = u
+		if _may_heal(u):
+			hurt.append([u.current_health / maxf(u.max_health, 1.0), u])
+	# Этап B — павшие отряда — ОТКРЫВАЕТСЯ И ПРИ РАНЕНЫХ (ТЗ 17.09.2026):
+	# канал воскрешения идёт параллельно лечению, а не после него
+	if can_resurrect() and _res_target == null and _res_cool <= 0.0 and alive > 0:
+		var c = _squad_corpse(sid)
+		if c != null:
+			_res_target = c
+			_res_spot = Vector3.INF
+			_res_left = res_sec()
+			_res_cool = res_cooldown()
+	if hurt.is_empty():
+		if _res_target != null:
+			return true
+		# Раненых нет, но отряд не укомплектован: ждём откат канала у отряда,
+		# приказ и пациент не сбрасываются (ТЗ 18.09.2026, п. 2). Отряд ушёл
+		# за ауру — подходим тем же приказом, что к пациенту
+		if not _squad_short(sid, alive):
+			return false
+		if may_walk and first_live != null \
+				and global_position.distance_to(first_live.global_position) > cast_range():
+			_walk_to_patient(first_live, sid)
+			_stop_heal_vfx()
+		return true
+	hurt.sort_custom(func(a, b): return float(a[0]) < float(b[0]))
+	var worst: Unit = hurt[0][1]
+	# ФОКУС: начатый пациент ведётся до 100 % (Fix Pack 15.09), более раненый
+	# сосед его не перехватывает — иначе лечение размазывается по всем
+	if heal_target != null and is_instance_valid(heal_target):
+		var cur := heal_target as Unit
+		if _may_heal(cur) and cur.squad_id == sid:
+			worst = cur
+	# Подход — только когда пациент ЗА границей ауры; встаём на stand_dist
+	# от центра его отряда, снаружи строя (ТЗ 17.09.2026)
+	var gap: float = global_position.distance_to(worst.global_position)
+	if gap > cast_range():
+		if not may_walk:
+			return false
+		heal_target = worst          # «взял в лечение» — с момента подхода
+		_walk_to_patient(worst, sid)
+		_stop_heal_vfx()
+		return true
+	# Этап A: лечим до cap целей за такт
+	var tick: float = heal_tick_sec()
+	var cap: int = max_heal_targets()
+	var full: bool = full_heal_tick()
+	var per: float = tick / _MCfg.MONK_HEAL_SEC_PER_MAN * heal_amount_mult()
+	var given := 0.0
+	var touched := 0
+	heal_targets.clear()
+	var cast_r2: float = cast_range() * cast_range()
+	for row in hurt:
+		if touched >= cap:
+			break
+		var u2 := (row[1]) as Unit
+		if u2 == null or not is_instance_valid(u2) or u2.is_dead():
+			continue
+		# Массовый каст бьёт по ауре, одиночный — только в дистанции каста
+		var d2: float = global_position.distance_squared_to(u2.global_position)
+		if cap == 1 and u2 != worst:
+			continue                 # фокус: одиночный каст — только самому раненому
+		if d2 > cast_r2:
+			continue
+		touched += 1
+		var before2: float = u2.current_health
+		if full:
+			u2.current_health = u2.max_health
+		else:
+			u2.current_health = minf(u2.max_health, u2.current_health + u2.max_health * per)
+		var got: float = u2.current_health - before2
+		given += got
+		healed_total += got
+		_credit_heal_xp(got)
+		u2._soa_push_stats()
+		heal_targets.append(u2)
+	if touched == 0:
+		_stop_heal_vfx()             # лечить некого — эффект не висит на прежнем
+		return true
+	heal_ticks += 1
+	aoe_touched = touched
+	heal_target = worst
+	_play_attack_anim("heal", int(tick * 1000.0) + 120)
+	_bind_heal_vfx_many(heal_targets)
+	_self_heal(given)
+	return true
+
+## Пациент-одиночка: самый раненый свой в ауре по колонке ядра (без отряда
+## в реестре — рабочий, одиночка, сам монах). Держится начатый (heal_target),
+## пока он ранен и в поводке, — фокус, а не размазывание
+func _care_lone(may_walk: bool = true) -> bool:
+	var cur: Unit = null
+	if heal_target != null and is_instance_valid(heal_target):
+		cur = heal_target as Unit
+	var best: Unit = null
+	# Фокус держится в пределах КАСТА (ТЗ 18.09.2026): каст идёт из ауры
+	# (20 м, 17.09.2026), и поводок 14 м терял начатого пациента в 16 м на
+	# каждом такте — лечение размазывалось (qa_monk_healing C3/E1)
+	if _may_heal(cur) and cur.squad_id == 0 \
+			and global_position.distance_to(cur.global_position) \
+				<= maxf(_MCfg.MONK_HEAL_LEASH, cast_range()):
+		best = cur
+	else:
+		var mp: Vector3 = position if _local_xform else global_position
+		var cand = GameManager.army.most_wounded_of_side(mp.x, mp.z, int(faction), heal_radius(), _soa)
+		if cand != null and is_instance_valid(cand):
+			var cu := cand as Unit
+			if _may_heal(cu):
+				best = cu
+		if _may_heal(self) and (best == null or current_health / max_health < best.current_health / best.max_health):
+			best = self
+	if best == null:
+		return false
+	# Раненый состоит в отряде — ведём его отряд целиком (общий путь)
+	if best.squad_id > 0 and best != self:
+		patient_sid = best.squad_id
+		return _care_squad(best.squad_id)
+	var gap: float = global_position.distance_to(best.global_position)
+	if best != self and gap > cast_range():
+		if not may_walk:
+			return false
+		heal_target = best
+		_walk_to_patient(best)
+		_stop_heal_vfx()
+		return true
+	var tick: float = heal_tick_sec()
+	var per: float = tick / _MCfg.MONK_HEAL_SEC_PER_MAN * heal_amount_mult()
+	var before: float = best.current_health
+	if full_heal_tick():
+		best.current_health = best.max_health
+	else:
+		best.current_health = minf(best.max_health, best.current_health + best.max_health * per)
+	var got: float = best.current_health - before
+	healed_total += got
+	_credit_heal_xp(got)
+	best._soa_push_stats()
+	heal_target = best
+	heal_targets.clear()
+	heal_targets.append(best)
+	heal_ticks += 1
+	_play_attack_anim("heal", int(tick * 1000.0) + 120)
+	_bind_heal_vfx_many(heal_targets)
+	if best != self:
+		_self_heal(got)
+	return true
+
+## Павший отряда, годный к подъёму (только для отряда-пациента)
+## ТЗ 18.09.2026, п. 2: тело ищется ПО ОТРЯДУ (find_raisable_of_squad), а не
+## «ближайшее своей стороны с последующей сверкой отряда» — сверка в замесе
+## отвечала «нет» на первом же чужом по отряду теле, и подъём кончался одной
+## моделью. Радиус — поиск воскрешения (у приказа — вдвое шире)
+func _squad_corpse(sid: int):
+	if sid <= 0 or GameManager.corpses == null or not can_resurrect():
+		return null
+	var r: float = maxf(heal_radius(), _MCfg.MONK_RES_SEARCH_RADIUS)
+	if _order_alive() and _order_sid == sid:
+		r = maxf(r, _MCfg.MONK_RES_SEARCH_RADIUS * 2.0)
+	return GameManager.corpses.find_raisable_of_squad(faction, sid, global_position, r)
+
+## Отряд НЕ УКОМПЛЕКТОВАН и есть кого поднять: живых меньше штата и в
+## радиусе поиска лежит его тело. По этому признаку монах держит отряд
+## пациентом (и приказ ПКМ — исполняемым) и на откате канала: раньше откат
+## 5 с читался как «работы нет», приказ сбрасывался, монах уходил к фронту
+func _squad_short(sid: int, alive: int) -> bool:
+	if not can_resurrect() or alive <= 0:
+		return false
+	var raw: Variant = GameManager.squads.get(sid)
+	if raw == null:
+		return false
+	var full: int = int((raw as Dictionary).get("full", alive))
+	if alive >= full:
+		return false
+	return _squad_corpse(sid) != null
+
+## Нет работы в ауре: ОДИН скан реестра отрядов — ближайший свой боевой отряд,
+## идём к нему на MONK_FRONT_DIST. true — идём или уже стоим у фронта
+func _go_to_front() -> bool:
+	if player_order_active() or _panicked or retreating:
+		return false
+	var mp: Vector3 = position if _local_xform else global_position
+	var best := Vector2.INF
+	var best_d2 := INF
+	for key in GameManager.squads:
+		var sid: int = int(key)
+		if sid == squad_id:
+			continue
+		var sq: Dictionary = GameManager.squads[key]
+		if int(sq.get("faction", -1)) != faction:
+			continue
+		if not GameManager.squad_is_combat(sid):
+			continue
+		var c: Vector2 = GameManager.squad_centre_xz(sid)
+		if c == Vector2.INF:
+			continue
+		var dx: float = c.x - mp.x
+		var dz: float = c.y - mp.z
+		var d2: float = dx * dx + dz * dz
+		if d2 < best_d2:
+			best_d2 = d2
+			best = c
+	if best == Vector2.INF:
+		return false
+	var d: float = sqrt(best_d2)
+	# Уже у фронта — на границе ауры: стоим (гистерезис, чтобы не дёргаться)
+	var sd: float = stand_dist()
+	if d <= sd + 3.0:
+		return false
+	if _step_t > 0.0:
+		return true
+	var dir := Vector3(best.x - mp.x, 0.0, best.y - mp.z) / d
+	var stand: Vector3 = Vector3(best.x, 0.0, best.y) - dir * sd
+	if _step_to != Vector3.INF and _step_to.distance_to(stand) < _MCfg.MONK_MOVE_SLACK \
+			and state == State.MOVING:
+		return true
+	_step_t = _MCfg.MONK_STEP_SEC
+	_step_to = stand
+	front_moves += 1
+	if _Opt.cmd_meter: _Opt.cmd_src = "monk_front"
+	command_move(GameManager.land_target(stand))
+	if _Opt.cmd_meter: _Opt.cmd_src = ""
+	return true
+
 func _tick_spacing(delta: float) -> void:
-	_space_t -= delta
+	_space_t -= delta if delta > 0.0 else heal_tick_sec()
 	if _space_t > 0.0:
 		return
-	_space_t = 1.0
+	_space_t = 0.0
 	# ── ВО ВРЕМЯ ОТХОДА РАССТАНОВКА МОЛЧИТ ────────────────────────────────
 	# Иначе она перебивает отход своим приказом: монах, вставший на секунду
 	# (такт расстановки ловит именно IDLE), получал новую точку в полуметре
@@ -309,12 +721,20 @@ func _tick_spacing(delta: float) -> void:
 		return
 	var mp: Vector3 = global_position
 	var nearest: Monk = null
-	var nd: float = _MCfg.MONK_SPACING
-	for n in GameManager.unit_grid.query_radius(mp, _MCfg.MONK_SPACING):
+	# ── ГИСТЕРЕЗИС (BigStand, этап 1) ──────────────────────────────────────
+	# Отход заводится только с MONK_SPACING − SPACING_HYST, а точка отхода
+	# считается до полной дистанции: иначе два монаха, вставшие ровно на
+	# 4.9 м, по очереди отходили на полметра каждую секунду (зонд: 4.8
+	# приказов/с на 12 стоящих монахов). Сосед, который сам идёт, отойдёт
+	# или подойдёт сам — от него не отходим: расстановка — дело стоящих
+	var nd: float = _MCfg.MONK_SPACING - SPACING_HYST
+	for n in GameManager.unit_grid.query_radius(mp, nd):
 		if n == null or not is_instance_valid(n) or n == self:
 			continue
 		var m := n as Monk
 		if m == null or m.is_dead() or m.faction != faction:
+			continue
+		if m.state != State.IDLE or m.moved_recently():
 			continue
 		var d: float = mp.distance_to(m.global_position)
 		if d < nd:
@@ -322,6 +742,7 @@ func _tick_spacing(delta: float) -> void:
 			nearest = m
 	if nearest == null:
 		return
+	_space_t = SPACING_MOVE_SEC
 	var away: Vector3 = mp - nearest.global_position
 	away.y = 0.0
 	if away.length_squared() < 1e-4:
@@ -338,10 +759,14 @@ func _tick_spacing(delta: float) -> void:
 func aura_radius() -> float:
 	return _MCfg.MONK_AURA_BASE_R + GameManager.squad_bonus(squad_id, "aura_radius")
 
-func _tick_aura(delta: float) -> void:
-	_aura_t -= delta
-	if _aura_t > 0.0:
-		return
+## Ауры раздаются в такт скана (ТЗ 16.09.2026: без тяжёлых тиков): `force` —
+## вызов из _monk_step, свой таймер тогда не спрашивается. Срок удержания
+## покрывает такт с запасом (MONK_AURA_HOLD_MS 1.7 с > MONK_SCAN_SEC 1.2)
+func _tick_aura(delta: float, force: bool = false) -> void:
+	if not force:
+		_aura_t -= delta
+		if _aura_t > 0.0:
+			return
 	_aura_t = _MCfg.MONK_AURA_TICK
 	if squad_id <= 0:
 		return
@@ -350,7 +775,7 @@ func _tick_aura(delta: float) -> void:
 	var r: float = GameManager.squad_bonus(squad_id, "aura_rate")
 	if a <= 0.0 and k <= 0.0 and r <= 0.0:
 		return
-	var until: int = now_ms + _MCfg.MONK_AURA_HOLD_MS
+	var until: int = now_ms + maxi(_MCfg.MONK_AURA_HOLD_MS, int(heal_tick_sec() * 1000.0) + 500)
 	var touched := 0
 	for n in GameManager.unit_grid.query_radius(global_position, aura_radius()):
 		if n == null or not is_instance_valid(n):
@@ -394,13 +819,13 @@ func max_resurrect_count() -> int:
 func res_health_frac() -> float:
 	return 0.5 if (_node("4d") or _node("5d")) else 0.3
 
-## Откат между каналами: 15 / 12 / 3 с у конвейера
+## Откат между каналами: MONK_RES_COOLDOWN / _4D / _5D (5 / 4 / 2 с)
 func res_cooldown() -> float:
 	if _node("5d"):
-		return 3.0
+		return _MCfg.MONK_RES_COOLDOWN_5D
 	if _node("4d"):
-		return 12.0
-	return 15.0
+		return _MCfg.MONK_RES_COOLDOWN_4D
+	return _MCfg.MONK_RES_COOLDOWN
 
 ## Самовоскрешение — бонус ряда 3, один раз за бой
 func has_self_revive() -> bool:
@@ -475,6 +900,7 @@ func _try_resurrect() -> bool:
 func take_damage(amount: float, attacker: Node3D = null) -> void:
 	if is_dead():
 		return
+	wake_physics()
 	# Неуязвимость «Второго Дыхания»
 	if _invuln_until > now_ms:
 		_step_away_from(attacker)
@@ -557,12 +983,58 @@ func _step_away_from(attacker: Node3D) -> void:
 			away = v.normalized()
 	_retreat_cd = RETREAT_CD
 	retreats += 1
-	var goal: Vector3 = GameManager.land_target(mp + away * RETREAT_DIST)
+	# ── ОТХОД К СВОИМ, А НЕ ПРОСТО ПРОЧЬ (ТЗ 16.09.2026) ─────────────────
+	# Ближайший свой боевой отряд в двух радиусах ауры тянет точку отхода к
+	# себе: «прочь от обидчика» и «к своим» складываются, дальность
+	# MONK_RETREAT_DIST. Своих нет — прежний отход прочь
+	var toward: Vector3 = _nearest_ally_squad_dir(mp)
+	if toward != Vector3.ZERO:
+		away = (away + toward * 1.5).normalized() if (away + toward * 1.5).length_squared() > 1e-4 else toward
+	var goal: Vector3 = GameManager.land_target(mp + away * _MCfg.MONK_RETREAT_DIST)
 	_retreat_goal = goal
-	_retreat_give_up = _retreat_timeout()
+	_retreat_give_up = _MCfg.MONK_RETREAT_DIST / maxf(move_speed, 0.5) + 1.5
+	_stop_heal_vfx()
 	if _Opt.cmd_meter: _Opt.cmd_src = "monk_retreat"
 	command_move(goal)
 	if _Opt.cmd_meter: _Opt.cmd_src = ""
+
+## Направление к центру ближайшего своего боевого отряда (ZERO — нет)
+func _nearest_ally_squad_dir(mp: Vector3) -> Vector3:
+	var best := Vector2.INF
+	var best_d2: float = (heal_radius() * 2.0) * (heal_radius() * 2.0)
+	for key in GameManager.squads:
+		var sid: int = int(key)
+		if sid == squad_id:
+			continue
+		var sq: Dictionary = GameManager.squads[key]
+		if int(sq.get("faction", -1)) != faction or not GameManager.squad_is_combat(sid):
+			continue
+		var c: Vector2 = GameManager.squad_centre_xz(sid)
+		if c == Vector2.INF:
+			continue
+		var dx: float = c.x - mp.x
+		var dz: float = c.y - mp.z
+		var d2: float = dx * dx + dz * dz
+		if d2 < best_d2 and d2 > 1.0:
+			best_d2 = d2
+			best = c
+	if best == Vector2.INF:
+		return Vector3.ZERO
+	return Vector3(best.x - mp.x, 0.0, best.y - mp.z).normalized()
+
+## ── ПРИКАЗ ИГРОКА ЖИВЁТ ДО ПРИХОДА (ТЗ 19.09.2026, блок 2) ────────────────
+## Общий замок приказа (FORCED_MOVE_SEC) — 3 с, у монаха это ~6 м пути. Дальше
+## его автоматы (к фронту, к пациенту, к точке подъёма, дистанция между
+## монахами, отход под уроном) переписывали точку, и ПКМ по земле дальше
+## шести метров «не срабатывал». Пока монах ИДЁТ по приказу игрока, приказ
+## действует: все гейты спрашивают player_order_active()
+var _player_goal: bool = false
+var player_goal_moves: int = 0
+
+func player_order_active() -> bool:
+	if _player_goal and state == State.MOVING:
+		return true
+	return super.player_order_active()
 
 ## Приказ на движение от игрока снимает приказ лечения
 func command_move(target_pos: Vector3, slow_march: bool = false, face_dir: Vector3 = Vector3.ZERO,
@@ -570,14 +1042,22 @@ func command_move(target_pos: Vector3, slow_march: bool = false, face_dir: Vecto
 	if player_order:
 		_order_target = null
 		_order_sid = 0
+		patient_sid = 0
+		_stop_heal_vfx()
+		_retreat_goal = Vector3.INF
+		_step_to = Vector3.INF
+		_player_goal = true
+		player_goal_moves += 1
+	else:
+		_player_goal = false
 	super.command_move(target_pos, slow_march, face_dir, keep_retreat, player_order, run)
 
 func _stop_res() -> void:
 	_res_target = null
 	_res_left = 0.0
 	_res_spot = Vector3.INF
-	if _heal_aura != null and is_instance_valid(_heal_aura) and _heal_vfx_target == null:
-		_heal_aura.visible = false
+	if _res_aura != null and is_instance_valid(_res_aura):
+		_res_aura.visible = false
 
 ## Точка воскрешения кэшируется на RES_SPOT_REFRESH_SEC (qa_melee_bench,
 ## 14.09.2026): raise_spot — обход состава × слотов отряда (до 3600 пар с
@@ -606,27 +1086,39 @@ func _tick_res(delta: float) -> void:
 		_res_spot = sp
 	var cp: Vector3 = _res_spot
 	var gap: float = Vector2(cp.x - global_position.x, cp.z - global_position.z).length()
-	if gap > _MCfg.MONK_CAST_RANGE:
-		# Подойти к телу тем же приказом, что к пациенту
-		if not player_order_active() and _step_t <= 0.0 and not _panicked:
+	if gap > cast_range():
+		# Точка подъёма за аурой: подойти на границу ауры тем же приказом,
+		# что к пациенту (слабина — чтобы не переиздавать приказ каждый такт)
+		if _res_aura != null and is_instance_valid(_res_aura):
+			_res_aura.visible = false
+		# Только СТОЯ: идущему к пациенту второй приказ с точкой в паре метров
+		# от первой — те самые перебежки; дойдя к отряду, он и в ауру точки
+		# подъёма попадёт
+		if not player_order_active() and _step_t <= 0.0 and not _panicked \
+				and state != State.MOVING:
 			var to_me: Vector3 = global_position - cp
 			to_me.y = 0.0
 			if to_me.length() < 0.01:
 				to_me = Vector3(1.0, 0.0, 0.0)
-			var stand: Vector3 = cp + to_me.normalized() * (_MCfg.MONK_CAST_RANGE * 0.7)
-			_step_t = _MCfg.MONK_STEP_SEC
-			_step_to = stand
-			if _Opt.cmd_meter: _Opt.cmd_src = "monk_res_approach"
-			command_move(GameManager.land_target(stand))
-			if _Opt.cmd_meter: _Opt.cmd_src = ""
+			var stand: Vector3 = cp + to_me.normalized() * stand_dist()
+			if _step_to == Vector3.INF or _step_to.distance_to(stand) >= _MCfg.MONK_MOVE_SLACK \
+					or state != State.MOVING:
+				_step_t = _MCfg.MONK_STEP_SEC
+				_step_to = stand
+				approach_moves += 1
+				if _Opt.cmd_meter: _Opt.cmd_src = "monk_res_approach"
+				command_move(GameManager.land_target(stand))
+				if _Opt.cmd_meter: _Opt.cmd_src = ""
 		return
-	# Канал: лента лечения, аура над телом
+	# Канал: лента лечения, свой круг над точкой подъёма. Круг — только у
+	# СТОЯЩЕГО монаха (ТЗ 18.09.2026, п. 1): идущий к точке подъёма канал
+	# держит, но картинки на земле не оставляет
 	_res_left -= delta
-	if _heal_vfx == null or not is_instance_valid(_heal_vfx):
-		_heal_vfx = _build_heal_vfx()
-	if _heal_aura != null and is_instance_valid(_heal_aura) and _heal_vfx_target == null:
-		_heal_aura.visible = true
-		_heal_aura.global_position = Vector3(cp.x, cp.y + AURA_LIFT_M, cp.z)
+	if _res_aura == null or not is_instance_valid(_res_aura):
+		_res_aura = _make_aura_node("ResAura")
+	if _res_aura != null and is_instance_valid(_res_aura):
+		_res_aura.visible = _vfx_caster_still()
+		_res_aura.global_position = Vector3(cp.x, cp.y + AURA_LIFT_M, cp.z)
 	if now_ms >= _anim_lock_until_ms:
 		_play_attack_anim("heal", 600)
 	if _res_left > 0.0:
@@ -635,7 +1127,7 @@ func _tick_res(delta: float) -> void:
 	var u: Unit = GameManager.raise_fallen(c, self)
 	if _prof_on: _Opt.prof_add("monk_raise", Time.get_ticks_usec() - _tr)
 	_stop_res()
-	_res_cool = _MCfg.MONK_RES_COOLDOWN
+	_res_cool = res_cooldown()
 	if u != null:
 		resurrected_total += 1
 		heal_target = u
@@ -690,47 +1182,6 @@ func _may_heal(u: Unit) -> bool:
 ## их по очереди через такт, то есть обоих сразу, и переключение «по одному»
 ## на экране не читалось вовсе. Бросается цель только по причине: вылечена,
 ## погибла, ушла с карты или оторвалась дальше поводка
-func _keep_or_pick() -> Unit:
-	# ── ПРИКАЗ ИГРОКА ВАЖНЕЕ АВТОПОИСКА (ТЗ 14.09.2026, п. 9) ─────────────
-	if _order_alive():
-		var op: Unit = _order_patient()
-		if op != null:
-			return op
-		# Раненых в отряде нет: остались тела — поднимаем их (см. _heal_pulse),
-		# нет и тел — ДЕРЖИМСЯ У ОТРЯДА (приказ снимает только игрок)
-		return null
-	# ПРАВИЛО 5: пациент гибнет и освобождается между тактами (поймал
-	# qa_performance_stress — 13 «Trying to cast a freed object» за бой);
-	# приведение типа только после проверки СЫРОЙ ссылки
-	var cur: Unit = null
-	if heal_target != null and is_instance_valid(heal_target):
-		cur = heal_target as Unit
-	if _may_heal(cur) \
-			and global_position.distance_to(cur.global_position) <= _MCfg.MONK_HEAL_LEASH:
-		return cur
-	# ── САМЫЙ РАНЕНЫЙ — ИЗ ЯДРА, БЕЗ МАССИВА (qa_melee_bench, 14.09.2026) ──
-	# query_radius строил Godot-массив из всех бойцов в 10 м (в свалке — три
-	# сотни) и фильтровал его в GDScript на каждый такт: тик монаха доходил
-	# до 5.8 мс. Ядро отвечает одним объектом по колонкам hp/hpMax (они в
-	# строке с каждого урона и лечения). ПРИОРИТЕТ — наименьшая доля запаса,
-	# а не остаток: рыцарь с половиной трёхсот не перевешивает лучника,
-	# которому до смерти один удар. САМ МОНАХ — тоже пациент (спринт 15):
-	# ядро его исключает (excludeRow), сравниваем с ним отдельно
-	var best: Unit = null
-	var best_frac: float = 1.0
-	var mp: Vector3 = position if _local_xform else global_position
-	var cand = GameManager.army.most_wounded_of_side(mp.x, mp.z, int(faction), heal_radius(), _soa)
-	if cand != null and is_instance_valid(cand):
-		var cu := cand as Unit
-		if _may_heal(cu):
-			best = cu
-			best_frac = cu.current_health / cu.max_health
-	if _may_heal(self):
-		var mf: float = current_health / max_health
-		if mf < best_frac:
-			best = self
-	return best
-
 ## Один такт: монах подходит к своему раненому и льёт в него запас
 ## ── БОНУСЫ КУЗНИЦЫ (спринт 16) ──────────────────────────────────────────────
 ## Темп (короче такт), объём (больше за такт) и радиус — те же ключи, что в
@@ -768,12 +1219,16 @@ const SHIELD_REGEN_PER_SEC := 15.0
 const SECOND_WIND_SEC := 5.0
 const SELF_REVIVE_FRAC := 0.5
 
+## Такт скана и лечения (ТЗ 16.09.2026: 1.0-1.5 с вместо 0.5). Объём за такт
+## пропорционален такту (per = tick / SEC_PER_MAN), поэтому темп исцеления в
+## секунду от длины такта не зависит; кузница ускоряет такт (bonus_heal_rate,
+## «Непрерывный поток» 4b — пол FLOW_TICK), а не удваивает объём
 func heal_tick_sec() -> float:
 	var k: float = 1.0 + GameManager.unit_bonus(faction, "monk", "bonus_heal_rate")
-	var t: float = _MCfg.MONK_HEAL_TICK / maxf(k, 0.1)
+	var t: float = _MCfg.MONK_SCAN_SEC / maxf(k, 0.1)
 	if _node("4b"):
 		t = minf(t, FLOW_TICK)
-	return t
+	return maxf(t, FLOW_TICK)
 
 func heal_amount_mult() -> float:
 	return 1.0 + GameManager.unit_bonus(faction, "monk", "bonus_heal_amount")
@@ -798,53 +1253,6 @@ func aoe_active() -> bool:
 ## путь (весь отряд, каждому MONK_AOE_RATE доля) — его частный случай.
 ## «Абсолютное Целительство» (5b) восполняет запас ЦЕЛИКОМ: это не прибавка
 ## к объёму, а другое правило, и потому стоит отдельной веткой
-func _heal_pulse_many(best: Unit) -> void:
-	var tick: float = heal_tick_sec()
-	var cap: int = max_heal_targets()
-	var full: bool = full_heal_tick()
-	# ПОЛНЫЙ КВАНТ КАЖДОЙ ЦЕЛИ (ТЗ 15.09.2026, п. 4.1): прежняя доля
-	# MONK_AOE_RATE на многих читалась как «размазывает хил по всем подряд» —
-	# никто не вылечивался. Ручка оставлена в конфиге, здесь не читается
-	var per: float = tick / _MCfg.MONK_HEAL_SEC_PER_MAN * heal_amount_mult()
-	var hurt: Array = []
-	for n in GameManager.unit_grid.query_radius(global_position, heal_radius()):
-		if n == null or not is_instance_valid(n):
-			continue
-		var u := n as Unit
-		if not _may_heal(u) or u == best:
-			continue
-		hurt.append([u.current_health / maxf(u.max_health, 1.0), u])
-	# Самые раненые первыми: при потолке в три цели выбор обязан быть осмысленным
-	hurt.sort_custom(func(a, b): return float(a[0]) < float(b[0]))
-	# Фокусная цель (та, что держится до 100 %) — всегда первой
-	if _may_heal(best):
-		hurt.push_front([0.0, best])
-	if hurt.is_empty():
-		return
-	var given := 0.0
-	var touched := 0
-	for row in hurt:
-		if touched >= cap:
-			break
-		var u2 := (row[1]) as Unit
-		if u2 == null or not is_instance_valid(u2) or u2.is_dead():
-			continue
-		touched += 1
-		var before2: float = u2.current_health
-		if full:
-			u2.current_health = u2.max_health
-		else:
-			u2.current_health = minf(u2.max_health, u2.current_health + u2.max_health * per)
-		var got: float = u2.current_health - before2
-		given += got
-		healed_total += got
-		_credit_heal_xp(got)
-		u2._soa_push_stats()
-	if touched > 0:
-		_play_attack_anim("heal", int(tick * 1000.0) + 120)
-		_bind_heal_vfx(best)
-		_self_heal(given)
-
 ## ── САМОХИЛ (1c): доля ОТДАННОГО исцеления возвращается монаху ────────────
 ## Считается от того, что реально зашло в чужие полоски, а не от заявленного
 ## объёма: целый боец не лечится, и платить монаху за несделанное незачем
@@ -857,94 +1265,12 @@ func _self_heal(given: float) -> void:
 	if current_health > was:
 		_soa_push_stats()
 
-func _heal_pulse_aoe(best: Unit) -> void:
-	var tick: float = heal_tick_sec()
-	var per: float = tick / _MCfg.MONK_HEAL_SEC_PER_MAN * heal_amount_mult() * _MCfg.MONK_AOE_RATE
-	var touched := 0
-	for n in GameManager.unit_grid.query_radius(global_position, heal_radius()):
-		if n == null or not is_instance_valid(n):
-			continue
-		var u := n as Unit
-		if not _may_heal(u):
-			continue
-		var before: float = u.current_health
-		u.current_health = minf(u.max_health, u.current_health + u.max_health * per)
-		healed_total += u.current_health - before
-		_credit_heal_xp(u.current_health - before)
-		u._soa_push_stats()
-		touched += 1
-	aoe_touched = touched
-	_play_attack_anim("heal", int(tick * 1000.0) + 120)
-	_bind_heal_vfx(best)
-
 ## Стенды: скольких накрыл последний AOE-такт
 var aoe_touched: int = 0
 
+## Обёртка для стендов (qa_sprint13 зовёт напрямую): один шаг автомата
 func _heal_pulse() -> void:
-	var _tp: int = Time.get_ticks_usec() if _prof_on else 0
-	var best: Unit = _keep_or_pick()
-	if _prof_on: _Opt.prof_add("monk_pick", Time.get_ticks_usec() - _tp); _tp = Time.get_ticks_usec()
-	# ── ВОСКРЕШЕНИЕ НЕ ЖДЁТ ПУСТОГО ЛАЗАРЕТА (13.09.2026) ─────────────────
-	# Прежде канал открывался ТОЛЬКО когда лечить некого: у отряда, где
-	# половина ранена, павшие лежали бы вечно (жалоба: 30 павших копейщиков,
-	# монахи рядом поднимали только свежих лучников). Теперь павший в
-	# приоритете, если рядом нет тяжелораненого (ниже MONK_RES_YIELD_FRAC)
-	if best != null and _res_target == null and can_resurrect() and _res_cool <= 0.0 \
-			and best.current_health / maxf(best.max_health, 1.0) >= _MCfg.MONK_RES_YIELD_FRAC:
-		var got: bool = _try_resurrect()
-		if _prof_on: _Opt.prof_add("monk_find_corpse", Time.get_ticks_usec() - _tp); _tp = Time.get_ticks_usec()
-		if got:
-			heal_target = null
-			_stop_heal_vfx()
-			return
-	heal_target = best
-	if best == null:
-		# ЛЕЧИТЬ НЕКОГО — СНИМАЕМ ЭФФЕКТ СРАЗУ, а не по догорающему таймеру:
-		# «как только монах прекращает лечение, VFX мгновенно отключается».
-		# Живые целы — можно поднимать павших (письмо 12: строго после
-		# выравнивания запаса живых)
-		_stop_heal_vfx()
-		if _res_target == null:
-			var raised: bool = _try_resurrect()
-			if _prof_on: _Opt.prof_add("monk_find_corpse", Time.get_ticks_usec() - _tp)
-			if not raised and _order_alive():
-				_follow_order_squad()
-		return
-	# ── СНАЧАЛА ПОДОЙТИ ───────────────────────────────────────────────────
-	# Дальше дистанции каста монах не лечит вовсе: заклинание — действие в
-	# упор, и «лечит через полполя» было бы ровно тем, на что жалуется заказ
-	var gap: float = global_position.distance_to(best.global_position)
-	if best != self and gap > _MCfg.MONK_CAST_RANGE:
-		# ── ВО ВРЕМЯ ОТХОДА К ПАЦИЕНТУ НЕ ИДЁМ ────────────────────────────
-		# Иначе подход тут же перебивает отход: пациент нередко стоит РЯДОМ С
-		# ОБИДЧИКОМ, и монах, получив стрелу, делал шаг назад и тем же тактом
-		# возвращался лечить — на экране это полметра дрожи вместо отхода
-		# (замер qa_monk_forge E3: 0.5 м вместо пяти). Лечить он при этом не
-		# перестаёт: до тех, кто уже в дистанции каста, такт дотягивается
-		if _retreat_goal.x != INF:
-			_stop_heal_vfx()
-			return
-		_walk_to_patient(best)
-		if _prof_on: _Opt.prof_add("monk_walk", Time.get_ticks_usec() - _tp)
-		_stop_heal_vfx()
-		return
-	# Один — как было; три — «Троичный Поток» (1d); весь отряд — «Опека» (3d)
-	# и прежняя «Благодать». Многоцелевой путь ОДИН на всех
-	if aoe_active() or max_heal_targets() > 1:
-		_heal_pulse_many(best)
-		return
-	var amount: float = best.max_health * heal_tick_sec() / _MCfg.MONK_HEAL_SEC_PER_MAN \
-		* heal_amount_mult()
-	var before: float = best.current_health
-	best.current_health = minf(best.max_health, best.current_health + amount)
-	healed_total += best.current_health - before
-	_credit_heal_xp(best.current_health - before)
-	# Строка ядра и полоска здоровья узнают о лечении тем же путём, что у
-	# перка «кровь за кровь» (GameManager.credit_kill)
-	best._soa_push_stats()
-	_play_attack_anim("heal", int(heal_tick_sec() * 1000.0) + 120)
-	_bind_heal_vfx(best)
-	_self_heal(best.current_health - before)
+	_monk_step()
 
 ## ── ПОДХОД — ЭТО ПРИКАЗ, А НЕ ВТОРАЯ МЕХАНИКА ХОДЬБЫ ──────────────────────
 ## Монах идёт к пациенту обычным command_move, тем же, каким его двигает игрок.
@@ -953,27 +1279,35 @@ func _heal_pulse() -> void:
 ##
 ## ПРИКАЗ ИГРОКА ВАЖНЕЕ. Пока он жив (player_order_active), монах идёт туда,
 ## куда послали, и лечит только тех, до кого дотянется по дороге
-func _walk_to_patient(p: Unit) -> void:
+func _walk_to_patient(p: Unit, sid: int = 0) -> void:
 	if player_order_active() or _panicked or retreating:
 		return
 	if _step_t > 0.0:
 		return
-	# Встаём НЕ В САМОГО пациента, а рядом: точка в его теле недостижима, и
-	# монах топтался бы у него вплотную, никогда не отчитавшись о приходе
-	var to_me: Vector3 = global_position - p.global_position
+	# ── ВСТАЁМ НА ГРАНИЦУ АУРЫ, СНАРУЖИ СТРОЯ (ТЗ 17.09.2026) ─────────────
+	# Якорь — центр отряда пациента (у одиночки — он сам); точка стояния —
+	# на stand_dist от якоря в нашу сторону. Прежние 0.7 × 3 м вели монаха
+	# ВНУТРЬ строя, и там его толкала каждая шеренга
+	var anchor: Vector3 = p.global_position
+	if sid > 0:
+		var c: Vector2 = GameManager.squad_centre_xz(sid)
+		if c != Vector2.INF:
+			anchor = Vector3(c.x, anchor.y, c.y)
+	var to_me: Vector3 = global_position - anchor
 	to_me.y = 0.0
 	if to_me.length() < 0.01:
 		to_me = Vector3(1.0, 0.0, 0.0)
-	var stand: Vector3 = p.global_position \
-		+ to_me.normalized() * (_MCfg.MONK_CAST_RANGE * 0.7)
-	# Цель не сдвинулась с прошлого приказа — переиздавать нечего: каждый
+	var stand: Vector3 = anchor + to_me.normalized() * stand_dist()
+	# Точка не ушла дальше слабины — переиздавать нечего: каждый
 	# command_move будит бойца и метит позу грязной (см. CLAUDE.md, «цена
-	# костыля была не там, где её мерили»)
-	if _step_to != Vector3.INF and _step_to.distance_to(stand) < 1.0 \
+	# костыля была не там, где её мерили»); слабина в метры, а не в метр —
+	# это и были «перебежки по 1-5 м»
+	if _step_to != Vector3.INF and _step_to.distance_to(stand) < _MCfg.MONK_MOVE_SLACK \
 			and state == State.MOVING:
 		return
 	_step_t = _MCfg.MONK_STEP_SEC
 	_step_to = stand
+	approach_moves += 1
 	if _Opt.cmd_meter: _Opt.cmd_src = "monk_approach"
 	command_move(GameManager.land_target(stand))
 	if _Opt.cmd_meter: _Opt.cmd_src = ""
@@ -1099,6 +1433,11 @@ static func _aura_texture() -> Texture2D:
 ## На ком сейчас висит эффект. null — ни на ком
 var _heal_vfx_target: Unit = null
 var _heal_vfx_left: float = 0.0
+## Где стояла цель в момент привязки: сдвиг дальше VFX_MOVE_TOL — цель
+## тронулась, даже если её тик не ведёт окно хода (замороженный стендом или
+## переставленный боец) — ТЗ 18.09.2026, п. 1
+var _heal_vfx_pos: Vector3 = Vector3.INF
+const VFX_MOVE_TOL := 0.35
 ## Высота центра спрайта текущей цели над её точкой на земле (см. _vfx_geom)
 var _vfx_mid: float = 0.0
 
@@ -1147,7 +1486,10 @@ func _bind_heal_vfx(target: Unit) -> void:
 			if qa != null and absf(qa.size.x - AURA_DIAM_M) > 0.01:
 				qa.size = Vector2(AURA_DIAM_M, AURA_DIAM_M)   # круг плашмя
 	_heal_vfx_target = target
-	_heal_vfx_left = _MCfg.MONK_HEAL_TICK + HEAL_VFX_GRACE
+	_heal_vfx_pos = target.global_position
+	# Окно — ДЛИНОЙ В ТАКТ ЛЕЧЕНИЯ (heal_tick_sec, 1.2 с), а не в прежний
+	# MONK_HEAL_TICK 0.5: с коротким окном эффект гас между тактами и мигал
+	_heal_vfx_left = heal_tick_sec() + HEAL_VFX_GRACE
 	_heal_vfx.visible = true
 	if _heal_aura != null and is_instance_valid(_heal_aura):
 		_heal_aura.visible = true
@@ -1161,6 +1503,91 @@ func _stop_heal_vfx() -> void:
 		_heal_vfx.visible = false
 	if _heal_aura != null and is_instance_valid(_heal_aura):
 		_heal_aura.visible = false
+	_stop_extra_vfx()
+
+## ── VFX НА КАЖДОЙ ЦЕЛИ ТАКТА (ТЗ 16.09.2026) ───────────────────────────────
+## Главный квад (_heal_vfx + аура) висит на самом раненом, как прежде; на
+## остальных целях такта — квады из пула (до MONK_VFX_MAX − 1). Пул растёт
+## лениво и не освобождается: узел дешевле пересоздания, а видимость гасится
+var _extra_vfx: Array = []          # MeshInstance3D
+var _extra_targets: Array = []      # Unit, по индексу квада
+var _extra_left: float = 0.0
+
+func _bind_heal_vfx_many(targets_in: Array) -> void:
+	# Идущий монах и идущие цели эффекта не получают (ТЗ 18.09.2026, п. 1):
+	# лечение при этом идёт — гаснет только картинка
+	var targets: Array = []
+	if _vfx_caster_still():
+		for t in targets_in:
+			if _vfx_target_still(t as Unit):
+				targets.append(t)
+	if targets.is_empty():
+		_stop_heal_vfx()
+		return
+	_bind_heal_vfx(targets[0] as Unit)
+	var n: int = mini(targets.size() - 1, _MCfg.MONK_VFX_MAX - 1)
+	while _extra_vfx.size() < n:
+		var q: MeshInstance3D = _build_heal_vfx()
+		if q == null:
+			break
+		_extra_vfx.append(q)
+	_extra_targets.clear()
+	for i in range(_extra_vfx.size()):
+		var q2: MeshInstance3D = _extra_vfx[i]
+		if not is_instance_valid(q2):
+			continue
+		if i < n:
+			var t: Unit = targets[i + 1] as Unit
+			_extra_targets.append(t)
+			q2.visible = true
+			var p: Vector3 = t.draw_position()
+			q2.global_position = Vector3(p.x, p.y + _vfx_mid, p.z)
+		else:
+			q2.visible = false
+	_extra_left = heal_tick_sec() + HEAL_VFX_GRACE
+
+func _stop_extra_vfx() -> void:
+	_extra_targets.clear()
+	_extra_left = 0.0
+	for q in _extra_vfx:
+		if is_instance_valid(q):
+			(q as MeshInstance3D).visible = false
+
+func _ride_extra_vfx() -> void:
+	if _extra_targets.is_empty():
+		return
+	_extra_left -= get_physics_process_delta_time()
+	if _extra_left <= 0.0 or not _vfx_caster_still():
+		_stop_extra_vfx()
+		return
+	for i in range(_extra_targets.size()):
+		var t = _extra_targets[i]
+		var q: MeshInstance3D = _extra_vfx[i]
+		if t == null or not is_instance_valid(t) or (t as Unit).is_dead() or not is_instance_valid(q) \
+				or (t as Unit).garrisoned or not _vfx_target_still(t as Unit):
+			if is_instance_valid(q):
+				q.visible = false
+			continue
+		var p: Vector3 = (t as Unit).draw_position()
+		q.global_position = Vector3(p.x, p.y + _vfx_mid, p.z)
+
+## ── ЭФФЕКТ ЛЕЧЕНИЯ ТОЛЬКО У СТОЯЩИХ (ТЗ 18.09.2026, п. 1) ──────────────────
+## Зелёный овал и лента лечения разрешены, пока и монах, и цель СТОЯТ: любой
+## из них тронулся (приказ на движение, атака, марш отряда) — эффект гаснет
+## тем же тиком. Раньше квад ЕХАЛ за ушедшей целью по её нарисованной точке
+## и висел над ней до конца такта: на экране это читалось как «круги лечения
+## остаются на земле / уезжают с отрядом». Признак — факт смещения
+## (moved_recently, окно 200 мс, порог 0.6 м/с: расталкивание строя за
+## движение не считается) либо состояние MOVING
+func _vfx_caster_still() -> bool:
+	return state != State.MOVING and not moved_recently() and _retreat_goal.x == INF
+
+func _vfx_target_still(t: Unit) -> bool:
+	if t == null:
+		return false
+	if t == self:
+		return true
+	return t.state != State.MOVING and not t.moved_recently()
 
 ## ── ЦЕНТР СПРАЙТА, А НЕ ГРУДЬ И НЕ НОГИ ──────────────────────────────────
 ## Высота центра нарисованной фигуры над её точкой на земле — это привязка ног
@@ -1201,6 +1628,7 @@ func _place_heal_vfx() -> void:
 ## Зовётся из tick_physics монаха — своего тика узел не заводит (то же правило,
 ## что у торчащих стрел и тел павших: декорация не платит нотификацией движка)
 func _ride_heal_vfx() -> void:
+	_ride_extra_vfx()
 	# ОСВОБОЖДЁННЫЙ ОБЪЕКТ В VARIANT РАВЕН NULL (спринт 19): павшая и уже
 	# освобождённая цель проходила эту проверку как «никого не лечу», и
 	# эффект оставался висеть над трупом до следующего лечения (поймал
@@ -1225,6 +1653,11 @@ func _ride_heal_vfx() -> void:
 		_stop_heal_vfx()
 		return
 	if global_position.distance_to(t.global_position) > heal_radius():
+		_stop_heal_vfx()
+		return
+	# Шестая причина (ТЗ 18.09.2026, п. 1): монах или цель тронулись с места
+	if not _vfx_caster_still() or not _vfx_target_still(t) \
+			or (_heal_vfx_pos.x != INF and t.global_position.distance_to(_heal_vfx_pos) > VFX_MOVE_TOL):
 		_stop_heal_vfx()
 		return
 	_heal_vfx_left -= get_physics_process_delta_time()
@@ -1288,6 +1721,24 @@ func _build_heal_vfx() -> MeshInstance3D:
 	# КВАДРАТНЫЙ и положен плашмя (world_fixed, поворот −90° по X, подъём
 	# RING_Y как у колец выделения), текстура — круг: овал даёт сам ракурс.
 	# Глубина — по фрагменту: плоский квад на земле сортируется честно
+	_heal_aura = _make_aura_node("HealAura")
+	return mi
+
+## ── ЗЕЛЁНЫХ КОЛЕЦ НА ЗЕМЛЕ НЕТ ВОВСЕ (ТЗ 19.09.2026, п. 1) ──────────────
+## Овал под лечимым и круг канала багуются и остаются на земле — владелец
+## вырезал их целиком. Узлы не заводятся: _heal_aura / _res_aura остаются
+## null, а все читатели уже проверяют is_instance_valid. Остаётся ТОЛЬКО
+## лента лечения над моделью (heal_vfx_node). Ручка — на случай возврата;
+## текстура ауры (_aura_texture) и геометрия ниже оставлены как история
+const GROUND_RINGS_ENABLED := false
+
+## Круг на земле (лечения или канала): квадрат плашмя, текстура — круг
+func _make_aura_node(nm: String) -> MeshInstance3D:
+	if not GROUND_RINGS_ENABLED:
+		return null
+	var root: Node = GameManager.main.world_root() if GameManager.main != null else get_parent()
+	if root == null:
+		return null
 	var aq := QuadMesh.new()
 	aq.size = Vector2(AURA_DIAM_M, AURA_DIAM_M)
 	var amat: ShaderMaterial = _BBUtilM.make_material(_aura_texture(), Color.WHITE, 0.5, AURA_FPS)
@@ -1299,19 +1750,19 @@ func _build_heal_vfx() -> MeshInstance3D:
 	amat.render_priority = 5
 	aq.material = amat
 	var ami := MeshInstance3D.new()
-	ami.name = "HealAura"
+	ami.name = nm
 	ami.mesh = aq
 	ami.visible = false
 	ami.rotation_degrees = Vector3(-90.0, 0.0, 0.0)   # плашмя
 	root.add_child(ami)
-	_heal_aura = ami
-	return mi
+	return ami
 
 ## СМЕРТЬ МОНАХА ГАСИТ ЭФФЕКТ В ТОТ ЖЕ КАДР, а не на выходе из дерева:
 ## освобождение узла отложено (queue_free), и между гибелью и уходом со сцены
 ## заклинание светилось бы над уже брошенным раненым
 func _die() -> void:
 	_stop_heal_vfx()
+	_stop_res()
 	super._die()
 
 ## Монах уходит со сцены — эффект уходит с ним. Узел лежит в МИРЕ, и без этого
@@ -1333,4 +1784,7 @@ func _exit_tree() -> void:
 	if _heal_aura != null and is_instance_valid(_heal_aura):
 		_heal_aura.queue_free()
 	_heal_aura = null
+	if _res_aura != null and is_instance_valid(_res_aura):
+		_res_aura.queue_free()
+	_res_aura = null
 	super._exit_tree()

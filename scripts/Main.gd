@@ -439,6 +439,8 @@ func _setup_pause_modes() -> void:
 	if GameManager.fog != null and is_instance_valid(GameManager.fog):
 		(GameManager.fog as Node).process_mode = Node.PROCESS_MODE_PAUSABLE
 
+var telemetry: Node = null
+
 func start_game() -> void:
 	# Реестр стволов переживает узлы (он не в дереве сцены), поэтому при новом
 	# бое его надо обнулить руками — иначе на карте останутся невидимые
@@ -480,6 +482,18 @@ func start_game() -> void:
 		_camera.jump_to(PLAYER_BASE_ANCHOR, _camera.min_height)
 	_reveal_start_area()
 	_prewarm_art()
+	# Накопители телеметрии, навигации и потерь — с нуля: автозагрузка
+	# переживает партию, и первая строка новой партии несла числа прошлой
+	# (аудит 19.09.2026: срез с A* прошлой партии, ответный удар с первого такта)
+	GameManager.tm_reset()
+	# Зонды партии (ТЗ 19.09.2026): лог метрик раз в 10 с и срезы на просадке
+	if _Opt.telemetry and telemetry == null:
+		telemetry = load("res://scripts/TelemetryLogger.gd").new()
+		telemetry.main = self
+		# Файл пишет только настоящая партия (Main — текущая сцена): стенды
+		# поднимают Main под своим узлом и засоряли бы user:// логами
+		telemetry.write_file = get_tree().current_scene == self
+		add_child(telemetry)
 	_phase = Phase.PLAYING
 	# Лес заводится на весь бой; основная тема будет подмешиваться раз в 10 минут
 	AudioManager.start_game_audio()
@@ -497,6 +511,7 @@ func start_game() -> void:
 	_spawn_troll_lair()
 	_spawn_gold_mines()
 	_spawn_goblin_mine()
+	_reveal_gold_mines()
 	# ── ЗАГРУЗКА ПАРТИИ: ПОСЛЕДНИМ ДЕЛОМ ────────────────────────────────────
 	# Слепок применяется, когда карта уже готова и стартовая расстановка уже
 	# сделана: apply() сносит живое (замки, рабочих, орду) и ставит сохранённое.
@@ -1567,6 +1582,15 @@ func _update_hover_highlight(rn: ResourceNode) -> void:
 	_hl_node.visible = true
 
 func _process(delta: float) -> void:
+	# Часы подсистемы (perf_config.sys_meter, qa_bigstand): одна проверка bool
+	if not _Opt.sys_meter:
+		_process_timed(delta)
+		return
+	var _sys_t0: int = Time.get_ticks_usec()
+	_process_timed(delta)
+	_Opt.sys_add("main", Time.get_ticks_usec() - _sys_t0)
+
+func _process_timed(delta: float) -> void:
 	# Часы партии тикают ЗДЕСЬ, а не в физике: _process останавливается паузой
 	# вместе со всем деревом, и это ровно то поведение, которое нужно
 	_game_clock += delta
@@ -2655,6 +2679,35 @@ func _spawn_gold_mines() -> void:
 		am.set_owner_faction(Constants.FACTION_ENEMY)
 		GameManager.ai_mine = am
 
+## ── ВСЕ РУДНИКИ ВИДНЫ С НАЧАЛА ПАРТИИ (ТЗ 18.09.2026, п. 10) ───────────────
+## Рудники на всех холмах ставятся в _spawn_gold_mines с рождения карты, но
+## два из трёх стояли под неразведанной пеленой и «появлялись из воздуха»,
+## когда туда доходил игрок или орда. Вокруг каждого штампуется «разведано»
+## (FogOfWar.add_explored): сам рудник и его состояние видны сразу, бойцы
+## у него — только в обзоре. Захват и приход меняют состояние ЭТОГО объекта
+## (владелец, флажок, руина), а не рождают новый
+const GOLD_MINE_REVEAL_R := 14.0
+## ── ШТАМПА «РАЗВЕДАНО» ВОКРУГ РУДНИКОВ БОЛЬШЕ НЕТ (ТЗ-C 19.09.2026) ────────
+## Заказ 18.09 п. 10 показывал рудники с рождения карты; владелец развернул:
+## «спрайт шахты полностью НЕВИДИМ на неисследованных ячейках и проявляется
+## только при первом попадании в радиус обзора». Механизм оставлен под ручкой
+const GOLD_MINE_REVEAL_ENABLED := false
+var mines_revealed: int = 0
+
+func _reveal_gold_mines() -> void:
+	if not GOLD_MINE_REVEAL_ENABLED:
+		return
+	if fog == null or not is_instance_valid(fog):
+		return
+	var seen_nodes: Dictionary = {}
+	for grp in ["neutral_buildings", "enemy_buildings", "goblin_buildings", "player_buildings"]:
+		for b in get_tree().get_nodes_in_group(grp):
+			if b == null or not is_instance_valid(b) or not (b is Mine) or seen_nodes.has(b):
+				continue
+			seen_nodes[b] = true
+			fog.add_explored((b as Node3D).global_position, GOLD_MINE_REVEAL_R)
+			mines_revealed += 1
+
 ## ── РУДНИК ОРДЫ (заказ спринта 17) ─────────────────────────────────────────
 ## В MINE_OFFSET метрах от деревни к центру карты, с рождения захвачен ордой
 ## (золото капает в её банк), при нём охрана из трёх ветеранских отрядов —
@@ -2711,6 +2764,11 @@ func _spawn_troll_lair() -> void:
 	var c := troll_lair_center()
 	var lair: Building = _TrollLair.new()
 	lair.faction = Constants.FACTION_GOBLIN
+	# ── ПЕНЬ ЗА РЕКОЙ ЗАМОРОЖЕН (ТЗ 19.09.2026, блок 3.2) ──────────────────
+	# Признак ставится ДО add_child: отложенные спавны _ready (стая, отара,
+	# стражи) увидят его и лягут в счётчики, не рождая ни одной ноды
+	if lair_frozen_at(c):
+		lair.call("freeze")
 	_world.add_child(lair)
 	lair.global_position = c
 	GameManager.troll_lair = lair
@@ -2726,6 +2784,8 @@ func _spawn_troll_lair() -> void:
 		var c2 := troll_lair_center_ai()
 		var lair2: Building = _TrollLair.new()
 		lair2.faction = Constants.FACTION_GOBLIN
+		if lair_frozen_at(c2):
+			lair2.call("freeze")
 		_world.add_child(lair2)
 		lair2.global_position = c2
 		lair2.set("side_faction", Constants.FACTION_ENEMY)
@@ -2733,6 +2793,45 @@ func _spawn_troll_lair() -> void:
 		GameManager.lair_spots[Constants.FACTION_ENEMY] = c2
 		lair2.call("spawn_guards", _GobCfg.LAIR_START_TROLLS)
 		_dress_lair_glade(c2)
+
+## ── НА КАКОМ БЕРЕГУ ТОЧКА: +1 справа от русла, −1 слева (ТЗ 19.09.2026) ───
+## Функции «на каком берегу» в проекте не было; знак — тот же приём, что у
+## брода (ford_route: signf(p.x − river_x(p.z)))
+func river_side(p: Vector3) -> int:
+	if not RIVER_ENABLED or not river_in_field(p.z):
+		return 0
+	return 1 if p.x >= river_x(p.z) else -1
+
+## Пень на ЧУЖОМ берегу от базы игрока рождает войска «всухую», пока игрок не
+## перешёл брод (см. TrollLair.frozen). Загруженная партия — по тому же
+## правилу: бойцы игрока на том берегу разморозят его первым же тактом
+func lair_frozen_at(c: Vector3) -> bool:
+	if not _GobCfg.LAIR_FREEZE_ENABLED or not RIVER_ENABLED:
+		return false
+	var home: int = river_side(PLAYER_BASE_ANCHOR)
+	var here: int = river_side(c)
+	return home != 0 and here != 0 and home != here
+
+## Есть ли боевой боец игрока на берегу пня (за сухой кромкой русла)
+func player_on_bank(side: int) -> bool:
+	if side == 0:
+		return false
+	var margin: float = RIVER_HALF_W + RIVER_BANK + _GobCfg.LAIR_THAW_BANK_MARGIN
+	for n in get_tree().get_nodes_in_group(Constants.unit_group(Constants.FACTION_PLAYER)):
+		if n == null or not is_instance_valid(n):
+			continue
+		var u := n as Unit
+		if u == null or u.is_dead() or u.garrisoned:
+			continue
+		var p: Vector3 = u.global_position
+		if not river_in_field(p.z):
+			continue
+		var off: float = p.x - river_x(p.z)
+		if side > 0 and off > margin:
+			return true
+		if side < 0 and off < -margin:
+			return true
+	return false
 
 ## ── ГЛУШЬ ВОКРУГ ПНЯ (спринт 20, модуль 1.2) ───────────────────────────────
 ## Поляна логова: грибы, камни, кости и кусты по кольцу вокруг пня плюс
@@ -3006,6 +3105,59 @@ func _spawn_home_defense(castle: Castle) -> void:
 			for m in GameManager.squad_members(sid):
 				(m as Unit).set_stance("defense")
 		enemy_guard.adopt(sid, post, cols, START_SQUAD_SPACING)
+
+## ── ПОДКРЕПЛЕНИЕ КРАСНОГО ИИ (ТЗ 19.09.2026-3, п. 2) ───────────────────────
+## REINFORCE_SQUADS отрядов REINFORCE_UNIT рождаются блоками в УГЛУ ЗА ЗАМКОМ
+## (по оси от центра карты, глубже колонны охраны, вбок от неё) и уходят под
+## охрану крепости (HomeGuard: DEFEND_BASE — спят, просыпаются только на
+## штурм, лечатся на постах). Возвращает число поставленных отрядов
+func spawn_ai_reinforcements() -> int:
+	var ef: int = Constants.FACTION_ENEMY
+	var castle: Castle = null
+	for b in get_tree().get_nodes_in_group(Constants.building_group(ef)):
+		if not is_instance_valid(b):
+			continue
+		var c := b as Castle
+		if c != null and c.is_stronghold() and not c.is_dead():
+			castle = c
+			break
+	if castle == null:
+		return 0
+	if enemy_guard == null or not is_instance_valid(enemy_guard):
+		enemy_guard = _HomeGuard.new()
+		enemy_guard.name = "EnemyHomeGuard"
+		add_child(enemy_guard)
+		enemy_guard.setup(self, castle)
+	var cpos: Vector3 = castle.global_position
+	var front: Vector3 = castle.front_dir()
+	var side := Vector3(-front.z, 0.0, front.x)
+	var uid: String = _AICfg.REINFORCE_UNIT
+	var n: int = _UCfg.squad_size(uid)
+	var cols: int = mini(START_SQUAD_COLS, maxi(n, 1))
+	var rows: int = int(ceil(float(n) / float(cols)))
+	var block_w: float = float(cols) * START_SQUAD_SPACING + START_SQUAD_GAP
+	var block_d: float = float(rows) * START_SQUAD_SPACING + _AICfg.HOME_GUARD_GAP
+	# Угол: глубже колонны охраны, сбоку от оси — охрана стоит по оси
+	var depth0: float = _AICfg.HOME_GUARD_DEPTH + float(_AICfg.home_guard_squads().size()) * block_d + 4.0
+	var placed: int = 0
+	for k in range(_AICfg.REINFORCE_SQUADS):
+		var col: int = k % _AICfg.REINFORCE_COLS
+		var row: int = k / _AICfg.REINFORCE_COLS
+		var lateral: float = (float(col) + 1.0) * block_w
+		var post: Vector3 = _home_defense_spot(
+			cpos - front * (depth0 + float(row) * block_d) + side * lateral, 4.5)
+		var sid: int = _spawn_squad_block(uid, ef, post, front, side, n, cols, START_SQUAD_SPACING)
+		if sid <= 0:
+			continue
+		placed += 1
+		if _AICfg.REINFORCE_VET > 0:
+			grant_squad_veterancy(sid, _AICfg.REINFORCE_VET, _AICfg.REINFORCE_VET,
+				_AICfg.START_VETERAN_PREFERENCE)
+		if uid == "spearman":
+			for m in GameManager.squad_members(sid):
+				(m as Unit).set_stance("defense")
+		enemy_guard.adopt(sid, post, cols, START_SQUAD_SPACING)
+	return placed
 
 ## Куда становятся стартовые отряды ИИ относительно своего замка: между замком
 ## и центром карты, то есть лицом к противнику. Числом, а не «вокруг замка»:

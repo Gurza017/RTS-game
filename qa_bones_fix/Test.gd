@@ -14,6 +14,17 @@ extends Node
 
 const _Arrow := preload("res://scripts/Arrow.gd")
 
+## Костей в земле: записи ядра (снаряд без узла, этап 3) плюс legacy-узлы
+func _stuck_bones() -> int:
+	var n := 0
+	for r in GameManager.stuck_arrow_records():
+		if bool(r["bone"]):
+			n += 1
+	for a in GameManager._stuck_arrows:
+		if is_instance_valid(a) and bool((a as Node3D).get("bone")):
+			n += 1
+	return n
+
 var main = null
 var _pass: int = 0
 var _fail: int = 0
@@ -138,14 +149,8 @@ func _run() -> void:
 	print("\n═════ C. ТОРЧАЩАЯ КОСТЬ УХОДИТ ПО СРОКУ ═════")
 	verdict("C1 срок кости в земле %.1f с, растворение %.1f с" % [_Arrow.BONE_STUCK_LIFETIME, _Arrow.BONE_STUCK_FADE],
 		_Arrow.BONE_STUCK_LIFETIME <= 5.0 and _Arrow.BONE_STUCK_FADE < _Arrow.BONE_STUCK_LIFETIME)
-	var stuck_bones := 0
-	for a3 in GameManager._stuck_arrows:
-		if is_instance_valid(a3) and bool((a3 as Node3D).get("bone")):
-			stuck_bones += 1
+	var stuck_bones: int = _stuck_bones()
 	await get_tree().create_timer(_Arrow.BONE_STUCK_LIFETIME + 1.0).timeout
-	var stuck_after := 0
-	for a4 in GameManager._stuck_arrows:
-		if is_instance_valid(a4) and bool((a4 as Node3D).get("bone")):
-			stuck_after += 1
+	var stuck_after: int = _stuck_bones()
 	verdict("C2 кости, лежавшие в земле (%d), через срок сняты (осталось %d)" % [stuck_bones, stuck_after], stuck_after == 0)
 	_finish()

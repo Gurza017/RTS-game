@@ -397,12 +397,7 @@ func _d_miss() -> void:
 		g._on_attack_fired(foe, 0.0)
 		await _pin(g, pin_d, gap_f)
 	await _pin(g, pin_d, 200)
-	var stuck_bones := 0
-	for a in GameManager._stuck_arrows:
-		if a == null or not is_instance_valid(a):
-			continue
-		if bool((a as Node3D).get("bone")):
-			stuck_bones += 1
+	var stuck_bones: int = _count_stuck(true)
 	print("  бросков %d, из них промахов %d; торчит костей %d (было торчащих %d)" % [
 		int(g.bones_thrown), int(g.bones_missed), stuck_bones, stuck0])
 	verdict("D1 промахи есть и их доля близка к заказанной",
@@ -452,9 +447,19 @@ func _e_pools() -> void:
 	# нигде: только тогда «точка снаряда лежит в чужом коридоре» однозначно
 	# означает подмену буфера, а не совпадение
 	var spot: Vector3 = main.PLAYER_BASE_ANCHOR + Vector3(0.0, 0.0, 80.0)
+	# ЛОВУШКА: площадка лежит в 30 м от «красного пня», а его гноллы патрулируют
+	# кольцом 26 м и с 13 м бросают кость в замороженного лучника — стенд
+	# ронял SCRIPT ERROR «previously freed» в трёх прогонах из четырёх
+	# (19.09.2026). Дикие пня на время блока стоят
+	for n in get_tree().get_nodes_in_group("all_units"):
+		if is_instance_valid(n) and n is Unit and (n as Unit).faction == Constants.FACTION_GOBLIN:
+			(n as Unit).set_tick(false)
 	var arch: Unit = _spawn("archer", Constants.FACTION_PLAYER, spot)
+	# Цель — ВНУТРИ дальности лука (правило 10): с ТЗ 19.09.2026 снаряд не
+	# рождается дальше досягаемости (Archer._shot_reach), и прежние 16 м при
+	# базе 15 оставляли слой стрел пустым — E1/E2/E6 краснели без единой стрелы
 	var tgt_a: Unit = _spawn("spearman", Constants.FACTION_GOBLIN,
-		spot + Vector3(0.0, 0.0, 16.0))
+		spot + Vector3(0.0, 0.0, minf(16.0, arch.attack_range - 2.0)))
 	var g: Unit = _spawn("gnoll", Constants.FACTION_GOBLIN,
 		spot + Vector3(48.0, 0.0, 0.0))
 	var tgt_g: Unit = _spawn("spearman", Constants.FACTION_PLAYER,
@@ -678,7 +683,9 @@ func _bones_in_flight() -> int:
 
 ## Модуль оси, записанной снаряду в буфер отрисовки. Единица — снаряд лежит
 ## смирно, меньше — помечен кувырком (см. mm_arrow.gdshader)
-func _axis_len(p: Node) -> float:
+func _axis_len(p) -> float:
+	if p is Dictionary:
+		return (p["axis"] as Vector3).length()
 	var lay = GameManager.bones_mm if bool(p.get("bone")) else GameManager.arrows_mm
 	if lay == null or lay.core_id < 0:
 		return -1.0
@@ -691,9 +698,25 @@ func _axis_len(p: Node) -> float:
 	return Vector3(slot[12] * 2.0 - 1.0, slot[13] * 2.0 - 1.0,
 		slot[14] * 2.0 - 1.0).length()
 
-## Живые узлы снарядов. bones_only — только кости
+## Снаряды на поле. СНАРЯД БЕЗ УЗЛА (BigStand-5, этап 3): полёты и торчащие —
+## записи ядра, здесь они СЛОВАРИ с теми же ключами, что стенд читал у узлов
+## (_spent / _pooled / bone / _start_pos / _end_pos), плюс точка и ось из слота.
+## Legacy-узлы Arrow (ручка выключена) добавляются как прежде. bones_only —
+## только кости
 func _projectiles(bones_only: bool) -> Array:
 	var out: Array = []
+	for fr in GameManager.flight_records():
+		if bool(fr["legacy"]) or (bones_only and not bool(fr["bone"])):
+			continue
+		out.append({"_spent": false, "_pooled": false, "bone": fr["bone"],
+			"_start_pos": fr["start"], "_end_pos": fr["end"],
+			"pos": fr["pos"], "axis": fr["axis"]})
+	for sr in GameManager.stuck_arrow_records():
+		if bones_only and not bool(sr["bone"]):
+			continue
+		out.append({"_spent": true, "_pooled": false, "bone": sr["bone"],
+			"_start_pos": sr["pos"], "_end_pos": sr["pos"],
+			"pos": sr["pos"], "axis": sr["axis"]})
 	var root: Node = main.world_root()
 	for c in root.get_children():
 		var n3 := c as Node3D
@@ -711,7 +734,9 @@ func _projectiles(bones_only: bool) -> Array:
 ## Пока снаряд летит, он ЗАПИСЬ в ядре: узел стоит в точке вылета, а позицию
 ## ведёт BatchArrows и пишет прямо в слот общего MultiMesh (раскладка слота —
 ## 16 float, точка в 3/7/11). Vector3.INF — «слота нет, судить не о чем»
-func _drawn_point(p: Node) -> Vector3:
+func _drawn_point(p) -> Vector3:
+	if p is Dictionary:
+		return p["pos"]
 	var lay = GameManager.bones_mm if bool(p.get("bone")) else GameManager.arrows_mm
 	if lay == null or lay.core_id < 0:
 		return Vector3.INF
@@ -725,7 +750,7 @@ func _drawn_point(p: Node) -> Vector3:
 
 ## Насколько снаряд ушёл ПО ЗЕМЛЕ от собственного отрезка «вылет → цель».
 ## У честного полёта это ноль: дуга поднимает только высоту
-func _off_corridor(p: Node, at: Vector3) -> float:
+func _off_corridor(p, at: Vector3) -> float:
 	var s: Vector3 = p.get("_start_pos")
 	var e: Vector3 = p.get("_end_pos")
 	var a := Vector2(s.x, s.z)
@@ -744,6 +769,14 @@ func _off_corridor(p: Node, at: Vector3) -> float:
 ## кости на другом конце карты замеру срока не принадлежат
 func _count_stuck(bones: bool, near: Vector3 = Vector3.INF, radius: float = 40.0) -> int:
 	var n := 0
+	for r in GameManager.stuck_arrow_records():
+		if bool(r["bone"]) != bones:
+			continue
+		if near != Vector3.INF:
+			var rp: Vector3 = r["pos"]
+			if Vector2(rp.x - near.x, rp.z - near.z).length() > radius:
+				continue
+		n += 1
 	for a in GameManager._stuck_arrows:
 		if a == null or not is_instance_valid(a):
 			continue

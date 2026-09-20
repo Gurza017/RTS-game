@@ -281,7 +281,7 @@ func _snipe_autonomous(delta: float) -> void:
 	if _snipe_self_cd > 0.0:
 		return
 	_snipe_self_cd = SNIPER_RECHECK_SEC
-	if state != State.IDLE or attack_target != null or _panicked or retreating 			or _disengaging or player_order_active():
+	if state != State.IDLE or attack_target != null or _panicked or retreating 			or _disengaging or player_order_active() or target_lock:
 		return
 	var t: Node3D = _snipe_pick(null, true)
 	if t == null:
@@ -342,6 +342,15 @@ func _snipe_pick(default_target: Node3D, lone_only: bool = false) -> Node3D:
 	var tsq: int = 0
 	if default_target != null and is_instance_valid(default_target) and default_target is Unit:
 		tsq = (default_target as Unit).squad_id
+	# ── ПОД ЗАМКОМ ИГРОКА СНАЙПЕР НЕ ВЫБИРАЕТ САМ (ТЗ 19.09.2026-2, п. 3) ──
+	# Прямой клик — фокус: одиночка или паникующий рядом его не перебивает.
+	# Цель без отряда (тролль, туша) — она и есть выстрел; у отряда —
+	# только его модели
+	if target_lock and default_target != null and is_instance_valid(default_target) \
+			and default_target is Unit and not (default_target as Unit).is_dead():
+		if tsq <= 0:
+			return default_target
+		lone_only = false
 	for n in GameManager.unit_grid.query_radius(mp, r):
 		if n == null or not is_instance_valid(n):
 			continue
@@ -358,6 +367,8 @@ func _snipe_pick(default_target: Node3D, lone_only: bool = false) -> Node3D:
 			if d < d3:
 				claimed_best = u
 				d3 = d
+			continue
+		if target_lock and tsq > 0 and u.squad_id != tsq:
 			continue
 		var lone: bool = u.is_panicked() or u.retreating \
 			or GameManager.squad_member_count(u.squad_id) <= 1
@@ -430,17 +441,22 @@ func _snipe_launch() -> void:
 	var tu := t as Unit
 	_play_attack_anim("attack", 600)
 	AudioManager.play_3d("snipe_shot", global_position)
+	GameManager.tm_ability("snipe_shot", faction)
 	tu.notify_incoming_fire(global_position)
 	var from_pos: Vector3 = global_position + Vector3(0, 1.2, 0)
-	var speed: float = _UStats.stat("archer", "arrow_speed", 9.0) * _UStats.SNIPE_SPEED_MULT
+	var speed: float = _arrow_speed_cached() * _UStats.SNIPE_SPEED_MULT
 	# Снайпер бьёт в ТОЧКУ ВСТРЕЧИ (ТЗ 15.09.2026): прямая стрела по бегущему
 	# без выноса ложилась ровно позади цели
 	var tv: Vector3 = tu.velocity
 	tv.y = 0.0
-	var aim: Vector3 = _lead_point(from_pos,
-		tu.global_position + Vector3(0, tu.aim_height(), 0), tv, speed)
+	var tb: Vector3 = tu.global_position + Vector3(0, tu.aim_height(), 0)
+	var s_reach: float = _shot_reach()
+	if _xz_dist(from_pos, tb) > s_reach + SHOT_RANGE_SLACK:
+		shots_refused_range += 1
+		return
+	var aim: Vector3 = _clamp_reach(from_pos, _lead_point(from_pos, tb, tv, speed), s_reach)
 	var dist: float = from_pos.distance_to(aim)
-	GameManager.spawn_arrow(parent, from_pos, aim, dist, speed, 0.0, _snipe_dmg,
+	GameManager.fire_projectile(parent, from_pos, aim, dist, speed, 0.0, _snipe_dmg,
 		self, faction, false, true)
 	snipe_shots += 1
 
@@ -460,8 +476,30 @@ func _damage_on_strike() -> bool:
 ## радиусе. Без этого отряд лучников уходил за отступающим противником прямо
 ## к его замку и погибал там. См. Unit.pursues_target / _engaged_once
 ## Стрелок выбирает цель с весом: большие гоблины ×2 (ТЗ 14.09.2026, п. 10)
+## Лучник — главная добыча конницы (ТЗ 18.09.2026, п. 4)
+func cav_target_weight() -> float:
+	return 2.2
+
 func target_prio_scan() -> bool:
 	return true
+
+## Цель авто-агро за дальностью — стоим и бьём то, что достаём: шаг за ней
+## делает только приказ игрока (ТЗ 17.09.2026, «рассыпание на одиночные ноды»)
+func holds_ground_on_aggro() -> bool:
+	return true
+
+## ── «ЗАЩИТА» ЛУЧНИКУ ХОДЬБУ НЕ РЕЖЕТ (ТЗ 20.09.2026, п. 4.2) ───────────────
+## Заказ: «лучники не режут свою скорость и не являются фалангой; при включении
+## щита просто стоят на месте и ведут огонь». Штраф −35 % писан под щит и
+## опущенные копья фаланги; у стрелка ни того, ни другого нет, а замедленный
+## отход из-под конницы — это уже не «оборона», а смерть отряда
+func stance_slows_move() -> bool:
+	return false
+
+## Стрелок в покое ищет цели дальше коридорного дозора (снайпер — 25 м сам,
+## отряд — радар на 20+), поэтому по физике не спит (BigStand, этап 3)
+func may_sleep_physics() -> bool:
+	return false
 
 func pursues_target() -> bool:
 	return false
@@ -476,6 +514,23 @@ func _sfx_swing() -> String:
 
 func _sfx_hit() -> String:
 	return ""
+
+## ── СКОРОСТЬ И ДУГА СТРЕЛЫ — ЧИСЛОМ, А НЕ ПОИСКОМ ПО СТРОКАМ ──────────────
+## `_UStats.stat("archer", "arrow_speed")` — два словарных поиска по строкам
+## на выстрел (правило 4); залп пятисот стрел за тик — тысяча поисков.
+## Конфиг статичен, читается один раз
+static var _arrow_speed_c: float = -1.0
+static var _arrow_arc_c: float = -1.0
+
+static func _arrow_speed_cached() -> float:
+	if _arrow_speed_c < 0.0:
+		_arrow_speed_c = _UStats.stat("archer", "arrow_speed", 9.0)
+	return _arrow_speed_c
+
+static func _arrow_arc_cached() -> float:
+	if _arrow_arc_c < 0.0:
+		_arrow_arc_c = _UStats.stat("archer", "arrow_arc", 0.5)
+	return _arrow_arc_c
 
 func _on_attack_fired(target: Node3D, damage: float) -> void:
 	# ── СНАЙПЕР СТРЕЛЯЕТ СВОИМ ПУТЁМ (по бойцам; по зданию — как все) ──────
@@ -493,9 +548,13 @@ func _on_attack_fired(target: Node3D, damage: float) -> void:
 	# ПРЕДУПРЕЖДЕНИЕ ЦЕЛИ — в момент спуска тетивы. Мечник успевает поднять щит
 	# ДО прилёта стрелы; если ждать касания, щит вставал бы уже после урона
 	var tw := target as Unit
+	# По павшему стрела не выпускается (ТЗ 17.09.2026): цель могла пасть в
+	# этом же кадре между решением автомата и спуском тетивы
+	if tw != null and tw.is_dead():
+		return
 	if tw != null:
 		tw.notify_incoming_fire(global_position)
-	var speed: float = _UStats.stat("archer", "arrow_speed", 9.0)
+	var speed: float = _arrow_speed_cached()
 
 	# ── УПРЕЖДЕНИЕ ───────────────────────────────────────────────────────────
 	# Целимся не в цель, а туда, где она окажется к моменту прилёта.
@@ -525,7 +584,15 @@ func _on_attack_fired(target: Node3D, damage: float) -> void:
 	elif target != null and target.has_method("aim_height"):
 		aim_h = float(target.call("aim_height"))
 	var tbase: Vector3 = target.global_position + Vector3(0, aim_h, 0)
-	var aim: Vector3 = _lead_point(from_pos, tbase, tvel, speed)
+	# ── СТРОГИЙ ПОТОЛОК ДАЛЬНОСТИ (ТЗ 19.09.2026-2, п. 3) ───────────────
+	# Цель дальше досягаемости — выстрела нет: снаряд не рождается вовсе
+	# (стрелы «через всю карту» рождались по цели, ушедшей за дальность
+	# между тактом решения и кадром выстрела, и по выносу упреждения)
+	var max_reach: float = _shot_reach()
+	if _xz_dist(from_pos, tbase) > max_reach + SHOT_RANGE_SLACK:
+		shots_refused_range += 1
+		return
+	var aim: Vector3 = _clamp_reach(from_pos, _lead_point(from_pos, tbase, tvel, speed), max_reach)
 	var lead_vec: Vector3 = aim - tbase
 
 	# ── ЗАЛП: ОБЩАЯ ТОЧКА ВМЕСТО СВОЕЙ ЦЕЛИ ─────────────────────────────────
@@ -540,6 +607,20 @@ func _on_attack_fired(target: Node3D, damage: float) -> void:
 		# вразнобой: последний стрелял по центру строя, который тот покинул
 		# полсекунды назад. Свежий центр стоит одного вызова на выстрел
 		var vp: Vector3 = GameManager.squad_volley_point(squad_id)
+		# ── ТОЧКА ЗАЛПА ОБЯЗАНА БЫТЬ ТОЧКОЙ МОЕЙ ЦЕЛИ (ТЗ 19.09.2026) ─────
+		# Окно залпа переживает смену цели: приказ по зданию открывал его
+		# на volley_aim ПРОШЛОГО противника — залп ложился в его трупы
+		# (qa_garrison_archers_test A4: 24 стрелы из 192 — в павшего гоблина).
+		# Здание — бьём в само здание; отряд — только если залп ведётся по
+		# ЭТОМУ отряду; одиночка — точка не дальше корпусов от него
+		if target is Building:
+			vp = tbase
+		elif tu != null:
+			var vfoe: int = GameManager.squad_volley_foe(squad_id)
+			if tu.squad_id > 0 and vfoe != tu.squad_id:
+				vp = tbase
+			elif vfoe == 0 and _xz_dist(vp, tbase) > VOLLEY_STALE_DIST:
+				vp = tbase
 		if vp != Vector3.ZERO:
 			# Упреждение и у залпа (ТЗ 15.09.2026): туча ложилась в центр
 			# строя ТАМ, ГДЕ ОН БЫЛ, и по бегущей цели весь залп падал позади —
@@ -591,21 +672,47 @@ func _on_attack_fired(target: Node3D, damage: float) -> void:
 			var moff := sqrt(randf()) * tu.aim_miss_spread()
 			aim = Vector3(tbase.x + cos(mang) * moff, 0.0, tbase.z + sin(mang) * moff)
 
+	aim = _clamp_reach(from_pos, aim, max_reach)
 	var dist: float = from_pos.distance_to(aim)
 	# СТРЕЛА БЕРЁТСЯ ИЗ ПУЛА, а не создаётся заново (см. GameManager.spawn_arrow):
 	# комплект из узлов, меша и материала переживает выстрел и идёт в следующий.
 	# Скорость и высота дуги — из unit_stats_config.gd (навесная траектория);
 	# урон летит вместе со стрелой и списывается только при попадании
-	var shaft = GameManager.spawn_arrow(parent, from_pos, aim, dist, speed,
-		_UStats.stat("archer", "arrow_arc", 0.5), damage, self, faction)
 	# ── СТРЕЛА ПО ЗДАНИЮ ЗАПОМИНАЕТ СВОЮ ЦЕЛЬ ──────────────────────────────
-	# Попадание в бойца стрела ищет сама, сканом сетки (Arrow._check_hit) — но
-	# здание в этой сетке не состоит, и стрелы по стенам просто втыкались в
-	# землю рядом, не нанося ни очка. Сканировать группу зданий на каждую
-	# стрелу в каждом кадре полёта незачем: стрелок и так ЗНАЕТ, куда целится,
-	# и передаёт цель вместе с выстрелом. Проверка одна и в самом конце дуги
-	if shaft != null and target is Building:
-		shaft.set("_hit_node", target)
+	# Попадание в бойца стрела ищет сама, сканом сетки — но здание в этой
+	# сетке не состоит, и стрелы по стенам просто втыкались в землю рядом, не
+	# нанося ни очка. Сканировать группу зданий на каждую стрелу в каждом кадре
+	# полёта незачем: стрелок и так ЗНАЕТ, куда целится, и передаёт цель вместе
+	# с выстрелом. Проверка одна и в самом конце дуги.
+	# СНАРЯД — ЗАПИСЬ В ЯДРЕ, НЕ УЗЕЛ (BigStand-5, этап 3): один вызов, без
+	# пула; при выключенной ручке fire_projectile сам берёт узел из пула
+	GameManager.fire_projectile(parent, from_pos, aim, dist, speed,
+		_arrow_arc_cached(), damage, self, faction, false, false,
+		target if target is Building else null)
+
+## Досягаемость выстрела: дальность плюс поправка на габарит цели, у укрытого
+## — с баффом высоты (стреляет за него модуль крыши в пределах fire_range)
+const SHOT_RANGE_SLACK := 0.75
+## Точка залпа дальше этого от собственной цели — устаревшая, бьём по цели
+const VOLLEY_STALE_DIST := 6.0
+var shots_refused_range: int = 0
+
+func _shot_reach() -> float:
+	return reach() * garrison_mult()
+
+static func _xz_dist(a: Vector3, b: Vector3) -> float:
+	var dx: float = b.x - a.x
+	var dz: float = b.z - a.z
+	return sqrt(dx * dx + dz * dz)
+
+## Точка прицела не дальше досягаемости: вынос упреждения, разброс и точка
+## залпа режутся по кругу дальности от стрелка (высота точки сохраняется)
+func _clamp_reach(from_pos: Vector3, aim: Vector3, max_reach: float) -> Vector3:
+	var d: float = _xz_dist(from_pos, aim)
+	if d <= max_reach:
+		return aim
+	var k: float = max_reach / d
+	return Vector3(from_pos.x + (aim.x - from_pos.x) * k, aim.y, from_pos.z + (aim.z - from_pos.z) * k)
 
 func _add_bow_procedural() -> void:
 	var bow := MeshInstance3D.new()

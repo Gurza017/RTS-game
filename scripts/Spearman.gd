@@ -320,7 +320,7 @@ func _hunt_strike_anim() -> void:
 	_set_dir_flip(SECTOR_MIRROR[sec])
 	_anim_lock_until_ms = Time.get_ticks_msec() + 450
 	_lock_pending = true
-	_pose_dirty = true
+	mark_pose_dirty()
 
 # Зеркалом направленных поз (attack_*/defence_*) управляет _update_dir_sprite:
 # он сам считает 8 направлений из одного набора шитов. Базовый разворот по
@@ -479,6 +479,15 @@ func _spear_leveled() -> bool:
 	# Флаг снимается сам по прибытии (Unit._arrive_at_target), и копья
 	# опускаются обратно тем же путём, что и всегда
 	var holds: bool = (not sprinting) and (_stance_holds_ground() or _charging())
+	# ── «СТЕНА КОПИЙ» ДЕРЖИТ ПИКИ ВПЕРЁД ВСЕГДА (ТЗ 20.09.2026, п. 4.1) ────
+	# Заказ: «когда улучшение изучено, копейщики во время стояния И МАРША (все
+	# 3 ряда) держат копья направленными вперёд, образуя готовую фалангу
+	# против конницы». Это перк отряда, а не стойка: он снимает и требование
+	# «стойка ЗАЩИТА или бой», и гистерезис по ряду (ниже). На бегу фаланги
+	# по-прежнему нет — двойной ПКМ распускает строй, и это правило старше
+	var wall: bool = (not sprinting) and squad_id > 0 		and GameManager.spear_wall_ready(squad_id)
+	if wall:
+		holds = true
 	if holds != _was_holding:
 		_was_holding = holds
 		# Вошли в стойку — заводим ЛИЧНЫЙ отсчёт до опускания копья
@@ -497,6 +506,11 @@ func _spear_leveled() -> bool:
 	#     против 1.5 мс в стойке АТАКА — впятеро дороже на ровном месте.
 	# Теперь опустить копьё можно с ряда 0-1, а поднять обратно — только с ряда
 	# 3 и глубже. Между ними мёртвая зона, в которой решение НЕ МЕНЯЕТСЯ
+	# Стена копий: ряд не спрашивается вовсе — щетина по всей глубине строя
+	if wall:
+		if not _spear_down and now_ms >= _spear_ready_ms:
+			_spear_down = true
+		return _spear_down
 	if _spear_down:
 		if _live_rank > PHALANX_FRONT_RANKS:
 			_spear_down = false
@@ -536,10 +550,16 @@ func _standing_key() -> String:
 ## Порядок условий выбран так, чтобы обращение к часам стояло ПОСЛЕДНИМ: у
 ## бойца задней шеренги ветка обрывается на сравнении полей, а у переднего —
 ## сразу после того, как копьё опущено (см. _spear_down)
+## Копьё опускается по личной задержке — картинку разбудить к её сроку (этап 5)
+func _vis_extra_wake_ms() -> int:
+	if _spear_ready_ms > 0 and not _spear_down:
+		return _spear_ready_ms
+	return 0
+
 func _update_walk_anim(delta: float, seen: bool = true) -> void:
 	super._update_walk_anim(delta, seen)
 	if _spear_ready_ms > 0 and not _spear_down 			and _live_rank < PHALANX_FRONT_RANKS 			and now_ms >= _spear_ready_ms:
-		_pose_dirty = true
+		mark_pose_dirty()
 
 func _update_dir_sprite() -> void:
 	var tex_key: String
@@ -549,7 +569,7 @@ func _update_dir_sprite() -> void:
 	# ряда), шагнуть не может — а лента крутит бег. То же и с State.MOVING у
 	# запертого в тесноте. Спрашиваем, СДВИНУЛСЯ ли он на самом деле
 	# (см. Unit.moved_recently); не сдвинулся — стоит, как и положено
-	var afoot: bool = moved_recently()
+	var afoot: bool = walk_anim_recently()
 	match state:
 		State.MOVING:
 			if not afoot:
@@ -732,6 +752,28 @@ func spear_wall_active() -> bool:
 func repels_charge() -> bool:
 	return true
 
+## ── АГРО В СТРОЮ — 5 м (ТЗ 18.09.2026, п. 4) ─────────────────────────────
+## Копейщик в «Защите» держит строй: инициатива только на длину нескольких
+## шагов. В «Атаке» — общие AGGRO_RADIUS (qa_aggro_fix A3)
+const FORMATION_AGGRO_RADIUS := 5.0
+
+func aggro_radius() -> float:
+	if _stance_holds_ground():
+		return FORMATION_AGGRO_RADIUS
+	return super.aggro_radius()
+
+## Вес цели для конницы: копейщик в строю ОТТАЛКИВАЕТ всадника (ТЗ 18.09.2026,
+## п. 4 — «избегая атаки в лоб на копейщиков в строю»); вне строя — как все
+const CAV_WEIGHT_IN_WALL := 0.4
+
+func cav_target_weight() -> float:
+	return CAV_WEIGHT_IN_WALL if _stance_holds_ground() else 1.0
+
+## Смена стойки меняет и вес для конницы — пушим колонку
+func set_stance(new_stance: String) -> void:
+	super.set_stance(new_stance)
+	_soa_push_stats()
+
 # ═════════════════════════════════════════════════════════════════════════════
 # НАТИСК ФАЛАНГИ (способность отряда spearman_4d, двойной ПКМ)
 # ═════════════════════════════════════════════════════════════════════════════
@@ -773,6 +815,7 @@ var push_hits_done: int = 0
 
 ## Включить натиск. Зовёт SelectionManager по двойному ПКМ
 func start_phalanx_push() -> void:
+	GameManager.tm_ability("phalanx_push", faction)
 	if state == State.DEAD:
 		return
 	_push_left = PHALANX_PUSH_HITS

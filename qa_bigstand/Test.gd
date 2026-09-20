@@ -28,6 +28,23 @@ extends Node
 ## кадра / в тумане.
 ## Запуск: `godot --path . res://qa_bigstand/Test.tscn -- secs=20 cap=0 scale=1.0`
 ## Вердиктов нет — это измеритель («провалов: 0»). FPS честен только в окне.
+##
+## ── ЧЕСТНЫЙ РЕЖИМ ПО УМОЛЧАНИЮ (BigStand-5, этап 0) ─────────────────────
+## `detail=0` (умолчание): profile_physics и class_meter ВЫКЛЮЧЕНЫ — они
+## стоили 3.4-5.0 мс физтика на кадр (4-5 меток по ~1 мкс на тик бойца), и
+## числа этапов 1-4 в docs/BIGSTAND_2026-09-16.md сняты с этой надбавкой.
+## A/B, FPS и гейты снимать ТОЛЬКО так. `detail=1` — прежний разбор по веткам
+## и родам войск (ранжирование, не бюджет). В обоих режимах печатаются: стена
+## среднего кадра и её раскладка (физтик + логика + хвост физики + прочий
+## _process + рендер/движок), распределение кадров (≤16.7 / ≤33.3 / дольше,
+## p50/p95/p99), GC (КБ/кадр, сборки gen0/1/2), стрелы (выстрелов, в полёте,
+## торчащих, пул), ВЕДОМЫЕ ЯДРОМ (автопилот, напор, матрица, дрёма, сон
+## физики; сколько строк ядро оставило себе — ArmyCore.TickSkipped) и, по
+## ручке `sephist=1`, гистограмма соседей расталкивания (снимок середины
+## фазы: 7000 вызовов через границу — один тяжёлый кадр, в FPS-прогоне не
+## включать). В headless стена среднего кадра не опускается ниже 16.7 мс
+## (физшаг ждёт реального времени) — «прочее» читать только там, где она
+## больше 16.7.
 
 const _Opt := preload("res://scripts/perf_config.gd")
 const _Forge := preload("res://scripts/forge_config.gd")
@@ -42,6 +59,10 @@ var AFTER_SEC := 8.0
 var HEAP_SEC := 10.0
 var CAP_FPS := 0
 var SCALE := 1.0
+## 0 — честный режим (профиль и class_meter выключены), 1 — разбор по веткам
+var DETAIL := 0
+## 1 — снимок гистограммы соседей расталкивания в середине каждой фазы
+var SEPHIST := 0
 ## Площадка — правый берег, между плато (70,-80), деревней (162,-91) и пнём
 ## партии (105, 85)
 const CX := 115.0
@@ -82,6 +103,8 @@ func _ready() -> void:
 			"heap": HEAP_SEC = float(kv[1])
 			"cap": CAP_FPS = int(kv[1])
 			"scale": SCALE = maxf(float(kv[1]), 0.1)
+			"detail": DETAIL = int(kv[1])
+			"sephist": SEPHIST = int(kv[1])
 			"knob":
 				var nv: PackedStringArray = kv[1].split(":")
 				if nv.size() == 2:
@@ -312,6 +335,8 @@ func _run() -> void:
 		print("  ручка %s = %s" % [k, str(opt_inst.get(k))])
 	main = load("res://scenes/Main.tscn").instantiate()
 	get_tree().root.add_child(main)
+	# Пень за рекой в партии заморожен (ТЗ 19.09.2026); стенду нужен живой
+	GameManager.call_deferred("thaw_lairs_now")
 	await frames(8)
 	# ИИ всех сторон молчат: фазы задаёт стенд, а не мышление ИИ
 	for nm in ["enemy_ai", "goblin_ai", "gnoll_ai", "goblin_reserve", "enemy_guard"]:
@@ -565,6 +590,11 @@ func _jitter_sample(prev: Dictionary, acc: Dictionary) -> Dictionary:
 	var fogged := 0
 	var settled := 0
 	var snoozing := 0
+	var autop := 0
+	var rearp := 0
+	var matrixd := 0
+	var physasleep := 0
+	var tickoff := 0
 	var by_class: Dictionary = acc.get("by_class", {})
 	for raw in _all:
 		if raw == null or not is_instance_valid(raw):
@@ -609,6 +639,11 @@ func _jitter_sample(prev: Dictionary, acc: Dictionary) -> Dictionary:
 				rc["attacking"] = int(rc["attacking"]) + 1
 				if u._atk_snooze:
 					snoozing += 1
+		if u._auto_pilot: autop += 1
+		if u._rear_press: rearp += 1
+		if u._matrix_driven: matrixd += 1
+		if u._phys_asleep: physasleep += 1
+		if not u.tick_on: tickoff += 1
 		if u._proc_sleeping:
 			sleeping += 1
 			rc["sleep"] = int(rc["sleep"]) + 1
@@ -635,6 +670,11 @@ func _jitter_sample(prev: Dictionary, acc: Dictionary) -> Dictionary:
 	acc["fogged"] = int(acc.get("fogged", 0)) + fogged
 	acc["settled"] = int(acc.get("settled", 0)) + settled
 	acc["snoozing"] = int(acc.get("snoozing", 0)) + snoozing
+	acc["autop"] = int(acc.get("autop", 0)) + autop
+	acc["rearp"] = int(acc.get("rearp", 0)) + rearp
+	acc["matrixd"] = int(acc.get("matrixd", 0)) + matrixd
+	acc["physasleep"] = int(acc.get("physasleep", 0)) + physasleep
+	acc["tickoff"] = int(acc.get("tickoff", 0)) + tickoff
 	acc["by_class"] = by_class
 	return cur
 
@@ -644,18 +684,37 @@ func _reform_diag() -> Dictionary:
 	var with_slots := 0
 	var drifted := 0
 	var squads_drift := 0
+	# Разбивка дрейфующих отрядов ПО ПРИЧИНЕ, по которой обход их не сводит:
+	# в бою (окно «нас били»), большинство идёт, откат после неудачного
+	# смыкания, и СВОБОДНЫЕ — те, кого обход обязан свести и не свёл
+	var in_combat := 0
+	var on_move := 0
+	var backoff := 0
+	var free_drift := 0
+	var now: int = Time.get_ticks_msec()
 	for key in GameManager.squads.keys():
+		var sid: int = int(key)
 		var sq: Dictionary = GameManager.squads[key]
 		var slots: Array = sq.get("slots", [])
 		if slots.is_empty():
 			continue
 		with_slots += 1
 		var d := 0
+		var live := 0
+		var moving := 0
+		var fighting := 0
 		for m in sq.get("members", []):
 			if m == null or not is_instance_valid(m):
 				continue
 			var u := m as Unit
-			if u == null or u.is_dead() or not u._post_valid:
+			if u == null or u.is_dead():
+				continue
+			live += 1
+			if u.state == Unit.State.MOVING:
+				moving += 1
+			elif u.state == Unit.State.ATTACKING or u.attack_target != null:
+				fighting += 1
+			if not u._post_valid:
 				continue
 			var up: Vector3 = u.position if u._local_xform else u.global_position
 			if Vector2(up.x - u.post_pos.x, up.z - u.post_pos.z).length() > GameManager.REFORM_DRIFT:
@@ -663,10 +722,63 @@ func _reform_diag() -> Dictionary:
 		if d > 0:
 			squads_drift += 1
 			drifted += d
-	return {"with_slots": with_slots, "squads_drift": squads_drift, "drifted": drifted, "total": GameManager.squads.size()}
+			if GameManager.squad_in_combat(sid) or fighting > 0:
+				in_combat += 1
+			elif moving * 2 > live:
+				on_move += 1
+			elif now < int(sq.get("reform_next_ms", 0)):
+				backoff += 1
+			else:
+				free_drift += 1
+	return {"with_slots": with_slots, "squads_drift": squads_drift, "drifted": drifted, "total": GameManager.squads.size(),
+		"in_combat": in_combat, "on_move": on_move, "backoff": backoff, "free": free_drift}
+
+## Гистограмма соседей расталкивания по живым строкам (BigStand-5, этап 0):
+## соседей в радиусе скана (личная норма × SEP_CROSS_SQUAD у отрядных) и
+## внутри порога толчка (норма − мёртвая зона). Дорогой снимок — по ручке
+func _sep_hist() -> Dictionary:
+	var army = GameManager.army
+	var rows := 0
+	var scan := 0
+	var push := 0
+	var push_rows := 0
+	var lonely := 0
+	var gt6 := 0
+	var gt6_push := 0
+	var hist: Array = [0, 0, 0, 0, 0]
+	var base: float = Unit.SEP_MIN_DIST
+	var dz: float = Unit.SEP_DEADZONE
+	for raw in _all:
+		if raw == null or not is_instance_valid(raw):
+			continue
+		var u := raw as Unit
+		if u == null or u.is_dead() or u._soa < 0:
+			continue
+		var p: Vector3 = u.position if u._local_xform else u.global_position
+		var own: float = army.get_sep_radius(u._soa)
+		var my: float = own if own > 0.0 else base
+		var cross: float = my * Unit.SEP_CROSS_SQUAD if u.squad_id != 0 else my
+		var n_scan: int = army.allies_count_near(u._soa, p.x, p.z, cross, 200)
+		var n_push: int = army.allies_count_near(u._soa, p.x, p.z, maxf(my - dz, 0.0), 200)
+		rows += 1
+		scan += n_scan
+		push += n_push
+		if n_push > 0: push_rows += 1
+		if n_scan == 0: lonely += 1
+		elif n_scan <= 3: hist[1] += 1
+		elif n_scan <= 6: hist[2] += 1
+		elif n_scan <= 12: hist[3] += 1
+		else: hist[4] += 1
+		if n_scan > 6:
+			gt6 += 1
+			gt6_push += n_push
+	hist[0] = lonely
+	return {"rows": rows, "scan": scan, "push": push, "push_rows": push_rows, "lonely": lonely, "hist": hist, "gt6": gt6, "gt6_push": gt6_push}
 
 ## Один замер фазы: секунды по физкадрам. detail — классы, состояния, ветки
-func _measure(label: String, secs: float, headless: bool, detail: bool = false) -> Dictionary:
+func _measure(label: String, secs: float, headless: bool, detail0: bool = false) -> Dictionary:
+	# Разбор по веткам — только по ручке detail=1: профиль сам стоит 3-5 мс
+	var detail: bool = detail0 and DETAIL == 1
 	_Opt.tick_meter = true; _Opt.tick_reset()
 	_Opt.vis_meter = true; _Opt.vis_reset()
 	_Opt.class_meter = detail; _Opt.class_reset()
@@ -674,6 +786,7 @@ func _measure(label: String, secs: float, headless: bool, detail: bool = false) 
 	_Opt.sep_meter = true; _Opt.sep_reset()
 	_Opt.cmd_meter = true; _Opt.cmd_reset()
 	_Opt.scan_meter = true; _Opt.scan_reset()
+	_Opt.sys_meter = true; _Opt.sys_reset()
 	var frames_total: int = int(secs * 60.0)
 	var fps_min := 1.0e9
 	var fps_sum := 0.0
@@ -693,15 +806,45 @@ func _measure(label: String, secs: float, headless: bool, detail: bool = false) 
 	var nav_prev: int = _Opt.nav_usec
 	var nav0: int = _Opt.nav_usec
 	var navc0: int = _Opt.nav_calls
+	var navf0: int = GameManager.nav_routes_failed
+	var navmk0: int = GameManager.nav_miss_key
+	var navmr0: int = GameManager.nav_miss_reuse
+	var navu0: int = GameManager.army.nav_unreach() if GameManager.army != null else 0
+	GameManager.nav_worst_usec = 0
 	var jit_prev: Dictionary = {}
 	var jit: Dictionary = {}
 	var arrows_sum := 0
+	var fired0: int = GameManager.arrows_fired
+	var stuck_max := 0
+	var sephist: Dictionary = {}
+	var gc0_0: int = GameManager.army.gc_count(0)
+	var gc0_1: int = GameManager.army.gc_count(1)
+	var gc0_2: int = GameManager.army.gc_count(2)
+	var skipped_sum := 0
+	var listed_sum := 0
+	# ── СБОРКИ GEN2 ПО КАДРАМ (BigStand-5, этап 4) ────────────────────────
+	# Кадр, в котором число сборок gen2 выросло: стена кадра, пауза сборки
+	# (GC.GetGCMemoryInfo), куча до/после, LOH — чтобы назвать причину числом
+	var gen2_log: Array = []
+	var gen2_prev: int = GameManager.army.gc_count(2)
+	var gen1_prev: int = GameManager.army.gc_count(1)
+	var gc_frames: Array = []
 	for f in range(frames_total):
 		await get_tree().physics_frame
 		var now: int = Time.get_ticks_usec()
 		var wall_ms: float = float(now - wall_prev) * 0.001
 		walls.append(wall_ms)
 		wall_prev = now
+		var g2: int = GameManager.army.gc_count(2)
+		var g1: int = GameManager.army.gc_count(1)
+		if g2 != gen2_prev or g1 != gen1_prev:
+			var gi: PackedFloat64Array = GameManager.army.gc_info()
+			gc_frames.append([f, wall_ms, int(gi[0]), gi[2], gi[3], gi[6], gi[7], gi[9], int(gi[11]), int(gi[10]), gi[5], gi[14],
+				gi[15], gi[16], gi[17], int(gi[18]), int(gi[19])])
+			if g2 != gen2_prev:
+				gen2_log.append(f)
+			gen2_prev = g2
+			gen1_prev = g1
 		var t_ms: float = float(_Opt._tick_usec - tick_prev) * 0.001
 		var v_ms: float = float(_Opt._vis_usec - vis_prev) * 0.001
 		tick_prev = _Opt._tick_usec
@@ -730,6 +873,11 @@ func _measure(label: String, secs: float, headless: bool, detail: bool = false) 
 			fps_n += 1
 		draw_peak = maxi(draw_peak, int(Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME)))
 		arrows_sum += GameManager.army.arrow_flights()
+		stuck_max = maxi(stuck_max, GameManager.stuck_arrow_count())
+		skipped_sum += GameManager.army.tick_skipped()
+		listed_sum += GameManager.army.tick_listed()
+		if SEPHIST == 1 and f == frames_total / 2:
+			sephist = _sep_hist()
 		if f % JIT_FRAMES == JIT_FRAMES - 1:
 			jit_prev = _jitter_sample(jit_prev, jit)
 	var r := {}
@@ -744,8 +892,29 @@ func _measure(label: String, secs: float, headless: bool, detail: bool = false) 
 	r["wall_avg"] = _avg(walls)
 	r["phys_p95"] = _pct(phys_all, 0.95)
 	r["proc_p95"] = _pct(proc_all, 0.95)
+	r["phys_avg"] = _avg(phys_all)
+	r["proc_avg"] = _avg(proc_all)
+	r["wall_p50"] = _pct(walls, 0.50)
+	r["wall_p99"] = _pct(walls, 0.99)
+	var b16 := 0
+	var b33 := 0
+	var bover := 0
+	for w in walls:
+		if w <= 16.7: b16 += 1
+		elif w <= 33.4: b33 += 1
+		else: bover += 1
+	r["buckets"] = [b16, b33, bover]
+	r["fired"] = GameManager.arrows_fired - fired0
+	r["stuck_max"] = stuck_max
+	r["pool"] = GameManager.arrow_pool_size()
+	r["sephist"] = sephist
+	r["gc"] = [GameManager.army.gc_count(0) - gc0_0, GameManager.army.gc_count(1) - gc0_1, GameManager.army.gc_count(2) - gc0_2]
+	r["core_skipped"] = float(skipped_sum) / float(frames_total)
+	r["core_listed"] = float(listed_sum) / float(frames_total)
 	r["draw"] = draw_peak
 	r["gc_kb_frame"] = float(GameManager.army.gc_allocated() - gc_alloc0) / 1024.0 / float(frames_total)
+	r["gc_frames"] = gc_frames
+	r["gc_mode"] = GameManager.army.gc_info()
 	r["obj_delta"] = int(Performance.get_monitor(Performance.OBJECT_COUNT)) - obj0
 	r["alive0"] = alive0
 	r["alive1"] = _alive(_all)
@@ -756,8 +925,16 @@ func _measure(label: String, secs: float, headless: bool, detail: bool = false) 
 	r["reform"] = _reform_diag()
 	r["scan_per_sec"] = float(_Opt.scan_calls) / secs
 	r["scan"] = _Opt.scan_report()
+	r["sys"] = _Opt.sys_report()
+	r["sys_frames"] = frames_total
+	_Opt.sys_meter = false
 	r["nav_ms_frame"] = float(_Opt.nav_usec - nav0) / 1000.0 / float(frames_total)
 	r["nav_calls"] = _Opt.nav_calls - navc0
+	r["nav_failed"] = GameManager.nav_routes_failed - navf0
+	r["nav_unreach"] = (GameManager.army.nav_unreach() if GameManager.army != null else 0) - navu0
+	r["nav_worst_ms"] = float(GameManager.nav_worst_usec) / 1000.0
+	r["nav_miss_key"] = GameManager.nav_miss_key - navmk0
+	r["nav_miss_reuse"] = GameManager.nav_miss_reuse - navmr0
 	r["arrows_avg"] = float(arrows_sum) / float(frames_total)
 	r["shards"] = _Opt.shards_for(GameManager.active_units())
 	r["jit"] = jit
@@ -845,8 +1022,10 @@ const SUB := ["mv_intercept", "mv_speed", "mb_trunk", "mb_water", "mb_enemyblock
 	"rank_enemypos", "die_signal", "die_rest", "die_credit", "die_corpse"]
 
 func _summary(rs: Array, headless: bool) -> void:
-	print("\n📊 **BIGSTAND (qa_bigstand)** — сцена %s; живых на старте %d" % [
-		"headless (FPS не показателен)" if headless else "окно", int(rs[0]["alive0"])])
+	print("\n📊 **BIGSTAND (qa_bigstand)** — сцена %s, режим %s; живых на старте %d" % [
+		"headless (FPS не показателен)" if headless else "окно",
+		"ЧЕСТНЫЙ (профиль выключен)" if DETAIL == 0 else "детальный (с профилем, физтик завышен на 3-5 мс)",
+		int(rs[0]["alive0"])])
 	print("| Фаза | физтик армии | кадр логики | физкадр p95 / худший | TIME_PHYS p95 | TIME_PROC p95 | FPS мин / ср | вызовов отрисовки | расталк. тел/кадр | приказов/с | сканов/с | нав. мс/кадр | стрел в полёте | шардов | живых |")
 	print("| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
 	for r in rs:
@@ -868,6 +1047,38 @@ func _summary(rs: Array, headless: bool) -> void:
 			float(j.get("idle_walk", 0)) / ns, float(j.get("moving", 0)) / ns, JIT_MOVING_STUCK, float(j.get("moving_stuck", 0)) / ns,
 			float(j.get("attacking", 0)) / ns, float(j.get("snoozing", 0)) / ns, float(j.get("sleeping", 0)) / ns,
 			float(j.get("draw_off", 0)) / ns, float(j.get("unseen", 0)) / ns, float(j.get("fogged", 0)) / ns, float(j.get("settled", 0)) / ns])
+		print("  ВЕДОМЫЕ ЯДРОМ (ср. по снимкам): автопилот %.0f, тыловой напор %.0f, матрица %.0f, дремлют %.0f, спят по физике %.0f, тик выключен %.0f; ядро оставило себе %.0f строк/кадр, в GDScript-тик ушло %.0f строк/кадр" % [
+			float(j.get("autop", 0)) / ns, float(j.get("rearp", 0)) / ns, float(j.get("matrixd", 0)) / ns, float(j.get("snoozing", 0)) / ns,
+			float(j.get("physasleep", 0)) / ns, float(j.get("tickoff", 0)) / ns, float(d["core_skipped"]), float(d["core_listed"])])
+		# Раскладка кадра: физтик армии + логика армии + всё остальное (хвост
+		# физшага, прочий _process, рендер, движок, а в лёгких фазах headless —
+		# простой до следующего физшага). Мониторы Performance.TIME_* при снятом
+		# ограничении кадров усредняются по кадрам отрисовки и для раскладки не
+		# годятся (CLAUDE.md, «Разбор кадра»), поэтому здесь их нет
+		var wall: float = float(d["wall_avg"])
+		var tick: float = float(d["tick"])
+		var vis: float = float(d["vis"])
+		print("  КАДР: стена ср. %.2f мс (p50 %.1f, p95 %.1f, p99 %.1f, худший %.1f) = физтик армии %.2f + логика армии %.2f + рендер/движок/прочее %.2f; кадров <=16.7 мс %d, <=33.4 мс %d, дольше %d" % [
+			wall, float(d["wall_p50"]), float(d["wall_p95"]), float(d["wall_p99"]), float(d["wall_worst"]),
+			tick, vis, maxf(wall - tick - vis, 0.0),
+			int(d["buckets"][0]), int(d["buckets"][1]), int(d["buckets"][2])])
+		print("  GC: %.1f КБ/кадр, сборок gen0/1/2 %s, OBJECT_COUNT %+d; СТРЕЛЫ: выстрелов %d (%.1f/с), в полёте ср. %.0f, торчащих макс %d, пул %d" % [
+			float(d["gc_kb_frame"]), str(d["gc"]), int(d["obj_delta"]),
+			int(d["fired"]), float(int(d["fired"])) / (float(int(d["frames"])) / 60.0), float(d["arrows_avg"]), int(d["stuck_max"]), int(d["pool"])])
+		var gm: PackedFloat64Array = d["gc_mode"]
+		var lat_names := ["Batch", "Interactive", "LowLatency", "SustainedLowLatency", "NoGCRegion"]
+		print("  GC-РЕЖИМ: задержка %s, серверный %s, куча %.1f МБ (gen0 %.1f, gen1 %.1f, gen2 %.1f, LOH %.1f, POH %.1f), фрагментация %.1f МБ" % [
+			lat_names[clampi(int(gm[12]), 0, 4)], str(int(gm[13]) == 1), gm[3], gm[4], gm[5], gm[6], gm[7], gm[8], gm[14]])
+		for gf in d["gc_frames"]:
+			print("    сборка gen%d в кадре %d: стена кадра %.1f мс, пауза GC %.2f мс, куча %.1f МБ (gen1 %.1f, gen2 %.1f, LOH %.1f, фрагм. %.1f), продвинуто %.2f МБ, фоновая %s, уплотняющая %s" % [
+				int(gf[2]), int(gf[0]), float(gf[1]), float(gf[3]), float(gf[4]), float(gf[10]), float(gf[5]), float(gf[6]), float(gf[11]), float(gf[7]), str(int(gf[8]) == 1), str(int(gf[9]) == 1)])
+			print("        до сборки: gen0 %.1f, gen1 %.1f, gen2 %.1f МБ; ждущих финализации %d, закреплённых %d" % [
+				float(gf[12]), float(gf[13]), float(gf[14]), int(gf[15]), int(gf[16])])
+		var sh: Dictionary = d["sephist"]
+		if not sh.is_empty():
+			print("  РАСТАЛКИВАНИЕ (снимок середины фазы): строк %d; соседей в радиусе скана %d (ср. %.1f/строку), внутри порога толчка %d (ср. %.2f); строк с толчком %d; без соседей %d; гистограмма 0/1-3/4-6/7-12/13+ = %s; строк с >6 соседями %d (толчков у них %d)" % [
+				int(sh["rows"]), int(sh["scan"]), float(sh["scan"]) / float(maxi(int(sh["rows"]), 1)), int(sh["push"]), float(sh["push"]) / float(maxi(int(sh["rows"]), 1)),
+				int(sh["push_rows"]), int(sh["lonely"]), str(sh["hist"]), int(sh["gt6"]), int(sh["gt6_push"])])
 		var bc: Dictionary = j.get("by_class", {})
 		var keys: Array = bc.keys()
 		keys.sort()
@@ -898,8 +1109,25 @@ func _summary(rs: Array, headless: bool) -> void:
 			sline += "%s#%d ×%d; " % [String(sids[i][0]), int(sids[i][1]), int(sids[i][2])]
 		print("    по отрядам (источник#sid ×вызовов): %s" % sline)
 		var rf: Dictionary = d["reform"]
-		print("  СМЫКАНИЕ на конец фазы: отрядов %d, с разметкой %d, с дрейфом > %.2f м — %d отрядов / %d бойцов" % [
-			int(rf["total"]), int(rf["with_slots"]), GameManager.REFORM_DRIFT, int(rf["squads_drift"]), int(rf["drifted"])])
+		print("  СМЫКАНИЕ на конец фазы: отрядов %d, с разметкой %d, с дрейфом > %.2f м — %d отрядов / %d бойцов (в бою %d, идут %d, откат %d, СВОБОДНЫХ %d)" % [
+			int(rf["total"]), int(rf["with_slots"]), GameManager.REFORM_DRIFT, int(rf["squads_drift"]), int(rf["drifted"]),
+			int(rf.get("in_combat", 0)), int(rf.get("on_move", 0)), int(rf.get("backoff", 0)), int(rf.get("free", 0))])
+		# Подсистемы _process (аудит 19.09): что сидит в «прочем» кадра
+		var sysr: Array = d.get("sys", [])
+		var sfr: float = float(maxi(int(d.get("sys_frames", 1)), 1))
+		var sys_sum := 0.0
+		for row in sysr:
+			sys_sum += float(int(row[1])) / 1000.0 / sfr
+		print("  НАВИГАЦИЯ: A* вызовов %d (не найдено %d, отбито компонентами %d; мимо кэша: ячейка %d, концы %d), %.2f мс/кадр, худший вызов %.2f мс" % [
+			int(d.get("nav_calls", 0)), int(d.get("nav_failed", 0)), int(d.get("nav_unreach", 0)),
+			int(d.get("nav_miss_key", 0)), int(d.get("nav_miss_reuse", 0)),
+			float(d.get("nav_ms_frame", 0.0)), float(d.get("nav_worst_ms", 0.0))])
+		print("  ПОДСИСТЕМЫ _process (мс/кадр, худший вызов): всего %.2f мс/кадр" % sys_sum)
+		for row in sysr:
+			var ncalls: int = int(row[3]) if row.size() > 3 else 0
+			print("    %-12s %6.2f мс/кадр   худший %6.1f мс   вызовов %6d, по %6.1f мкс" % [String(row[0]),
+				float(int(row[1])) / 1000.0 / sfr, float(int(row[2])) / 1000.0, ncalls,
+				float(int(row[1])) / float(maxi(ncalls, 1))])
 		# Сканы по местам
 		var sc: Array = d["scan"]
 		print("  СКАНЫ ЦЕЛЕЙ (_find_nearest_enemy_in_range): всего %.0f/с" % float(d["scan_per_sec"]))
@@ -945,6 +1173,17 @@ func _summary(rs: Array, headless: bool) -> void:
 				break
 			print("    %2d. %-22s %6.2f мс/кадр  (%d вызовов, %.1f мкс каждый, худший %d)" % [
 				k, name, float(int(row[1])) / 1000.0 / float(maxi(frames_total, 1)), int(row[2]), float(row[3]), int(row[4])])
+		# Подветки пересчёта коридора (BigStand-5, этап 4): что осталось в GDScript
+		var cor_any := false
+		for row in prof:
+			var cn: String = String(row[0])
+			if not (cn.begins_with("cor_") or cn.begins_with("tail_")):
+				continue
+			if not cor_any:
+				print("  ПОДВЕТКИ КОРИДОРА И ХВОСТА ТИКА (мс/кадр, мкс/вызов):")
+				cor_any = true
+			print("      %-14s %6.3f мс/кадр  (%d вызовов, %.1f мкс каждый, худший %d)" % [
+				cn, float(int(row[1])) / 1000.0 / float(maxi(frames_total, 1)), int(row[2]), float(row[3]), int(row[4])])
 		for sp in d["spikes"]:
 			var br := ""
 			for b in sp[4]:

@@ -302,10 +302,29 @@ public partial class ArmyCore : RefCounted
     private float[] _sepNX = Array.Empty<float>();
     private float[] _sepNZ = Array.Empty<float>();
     private byte[] _sepGo = Array.Empty<byte>();
+    // ── НАКОПЛЕННЫЙ, НО НЕ ЗАПИСАННЫЙ В УЗЕЛ СДВИГ (BigStand, этап 2) ──────
+    // Колонка ядра ведёт точную позицию, а узел сцены получает её только когда
+    // накопленный сдвиг дорос до NodeWriteMin: запись Position и пробуждение
+    // спящего по картинке на каждую миллиметровую поправку стоили дороже
+    // самого разбора наложения. Любая другая запись узла (шаг, PushToNodes,
+    // SetPos, Release) обнуляет накопитель — узел и колонка снова совпадают
+    private float[] _sepAccX = Array.Empty<float>();
+    private float[] _sepAccZ = Array.Empty<float>();
+    public static float NodeWriteMin = 0.01f;
+    // ── ЯКОРЬ: ДВА СТОЯЩИХ СОСЕДА ОДНОГО ОТРЯДА (BigStand, этап 2) ──────────
+    // Оба дошли (FSettled) и стоят — им разрешено стоять теснее нормы на
+    // SettledDeadzone (личный круг бойца, 0.25 м), и поправки между ними нет:
+    // это заявленное поведение «ЯКОРЬ» у прибытия, которого бит не давал,
+    // потому что ядро его не читало. Идущий, дерущийся и чужой отряд толкают
+    // как прежде — строй остаётся проходимым и разводится после боя
+    public static float SettledDeadzone = 0.25f;
     // Сторона обхода обрыва (спринт 18): 0 — не идём вдоль стены, ±1 — идём;
     // держится, пока прямой шаг упирается, сбрасывается свободным шагом
     private sbyte[] _cliffSide = Array.Empty<sbyte>();
     private byte[] _cliffFree = Array.Empty<byte>();
+    // Сторона обхода фундамента (ТЗ 19.09.2026 «обтекание»): пока боец трётся
+    // о стену дома, сторона не меняется; сброс — первым свободным шагом
+    private sbyte[] _bldSide = Array.Empty<sbyte>();
     private const float CliffBack = 0.35f;
     // Сколько свободных шагов подряд забывают сторону обхода: отступ от стены
     // делает прямой шаг свободным на такт-другой, и сброс на первом же
@@ -323,6 +342,26 @@ public partial class ArmyCore : RefCounted
     private float[] _pressZ = Array.Empty<float>();
     private float[] _pressV = Array.Empty<float>();
     private float[] _pressStop = Array.Empty<float>();
+    // ── ВОРОТА БОЯ (BigStand, этап 4): автопилот подхода без ворот «чистый путь» ──
+    // Темп подтягивания и его порог (reach + PULL_UP_MAX; < 0 — подтягивания
+    // нет, боец вне отряда), плановый возврат в GDScript (_gateT — до него,
+    // _gateEl — сколько прошло с взвода: GDScript доводит свои таймеры на
+    // это время одним вычитанием), обход своих по вердикту «проход занят»
+    // (_flankB) в свою сторону (_sideS) — копия Unit._flank_step
+    private float[] _pressV2 = Array.Empty<float>();
+    private float[] _pressLim = Array.Empty<float>();
+    private float[] _gateT = Array.Empty<float>();
+    private float[] _gateEl = Array.Empty<float>();
+    private float[] _sideS = Array.Empty<float>();
+    private byte[] _flankB = Array.Empty<byte>();
+    private float[] _pressWakeEl = Array.Empty<float>();
+    // Режим автопилота: 0 — подход к строке цели, 1 — ПОДТЯГИВАНИЕ (упор в
+    // чужое тело НЕ будит: GDScript-ветка _should_pull_up заслон не сканирует
+    // и просто давит — иначе каждый заблокированный шаг возвращал бойца в
+    // автомат), 2 — МАРШ СТЕНЫ к точке _pressX/Z (Unit._phalanx_march)
+    private byte[] _gateMode = Array.Empty<byte>();
+    public const byte GatePull = 1;
+    public const byte GateGoal = 2;
     private float[] _aggroT = Array.Empty<float>();
     private float[] _atkDmg = Array.Empty<float>();
     private float[] _atkRange = Array.Empty<float>();
@@ -331,12 +370,60 @@ public partial class ArmyCore : RefCounted
     // дистанцию на этот вес — большой гоблин (2.0) выбирается вдвое охотнее.
     // Единица — «как у всех»; ставится при рождении строки (Unit.target_weight)
     private float[] _tgtW = Array.Empty<float>();
+    /// Вес цели для КОННИЦЫ (ТЗ 18.09.2026, п. 4): свино-всадник делит счёт
+    /// на него — лучник/мечник/рабочий тянут к себе, копейщик в строю
+    /// отталкивает. Свойство цели (Unit.cav_target_weight), своя колонка:
+    /// стрелковый вес (_tgtW) про другое и читается другим родом войск
+    private float[] _tgtWc = Array.Empty<float>();
     private float[] _sepT = Array.Empty<float>();
     // ЛИЧНЫЙ РАДИУС РАСТАЛКИВАНИЯ. Ноль — «как у всех», то есть minDist из
     // аргумента BatchSeparation; ненулевое значение перекрывает его для этой
     // строки. Заведён ради гоблинов: их спрайт крупнее людского в 1.7 раза, и
     // единая на всю армию дистанция либо склеивала орду, либо раздвигала людей
     private float[] _sepR = Array.Empty<float>();
+    // ── ТЕЛО ГИГАНТА (ТЗ 19.09.2026-3, п. 3) ──────────────────────────────
+    // Добавка к радиусу блокировки чужого шага: пехотинец не входит в тушу
+    // ближе blockR + _bodyR. Гигантов единицы — они лежат отдельным списком,
+    // и ScanBlock/EnemyBlock обходят его целиком вместо расширения окна
+    // ячеек для всех (цена — по числу гигантов, не по радиусу)
+    private float[] _bodyR = Array.Empty<float>();
+    private readonly System.Collections.Generic.List<int> _giants = new System.Collections.Generic.List<int>();
+    private float _bodyMax = 0.0f;
+    // ── ФУНДАМЕНТЫ ПОСТРОЕК (ТЗ 19.09.2026 «коллизии зданий») ─────────────
+    // Постройка — ряд кругов (x, z, r) в той же редкой сетке ObstCell, что и
+    // стволы. Шаг ЛЮБОЙ стороны в круг не проходит и скользит вдоль него;
+    // стоящий ВНУТРИ (площадка заложена поверх отряда, слепок) выходит
+    // наружу. Своя запись, а не RegisterTrunk: ствол для застрявшего
+    // отключается (FTrunkIgnore) и в сетке навигации — цена, а не стена;
+    // фундамент не отключается никогда и в сетке — непроходимая ячейка
+    private struct BldCircle { public float X, Z, R; public long Id; }
+    private readonly System.Collections.Generic.Dictionary<long, System.Collections.Generic.List<BldCircle>> _blds
+        = new System.Collections.Generic.Dictionary<long, System.Collections.Generic.List<BldCircle>>();
+    private readonly System.Collections.Generic.Dictionary<long, System.Collections.Generic.List<long>> _bldCells
+        = new System.Collections.Generic.Dictionary<long, System.Collections.Generic.List<long>>();
+    private float _bldMaxR = 0.0f;
+    private bool _navBldDirty = false;
+    public int BldCount = 0;
+    // Зазор тела бойца до стены: центр не ближе r + BldClear к центру круга
+    public const float BldClear = 0.25f;
+    // ── СЕТКА НАВИГАЦИИ И ЗДАНИЯ (ТЗ 19.09.2026 «обтекание вплотную») ────
+    // Ячейка считается стеной, когда её ПРЯМОУГОЛЬНИК задевает круг с зазором
+    // NavBldPad (прежде — центр ячейки внутри круга: башня между центрами
+    // четырёх ячеек не попадала в сетку вовсе, A* её не видел, и шаг обходил
+    // её скольжением — половина отряда налево, половина направо). Здание —
+    // не скала: у стены нет ни штрафа дистанции (_navWall считает только
+    // скалы и воду), ни отступа нити clear + halfW — нить и угол держат
+    // NavBldSidePad / NavBldCornerPush, а угол ещё и ПОДТЯГИВАЕТСЯ к
+    // настоящему кругу фундамента на NavBldHug (по точным кругам, не по
+    // ячейкам) — отряд огибает дом по самому краю, сжимаясь в гармошку
+    // (NavSpread гасит смещение, легшее в дом), и выравнивается за углом
+    public const float NavBldPad = 0.25f;
+    public const float NavBldSidePad = 0.9f;
+    public const float NavBldCornerPush = 1.0f;
+    public const float NavBldHug = 0.8f;
+    public const float NavBldAdjCost = 0.5f;
+    private byte[] _navBldAdj = System.Array.Empty<byte>();
+    public int NavBldCells = 0;
     private float[] _slX = Array.Empty<float>();
     private float[] _slZ = Array.Empty<float>();
     private float[] _stpX = Array.Empty<float>();
@@ -395,6 +482,52 @@ public partial class ArmyCore : RefCounted
     /// по поколениям. Читается раз в фазу замера — не покадрово
     public long GcAllocated() => GC.GetTotalAllocatedBytes(true);
     public int GcCount(int gen) => GC.CollectionCount(gen);
+
+    /// GC-зонд (BigStand-5, этап 4): сведения о ПОСЛЕДНЕЙ сборке и режиме.
+    /// [поколение, номер, пауза мс (сумма), куча всего МБ, gen0 МБ, gen1 МБ,
+    ///  gen2 МБ, LOH МБ, POH МБ, продвинуто МБ, уплотняющая, фоновая,
+    ///  режим задержки, серверный GC, фрагментация МБ]
+    public double[] GcInfo()
+    {
+        var i = GC.GetGCMemoryInfo(GCKind.Any);
+        double pause = 0.0;
+        foreach (var p in i.PauseDurations) pause += p.TotalMilliseconds;
+        const double mb = 1.0 / (1024.0 * 1024.0);
+        return new[]
+        {
+            (double)i.Generation, (double)i.Index, pause, i.HeapSizeBytes * mb,
+            i.GenerationInfo[0].SizeAfterBytes * mb, i.GenerationInfo[1].SizeAfterBytes * mb,
+            i.GenerationInfo[2].SizeAfterBytes * mb, i.GenerationInfo[3].SizeAfterBytes * mb,
+            i.GenerationInfo[4].SizeAfterBytes * mb, i.PromotedBytes * mb,
+            i.Compacted ? 1.0 : 0.0, i.Concurrent ? 1.0 : 0.0,
+            (double)(int)System.Runtime.GCSettings.LatencyMode,
+            System.Runtime.GCSettings.IsServerGC ? 1.0 : 0.0,
+            i.FragmentedBytes * mb,
+            // 15..: до сборки gen0/gen1/gen2 МБ, ждущих финализации, закреплённых
+            i.GenerationInfo[0].SizeBeforeBytes * mb, i.GenerationInfo[1].SizeBeforeBytes * mb,
+            i.GenerationInfo[2].SizeBeforeBytes * mb,
+            (double)i.FinalizationPendingCount, (double)i.PinnedObjectsCount,
+        };
+    }
+
+    /// Зонд: принудительная полная сборка → сколько объектов ждут финализации
+    /// (те, что были живы только ради финализатора) и байт выделено всего
+    public double[] GcProbe()
+    {
+        GC.Collect(2, GCCollectionMode.Forced, true);
+        var i = GC.GetGCMemoryInfo(GCKind.Any);
+        return new[] { (double)i.FinalizationPendingCount, (double)GC.GetTotalAllocatedBytes(true),
+            i.HeapSizeBytes / (1024.0 * 1024.0) };
+    }
+
+    /// Режим задержки GC: 0 Batch, 1 Interactive (умолчание), 2 LowLatency,
+    /// 3 SustainedLowLatency, 4 NoGCRegion. Возвращает установленный
+    public int GcSetLatency(int mode)
+    {
+        try { System.Runtime.GCSettings.LatencyMode = (System.Runtime.GCLatencyMode)mode; }
+        catch (Exception) { }
+        return (int)System.Runtime.GCSettings.LatencyMode;
+    }
 
     // ── ПЛОТНЫЙ СПИСОК ЖИВЫХ СТРОК, И ОН ОТСОРТИРОВАН (сент. 2026) ─────────
     // _top упирается в самого верхнего живого: при рассеянных потерях (а в бою
@@ -614,6 +747,7 @@ public partial class ArmyCore : RefCounted
         }
         list.Add(new Vector3(pos.X, pos.Z, radius));
         if (radius > _trunkMaxR) _trunkMaxR = radius;
+        _navTreeDirty = true;
     }
 
     public void UnregisterTrunk(Vector3 pos)
@@ -630,6 +764,7 @@ public partial class ArmyCore : RefCounted
             if (dx * dx + dz * dz < 0.01f)
             {
                 list.RemoveAt(i);
+                _navTreeDirty = true;
                 return;
             }
         }
@@ -639,6 +774,7 @@ public partial class ArmyCore : RefCounted
     {
         _trunks.Clear();
         _trunkMaxR = 0.0f;
+        _navTreeDirty = true;
     }
 
     public int TrunkCount()
@@ -681,6 +817,134 @@ public partial class ArmyCore : RefCounted
             }
         }
         return Vector3.Zero;
+    }
+
+    // ── ФУНДАМЕНТЫ: реестр и запросы ─────────────────────────────────────
+    public void RegisterObstacle(long id, float[] flat)
+    {
+        UnregisterObstacle(id);
+        if (flat == null || flat.Length < 3) return;
+        var cells = new System.Collections.Generic.List<long>(4);
+        for (int k = 0; k + 2 < flat.Length; k += 3)
+        {
+            float x = flat[k], z = flat[k + 1], r = flat[k + 2];
+            if (r <= 0.0f) continue;
+            int cx = Mathf.FloorToInt(x / ObstCell);
+            int cz = Mathf.FloorToInt(z / ObstCell);
+            long key = TrunkKey(cx, cz);
+            if (!_blds.TryGetValue(key, out var list))
+            {
+                list = new System.Collections.Generic.List<BldCircle>(4);
+                _blds[key] = list;
+            }
+            list.Add(new BldCircle { X = x, Z = z, R = r, Id = id });
+            cells.Add(key);
+            if (r > _bldMaxR) _bldMaxR = r;
+        }
+        if (cells.Count == 0) return;
+        _bldCells[id] = cells;
+        BldCount++;
+        _navBldDirty = true;
+    }
+
+    public void UnregisterObstacle(long id)
+    {
+        if (!_bldCells.TryGetValue(id, out var cells)) return;
+        for (int c = 0; c < cells.Count; c++)
+        {
+            if (!_blds.TryGetValue(cells[c], out var list)) continue;
+            for (int i = list.Count - 1; i >= 0; i--)
+                if (list[i].Id == id) list.RemoveAt(i);
+            if (list.Count == 0) _blds.Remove(cells[c]);
+        }
+        _bldCells.Remove(id);
+        BldCount--;
+        _bldMaxR = 0.0f;
+        foreach (var kv in _blds)
+            for (int i = 0; i < kv.Value.Count; i++)
+                if (kv.Value[i].R > _bldMaxR) _bldMaxR = kv.Value[i].R;
+        _navBldDirty = true;
+    }
+
+    public void ClearObstacles()
+    {
+        _blds.Clear(); _bldCells.Clear(); _bldMaxR = 0.0f; BldCount = 0;
+        _navBldDirty = true;
+    }
+
+    public int ObstacleCount() { return BldCount; }
+
+    /// Глубина проникновения точки (с телом bodyR) в самый глубокий круг
+    /// фундамента; 0 — свободно. ox/oz — единичное направление НАРУЖУ
+    private float BldPenetration(float x, float z, float bodyR, out float ox, out float oz)
+    {
+        ox = 0.0f; oz = 0.0f;
+        if (BldCount == 0) return 0.0f;
+        float reach = bodyR + _bldMaxR;
+        const float inv = 1.0f / ObstCell;
+        int cx0 = Mathf.FloorToInt((x - reach) * inv);
+        int cz0 = Mathf.FloorToInt((z - reach) * inv);
+        int cx1 = Mathf.FloorToInt((x + reach) * inv);
+        int cz1 = Mathf.FloorToInt((z + reach) * inv);
+        float best = 0.0f;
+        for (int cx = cx0; cx <= cx1; cx++)
+            for (int cz = cz0; cz <= cz1; cz++)
+            {
+                if (!_blds.TryGetValue(TrunkKey(cx, cz), out var list)) continue;
+                for (int i = 0; i < list.Count; i++)
+                {
+                    var b = list[i];
+                    float dx = x - b.X, dz = z - b.Z;
+                    float rr = b.R + bodyR;
+                    float d2 = dx * dx + dz * dz;
+                    if (d2 >= rr * rr) continue;
+                    float d = Mathf.Sqrt(d2);
+                    float pen = rr - d;
+                    if (pen <= best) continue;
+                    best = pen;
+                    if (d < 1e-6f) { ox = 1.0f; oz = 0.0f; }
+                    else { ox = dx / d; oz = dz / d; }
+                }
+            }
+        return best;
+    }
+
+    public Vector3 BldBlock(float x, float z, float bodyR)
+    {
+        float ox, oz;
+        float pen = BldPenetration(x, z, bodyR, out ox, out oz);
+        if (pen <= 0.0f) return Vector3.Zero;
+        return new Vector3(ox * pen, 0.0f, oz * pen);
+    }
+
+    public float BldDepth(float x, float z, float bodyR)
+    {
+        float ox, oz;
+        return BldPenetration(x, z, bodyR, out ox, out oz);
+    }
+
+    public bool BldNear(float x, float z, float radius)
+    {
+        if (BldCount == 0) return false;
+        float reach = radius + _bldMaxR;
+        const float inv = 1.0f / ObstCell;
+        int cx0 = Mathf.FloorToInt((x - reach) * inv);
+        int cz0 = Mathf.FloorToInt((z - reach) * inv);
+        int cx1 = Mathf.FloorToInt((x + reach) * inv);
+        int cz1 = Mathf.FloorToInt((z + reach) * inv);
+        for (int cx = cx0; cx <= cx1; cx++)
+            for (int cz = cz0; cz <= cz1; cz++)
+            {
+                if (!_blds.TryGetValue(TrunkKey(cx, cz), out var list)) continue;
+                for (int i = 0; i < list.Count; i++)
+                {
+                    var b = list[i];
+                    float dx = x - b.X, dz = z - b.Z;
+                    float rr = b.R + radius;
+                    if (dx * dx + dz * dz < rr * rr) return true;
+                }
+            }
+        return false;
     }
 
     public bool TrunkNear(float x, float z, float radius)
@@ -726,10 +990,16 @@ public partial class ArmyCore : RefCounted
         Array.Resize(ref _atkReach, cap);
         Array.Resize(ref _sepNX, cap); Array.Resize(ref _sepNZ, cap);
         Array.Resize(ref _sepGo, cap);
+        Array.Resize(ref _sepAccX, cap); Array.Resize(ref _sepAccZ, cap);
         Array.Resize(ref _cliffSide, cap);
         Array.Resize(ref _cliffFree, cap);
+        Array.Resize(ref _bldSide, cap);
         Array.Resize(ref _pressX, cap); Array.Resize(ref _pressZ, cap);
         Array.Resize(ref _pressV, cap); Array.Resize(ref _pressStop, cap);
+        Array.Resize(ref _pressV2, cap); Array.Resize(ref _pressLim, cap);
+        Array.Resize(ref _gateT, cap); Array.Resize(ref _gateEl, cap);
+        Array.Resize(ref _sideS, cap); Array.Resize(ref _flankB, cap);
+        Array.Resize(ref _gateMode, cap);
         Array.Resize(ref _rbB, cap); Array.Resize(ref _rbI, cap);
         Array.Resize(ref _rbBaseY, cap);
         Array.Resize(ref _drawX, cap); Array.Resize(ref _drawY, cap);
@@ -737,6 +1007,11 @@ public partial class ArmyCore : RefCounted
         Array.Resize(ref _anFps, cap); Array.Resize(ref _anFrames, cap);
         Array.Resize(ref _anLoop, cap); Array.Resize(ref _anPhase, cap);
         Array.Resize(ref _anFrame, cap);
+        Array.Resize(ref _vqLx, cap); Array.Resize(ref _vqLz, cap);
+        Array.Resize(ref _vqPx, cap); Array.Resize(ref _vqPz, cap);
+        Array.Resize(ref _vqMs, cap); Array.Resize(ref _vqWake, cap);
+        Array.Resize(ref _vqMv2, cap);
+        Array.Resize(ref _vFlash, cap); Array.Resize(ref _vPeak, cap);
         Array.Resize(ref _ringB, cap); Array.Resize(ref _shB, cap);
         Array.Resize(ref _decI, cap); Array.Resize(ref _hpB, cap); Array.Resize(ref _hpI, cap);
         // Новые ячейки привязки к отрисовке обязаны быть «не привязан»
@@ -745,9 +1020,11 @@ public partial class ArmyCore : RefCounted
         Array.Resize(ref _atkDmg, cap); Array.Resize(ref _atkRange, cap);
         int oldW = _tgtW.Length;
         Array.Resize(ref _tgtW, cap);
-        for (int w = oldW; w < cap; w++) _tgtW[w] = 1.0f;
+        Array.Resize(ref _tgtWc, cap);
+        for (int w = oldW; w < cap; w++) { _tgtW[w] = 1.0f; _tgtWc[w] = 1.0f; }
         Array.Resize(ref _speed, cap);
         Array.Resize(ref _sepT, cap); Array.Resize(ref _sepR, cap);
+        Array.Resize(ref _bodyR, cap);
         Array.Resize(ref _slX, cap); Array.Resize(ref _slZ, cap);
         Array.Resize(ref _stpX, cap); Array.Resize(ref _stpZ, cap);
         Array.Resize(ref _thX, cap); Array.Resize(ref _thZ, cap); Array.Resize(ref _thY, cap);
@@ -789,7 +1066,8 @@ public partial class ArmyCore : RefCounted
         _hp[i] = 0; _hpMax[i] = 0;
         _atkCd[i] = 0; _aggroT[i] = 0; _atkReach[i] = 0;
         _rbB[i] = -1; _bobPhase[i] = 0;
-        _atkDmg[i] = 0; _atkRange[i] = 0; _speed[i] = 0; _tgtW[i] = 1.0f;
+        _vFlash[i] = 0; _vPeak[i] = 0; _vqWake[i] = 0;
+        _atkDmg[i] = 0; _atkRange[i] = 0; _speed[i] = 0; _tgtW[i] = 1.0f; _tgtWc[i] = 1.0f;
         // Фаза разбора наложения разводится по номеру строки: иначе весь отряд,
         // вышедший из барака одним заказом, разбирается в один и тот же кадр
         _sepT[i] = (i & 7) * 0.008f;
@@ -810,6 +1088,8 @@ public partial class ArmyCore : RefCounted
         _st[i] = 0;
         _fac[i] = -1;
         _sq[i] = 0;
+        _sepAccX[i] = 0.0f; _sepAccZ[i] = 0.0f;
+        if (_bodyR[i] > 0.0f) SetBodyRadius(i, 0.0f);
         _attackers[i] = 0;
         _tgt[i] = -1;
         _unitOf[i] = null;
@@ -848,7 +1128,7 @@ public partial class ArmyCore : RefCounted
     // ── ТОНКИЕ СЕТТЕРЫ ─────────────────────────────────────────────────────
     // Одно число за вызов: их зовёт сам боец оттуда, где он и так менял эту
     // величину. Массивы наружу не отдаются НИКОГДА — см. шапку файла
-    public void SetPos(int i, float x, float y, float z) { _px[i] = x; _py[i] = y; _pz[i] = z; }
+    public void SetPos(int i, float x, float y, float z) { _px[i] = x; _py[i] = y; _pz[i] = z; _sepAccX[i] = 0.0f; _sepAccZ[i] = 0.0f; }
     /// БОЕЦ ВНЕ КАРТЫ (гарнизон): строка живёт, но координата «ненастоящая».
     /// Без этого вошедший в замок или башню оставался в сетке соседей на
     /// последней точке у ворот, и его находили и BestEnemy, и стрелы (EnemyAt):
@@ -867,6 +1147,7 @@ public partial class ArmyCore : RefCounted
     public void SetCombat(int i, float dmg, float rng, float spd)
     { _atkDmg[i] = dmg; _atkRange[i] = rng; _speed[i] = spd; }
     public void SetTargetWeight(int i, float w) { if (i >= 0 && i < _capacity) _tgtW[i] = w > 0.01f ? w : 1.0f; }
+    public void SetCavWeight(int i, float w) { if (i >= 0 && i < _capacity) _tgtWc[i] = w > 0.01f ? w : 1.0f; }
     public void SetSlot(int i, float ox, float oz) { if (i >= 0) { _slX[i] = ox; _slZ[i] = oz; } }
     public void SetAttackers(int i, int n) { if (i >= 0 && i < _capacity) _attackers[i] = n; }
     /// Строка цели атаки. Пишется по событию из Unit.set_attack_target
@@ -877,7 +1158,7 @@ public partial class ArmyCore : RefCounted
     public void WritePose(int i, Vector3 p, Vector3 v, int state)
     {
         if (i < 0) return;
-        _px[i] = p.X; _py[i] = p.Y; _pz[i] = p.Z;
+        _px[i] = p.X; _py[i] = p.Y; _pz[i] = p.Z; _sepAccX[i] = 0.0f; _sepAccZ[i] = 0.0f;
         _vx[i] = v.X; _vz[i] = v.Z;
         _st[i] = state;
         _flags[i] |= FPosValid;
@@ -909,7 +1190,7 @@ public partial class ArmyCore : RefCounted
         {
             int i = rows[k];
             if (i < 0 || i >= _capacity) continue;
-            _px[i] = xs[k]; _py[i] = ys[k]; _pz[i] = zs[k];
+            _px[i] = xs[k]; _py[i] = ys[k]; _pz[i] = zs[k]; _sepAccX[i] = 0.0f; _sepAccZ[i] = 0.0f;
             _vx[i] = vxs[k]; _vz[i] = vzs[k];
             _st[i] = sts[k];
             _effSpeed[i] = effSpd[k];
@@ -1271,7 +1552,7 @@ public partial class ArmyCore : RefCounted
         if (row < 0 || SkipBodyScan) return Vector3.Zero;
         int myf = _fac[row];
         int mySlot = FacSlot(myf);
-        if (!EnemyNear(tx, tz, myf, minDist)) return Vector3.Zero;
+        if (!EnemyNear(tx, tz, myf, minDist + _bodyMax)) return Vector3.Zero;
         if (_gw == 0) return Vector3.Zero;
         int cx0 = (int)((tx - minDist - _gx0) * _ginv);
         int cz0 = (int)((tz - minDist - _gz0) * _ginv);
@@ -1326,6 +1607,7 @@ public partial class ArmyCore : RefCounted
                 }
             }
         }
+        if (_giants.Count > 0) GiantBlock(row, tx, tz, minDist, mySlot, DeadState, ref nx, ref nz, awayOk);
         return new Vector3(nx, 0.0f, nz);
     }
 
@@ -1488,6 +1770,12 @@ public partial class ArmyCore : RefCounted
     /// больших гоблинов (ТЗ 14.09.2026, п. 10). Рукопашная веса не читает
     public GodotObject BestEnemyW(int row, float radius, float crowdPenalty, bool usePrio)
     {
+        return BestEnemyPrio(row, radius, crowdPenalty, usePrio ? 1 : 0);
+    }
+
+    /// prio: 0 — ближайший, 1 — вес стрелка (_tgtW), 2 — вес конницы (_tgtWc)
+    public GodotObject BestEnemyPrio(int row, float radius, float crowdPenalty, int prio)
+    {
         if (row < 0) return null;
         float x = _px[row], z = _pz[row];
         int myf = _fac[row];
@@ -1528,7 +1816,8 @@ public partial class ArmyCore : RefCounted
                         // Число целящихся — из КОЛОНКИ, а не из поля объекта:
                         // чтение поля через Variant стоило бы дороже всего скана
                         float score = Mathf.Sqrt(d2) + _attackers[j] * crowdPenalty;
-                        if (usePrio) score /= _tgtW[j];
+                        if (prio == 1) score /= _tgtW[j];
+                        else if (prio == 2) score /= _tgtWc[j];
                         if (score < bestScore) { bestScore = score; best = u; }
                         j = _next[j];
                     }
@@ -1648,12 +1937,21 @@ public partial class ArmyCore : RefCounted
     /// был виден — а прежний GDScript-разбор точно так же брал первого
     public Godot.Node3D EnemyAt(float x, float z, float radius, int fac)
     {
-        if (_gw == 0) return null;
+        int j = EnemyRowAt(x, z, radius, fac);
+        return j < 0 ? null : _unitOf[j] as Godot.Node3D;
+    }
+
+    /// То же правило, ответ — СТРОКА (−1 — никого). Снаряды ядра (этап 3
+    /// BigStand-5) отдают жертву строкой: узел GDScript берёт из своего
+    /// реестра строка → узел, а не из обёртки объекта в событии
+    public int EnemyRowAt(float x, float z, float radius, int fac)
+    {
+        if (_gw == 0) return -1;
         int cx0 = (int)((x - radius - _gx0) * _ginv);
         int cz0 = (int)((z - radius - _gz0) * _ginv);
         int cx1 = (int)((x + radius - _gx0) * _ginv);
         int cz1 = (int)((z + radius - _gz0) * _ginv);
-        if (cx1 < 0 || cz1 < 0 || cx0 >= _gw || cz0 >= _gh) return null;
+        if (cx1 < 0 || cz1 < 0 || cx0 >= _gw || cz0 >= _gh) return -1;
         if (cx0 < 0) cx0 = 0;
         if (cz0 < 0) cz0 = 0;
         if (cx1 >= _gw) cx1 = _gw - 1;
@@ -1678,16 +1976,112 @@ public partial class ArmyCore : RefCounted
                         float dz = z - _pz[j];
                         if (dx * dx + dz * dz <= rSq)
                         {
-                            var u = _unitOf[j] as Godot.Node3D;
+                            var u = _unitOf[j];
                             if (u != null && GodotObject.IsInstanceValid(u))
-                                return u;
+                                return j;
                         }
                         j = _next[j];
                     }
                 }
             }
         }
-        return null;
+        return -1;
+    }
+
+    /// ВСЕ БОЙЦЫ В РАДИУСЕ — СТРОКАМИ (BigStand-5, этап 4). Тот же обход, что
+    /// у QueryRadius, но наружу уходит int[] (PackedInt32Array): у
+    /// Godot.Collections.Array КАЖДЫЙ элемент-узел — финализируемая обёртка,
+    /// и она переживает gen0 всегда (очередь финализации), набивая gen1 —
+    /// зонд GcProbe назвал query_radius единственным источником
+    /// финализируемого мусора среди вызовов ядра (~59 на вызов). Узел по
+    /// строке GDScript берёт из своего реестра (GameManager._row_units)
+    private readonly System.Collections.Generic.List<int> _qrRows = new System.Collections.Generic.List<int>(256);
+    public int[] QueryRadiusRows(float x, float z, float radius)
+    {
+        _qrRows.Clear();
+        if (_gw == 0) return Array.Empty<int>();
+        int cx0 = (int)((x - radius - _gx0) * _ginv);
+        int cz0 = (int)((z - radius - _gz0) * _ginv);
+        int cx1 = (int)((x + radius - _gx0) * _ginv);
+        int cz1 = (int)((z + radius - _gz0) * _ginv);
+        if (cx1 < 0 || cz1 < 0 || cx0 >= _gw || cz0 >= _gh) return Array.Empty<int>();
+        if (cx0 < 0) cx0 = 0;
+        if (cz0 < 0) cz0 = 0;
+        if (cx1 >= _gw) cx1 = _gw - 1;
+        if (cz1 >= _gh) cz1 = _gh - 1;
+        float rSq = radius * radius;
+        for (int cz = cz0; cz <= cz1; cz++)
+        {
+            int b = cz * _gw;
+            for (int cx = cx0; cx <= cx1; cx++)
+            {
+                int slot = (b + cx) * Factions;
+                for (int side = 0; side < Factions; side++)
+                {
+                    int j = _head[slot + side];
+                    while (j != -1)
+                    {
+                        float dx = x - _px[j];
+                        float dz = z - _pz[j];
+                        if (dx * dx + dz * dz <= rSq)
+                        {
+                            var u = _unitOf[j];
+                            if (u != null && GodotObject.IsInstanceValid(u))
+                                _qrRows.Add(j);
+                        }
+                        j = _next[j];
+                    }
+                }
+            }
+        }
+        return _qrRows.Count == 0 ? Array.Empty<int>() : _qrRows.ToArray();
+    }
+
+    /// СЧЁТ ЖИВЫХ ЧУЖИХ В РАДИУСЕ — без массива вовсе (тролль спрашивает
+    /// «сколько вокруг» каждый физтик ради решения об окружении; список ему
+    /// не нужен). fac — своя фракция, dead — код состояния DEAD
+    public int EnemyCount(float x, float z, float radius, int fac, int dead)
+    {
+        if (_gw == 0) return 0;
+        int cx0 = (int)((x - radius - _gx0) * _ginv);
+        int cz0 = (int)((z - radius - _gz0) * _ginv);
+        int cx1 = (int)((x + radius - _gx0) * _ginv);
+        int cz1 = (int)((z + radius - _gz0) * _ginv);
+        if (cx1 < 0 || cz1 < 0 || cx0 >= _gw || cz0 >= _gh) return 0;
+        if (cx0 < 0) cx0 = 0;
+        if (cz0 < 0) cz0 = 0;
+        if (cx1 >= _gw) cx1 = _gw - 1;
+        if (cz1 >= _gh) cz1 = _gh - 1;
+        float rSq = radius * radius;
+        int n = 0;
+        for (int cz = cz0; cz <= cz1; cz++)
+        {
+            int b = cz * _gw;
+            for (int cx = cx0; cx <= cx1; cx++)
+            {
+                int slot = (b + cx) * Factions;
+                for (int side = 0; side < Factions; side++)
+                {
+                    if (side == fac) continue;
+                    int j = _head[slot + side];
+                    while (j != -1)
+                    {
+                        if (_st[j] != dead)
+                        {
+                            float dx = x - _px[j];
+                            float dz = z - _pz[j];
+                            if (dx * dx + dz * dz <= rSq)
+                            {
+                                var u = _unitOf[j];
+                                if (u != null && GodotObject.IsInstanceValid(u)) n++;
+                            }
+                        }
+                        j = _next[j];
+                    }
+                }
+            }
+        }
+        return n;
     }
 
     /// ВСЕ БОЙЦЫ В РАДИУСЕ. Холодный путь: разбор клика мышью — единственный
@@ -1888,6 +2282,55 @@ public partial class ArmyCore : RefCounted
                     if (sx * sx + sz * sz < 1e-8f) continue;
                 }
             }
+            // ── ФУНДАМЕНТ ПОСТРОЙКИ ────────────────────────────────────────
+            // Правило партии, как вода и скалы (boundsOn). Коридор отряда без
+            // построек рядом снимает проверку (FClearTrunk считает и их);
+            // FTrunkIgnore сюда не смотрит — сквозь дом застрявший не идёт
+            if (BldCount > 0 && boundsOn && (fl & FClearTrunk) == 0)
+            {
+                float ox, oz;
+                float pen = BldPenetration(nx, nz, BldClear, out ox, out oz);
+                if (pen > 0.0f)
+                {
+                    float sp = Mathf.Sqrt(sx * sx + sz * sz);
+                    float hx, hz;
+                    float here = BldPenetration(x, z, BldClear, out hx, out hz);
+                    if (here > 0.0f)
+                    {
+                        // СТОЯЩИЙ ВНУТРИ ВЫХОДИТ: шаг разворачивается наружу
+                        // (площадка заложена поверх отряда, боец из слепка)
+                        sx = hx * sp; sz = hz * sp;
+                    }
+                    else
+                    {
+                        // Обход, как у ствола: снять составляющую «в стену»,
+                        // лобовой шаг отклонить вбок. СТОРОНА — ПАМЯТЬ: пока
+                        // боец трётся об этот фундамент, она не меняется
+                        // (прежде — чётность строки, и соседи по шеренге
+                        // расходились по разные стороны башни, а лобовой
+                        // боец менял сторону на каждом шаге — «бегают по
+                        // кругу»); первый лобовой контакт — сторона отряда
+                        float into = -(sx * ox + sz * oz);
+                        if (into > 0.0f) { sx += ox * into; sz += oz * into; }
+                        float tx = -oz, tz = ox;
+                        float along = sx * tx + sz * tz;
+                        sbyte side = _bldSide[i];
+                        if (Mathf.Abs(along) >= sp * 0.2f) side = along >= 0.0f ? (sbyte)1 : (sbyte)-1;
+                        else if (side == 0) side = (((_sq[i] > 0 ? _sq[i] : i) & 1) == 0) ? (sbyte)1 : (sbyte)-1;
+                        if (Mathf.Sqrt(sx * sx + sz * sz) < sp * 0.2f)
+                        {
+                            sx = tx * side * sp; sz = tz * side * sp;
+                        }
+                        _bldSide[i] = side;
+                        float ax2, az2;
+                        float again = BldPenetration(x + sx, z + sz, BldClear, out ax2, out az2);
+                        if (again > 0.0f) { sx += ax2 * again; sz += az2 * again; }
+                        if (sx * sx + sz * sz < 1e-8f) continue;
+                    }
+                    nx = x + sx; nz = z + sz;
+                }
+                else _bldSide[i] = 0;
+            }
             // ── ЧУЖОЙ СТРОЙ ────────────────────────────────────────────────
             // ЗДЕСЬ СТОЯЛ FRetreating, И ЭТО БЫЛ «ПРОХОД СКВОЗЬ ФАЛАНГУ».
             // Довод был такой: отряду, которого отзывают в замок, перекрытая
@@ -1920,7 +2363,8 @@ public partial class ArmyCore : RefCounted
                 }
                 // Дешёвый отсев по редкой сетке — ровно тот же, что делает
                 // EnemyBlock: без него скан идёт даже по пустой округе
-                if (EnemyNear(nx, nz, myf, br))
+                // (+ тело гиганта: тролль блокирует шаг дальше blockR)
+                if (EnemyNear(nx, nz, myf, br + _bodyMax))
                 {
                     BmEnemyScans++;
                     float bx = 0.0f, bz = 0.0f;
@@ -1935,7 +2379,12 @@ public partial class ArmyCore : RefCounted
                         if (ub != null && GodotObject.IsInstanceValid(ub))
                             ub.Set("_enemy_contact", true);
                         // Напор и автопилот, упёршиеся в ЧУЖОЕ тело, будятся:
-                        // дальше решает полный автомат (перехват, ответ)
+                        // дальше решает полный автомат (перехват, ответ).
+                        // И в режиме подтягивания тоже: без пробуждения боец
+                        // давил в тела до планового возврата, и строй в
+                        // контакте расползался (qa_mega_battle B7-2: 1.14 →
+                        // 1.40 м). Цена — вход в автомат на каждом упоре,
+                        // как и было у GDScript-ветки
                         if ((fl & (FRearPress | FAutopilot)) != 0) PressWake(i);
                         float bl = Mathf.Sqrt(bx * bx + bz * bz);
                         float bnx = bx / bl, bnz = bz / bl;
@@ -2060,6 +2509,7 @@ public partial class ArmyCore : RefCounted
                 if ((fl & FLocalXform) != 0) n3.Position = new Vector3(nx, ny, nz);
                 else n3.GlobalPosition = new Vector3(nx, ny, nz);
             }
+            _sepAccX[i] = 0.0f; _sepAccZ[i] = 0.0f;
             moved++;
         }
         return moved;
@@ -2079,11 +2529,12 @@ public partial class ArmyCore : RefCounted
         int mySlot, int dead, ref float bx, ref float bz, bool awayOk = false)
     {
         if (SkipBodyScan) return;
+        if (_gw == 0) { if (_giants.Count > 0) GiantBlock(row, nx, nz, blockR, mySlot, dead, ref bx, ref bz, awayOk); return; }
         int cx0 = (int)((nx - blockR - _gx0) * _ginv);
         int cz0 = (int)((nz - blockR - _gz0) * _ginv);
         int cx1 = (int)((nx + blockR - _gx0) * _ginv);
         int cz1 = (int)((nz + blockR - _gz0) * _ginv);
-        if (cx1 < 0 || cz1 < 0 || cx0 >= _gw || cz0 >= _gh) return;
+        if (cx1 < 0 || cz1 < 0 || cx0 >= _gw || cz0 >= _gh) { if (_giants.Count > 0) GiantBlock(row, nx, nz, blockR, mySlot, dead, ref bx, ref bz, awayOk); return; }
         if (cx0 < 0) cx0 = 0;
         if (cz0 < 0) cz0 = 0;
         if (cx1 >= _gw) cx1 = _gw - 1;
@@ -2138,6 +2589,7 @@ public partial class ArmyCore : RefCounted
                 }
             }
         }
+        if (_giants.Count > 0) GiantBlock(row, nx, nz, blockR, mySlot, dead, ref bx, ref bz, awayOk);
     }
 
     public void RequestStep(int i, float sx, float sz, int fl)
@@ -2213,6 +2665,54 @@ public partial class ArmyCore : RefCounted
         return _sepR[row];
     }
 
+    /// Добавка к телу гиганта (метры сверх общего blockR). Ноль снимает
+    public void SetBodyRadius(int row, float r)
+    {
+        if (row < 0 || row >= _capacity) return;
+        float v = r > 0.0f ? r : 0.0f;
+        _bodyR[row] = v;
+        if (v > 0.0f) { if (!_giants.Contains(row)) _giants.Add(row); }
+        else _giants.Remove(row);
+        _bodyMax = 0.0f;
+        for (int k = 0; k < _giants.Count; k++)
+            if (_bodyR[_giants[k]] > _bodyMax) _bodyMax = _bodyR[_giants[k]];
+    }
+
+    // Нормали от тел гигантов, чью тушу задевает точка (nx, nz)
+    private void GiantBlock(int row, float nx, float nz, float blockR, int mySlot, int dead,
+        ref float bx, ref float bz, bool awayOk)
+    {
+        for (int k = 0; k < _giants.Count; k++)
+        {
+            int j = _giants[k];
+            if (j == row || j >= _capacity || _st[j] == dead) continue;
+            if ((_flags[j] & FPosValid) == 0 || FacSlot(_fac[j]) == mySlot) continue;
+            float rr = blockR + _bodyR[j];
+            float dx = nx - _px[j];
+            float dz = nz - _pz[j];
+            float d2 = dx * dx + dz * dz;
+            if (d2 >= rr * rr) continue;
+            if (awayOk && d2 >= 0.0001f)
+            {
+                float cdx = _px[row] - _px[j];
+                float cdz = _pz[row] - _pz[j];
+                if (d2 >= cdx * cdx + cdz * cdz) continue;
+            }
+            if (d2 < 0.0001f)
+            {
+                float ang = (row % 251) * (Mathf.Tau / 251.0f);
+                bx += Mathf.Cos(ang);
+                bz += Mathf.Sin(ang);
+            }
+            else
+            {
+                float inv = 1.0f / Mathf.Sqrt(d2);
+                bx += dx * inv;
+                bz += dz * inv;
+            }
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // РАЗБОР НАЛОЖЕНИЯ. crossSquad — ВО СКОЛЬКО РАЗ ШИРЕ ДЕРЖАТСЯ ЧУЖИЕ ОТРЯДЫ
     // ═══════════════════════════════════════════════════════════════════════
@@ -2267,6 +2767,17 @@ public partial class ArmyCore : RefCounted
             if ((_flags[i] & (FPosValid | FDormant)) != FPosValid) continue;
             int s = _st[i];
             if (s == dead) continue;
+            bool iCalm = s != movingState && s != attackingState && (_flags[i] & FSettled) != 0;
+            // ── ГИГАНТ СРЕДИ МЕЛКИХ СОЮЗНИКОВ (ТЗ 19.09.2026, «Фикс туш») ─────
+            // Тушу (тело в ядре, _bodyR > 0) на марше сквозь свою орду каждая
+            // пара соседей отталкивала по ЕЁ норме (0.73 м, ×1.6 от чужого
+            // отряда): десятки поправок в такт, идущий скользил вбок и терял
+            // шаг — «замедляется, впадает в ступор». Теперь идущий гигант
+            // мелких союзников НЕ считает вовсе (они уходят с его дороги
+            // сами: мелкий сосед берёт норму гиганта, см. ниже), стоящий —
+            // считает в доле их радиуса к своему
+            bool iGiant = _bodyR[i] > 0.0f;
+            bool iGoing = s == movingState || s == attackingState;
             // ЛИЧНЫЙ РАДИУС ПЕРЕКРЫВАЕТ ОБЩИЙ. Поправка считается по СВОЕЙ
             // норме каждого: крупный сосед отходит дальше, мелкий — на своё.
             // Равновесие пары выходит по большему из двух радиусов, потому что
@@ -2364,12 +2875,35 @@ public partial class ArmyCore : RefCounted
                                 limNearSq = pNear * pNear;
                             }
                         }
+                        float oR = _sepR[j];
+                        float share = 1.0f;
+                        if (iGiant && oR < own)
+                        {
+                            if (iGoing) { j = _next[j]; continue; }
+                            share = (oR > 0.0f ? oR : minDist) / own;
+                        }
+                        else if (!iGiant && _bodyR[j] > 0.0f && oR > lim)
+                        {
+                            // Мелкий у гиганта держит ЕГО норму: отходит сам,
+                            // и гиганту не приходится выталкивать его собой
+                            lim = oR;
+                            float gNear = Mathf.Max(oR - deadzone, 0.0f);
+                            limNearSq = gNear * gNear;
+                        }
                         float dx = x - _px[j];
                         float dz = z - _pz[j];
                         float dd = dx * dx + dz * dz;
                         // МЁРТВАЯ ЗОНА: сосед, стоящий чуть теснее нормы, в
                         // расчёт не идёт — иначе строй перетаптывается вечно
                         if (dd >= limNearSq) { j = _next[j]; continue; }
+                        // ЯКОРЬ: два стоящих соседа одного отряда (оба дошли)
+                        // терпят друг друга до SettledDeadzone — см. шапку
+                        if (iCalm && !otherSquad && (_flags[j] & FSettled) != 0
+                            && _st[j] != movingState && _st[j] != attackingState)
+                        {
+                            float calmNear = Mathf.Max(lim - SettledDeadzone, 0.0f);
+                            if (dd >= calmNear * calmNear) { j = _next[j]; continue; }
+                        }
                         if (dd < 1e-8f)
                         {
                             float ang = (i % 251) * (Mathf.Tau / 251.0f);
@@ -2378,7 +2912,7 @@ public partial class ArmyCore : RefCounted
                             dd = dx * dx + dz * dz;
                         }
                         float d = Mathf.Sqrt(dd);
-                        float need = (lim - d) / d;
+                        float need = (lim - d) / d * share;
                         pxa += dx * need;
                         pza += dz * need;
                         j = _next[j];
@@ -2493,8 +3027,20 @@ public partial class ArmyCore : RefCounted
             if (u == null || !GodotObject.IsInstanceValid(u)) continue;
             if (waterOn && IsWaterAt(nx2, nz2, gm)) continue;
             if (_cliffOn && waterOn && IsCliffAt(nx2, nz2) && !IsCliffAt(_px[i], _pz[i])) continue;   // на скалу не выталкиваем
+            if (BldCount > 0 && waterOn && BldDepth(nx2, nz2, 0.0f) > 0.0f && BldDepth(_px[i], _pz[i], 0.0f) <= 0.0f) continue;   // и в дом тоже
             float ny = Height(nx2, nz2, reliefAmp);
+            // Накопитель: колонка точна всегда, узел — когда сдвиг дорос до
+            // NodeWriteMin (BigStand, этап 2). Ниже порога — ни записи в
+            // дерево сцены, ни пробуждения, ни счёта «сдвинутых»
+            float ax = _sepAccX[i] + (nx2 - _px[i]);
+            float az = _sepAccZ[i] + (nz2 - _pz[i]);
             _px[i] = nx2; _py[i] = ny; _pz[i] = nz2;
+            if (ax * ax + az * az < NodeWriteMin * NodeWriteMin)
+            {
+                _sepAccX[i] = ax; _sepAccZ[i] = az;
+                continue;
+            }
+            _sepAccX[i] = 0.0f; _sepAccZ[i] = 0.0f;
             if (u is Node3D n3)
             {
                 if ((_flags[i] & FLocalXform) != 0) n3.Position = new Vector3(nx2, ny, nz2);
@@ -2523,7 +3069,7 @@ public partial class ArmyCore : RefCounted
             float ox = _slX[i], oz = _slZ[i];
             float wx = ax + rx * ox + cx * oz;
             float wz = az + rz * ox + cz * oz;
-            _px[i] = wx; _pz[i] = wz;
+            _px[i] = wx; _pz[i] = wz; _sepAccX[i] = 0.0f; _sepAccZ[i] = 0.0f;
             _py[i] = ny + Height(wx, wz, amp);
             _flags[i] |= FPosValid;
             n++;
@@ -2545,6 +3091,7 @@ public partial class ArmyCore : RefCounted
                 if ((_flags[i] & FLocalXform) != 0) n3.Position = p;
                 else n3.GlobalPosition = p;
             }
+            _sepAccX[i] = 0.0f; _sepAccZ[i] = 0.0f;
         }
     }
 
@@ -2734,6 +3281,22 @@ public partial class ArmyCore : RefCounted
     // Проснувшиеся — плоским массивом [объект, остаток кулдауна, ...]. Остаток
     // обязателен: пробуждение по потере цели приходит ПОСРЕДИ остывания, и
     // подмена остатка на spare дала бы удар по новой цели раньше срока
+    /// То же ПЛОСКИМ float[] пар [строка, остаток]: Godot.Collections.Array
+    /// финализируем и переживает gen0 всегда — раз в тик такая обёртка
+    /// набивала gen1 и учащала блокирующие сборки (BigStand-5, этап 4).
+    /// Узел GDScript берёт из реестра строка → узел
+    public float[] TakeWokenF()
+    {
+        var res = new float[_wokenCount * 2];
+        for (int k = 0; k < _wokenCount; k++)
+        {
+            res[k * 2] = _wokenRows[k];
+            res[k * 2 + 1] = _wokenCd[k];
+        }
+        _wokenCount = 0;
+        return res;
+    }
+
     public Godot.Collections.Array TakeWoken()
     {
         var res = new Godot.Collections.Array();
@@ -2806,6 +3369,45 @@ public partial class ArmyCore : RefCounted
     {
         if (seen.Length == _fogSeen.Length)
             Array.Copy(seen, _fogSeen, seen.Length);
+    }
+
+    /// «Разведано» без «видно»: штамп в _fogSeen (ТЗ 18.09.2026, п. 10 —
+    /// рудники на холмах видны с начала партии как ориентир, врагов рядом
+    /// это не показывает). Та же математика, что у FogStamp, только в seen
+    public void FogStampSeen(float x, float z, float radius)
+    {
+        if (radius <= 0.0f || _fogCols <= 0) return;
+        float cx = (x + _fogHalfX) / _fogCell;
+        float cz = (z + _fogHalfZ) / _fogCell;
+        float rc = radius / _fogCell;
+        float inner = Mathf.Max(rc - _fogFeather / _fogCell, 0.0f);
+        float inner2 = inner * inner;
+        float feather = Mathf.Max(rc - inner, 0.001f);
+        int z0 = Math.Max((int)Mathf.Floor(cz - rc), 0);
+        int z1 = Math.Min((int)Mathf.Ceil(cz + rc), _fogRows - 1);
+        float r2 = rc * rc;
+        var seen = _fogSeen;
+        for (int iz = z0; iz <= z1; iz++)
+        {
+            float dz = iz + 0.5f - cz;
+            float dz2 = dz * dz;
+            float half = r2 - dz2;
+            if (half <= 0.0f) continue;
+            half = Mathf.Sqrt(half);
+            int x0 = Math.Max((int)Mathf.Floor(cx - half), 0);
+            int x1 = Math.Min((int)Mathf.Ceil(cx + half), _fogCols - 1);
+            int b = iz * _fogCols;
+            for (int ix = x0; ix <= x1; ix++)
+            {
+                float dx = ix + 0.5f - cx;
+                float d2 = dx * dx + dz2;
+                int v = 255;
+                if (d2 > inner2)
+                    v = (int)(Mathf.Clamp((rc - Mathf.Sqrt(d2)) / feather, 0.0f, 1.0f) * 255.0f);
+                int o = b + ix;
+                if (v > seen[o]) seen[o] = (byte)v;
+            }
+        }
     }
 
     private void FogStamp(float x, float z, float radius)
@@ -2899,6 +3501,21 @@ public partial class ArmyCore : RefCounted
     /// Число ячеек-источников последнего пересчёта (зонды)
     public int FogSourceCount() => _fogSrcN;
 
+    /// Пересчёт по строкам БЕЗ Godot-обёртки в ответе (BigStand-5, этап 4):
+    /// маски читаются потом FogLit/FogSeen/FogRgba плоскими массивами.
+    /// Godot.Collections.Array финализируем и раз в 0.15 с ложился в gen1
+    public int FogRefreshRowsPacked(int faction, float visMult, float visMin,
+        float srcCell, float pad, float[] extra)
+    {
+        _fogPacked = true;
+        FogRefreshRows(faction, visMult, visMin, srcCell, pad, extra);
+        _fogPacked = false;
+        return _fogSrcN;
+    }
+    public byte[] FogLit() => _fogLit;
+    public byte[] FogSeen() => _fogSeen;
+    public byte[] FogRgba() => _fogRgba;
+
     private Godot.Collections.Array FogFinish()
     {
         int n = _fogCols * _fogRows;
@@ -2913,10 +3530,16 @@ public partial class ArmyCore : RefCounted
             rgba[o + 2] = 0;
             rgba[o + 3] = 255;
         }
-        var res = new Godot.Collections.Array();
-        res.Add(lit); res.Add(seen); res.Add(rgba);
-        return res;
+        if (!_fogPacked)
+        {
+            var res = new Godot.Collections.Array();
+            res.Add(lit); res.Add(seen); res.Add(rgba);
+            return res;
+        }
+        return null;
     }
+    // Ответ без обёртки (FogRefreshRowsPacked): заливка та же, массива нет
+    private bool _fogPacked;
 
     /// Полный пересчёт: источники плоским массивом троек [x, z, r].
     /// Возвращает [lit, seen, rgba] — копии для чтения и текстуры
@@ -2939,8 +3562,57 @@ public partial class ArmyCore : RefCounted
     {
         _flags[i] &= ~(FRearPress | FAutopilot);
         if (_pressWakeCount >= _pressWakeRows.Length)
-            Array.Resize(ref _pressWakeRows, Math.Max(64, _pressWakeRows.Length * 2));
-        _pressWakeRows[_pressWakeCount++] = i;
+        {
+            int cap2 = Math.Max(64, _pressWakeRows.Length * 2);
+            Array.Resize(ref _pressWakeRows, cap2);
+            Array.Resize(ref _pressWakeEl, cap2);
+        }
+        _pressWakeRows[_pressWakeCount] = i;
+        _pressWakeEl[_pressWakeCount] = _gateEl[i];
+        _pressWakeCount++;
+        _gateEl[i] = 0.0f;
+    }
+
+    // Сколько СВОИХ (кроме самого бойца) стоит ближе r к точке — копия
+    // GDScript unit_grid.allies_count_near, по мелкой сетке ядра
+    private int AlliesNearPoint(int self, float x, float z, int fac, float r, int limit)
+    {
+        if (_gw == 0) return 0;
+        int side = FacSlot(fac);
+        int dead = DeadState;
+        float r2 = r * r;
+        int cx0 = (int)((x - r - _gx0) * _ginv);
+        int cz0 = (int)((z - r - _gz0) * _ginv);
+        int cx1 = (int)((x + r - _gx0) * _ginv);
+        int cz1 = (int)((z + r - _gz0) * _ginv);
+        if (cx1 < 0 || cz1 < 0 || cx0 >= _gw || cz0 >= _gh) return 0;
+        if (cx0 < 0) cx0 = 0;
+        if (cz0 < 0) cz0 = 0;
+        if (cx1 >= _gw) cx1 = _gw - 1;
+        if (cz1 >= _gh) cz1 = _gh - 1;
+        int n = 0;
+        for (int cz = cz0; cz <= cz1; cz++)
+        {
+            int b = cz * _gw;
+            for (int cx = cx0; cx <= cx1; cx++)
+            {
+                int j = _head[(b + cx) * Factions + side];
+                while (j != -1)
+                {
+                    if (j != self && _st[j] != dead)
+                    {
+                        float dx = _px[j] - x, dz = _pz[j] - z;
+                        if (dx * dx + dz * dz <= r2)
+                        {
+                            n++;
+                            if (n >= limit) return n;
+                        }
+                    }
+                    j = _next[j];
+                }
+            }
+        }
+        return n;
     }
 
     /// Аренда напора: точка боя, скорость (уже с множителем подтягивания) и
@@ -3007,10 +3679,25 @@ public partial class ArmyCore : RefCounted
     /// Аренда автопилота: скорость и дистанция остановки (колонки напора
     /// переиспользуются — режимы взаимоисключающие). Точка НЕ хранится:
     /// направление берётся на живую строку цели каждый такт
-    public void AutopilotArm(int i, float speed, float stop)
+    public void AutopilotArm(int i, float speed, float pullSpeed, float stop,
+        float pullLim, float cadence, float sideSign)
     {
         if (i < 0 || i >= _capacity) return;
-        _pressV[i] = speed; _pressStop[i] = stop;
+        _pressV[i] = speed; _pressV2[i] = pullSpeed; _pressStop[i] = stop;
+        _pressLim[i] = pullLim; _gateT[i] = cadence; _gateEl[i] = 0.0f;
+        _sideS[i] = sideSign; _flankB[i] = 0; _gateMode[i] = 0;
+        _flags[i] |= FAutopilot;
+    }
+
+    // Марш стены к ТОЧКЕ (Unit._phalanx_march): цель — не строка, а место;
+    // стоп на ARRIVE_RADIUS, упор и чужой в длине руки будят
+    public void AutopilotArmGoal(int i, float speed, float gx, float gz, float stop, float cadence)
+    {
+        if (i < 0 || i >= _capacity) return;
+        _pressV[i] = speed; _pressV2[i] = speed; _pressStop[i] = stop;
+        _pressX[i] = gx; _pressZ[i] = gz;
+        _pressLim[i] = -1.0f; _gateT[i] = cadence; _gateEl[i] = 0.0f;
+        _flankB[i] = 0; _gateMode[i] = GateGoal;
         _flags[i] |= FAutopilot;
     }
 
@@ -3025,7 +3712,8 @@ public partial class ArmyCore : RefCounted
     /// сетке для (i + tick) % scanMod == 0. Радиус — длина руки с запасом:
     /// перехват обязан быть ФИЗИЧЕСКИМ телом на пути (правило замка приказа)
     public int AutopilotPass(float delta, int shards, int phase,
-        int tick, int scanMod, float scanR)
+        int tick, int scanMod, float scanR,
+        float flankTrig, int flankRecheck, float flankStrength)
     {
         if (shards < 1) shards = 1;
         float sdelta = delta * shards;
@@ -3039,13 +3727,23 @@ public partial class ArmyCore : RefCounted
             if ((fl & (FPosValid | FDormant)) != FPosValid || _st[i] == dead)
             { _flags[i] = fl & ~FAutopilot; continue; }
             int t = _tgt[i];
-            if (t < 0 || t >= _capacity || (_flags[t] & FPosValid) == 0
-                || _st[t] == dead)
+            bool goal = _gateMode[i] == GateGoal;
+            if (!goal && (t < 0 || t >= _capacity || (_flags[t] & FPosValid) == 0
+                || _st[t] == dead))
             { PressWake(i); continue; }
             armed++;
+            // ── ПЛАНОВЫЙ ВОЗВРАТ В GDScript (BigStand, этап 4) ────────────────
+            // Автомат боя в GDScript входит раз в cadence (AGGRO_INTERVAL_HOT):
+            // сканы заслона и застревания идут в прежнем ритме, а между ними
+            // шаг к цели считает ядро. Упор в чужое тело будит сразу (шаг),
+            // дистанция удара — тоже; GDScript на входе доводит свои таймеры
+            // на прошедшее время (Unit._rear_wake(elapsed))
+            _gateEl[i] += delta;
+            _gateT[i] -= delta;
+            if (_gateT[i] <= 0.0f) { PressWake(i); continue; }
             float x = _px[i], z = _pz[i];
-            float dx = _px[t] - x;
-            float dz = _pz[t] - z;
+            float dx = (goal ? _pressX[i] : _px[t]) - x;
+            float dz = (goal ? _pressZ[i] : _pz[t]) - z;
             float d2 = dx * dx + dz * dz;
             float stop = _pressStop[i];
             if (d2 <= stop * stop)
@@ -3061,12 +3759,46 @@ public partial class ArmyCore : RefCounted
             { PressWake(i); continue; }
             float d = Mathf.Sqrt(d2);
             float nx = dx / d, nz = dz / d;
-            float sp = _pressV[i];
-            _vx[i] = nx * sp; _vz[i] = nz * sp;
+            // Подтягивание рядов: в окне reach + PULL_UP_MAX идём на долю
+            // скорости (Unit.PULL_UP_SPEED, без обхода своих — как в
+            // GDScript-ветке _should_pull_up), дальше — полным шагом
+            float lim = _pressLim[i];
+            bool pull = lim > 0.0f && d2 <= lim * lim;
+            float sp = pull ? _pressV2[i] : _pressV[i];
+            if (!goal) _gateMode[i] = pull ? GatePull : (byte)0;
+            // Режим «стоять» (скорость 0): стойка «оборона» ждёт цели на
+            // дистанции — только взгляд на цель, шага нет
+            if (sp <= 0.0f)
+            {
+                _vx[i] = 0; _vz[i] = 0;
+                _fx[i] = nx; _fz[i] = nz;
+                continue;
+            }
+            float sx = nx, sz = nz;
+            if (!pull && !goal)
+            {
+                // Обход своих — копия Unit._flank_step: ближе flankTrig к
+                // цели раз в flankRecheck кадров смотрим, занят ли проход
+                // (двое своих в 0.9 м перед носом); занят — шаг с боковой
+                // составляющей в свою сторону
+                if (d > flankTrig) _flankB[i] = 0;
+                else if (((tick + i) % flankRecheck) == 0)
+                    _flankB[i] = (byte)(AlliesNearPoint(i, x + nx * 0.8f, z + nz * 0.8f,
+                        _fac[i], 0.9f, 2) >= 2 ? 1 : 0);
+                if (_flankB[i] != 0)
+                {
+                    float side = -_sideS[i];
+                    sx = nx + (-nz * side) * flankStrength;
+                    sz = nz + (nx * side) * flankStrength;
+                    float sl = Mathf.Sqrt(sx * sx + sz * sz);
+                    if (sl > 1e-6f) { sx /= sl; sz /= sl; }
+                }
+            }
+            _vx[i] = sx * sp; _vz[i] = sz * sp;
             _fx[i] = nx; _fz[i] = nz;
             if (i % shards != phase) continue;
-            _stpX[i] = nx * sp * sdelta;
-            _stpZ[i] = nz * sp * sdelta;
+            _stpX[i] = sx * sp * sdelta;
+            _stpZ[i] = sz * sp * sdelta;
             // ЧУЖОЙ СТРОЙ АВТОПИЛОТУ ПРЕГРАДА ВСЕГДА: бит «путь чист»
             // достался от коридора НА МОМЕНТ ВЗВОДА и стареет, а 5-Гц стража
             // выше даёт окно в десяток тактов — qa_wall A1 тут же поймал 7
@@ -3078,15 +3810,33 @@ public partial class ArmyCore : RefCounted
         return armed;
     }
 
+    public int PressWokenCount() => _pressWakeCount;
+
+    /// Пары [строка, секунд с взвода] плоским float[] (см. TakeWokenF)
+    public float[] TakePressWokenF()
+    {
+        var res = new float[_pressWakeCount * 2];
+        for (int k = 0; k < _pressWakeCount; k++)
+        {
+            res[k * 2] = _pressWakeRows[k];
+            res[k * 2 + 1] = _pressWakeEl[k];
+        }
+        _pressWakeCount = 0;
+        return res;
+    }
+
     /// Проснувшиеся строки напора — объектами (см. TakeWoken: тот же приём)
     public Godot.Collections.Array TakePressWoken()
     {
+        // Пары [боец, секунд с взвода]: GDScript доводит таймеры автомата на
+        // прошедшее время (BigStand, этап 4)
         var res = new Godot.Collections.Array();
         for (int k = 0; k < _pressWakeCount; k++)
         {
             var u = _unitOf[_pressWakeRows[k]];
             if (u == null) continue;
             res.Add(u);
+            res.Add(_pressWakeEl[k]);
         }
         _pressWakeCount = 0;
         return res;
@@ -3114,6 +3864,11 @@ public partial class ArmyCore : RefCounted
         public float[] Buf = Array.Empty<float>();
         public int Capacity;   // в экземплярах
         public bool Dirty;
+        // Свободные слоты слоя СНАРЯДОВ (этап 3 BigStand-5): выдача и возврат
+        // без перехода границы за каждый выстрел. У бакетов армии не ведётся
+        // (их слотами распоряжается FarUnitRenderer)
+        public int[] Free = Array.Empty<int>();
+        public int FreeN;
     }
     private readonly System.Collections.Generic.List<Rb> _rb = new();
     private const int RbStride = 16;
@@ -3142,6 +3897,17 @@ public partial class ArmyCore : RefCounted
     private bool[] _anLoop = Array.Empty<bool>();
     private float[] _anPhase = Array.Empty<float>();
     private int[] _anFrame = Array.Empty<int>();
+    // Тихая строка: взгляд позы, точка и время последнего замера хода, срок
+    // пробуждения (0 — без срока), признак «идёт» по мягкому порогу (0.6)
+    private float[] _vqLx = Array.Empty<float>(), _vqLz = Array.Empty<float>();
+    private float[] _vqPx = Array.Empty<float>(), _vqPz = Array.Empty<float>();
+    private int[] _vqMs = Array.Empty<int>(), _vqWake = Array.Empty<int>();
+    private byte[] _vqMv2 = Array.Empty<byte>();
+    // Вспышка попадания и доля жизни у привязанной строки ведёт ядро:
+    // остаток вспышки в секундах и её пик (свойство ленты: тролль тусклее)
+    private float[] _vFlash = Array.Empty<float>(), _vPeak = Array.Empty<float>();
+    private int[] _visOut = new int[1024];
+    public int VisListed, VisQuietN;
 
     // ── КОЛЬЦА ВЫДЕЛЕНИЯ, ТЕНИ И ПОЛОСКИ ЗДОРОВЬЯ — ТОЖЕ СЛОТЫ, ВЕДОМЫЕ ЯДРОМ ─
     // Слои колец/теней (SelectionDecalRenderer) и полосок (HpBarRenderer)
@@ -3183,21 +3949,51 @@ public partial class ArmyCore : RefCounted
     // кувырком. Канала instance-цвета под это нет (все четыре заняты осью и
     // растворением), а второй слой отрисовки ради одного бита — расточительство
     private float[] _afAxK = new float[64];
+    // ── СНАРЯД БЕЗ УЗЛА (BigStand-5, этап 3) ─────────────────────────────
+    // Всё, что раньше лежало полями узла Arrow на время полёта, — колонки
+    // полёта: урон, стрелок и цель-здание (instance id — GDScript берёт
+    // узел через instance_from_id и сам проверяет живость: строка стрелка
+    // могла быть переиспользована, id — нет), флаги (снайпер, здание,
+    // кость, legacy-узел), длина квада, срок и растворение торчащей, возраст
+    // и потолок полёта. Записи узлов (PfLegacy) летят в тех же колонках:
+    // ручка perf_config.projectile_core выключена — стрела снова узел, и
+    // A/B идёт на одной сборке
+    private float[] _afDmg = new float[64], _afLen = new float[64];
+    private float[] _afLife = new float[64], _afFade = new float[64];
+    private float[] _afAge = new float[64], _afMaxAge = new float[64];
+    private int[] _afFlags = new int[64];
+    private long[] _afShooter = new long[64], _afTgt = new long[64];
     private readonly Godot.Collections.Array _afEvents = new();
+    // Ядро нумерует свои полёты с миллиарда: legacy-узлы ведут свой счётчик
+    // с единицы, и ArrowCancel по id не должен снять чужой полёт
+    private int _nextFlightId = 1000000000;
 
-    public void ArrowLaunch(int id, int b, int slot, Vector3 s, Vector3 e,
-        float arcH, float rate, int fac, float axK = 1.0f)
+    public const int PfLegacy = 1 << 0;
+    public const int PfSnipe  = 1 << 1;
+    public const int PfTarget = 1 << 2;
+    public const int PfBone   = 1 << 3;
+
+    private void AfEnsure()
     {
-        if (_afN >= _afId.Length)
-        {
-            int cap = _afId.Length * 2;
-            Array.Resize(ref _afId, cap); Array.Resize(ref _afSlot, cap); Array.Resize(ref _afFac, cap);
-            Array.Resize(ref _afB, cap);
-            Array.Resize(ref _afSx, cap); Array.Resize(ref _afSy, cap); Array.Resize(ref _afSz, cap);
-            Array.Resize(ref _afEx, cap); Array.Resize(ref _afEy, cap); Array.Resize(ref _afEz, cap);
-            Array.Resize(ref _afArc, cap); Array.Resize(ref _afT, cap); Array.Resize(ref _afRate, cap);
-            Array.Resize(ref _afAxK, cap);
-        }
+        if (_afN < _afId.Length) return;
+        int cap = _afId.Length * 2;
+        Array.Resize(ref _afId, cap); Array.Resize(ref _afSlot, cap); Array.Resize(ref _afFac, cap);
+        Array.Resize(ref _afB, cap);
+        Array.Resize(ref _afSx, cap); Array.Resize(ref _afSy, cap); Array.Resize(ref _afSz, cap);
+        Array.Resize(ref _afEx, cap); Array.Resize(ref _afEy, cap); Array.Resize(ref _afEz, cap);
+        Array.Resize(ref _afArc, cap); Array.Resize(ref _afT, cap); Array.Resize(ref _afRate, cap);
+        Array.Resize(ref _afAxK, cap);
+        Array.Resize(ref _afDmg, cap); Array.Resize(ref _afLen, cap);
+        Array.Resize(ref _afLife, cap); Array.Resize(ref _afFade, cap);
+        Array.Resize(ref _afAge, cap); Array.Resize(ref _afMaxAge, cap);
+        Array.Resize(ref _afFlags, cap);
+        Array.Resize(ref _afShooter, cap); Array.Resize(ref _afTgt, cap);
+    }
+
+    private int AfPush(int id, int b, int slot, Vector3 s, Vector3 e,
+        float arcH, float rate, int fac, float axK, int flags)
+    {
+        AfEnsure();
         int k = _afN++;
         _afB[k] = b;
         _afId[k] = id; _afSlot[k] = slot; _afFac[k] = fac;
@@ -3205,6 +4001,59 @@ public partial class ArmyCore : RefCounted
         _afEx[k] = e.X; _afEy[k] = e.Y; _afEz[k] = e.Z;
         _afArc[k] = arcH; _afT[k] = 0.0f; _afRate[k] = rate;
         _afAxK[k] = axK;
+        _afFlags[k] = flags;
+        _afDmg[k] = 0.0f; _afLen[k] = 0.0f; _afLife[k] = 0.0f; _afFade[k] = 0.0f;
+        _afAge[k] = 0.0f; _afMaxAge[k] = 1e9f;
+        _afShooter[k] = 0; _afTgt[k] = 0;
+        return k;
+    }
+
+    /// Полёт УЗЛА Arrow (legacy-путь, ручка projectile_core = false): события
+    /// уходят прежним Godot-массивом с ссылкой на жертву, узел разбирает сам
+    public void ArrowLaunch(int id, int b, int slot, Vector3 s, Vector3 e,
+        float arcH, float rate, int fac, float axK = 1.0f)
+    {
+        AfPush(id, b, slot, s, e, arcH, rate, fac, axK, PfLegacy);
+    }
+
+    /// ВЫСТРЕЛ БЕЗ УЗЛА: слот слоя берётся здесь же, первый кадр слота пишется
+    /// сразу (точка вылета, ось по скорости в t = 0, покрытие 1). −1 — в слое
+    /// нет свободного слота: вызывающий растит слой (RbGrow) и повторяет.
+    /// shooterId / tgtId — instance id узлов (0 — нет)
+    public int ProjectileFire(int b, Vector3 s, Vector3 e, float arcH, float rate,
+        int fac, float axK, float dmg, long shooterId, long tgtId, int flags,
+        float len, float life, float fade, float maxAge)
+    {
+        if (b < 0 || b >= _rb.Count) return -1;
+        int slot = RbAcquire(b);
+        if (slot < 0) return -1;
+        int id = _nextFlightId++;
+        int k = AfPush(id, b, slot, s, e, arcH, rate, fac, axK, flags & ~PfLegacy);
+        _afDmg[k] = dmg; _afLen[k] = len; _afLife[k] = life; _afFade[k] = fade;
+        _afMaxAge[k] = maxAge; _afShooter[k] = shooterId; _afTgt[k] = tgtId;
+        // Ось в t = 0 — та же формула, что в BatchArrows
+        float ax = e.X - s.X, ay = e.Y - s.Y + Mathf.Pi * arcH, az = e.Z - s.Z;
+        float al = Mathf.Sqrt(ax * ax + ay * ay + az * az);
+        if (al < 1e-4f) { ax = 0.0f; ay = 0.0f; az = -1.0f; } else { ax /= al; ay /= al; az /= al; }
+        SlotWrite(b, slot, s.X, s.Y, s.Z, ax * axK, ay * axK, az * axK, 1.0f);
+        return id;
+    }
+
+    /// Слот снаряда целиком: единичный базис (ориентацию строит шейдер из
+    /// оси в цвете), точка, ось и покрытие
+    private void SlotWrite(int b, int slot, float x, float y, float z,
+        float ax, float ay, float az, float fade)
+    {
+        var r = _rb[b];
+        int o = slot * RbStride;
+        var buf = r.Buf;
+        if (o + RbStride > buf.Length) return;
+        buf[o] = 1.0f; buf[o + 1] = 0.0f; buf[o + 2] = 0.0f; buf[o + 3] = x;
+        buf[o + 4] = 0.0f; buf[o + 5] = 1.0f; buf[o + 6] = 0.0f; buf[o + 7] = y;
+        buf[o + 8] = 0.0f; buf[o + 9] = 0.0f; buf[o + 10] = 1.0f; buf[o + 11] = z;
+        buf[o + 12] = ax * 0.5f + 0.5f; buf[o + 13] = ay * 0.5f + 0.5f;
+        buf[o + 14] = az * 0.5f + 0.5f; buf[o + 15] = fade;
+        r.Dirty = true;
     }
 
     public void ArrowCancel(int id)
@@ -3214,6 +4063,43 @@ public partial class ArmyCore : RefCounted
     }
 
     public int ArrowFlights() => _afN;
+
+    /// Полётов на слое b (стенды и совместимость flight_count у слоя)
+    public int FlightsOn(int b)
+    {
+        int n = 0;
+        for (int k = 0; k < _afN; k++) if (_afB[k] == b) n++;
+        return n;
+    }
+
+    /// Окно стендов: [id, слой, слот, флаги] × N
+    public int[] FlightList()
+    {
+        var res = new int[_afN * 4];
+        for (int k = 0; k < _afN; k++)
+        {
+            res[k * 4] = _afId[k]; res[k * 4 + 1] = _afB[k];
+            res[k * 4 + 2] = _afSlot[k]; res[k * 4 + 3] = _afFlags[k];
+        }
+        return res;
+    }
+
+    /// Окно стендов: [sx, sy, sz, ex, ey, ez, t, возраст, дуга, темп, урон] полёта или пусто
+    public float[] FlightInfo(int id)
+    {
+        for (int k = 0; k < _afN; k++)
+            if (_afId[k] == id)
+                return new[] { _afSx[k], _afSy[k], _afSz[k], _afEx[k], _afEy[k], _afEz[k],
+                    _afT[k], _afAge[k], _afArc[k], _afRate[k], _afDmg[k] };
+        return Array.Empty<float>();
+    }
+
+    /// Окно стендов: instance id стрелка полёта (0 — нет / нет полёта)
+    public long FlightShooter(int id)
+    {
+        for (int k = 0; k < _afN; k++) if (_afId[k] == id) return _afShooter[k];
+        return 0;
+    }
 
     private void AfRemove(int k)
     {
@@ -3226,12 +4112,335 @@ public partial class ArmyCore : RefCounted
             _afEx[k] = _afEx[last]; _afEy[k] = _afEy[last]; _afEz[k] = _afEz[last];
             _afArc[k] = _afArc[last]; _afT[k] = _afT[last]; _afRate[k] = _afRate[last];
             _afAxK[k] = _afAxK[last];
+            _afDmg[k] = _afDmg[last]; _afLen[k] = _afLen[last];
+            _afLife[k] = _afLife[last]; _afFade[k] = _afFade[last];
+            _afAge[k] = _afAge[last]; _afMaxAge[k] = _afMaxAge[last];
+            _afFlags[k] = _afFlags[last];
+            _afShooter[k] = _afShooter[last]; _afTgt[k] = _afTgt[last];
         }
         _afN = last;
     }
 
-    /// Шаг всех полётов. Обход С КОНЦА: снятый полёт подменяется последним
-    public void BatchArrows(float delta, float hitRadius)
+    // ── СОБЫТИЯ СНАРЯДОВ ЯДРА — ПАЧКОЙ, PACKED-МАССИВАМИ ─────────────────
+    // Прежний Godot.Collections.Array нёс ссылку на жертву и Vector3 в
+    // Variant-обёртках — финализируемых, то есть сборки gen1 на каждой пачке.
+    // Теперь целые — long[] (PackedInt64Array: instance id не влезает в
+    // int32), дроби — float[]; жертва — СТРОКА ядра, узел GDScript берёт из
+    // своего реестра строка → узел
+    private readonly System.Collections.Generic.List<long> _pjEvI = new();
+    private readonly System.Collections.Generic.List<float> _pjEvF = new();
+    public const int PjEvIStride = 8;   // id, тип, строка жертвы, стрелок, цель, флаги, слой, слот
+    public const int PjEvFStride = 8;   // x, y, z, ax, ay, az, урон, длина
+
+    private void PjEvent(int k, int type, int victim, float x, float y, float z,
+        float ax, float ay, float az)
+    {
+        _pjEvI.Add(_afId[k]); _pjEvI.Add(type); _pjEvI.Add(victim);
+        _pjEvI.Add(_afShooter[k]); _pjEvI.Add(_afTgt[k]); _pjEvI.Add(_afFlags[k]);
+        _pjEvI.Add(_afB[k]); _pjEvI.Add(_afSlot[k]);
+        _pjEvF.Add(x); _pjEvF.Add(y); _pjEvF.Add(z);
+        _pjEvF.Add(ax); _pjEvF.Add(ay); _pjEvF.Add(az);
+        _pjEvF.Add(_afDmg[k]); _pjEvF.Add(_afLen[k]);
+    }
+
+    public bool HasProjectileEvents() => _pjEvI.Count > 0;
+    public long[] TakeProjectileEventsI() { var r = _pjEvI.ToArray(); _pjEvI.Clear(); return r; }
+    public float[] TakeProjectileEventsF() { var r = _pjEvF.ToArray(); _pjEvF.Clear(); return r; }
+
+    // ── АГРЕГАТ ЗВУКА ПРОМАХОВ ЗА КАДР — ПО ГРУППАМ В РАДИУСЕ ─────────────
+    // Не play_3d на каждую воткнувшуюся стрелу, а один звук на группу
+    // промахов в клетке MissCell метров (до MissMax групп за кадр, лишние
+    // сливаются в первую): два залпа на разных концах карты звучат каждый у
+    // себя, а сотня стрел одного залпа — одним ударом в центре тяжести.
+    // Лимиты AudioManager (gap) и так пускали не больше одного звука в кадр,
+    // слышимый результат тот же, вызовов — на два порядка меньше
+    private const float MissCell = 32.0f;
+    private const int MissMax = 8;
+    private int _missK;
+    private readonly long[] _missKey = new long[MissMax];
+    private readonly int[] _missCnt = new int[MissMax];
+    private readonly float[] _missSx = new float[MissMax], _missSy = new float[MissMax], _missSz = new float[MissMax];
+
+    private void MissNote(float x, float y, float z)
+    {
+        long key = ((long)MathF.Floor(x / MissCell) << 32) ^ (uint)(int)MathF.Floor(z / MissCell);
+        int k = -1;
+        for (int i = 0; i < _missK; i++) if (_missKey[i] == key) { k = i; break; }
+        if (k < 0)
+        {
+            if (_missK < MissMax) { k = _missK++; _missKey[k] = key; _missCnt[k] = 0; _missSx[k] = 0; _missSy[k] = 0; _missSz[k] = 0; }
+            else k = 0;
+        }
+        _missCnt[k]++; _missSx[k] += x; _missSy[k] += y; _missSz[k] += z;
+    }
+
+    /// [n, x, y, z] × групп промахов за кадр (пусто — промахов не было)
+    public float[] TakeMissSound()
+    {
+        if (_missK == 0) return Array.Empty<float>();
+        var r = new float[_missK * 4];
+        for (int i = 0; i < _missK; i++)
+        {
+            float inv = 1.0f / _missCnt[i];
+            r[i * 4] = _missCnt[i]; r[i * 4 + 1] = _missSx[i] * inv;
+            r[i * 4 + 2] = _missSy[i] * inv; r[i * 4 + 3] = _missSz[i] * inv;
+        }
+        _missK = 0;
+        return r;
+    }
+
+    // ── ТОРЧАЩИЕ СНАРЯДЫ — МАССИВ ЯДРА (BigStand-5, этап 3) ──────────────
+    // Прежний реестр GameManager._stuck_arrows держал УЗЛЫ и звал tick_stuck
+    // у каждого каждый кадр (~300 входов в GDScript); потолок перебирал весь
+    // список на каждый прилёт. Здесь: срок, растворение и потолок — колонки,
+    // один проход в кадр, порядок вставки сохранён (уплотнение, не свап) —
+    // «самая старая» это первая в массиве, как и было
+    private int _stN;
+    private int[] _stId = new int[64], _stB = new int[64], _stSlot = new int[64];
+    // id полёта, из которого стрела воткнулась (0 — декор): стендам, ведущим
+    // снаряд от выстрела до земли
+    private int[] _stSrc = new int[64];
+    private float[] _stLeft = new float[64], _stFade = new float[64];
+    private bool[] _stFading = new bool[64], _stCorpse = new bool[64];
+    private int _nextStuckId = 1;
+    // Настройки (GameManager.ProjectileConfig): потолок, растворение при
+    // вытеснении, минимальный наклон вниз, доля над грунтом, разброс угла
+    private int _pjMaxStuck = 160;
+    private float _pjEvictFade = 0.6f, _pjMinDown = 1.0f, _pjExposed = 2.0f / 3.0f, _pjJitter = 0.21f;
+
+    public void ProjectileConfig(int maxStuck, float evictFade, float minDown, float exposed, float jitter)
+    {
+        _pjMaxStuck = maxStuck; _pjEvictFade = evictFade;
+        _pjMinDown = minDown; _pjExposed = exposed; _pjJitter = jitter;
+    }
+
+    private int StuckAdd(int b, int slot, float life, float fade, bool corpse, int src = 0)
+    {
+        if (_stN >= _stId.Length)
+        {
+            int cap = _stId.Length * 2;
+            Array.Resize(ref _stId, cap); Array.Resize(ref _stB, cap); Array.Resize(ref _stSlot, cap);
+            Array.Resize(ref _stSrc, cap);
+            Array.Resize(ref _stLeft, cap); Array.Resize(ref _stFade, cap);
+            Array.Resize(ref _stFading, cap); Array.Resize(ref _stCorpse, cap);
+        }
+        int k = _stN++;
+        int id = _nextStuckId++;
+        _stId[k] = id; _stB[k] = b; _stSlot[k] = slot; _stSrc[k] = src;
+        _stLeft[k] = life; _stFade[k] = Math.Max(fade, 0.0001f);
+        _stFading[k] = false; _stCorpse[k] = corpse;
+        // Потолок — как у прежнего note_stuck_arrow: перебор сверх потолка
+        // отправляет догорать самых старых, ещё не гаснущих
+        int over = _stN - _pjMaxStuck;
+        for (int i = 0; over > 0 && i < _stN; i++)
+        {
+            over--;
+            if (!_stFading[i]) StuckFadeAt(i, _pjEvictFade);
+        }
+        return id;
+    }
+
+    private void StuckFadeAt(int k, float secs)
+    {
+        float want = Math.Max(secs, 0.05f);
+        if (_stCorpse[k]) { _stCorpse[k] = false; _stLeft[k] = want; }
+        else if (want < _stLeft[k]) _stLeft[k] = want;
+        _stFading[k] = true;
+    }
+
+    private int StuckIndex(int id)
+    {
+        for (int k = 0; k < _stN; k++) if (_stId[k] == id) return k;
+        return -1;
+    }
+
+    /// Стрелу гасит тело, в котором она торчит, или потолок: остаток срока
+    /// укорачивается до secs, растворение — своё по виду снаряда
+    public void StuckFade(int id, float secs)
+    {
+        int k = StuckIndex(id);
+        if (k >= 0) StuckFadeAt(k, secs);
+    }
+
+    /// Снять немедленно (тело догорело): слот в свободные, запись — вон
+    public void StuckRemove(int id)
+    {
+        int k = StuckIndex(id);
+        if (k < 0) return;
+        RbRelease(_stB[k], _stSlot[k]);
+        StuckDrop(k);
+    }
+
+    private void StuckDrop(int k)
+    {
+        int n = _stN - 1;
+        for (int i = k; i < n; i++)
+        {
+            _stId[i] = _stId[i + 1]; _stB[i] = _stB[i + 1]; _stSlot[i] = _stSlot[i + 1];
+            _stSrc[i] = _stSrc[i + 1];
+            _stLeft[i] = _stLeft[i + 1]; _stFade[i] = _stFade[i + 1];
+            _stFading[i] = _stFading[i + 1]; _stCorpse[i] = _stCorpse[i + 1];
+        }
+        _stN = n;
+    }
+
+    /// Новая партия: записи полётов и торчащих прошлой сцены — вон (слои
+    /// пересобираются с новыми номерами бакетов, писать в старые незачем)
+    public void ProjectilesReset()
+    {
+        // Слоты полётов и торчащих — обратно в свободные своих слоёв (слой
+        // может пережить сброс: стенды чистят поле посреди сцены)
+        for (int k = 0; k < _afN; k++)
+            if ((_afFlags[k] & PfLegacy) == 0 && _afB[k] >= 0 && _afB[k] < _rb.Count)
+                RbRelease(_afB[k], _afSlot[k]);
+        for (int k = 0; k < _stN; k++)
+            if (_stB[k] >= 0 && _stB[k] < _rb.Count) RbRelease(_stB[k], _stSlot[k]);
+        _afN = 0; _stN = 0;
+        _pjEvI.Clear(); _pjEvF.Clear(); _afEvents.Clear();
+        _missK = 0;
+    }
+
+    public int StuckCount() => _stN;
+    public int StuckFadingCount() { int n = 0; for (int k = 0; k < _stN; k++) if (_stFading[k]) n++; return n; }
+    public float StuckLeft(int id) { int k = StuckIndex(id); return k < 0 ? -1.0f : _stLeft[k]; }
+    public bool StuckIsFading(int id) { int k = StuckIndex(id); return k >= 0 && _stFading[k]; }
+    public bool StuckInCorpse(int id) { int k = StuckIndex(id); return k >= 0 && _stCorpse[k]; }
+
+    /// Окно стендов: [id, слой, слот, вТеле, id полёта] × N в порядке вставки
+    public int[] StuckList()
+    {
+        var res = new int[_stN * 5];
+        for (int k = 0; k < _stN; k++)
+        {
+            res[k * 5] = _stId[k]; res[k * 5 + 1] = _stB[k];
+            res[k * 5 + 2] = _stSlot[k]; res[k * 5 + 3] = _stCorpse[k] ? 1 : 0;
+            res[k * 5 + 4] = _stSrc[k];
+        }
+        return res;
+    }
+
+    /// Срок и растворение торчащих — один проход в кадр (в _process: на паузе
+    /// стрелы стоят). Растворение — покрытие в альфе цвета слота, тот же дизер
+    public void StuckTick(float delta)
+    {
+        if (_stN == 0) return;
+        int w = 0;
+        for (int k = 0; k < _stN; k++)
+        {
+            bool keep = true;
+            if (!_stCorpse[k])
+            {
+                float left = _stLeft[k] - delta;
+                if (left <= 0.0f)
+                {
+                    RbRelease(_stB[k], _stSlot[k]);
+                    keep = false;
+                }
+                else
+                {
+                    _stLeft[k] = left;
+                    if (left <= _stFade[k])
+                    {
+                        _stFading[k] = true;
+                        var r = _rb[_stB[k]];
+                        int o = _stSlot[k] * RbStride + 15;
+                        if (o < r.Buf.Length) { r.Buf[o] = left / _stFade[k]; r.Dirty = true; }
+                    }
+                }
+            }
+            if (!keep) continue;
+            if (w != k)
+            {
+                _stId[w] = _stId[k]; _stB[w] = _stB[k]; _stSlot[w] = _stSlot[k];
+                _stSrc[w] = _stSrc[k];
+                _stLeft[w] = _stLeft[k]; _stFade[w] = _stFade[k];
+                _stFading[w] = _stFading[k]; _stCorpse[w] = _stCorpse[k];
+            }
+            w++;
+        }
+        _stN = w;
+    }
+
+    private static float Frac(float v) => v - MathF.Floor(v);
+
+    // Поворот вектора вокруг единичной оси (формула Родрига) — как Vector3.rotated
+    private static void Rotate(ref float x, ref float y, ref float z, float ux, float uy, float uz, float ang)
+    {
+        float c = MathF.Cos(ang), sn = MathF.Sin(ang);
+        float dot = ux * x + uy * y + uz * z;
+        float cx = uy * z - uz * y, cy = uz * x - ux * z, cz = ux * y - uy * x;
+        float nx = x * c + cx * sn + ux * dot * (1.0f - c);
+        float ny = y * c + cy * sn + uy * dot * (1.0f - c);
+        float nz = z * c + cz * sn + uz * dot * (1.0f - c);
+        x = nx; y = ny; z = nz;
+    }
+
+    /// ПРОМАХ ЦЕЛИКОМ В ЯДРЕ: доворот вниз, детерминированный разброс ±jitter
+    /// от точки (та же формула, что Arrow._stick_jitter — два прогона одного
+    /// боя дают одно поле), высота грунта той же Height, что у шага, запись
+    /// слота и учёт в торчащих. Возвращает id торчащей
+    public int ProjectileLand(int b, int slot, float x, float y, float z,
+        float ax, float ay, float az, float len, float life, float fade, float reliefAmp,
+        int srcId)
+    {
+        if (b < 0 || b >= _rb.Count) return -1;
+        float al = MathF.Sqrt(ax * ax + ay * ay + az * az);
+        if (al < 1e-4f) { ax = 0.0f; ay = -1.0f; az = 0.0f; } else { ax /= al; ay /= al; az /= al; }
+        if (ay > -_pjMinDown)
+        {
+            ay = -_pjMinDown;
+            al = MathF.Sqrt(ax * ax + ay * ay + az * az);
+            ax /= al; ay /= al; az /= al;
+        }
+        float h1 = Frac(MathF.Sin(x * 12.9898f + z * 78.233f) * 43758.5453f);
+        float h2 = Frac(MathF.Sin(x * 39.3468f + z * 11.135f) * 24634.6345f);
+        Rotate(ref ax, ref ay, ref az, 0.0f, 1.0f, 0.0f, (h1 - 0.5f) * 2.0f * _pjJitter);
+        float sx = az, sz = -ax;
+        float sl = MathF.Sqrt(sx * sx + sz * sz);
+        if (sl > 1e-3f)
+        {
+            sx /= sl; sz /= sl;
+            Rotate(ref ax, ref ay, ref az, sx, 0.0f, sz, (h2 - 0.5f) * 2.0f * _pjJitter);
+        }
+        if (ay > -_pjMinDown * 0.75f) ay = -_pjMinDown * 0.75f;
+        al = MathF.Sqrt(ax * ax + ay * ay + az * az);
+        ax /= al; ay /= al; az /= al;
+        float gy = Height(x, z, reliefAmp);
+        float back = len * (_pjExposed - 0.5f);
+        SlotWrite(b, slot, x - ax * back, gy - ay * back, z - az * back, ax, ay, az, 1.0f);
+        return StuckAdd(b, slot, life, fade, false, srcId);
+    }
+
+    /// Стрела в теле (или в голове павшего): точка и угол заданы снаружи
+    /// (их знает CorpseRenderer), срока нет — гасит тело (StuckFade)
+    public int ProjectileStick(int b, int slot, float atX, float atY, float atZ,
+        float dx, float dy, float dz, float len, bool inCorpse, float life, float fade)
+    {
+        if (b < 0 || b >= _rb.Count) return -1;
+        float dl = MathF.Sqrt(dx * dx + dy * dy + dz * dz);
+        if (dl < 1e-4f) { dx = 0.0f; dy = -1.0f; dz = 0.0f; } else { dx /= dl; dy /= dl; dz /= dl; }
+        if (dy > -_pjMinDown)
+        {
+            dy = -_pjMinDown;
+            dl = MathF.Sqrt(dx * dx + dy * dy + dz * dz);
+            dx /= dl; dy /= dl; dz /= dl;
+        }
+        float back = len * (_pjExposed - 0.5f);
+        SlotWrite(b, slot, atX - dx * back, atY - dy * back, atZ - dz * back, dx, dy, dz, 1.0f);
+        return StuckAdd(b, slot, inCorpse ? 1e9f : life, fade, inCorpse);
+    }
+
+    /// Снаряд ядра никуда не воткнулся (жертва мертва/недействительна, здание
+    /// не приняло) — слот в свободные без следа
+    public void ProjectileDrop(int b, int slot)
+    {
+        if (b < 0 || b >= _rb.Count) return;
+        RbRelease(b, slot);
+    }
+
+    /// Шаг всех полётов. Обход С КОНЦА: снятый полёт подменяется последним.
+    /// reliefAmp — амплитуда рельефа для высоты грунта у промахов ядра
+    public void BatchArrows(float delta, float hitRadius, float reliefAmp = 0.0f)
     {
         if (_afN == 0) return;
         for (int k = _afN - 1; k >= 0; k--)
@@ -3265,13 +4474,42 @@ public partial class ArmyCore : RefCounted
                 rb.Dirty = true;
             }
             // Попадание — тем же правилом, что было в Arrow._check_hit
-            var victim = EnemyAt(x, z, hitRadius, _afFac[k]);
-            if (victim != null || t >= 1.0f)
+            int j = EnemyRowAt(x, z, hitRadius, _afFac[k]);
+            int flags = _afFlags[k];
+            if ((flags & PfLegacy) != 0)
             {
-                _afEvents.Add(_afId[k]);
-                _afEvents.Add(victim);
-                _afEvents.Add(new Vector3(x, y, z));
-                _afEvents.Add(new Vector3(ax, ay, az));
+                if (j >= 0 || t >= 1.0f)
+                {
+                    _afEvents.Add(_afId[k]);
+                    _afEvents.Add(j >= 0 ? _unitOf[j] as Godot.Node3D : null);
+                    _afEvents.Add(new Vector3(x, y, z));
+                    _afEvents.Add(new Vector3(ax, ay, az));
+                    AfRemove(k);
+                }
+                continue;
+            }
+            _afAge[k] += delta;
+            if (j >= 0)
+            {
+                // Касание чужого — решение (броня, щит, тело) за GDScript;
+                // слот остаётся за событием, пока его не разберут
+                PjEvent(k, 0, j, x, y, z, ax, ay, az);
+                AfRemove(k);
+                continue;
+            }
+            if (t >= 1.0f || _afAge[k] >= _afMaxAge[k])
+            {
+                if ((flags & PfTarget) != 0)
+                {
+                    // Долетела до назначенного здания — урон списывает GDScript
+                    PjEvent(k, 1, -1, x, y, z, ax, ay, az);
+                    AfRemove(k);
+                    continue;
+                }
+                // ПРОМАХ — целиком здесь: ни события, ни узла
+                ProjectileLand(bIdx, _afSlot[k], x, y, z, ax, ay, az,
+                    _afLen[k], _afLife[k], _afFade[k], reliefAmp, _afId[k]);
+                MissNote(x, y, z);
                 AfRemove(k);
             }
         }
@@ -3351,6 +4589,199 @@ public partial class ArmyCore : RefCounted
     // (периодический скан по сетке — цена перехвата, которую нёс личный тик)
     public const int FAutopilot = 1 << 22;
 
+    // ── СПИСОК СТРОК, КОТОРЫМ НУЖЕН GDSCRIPT-ТИК (BigStand-5, этап 1) ─────────
+    // Замер qa_bigstand 17.09.2026: в замесе 3886 из 2862 ATTACKING 1460 вёл
+    // автопилот, 786 дремали, 15 давил напор — и все они всё равно входили в
+    // Unit.tick_physics на своём шарде: окно ходьбы, сравнение позы,
+    // queue_pose (позицию записало само ядро), проверки сна и лежания — и
+    // выход. ~565 входов в кадр по ~5 мкс = 2.5-3 мс физтика ни на что.
+    // Теперь диспетчер GameManager идёт не по реестру узлов, а по списку
+    // строк, который собирает ядро: живая, тикающая (FTickOn — зеркало
+    // Unit.tick_on), не ведомая ядром. Ведомая — это автопилот, напор или
+    // дрёма ПРИ состоянии ATTACKING (ровно те ворота, что стояли в
+    // tick_physics), либо матрица отряда (FMatrixLed). Строки родов войск,
+    // у которых в тике живут свои часы (лучник — отложенный выстрел
+    // снайпера, монах, рабочий, гнолл, тролль, туша), помечены FTickAlways и
+    // из списка не выпадают — то же правило, что у may_sleep_physics.
+    // Шард — по номеру строки (i % shards == phase): боец опрашивается раз в
+    // shards тактов с дельтой delta*shards, как и раньше; порядок обхода —
+    // порядок отсортированного списка живых.
+    public const int FTickOn = 1 << 23;
+    public const int FTickAlways = 1 << 24;
+    public const int FMatrixLed = 1 << 25;
+    // ── ОЖИДАНИЕ ТАКТА АГРО В ЯДРЕ (BigStand-5, этап 1б) ──────────────────
+    // Стоящий в бою боец (IDLE, чужие рядом — сон физики не положен) между
+    // тактами авто-агро (0.5-2 с) делал в тике только преамбулу и декремент
+    // таймера. Таймер теперь тикает здесь (_aggroT), строка вне списка до
+    // истечения; будят события (приказ, удар, смена цели — Unit._core_release).
+    // Не взводится у стойки «оборона» (там _phalanx_advance каждый такт), у
+    // паникующих, бегущих, отходящих и у родов войск с FTickAlways
+    public const int FIdleWait = 1 << 26;
+    // ── ВИЗУАЛЬНО ТИХАЯ СТРОКА (BigStand-5, этап 5) ────────────────────────
+    // GDScript-тик картинки (Unit.tick_visual) у привязанной к отрисовке
+    // строки не входит вовсе, пока ядро не заметит повод: истёк срок замка
+    // анимации, сменилась видимость по туману или LOD, началась/кончилась
+    // ходьба, повернулся взгляд ведомого ядром. GDScript снимает флаг сам на
+    // своих событиях (смена состояния, поза, приказ, удар — _vis_wake)
+    public const int FVisQuiet = 1 << 27;
+    public const int FVisMoving = 1 << 28;   // объявлено: лента ходьбы идёт
+    public const int FVisSeen = 1 << 29;     // объявлено: в поле LOD
+    public const int FVisLit = 1 << 30;      // объявлено: освещён (чужой)
+    private int[] _tickOut = new int[1024];
+    public int TickListed;   // сколько строк ушло в список последним вызовом (стендам)
+    public int TickSkipped;  // сколько живых тикающих строк ядро оставило себе
+    public int TickSlowed;   // сколько скрытых туманом строк пропущено в этот такт
+    public int TickHidden;   // сколько строк тикает на низкой частоте (в тумане)
+
+    public void IdleWaitArm(int i, float t)
+    {
+        if (i < 0 || i >= _capacity) return;
+        _aggroT[i] = t;
+        _flags[i] |= FIdleWait;
+    }
+
+    /// Снятие ожидания событием: остаток таймера отдаём вызывающему — поле
+    /// _aggro_timer у бойца на время ожидания было заморожено (как у дрёмы)
+    public float IdleWaitClear(int i)
+    {
+        if (i < 0 || i >= _capacity) return 0.0f;
+        _flags[i] &= ~FIdleWait;
+        return _aggroT[i] > 0.0f ? _aggroT[i] : 0.0f;
+    }
+
+    /// delta — шаг ЭТОЙ строки (delta кадра × shards): строка посещается раз
+    /// в shards тактов, как и её GDScript-тик
+    // ── СКРЫТЫЙ ТУМАНОМ ТИКАЕТ РЕЖЕ (ТЗ 19.09.2026, «Fog-of-War Sleep») ──────
+    // Чужой боец (fac != playerFac), чья ячейка маски тумана не освещена, и
+    // не в бою (st != ATTACKING), посещается раз в fogSlowDiv своих тактов и
+    // отдаётся ОТРИЦАТЕЛЬНЫМ номером (−i−1): диспетчер тикает его с дельтой
+    // × fogSlowDiv — часы, патруль и шаг честные, только реже. Освещённый
+    // (край тумана рассеялся, отряд игрока подошёл) уже в СЛЕДУЮЩЕМ такте
+    // идёт полной частотой — маска ядра та же, что у картинки (FogRefresh).
+    // Полный сон здесь не годится: патруль обязан ХОДИТЬ, а тик раз в две
+    // секунды дал бы шаг в 4-6 м сквозь скалы. fogSlowDiv 0 — как прежде
+    public int[] TickRows(int shards, int phase, int attackingState, int idleState, float delta,
+        int armyTicks, int playerFac, int fogSlowDiv)
+    {
+        int n = 0;
+        int skipped = 0;
+        int slowed = 0, hidden = 0;
+        int dead = DeadState;
+        int led = FAutopilot | FRearPress | FAtkSnooze;
+        bool fogOk = fogSlowDiv > 1 && _fogCols > 0 && _fogLit.Length == _fogCols * _fogRows;
+        int sh = Math.Max(shards, 1);
+        int slowPhase = (armyTicks / sh) % Math.Max(fogSlowDiv, 1);
+        for (int k = 0; k < _liveCount; k++)
+        {
+            int i = _liveRows[k];
+            if (shards > 1 && (i % shards) != phase) continue;
+            int fl = _flags[i];
+            if ((fl & FTickOn) == 0) continue;
+            int st = _st[i];
+            if (st == dead) continue;
+            if ((fl & FTickAlways) == 0)
+            {
+                if ((fl & FMatrixLed) != 0) { skipped++; continue; }
+                if ((fl & led) != 0 && st == attackingState) { skipped++; continue; }
+                if ((fl & FIdleWait) != 0 && st == idleState)
+                {
+                    float t = _aggroT[i] - delta;
+                    _aggroT[i] = t;
+                    if (t > 0.0f) { skipped++; continue; }
+                    _flags[i] = fl & ~FIdleWait;
+                }
+            }
+            bool slow = false;
+            if (fogOk && _fac[i] != playerFac && st != attackingState && (fl & FPosValid) != 0)
+            {
+                int cx = (int)((_px[i] + _fogHalfX) / _fogCell);
+                int cz = (int)((_pz[i] + _fogHalfZ) / _fogCell);
+                bool lit = cx >= 0 && cz >= 0 && cx < _fogCols && cz < _fogRows
+                    && _fogLit[cz * _fogCols + cx] != 0;
+                if (!lit)
+                {
+                    hidden++;
+                    if (((i / sh) % fogSlowDiv) != slowPhase) { slowed++; continue; }
+                    slow = true;
+                }
+            }
+            if (n >= _tickOut.Length) Array.Resize(ref _tickOut, _tickOut.Length * 2);
+            _tickOut[n++] = slow ? -(i + 1) : i;
+        }
+        TickListed = n;
+        TickSkipped = skipped;
+        TickSlowed = slowed;
+        TickHidden = hidden;
+        var res = new int[n];
+        Array.Copy(_tickOut, res, n);
+        return res;
+    }
+
+    // ── ТИХИЕ СТРОКИ: API (BigStand-5, этап 5) ──────────────────────────────
+    /// Строка объявляет себя тихой: что она уже нарисовала (взгляд позы,
+    /// идёт ли, видна ли LOD, освещена ли) и когда её разбудить (0 — без срока)
+    public void VisQuiet(int i, float lookX, float lookZ, bool moving, bool moving2,
+        bool seen, bool lit, int wakeAtMs, int nowMs)
+    {
+        if (i < 0 || i >= _capacity) return;
+        int fl = _flags[i] | FVisQuiet;
+        fl = moving ? (fl | FVisMoving) : (fl & ~FVisMoving);
+        fl = seen ? (fl | FVisSeen) : (fl & ~FVisSeen);
+        fl = lit ? (fl | FVisLit) : (fl & ~FVisLit);
+        _flags[i] = fl;
+        _vqLx[i] = lookX; _vqLz[i] = lookZ;
+        _vqPx[i] = _px[i]; _vqPz[i] = _pz[i];
+        _vqMs[i] = nowMs; _vqWake[i] = wakeAtMs;
+        _vqMv2[i] = (byte)(moving2 ? 1 : 0);
+    }
+
+    public void VisWake(int i)
+    {
+        if (i >= 0 && i < _capacity) _flags[i] &= ~FVisQuiet;
+    }
+
+    public bool VisIsQuiet(int i) => i >= 0 && i < _capacity && (_flags[i] & FVisQuiet) != 0;
+
+    /// Вспышка попадания: пишет ядро (BatchVisual), а не боец — визуальный
+    /// тик у тихой строки не идёт, а вспышка обязана погаснуть и без него
+    public void VisHit(int i, float peak, float sec)
+    {
+        if (i < 0 || i >= _capacity) return;
+        _vFlash[i] = sec; _vPeak[i] = peak;
+        // Пик и доля жизни — В ТОТ ЖЕ КАДР, как прежний Slot.set_damage из
+        // take_damage: вспышка в 0.07 с не вправе ждать кадра отрисовки
+        int b = _rbB[i];
+        if (b < 0) return;
+        var r = _rb[b];
+        int o = _rbI[i] * RbStride;
+        float hfrac = _hpMax[i] > 0.0f ? Mathf.Clamp(_hp[i] / _hpMax[i], 0.0f, 1.0f) : 1.0f;
+        r.Buf[o + 14] = peak; r.Buf[o + 15] = hfrac; r.Dirty = true;
+    }
+
+    /// Строки, которым НУЖЕН GDScript-тик картинки на этом шарде: живые, не
+    /// спящие по картинке (FSleepDraw) и не тихие. Отбор по draw_on делает
+    /// GDScript по своему полю — оно у него под рукой
+    public int[] VisRows(int shards, int phase)
+    {
+        int n = 0, quiet = 0;
+        int dead = DeadState;
+        for (int k = 0; k < _liveCount; k++)
+        {
+            int i = _liveRows[k];
+            if (shards > 1 && (i % shards) != phase) continue;
+            int fl = _flags[i];
+            if ((fl & FSleepDraw) != 0) continue;
+            if (_st[i] == dead) continue;
+            if ((fl & FVisQuiet) != 0) { quiet++; continue; }
+            if (n >= _visOut.Length) Array.Resize(ref _visOut, _visOut.Length * 2);
+            _visOut[n++] = i;
+        }
+        VisListed = n; VisQuietN = quiet;
+        var res = new int[n];
+        Array.Copy(_visOut, res, n);
+        return res;
+    }
+
     public int RbCreate(Rid multimesh)
     {
         _rb.Add(new Rb { Multimesh = multimesh });
@@ -3365,6 +4796,41 @@ public partial class ArmyCore : RefCounted
         r.Capacity = instances;
         r.Dirty = true;
     }
+
+    /// Свободный слот слоя или −1 (GDScript тогда растит слой RbGrow и
+    /// спрашивает снова — рост раз в GROW слотов, а не на каждый выстрел)
+    public int RbAcquire(int b)
+    {
+        var r = _rb[b];
+        if (r.FreeN == 0) return -1;
+        return r.Free[--r.FreeN];
+    }
+
+    /// Вернуть слот слоя: спрятать и положить в свободные
+    public void RbRelease(int b, int idx)
+    {
+        var r = _rb[b];
+        if (idx < 0 || idx >= r.Capacity) return;
+        Array.Clear(r.Buf, idx * RbStride, RbStride);
+        r.Dirty = true;
+        if (r.FreeN >= r.Free.Length) Array.Resize(ref r.Free, Math.Max(64, r.Free.Length * 2));
+        r.Free[r.FreeN++] = idx;
+    }
+
+    /// Нарастить слой снарядов: буфер + новые номера в свободные.
+    /// instance_count самому MultiMesh ставит вызывающий (это ресурс сцены)
+    public void RbGrow(int b, int newCap)
+    {
+        var r = _rb[b];
+        int old = r.Capacity;
+        if (newCap <= old) return;
+        RbEnsure(b, newCap);
+        int need = r.FreeN + (newCap - old);
+        if (need > r.Free.Length) Array.Resize(ref r.Free, Math.Max(need, r.Free.Length * 2));
+        for (int i = newCap - 1; i >= old; i--) r.Free[r.FreeN++] = i;
+    }
+
+    public int RbFreeCount(int b) => _rb[b].FreeN;
 
     public void RbWriteFull(int b, int idx, float x, float y, float z,
         int frame, bool mirror, float flash, float hp)
@@ -3514,10 +4980,15 @@ public partial class ArmyCore : RefCounted
     //   • неподвижного не переписываем — порог тот же, что у Slot.move_to.
     // Строки под FVisSelf (разлёт) и без привязки пропускаются.
     public void BatchVisual(float delta, float lerpK, float snapSq,
-        float bobAmp, float bobSprintMult, bool animCore = false, bool decalCore = false)
+        float bobAmp, float bobSprintMult, bool animCore, bool decalCore,
+        int nowMs, float viewX, float viewZ, float viewR2, bool fogWatch, int playerFac,
+        float flashSec, float walkMin, float moveMin, float turnCos2)
     {
         const float MoveEpsSq = 1e-6f;
         float ringY = _ringY, shadowY = _shadowY, hpBarY = _hpBarY;
+        int ledMask = FAutopilot | FRearPress | FMatrixLed | FAtkSnooze;
+        float walkMin2 = walkMin * walkMin, moveMin2 = moveMin * moveMin;
+        bool fogOk = fogWatch && _fogCols > 0;
         // Проход целиком из чистой математики по колонкам и буферам (записи —
         // только в СВОЮ строку и в СВОЙ слот бакета), поэтому параллелится
         // диапазонами без локов; флаг Dirty — благоприятная гонка (все пишут
@@ -3528,8 +4999,62 @@ public partial class ArmyCore : RefCounted
         {
             int i = _liveRows[k];
             int b = _rbB[i];
-            if (b < 0) continue;
             int fl = _flags[i];
+            // ── НАДЗОР ЗА ТИХОЙ СТРОКОЙ (этап 5): повод — и GDScript будится ─
+            if ((fl & FVisQuiet) != 0)
+            {
+                bool wake = false;
+                float qx = _px[i], qz = _pz[i];
+                if (_vqWake[i] > 0 && nowMs >= _vqWake[i]) wake = true;
+                // Туман: лит по маске ядра (та же, что копия GDScript)
+                if (!wake && fogOk && _fac[i] != playerFac)
+                {
+                    int cx = (int)((qx + _fogHalfX) / _fogCell);
+                    int cz = (int)((qz + _fogHalfZ) / _fogCell);
+                    bool lit = cx >= 0 && cz >= 0 && cx < _fogCols && cz < _fogRows
+                        && _fogLit[cz * _fogCols + cx] != 0;
+                    if (lit != ((fl & FVisLit) != 0)) wake = true;
+                }
+                if (!wake && b >= 0)
+                {
+                    // LOD: вошёл в поле зрения / вышел из него
+                    float vdx = qx - viewX, vdz = qz - viewZ;
+                    bool seen = vdx * vdx + vdz * vdz <= viewR2;
+                    if (seen != ((fl & FVisSeen) != 0)) wake = true;
+                    // Ходьба: тот же замер окном, что Unit._sample_movement
+                    int win = nowMs - _vqMs[i];
+                    if (!wake && win >= 200)
+                    {
+                        float mdx = qx - _vqPx[i], mdz = qz - _vqPz[i];
+                        float wsec = win * 0.001f;
+                        float d2 = mdx * mdx + mdz * mdz;
+                        bool moving = d2 > walkMin2 * wsec * wsec;
+                        bool moving2 = d2 > moveMin2 * wsec * wsec;
+                        if (moving != ((fl & FVisMoving) != 0)) wake = true;
+                        else if (moving2 != (_vqMv2[i] != 0)) wake = true;
+                        else if (moving2)
+                        {
+                            // Идёт: направление хода против взгляда позы
+                            float lx = _vqLx[i], lz = _vqLz[i];
+                            float dd = mdx * lx + mdz * lz;
+                            if (dd <= 0.0f || dd * dd < turnCos2 * d2 * (lx * lx + lz * lz)) wake = true;
+                        }
+                        _vqPx[i] = qx; _vqPz[i] = qz; _vqMs[i] = nowMs;
+                    }
+                    // Взгляд ведомого ядром: его пишет только ядро, GDScript
+                    // своё сравнивает сам в физтике
+                    if (!wake && (fl & ledMask) != 0 && _vqMv2[i] == 0)
+                    {
+                        float fx = _fx[i], fz = _fz[i];
+                        float lx = _vqLx[i], lz = _vqLz[i];
+                        float dd = fx * lx + fz * lz;
+                        float n2 = (fx * fx + fz * fz) * (lx * lx + lz * lz);
+                        if (n2 > 1e-8f && (dd <= 0.0f || dd * dd < turnCos2 * n2)) wake = true;
+                    }
+                }
+                if (wake) { fl &= ~FVisQuiet; _flags[i] = fl; }
+            }
+            if (b < 0) continue;
             // ── КАДР ЛЕНТЫ: ДО ветки разлёта, боец в полёте тоже листает ────
             if (animCore)
             {
@@ -3613,6 +5138,26 @@ public partial class ArmyCore : RefCounted
             {
                 buf[o + 3] = sx; buf[o + 7] = wy; buf[o + 11] = sz;
                 r.Dirty = true;
+            }
+            // ── ВСПЫШКА И ДОЛЯ ЖИЗНИ — ТЕ ЖЕ ДВА КАНАЛА, ЧТО У Slot.set_damage ─
+            // Порог 0.004 — шаг восьмибитного канала (см. FarUnitRenderer)
+            float vf = _vFlash[i];
+            float lvl = 0.0f;
+            if (vf > 0.0f)
+            {
+                vf -= delta;
+                if (vf < 0.0f) vf = 0.0f;
+                _vFlash[i] = vf;
+                lvl = _vPeak[i] * Math.Min(vf / flashSec, 1.0f);
+            }
+            if (Math.Abs(buf[o + 14] - lvl) >= 0.004f)
+            {
+                buf[o + 14] = lvl; r.Dirty = true;
+            }
+            float hfrac = _hpMax[i] > 0.0f ? Mathf.Clamp(_hp[i] / _hpMax[i], 0.0f, 1.0f) : 1.0f;
+            if (Math.Abs(buf[o + 15] - hfrac) >= 0.004f)
+            {
+                buf[o + 15] = hfrac; r.Dirty = true;
             }
             if (!decalCore) continue;
             // ── КОЛЬЦО, ТЕНЬ, ПОЛОСКА — ИЗ ТОЙ ЖЕ НАРИСОВАННОЙ ТОЧКИ ───────
@@ -3729,6 +5274,142 @@ public partial class ArmyCore : RefCounted
     }
 
     // ═════════════════════════════════════════════════════════════════════
+    // ОТРЯДНЫЕ ПЕРЕСЧЁТЫ ОДНИМ ВЫЗОВОМ (BigStand-5, этап 2)
+    // ═════════════════════════════════════════════════════════════════════
+    // Коридор отряда (GameManager._recalc_corridor) ходил в ядро трижды —
+    // габариты, стволы, чужие — и каждый ответ приходил Godot-массивом
+    // (финализируемая обёртка → сборки gen1). Голосование по целям
+    // (_recalc_melee) снимало ДВА СНИМКА колонок px/pz на КАЖДЫЙ пересчёт:
+    // при ёмкости 4096 это 32 КБ управляемых аллокаций на отряд, ~150 КБ на
+    // кадр в замесе — главный неатрибутированный источник GC из отчёта
+    // 17.09.2026. Здесь оба пересчёта идут по колонкам за один переход
+    // границы и отвечают плоскими массивами (float[] / int[] →
+    // Packed*Array, без обёрток с финализатором).
+
+    /// Коридор отряда: [n, cx, cz, far, watch, fac, clearTrunk, clearEnemy].
+    /// Габариты — как SquadBounds; стволы ищутся в far + margin от центра,
+    /// чужие — в far + margin + watch (та же формула, что была в GDScript)
+    public float[] SquadCorridor(int[] rows, int dead, float aggroR, float intercept, float margin)
+    {
+        float sx = 0.0f, sz = 0.0f;
+        int n = 0;
+        int fc = -1;
+        float watch = aggroR;
+        for (int k = 0; k < rows.Length; k++)
+        {
+            int i = rows[k];
+            if (i < 0 || i >= _capacity) continue;
+            if ((_flags[i] & FPosValid) == 0 || _st[i] == dead) continue;
+            if (fc < 0) fc = _fac[i];
+            sx += _px[i]; sz += _pz[i];
+            float ar = _atkRange[i] + intercept;
+            if (ar > watch) watch = ar;
+            n++;
+        }
+        var res = new float[8];
+        res[4] = watch; res[5] = fc;
+        if (n == 0) return res;
+        float invN = 1.0f / n;
+        float cx = sx * invN, cz = sz * invN;
+        float rad = 0.0f;
+        for (int k = 0; k < rows.Length; k++)
+        {
+            int i = rows[k];
+            if (i < 0 || i >= _capacity) continue;
+            if ((_flags[i] & FPosValid) == 0 || _st[i] == dead) continue;
+            float dx = _px[i] - cx, dz = _pz[i] - cz;
+            float d2 = dx * dx + dz * dz;
+            if (d2 > rad) rad = d2;
+        }
+        rad = Mathf.Sqrt(rad);
+        float radius = rad + margin;
+        res[0] = n; res[1] = cx; res[2] = cz; res[3] = rad;
+        res[6] = (TrunkNear(cx, cz, radius) || BldNear(cx, cz, radius)) ? 0.0f : 1.0f;
+        res[7] = EnemyNear(cx, cz, fc, radius + watch) ? 0.0f : 1.0f;
+        return res;
+    }
+
+    // Скрэтч голосования: ключи в порядке появления (первый максимум — как у
+    // обхода GDScript-словаря), счётчики рядом. Отрядов в голосовании единицы
+    private int[] _voteSid = new int[32];
+    private int[] _voteCnt = new int[32];
+    private int[] _meleeOut = new int[256];
+
+    /// Бухгалтерия боя отряда по колонкам: [engaged, free, foeSid, nHad,
+    /// nCand, nUnknown, hadRows..., candRows..., unknownRows...].
+    /// hadRows — строки, у которых снята аренда напора (GDScript гасит своё
+    /// поле); candRows — свободные ATTACKING со строкой цели дальше оружия
+    /// (кандидаты в напор, GDScript-условия проверяет вызывающий);
+    /// unknownRows — ATTACKING без строки цели (цели нет либо цель — здание:
+    /// колонка их не различает, разбирает GDScript, как раньше)
+    public int[] SquadMelee(int[] rows, int attacking)
+    {
+        int engaged = 0, free = 0;
+        int nv = 0;
+        int nHad = 0, nCand = 0, nUnk = 0;
+        // Три списка складываются в скрэтч порознь: сначала считаем размеры
+        int need = 6 + rows.Length * 3;
+        if (_meleeOut.Length < need) Array.Resize(ref _meleeOut, need);
+        int hadBase = 6;
+        int candBase = 6 + rows.Length;
+        int unkBase = 6 + rows.Length * 2;
+        for (int k = 0; k < rows.Length; k++)
+        {
+            int i = rows[k];
+            if (i < 0 || i >= _capacity) continue;
+            int fl = _flags[i];
+            if ((fl & FRearPress) != 0)
+            {
+                _flags[i] = fl & ~FRearPress;
+                _meleeOut[hadBase + nHad++] = i;
+            }
+            if (_st[i] != attacking) continue;
+            int t = _tgt[i];
+            if (t < 0 || t >= _capacity || !_rowUsed[t])
+            {
+                _meleeOut[unkBase + nUnk++] = i;
+                continue;
+            }
+            float dx = _px[i] - _px[t];
+            float dz = _pz[i] - _pz[t];
+            float d2 = dx * dx + dz * dz;
+            float r = _atkRange[i];
+            if (d2 <= r * r) engaged++;
+            else
+            {
+                free++;
+                _meleeOut[candBase + nCand++] = i;
+            }
+            int tsq = _sq[t];
+            if (tsq > 0)
+            {
+                int v = -1;
+                for (int q = 0; q < nv; q++) if (_voteSid[q] == tsq) { v = q; break; }
+                if (v < 0)
+                {
+                    if (nv >= _voteSid.Length)
+                    {
+                        Array.Resize(ref _voteSid, nv * 2);
+                        Array.Resize(ref _voteCnt, nv * 2);
+                    }
+                    _voteSid[nv] = tsq; _voteCnt[nv] = 0; v = nv++;
+                }
+                _voteCnt[v]++;
+            }
+        }
+        int foe = 0, best = 0;
+        for (int q = 0; q < nv; q++)
+            if (_voteCnt[q] > best) { best = _voteCnt[q]; foe = _voteSid[q]; }
+        var res = new int[6 + nHad + nCand + nUnk];
+        res[0] = engaged; res[1] = free; res[2] = foe;
+        res[3] = nHad; res[4] = nCand; res[5] = nUnk;
+        Array.Copy(_meleeOut, hadBase, res, 6, nHad);
+        Array.Copy(_meleeOut, candBase, res, 6 + nHad, nCand);
+        Array.Copy(_meleeOut, unkBase, res, 6 + nHad + nCand, nUnk);
+        return res;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
     // НАВИГАЦИЯ: КОАРС-СЕТКА ПРОХОДИМОСТИ И A* (спринт 19, письмо 11)
     // ═════════════════════════════════════════════════════════════════════
     // Поиска пути в игре не было: боец шёл по прямой, а скалу и воду обходил
@@ -3745,6 +5426,10 @@ public partial class ArmyCore : RefCounted
     private int _navCols = 0, _navRows = 0;
     private float _navOx = 0.0f, _navOz = 0.0f, _navCell = 2.0f;
     private bool _navOn = false;
+    private bool _navWanted = false;
+    // Скалы и вода без построек: слой построек накладывается заново при
+    // каждой смене реестра (NavSync), ячейка стены = 2
+    private byte[] _navBase = System.Array.Empty<byte>();
     public int NavBlocked = 0;
     public bool NavLastFound = false;
     public float NavLastLength = 0.0f;
@@ -3759,6 +5444,111 @@ public partial class ArmyCore : RefCounted
     private int[] _heapI = new int[1024];
     private int _heapN = 0;
     private const int NavMaxExpand = 60000;
+    // ── КОМПОНЕНТЫ СВЯЗНОСТИ СЕТКИ (аудит 19.09.2026) ─────────────────────
+    // Цель за обрывом/рекой раньше стоила ПОЛНОЙ заливки A* (до NavMaxExpand
+    // ячеек — единицы-десятки мс за вызов): qa_bigstand/Owner давал пиковые
+    // кадры 70-100 мс с nav_route 38-40 мс внутри даже при кэше маршрутов.
+    // Заливка ОДИН РАЗ при сборке сетки метит каждую свободную ячейку номером
+    // компоненты; разные номера у старта и цели — пути нет, ответ мгновенный.
+    // Связность по рёбрам: диагональ A* без срезания угла требует обоих
+    // ортогональных соседей, то есть по диагонали компоненты не сливаются
+    private int[] _navComp = System.Array.Empty<int>();
+    public int NavCompCount = 0;
+    public int NavUnreach = 0;
+    // ── ОТСТУП ОТ СТЕН (ТЗ 19.09.2026, п. 2) ──────────────────────────────
+    // A* считал шаг у самой скалы таким же дешёвым, как в чистом поле, и
+    // нить натягивалась с зазором 0.7 м — отряд шёл впритирку к обрыву и
+    // выстраивался вдоль него гуськом. Теперь у каждой свободной ячейки
+    // известна дистанция до ближайшей стены в ячейках (_navWall: 1, 2, 3+),
+    // шаг в ячейку у стены дороже (NavWallCost), а нить натягивается с
+    // зазором NavThreadClearance — угол обхода отодвигается от кромки
+    private byte[] _navWall = System.Array.Empty<byte>();
+    private static readonly float[] NavWallCost = { 0f, 2.5f, 0.8f, 0f, 0f };
+    private const float NavThreadClearance = 1.6f;
+    public float NavWallMargin() { return NavThreadClearance; }
+    // ── ГАБАРИТ АГЕНТА (ТЗ 19.09.2026, обход гор и углов) ──────────────────
+    // Отступ от стены — СВОЙСТВО РОДА ВОЙСК (Unit.nav_clearance: пехота 1.5,
+    // конница 2.2, гиганты 3.5-4.0 м), и он входит во ВСЕ четыре места, где
+    // сетка решает за бойца: штраф шага у стены (NavCellPenalty — масштаб от
+    // 1.6 м базы, у гигантов платит и третья клетка), зазор нити (pad =
+    // clear), отжим угла (push = clear) и видимость прямой (pad = clear/2:
+    // прямая, проходящая в метре от кромки, для туши в 1.7 м «упирается»).
+    // ── ЛЕС — СТОИМОСТЬ, А НЕ СТЕНА ─────────────────────────────────────────
+    // Стволов сетка не знала: шаг обходил их скольжением, а в чаще у угла
+    // скалы гигант зависал (скриншот 1). Слой _navTree — число стволов в
+    // ячейке (из реестра стволов, пересчёт по флагу рубки NavRefreshTrees):
+    // штраф на ствол растёт с габаритом (NavTreeCost), а для гиганта чаща от
+    // NavTreeBlockGiant стволов ещё и непрозрачна для нити и прямой
+    private byte[] _navTree = System.Array.Empty<byte>();
+    private bool _navTreeDirty = true;
+    public int NavTreeCells = 0;
+    private const int NavTreeBlockGiant = 3;
+    private const float NavGiantClear = 3.0f;
+    public bool NavTreesDirty() { return _navTreeDirty; }
+
+    public int NavRefreshTrees()
+    {
+        _navTreeDirty = false;
+        int n = _navCols * _navRows;
+        if (n <= 0) return 0;
+        if (_navTree.Length != n) _navTree = new byte[n];
+        else System.Array.Clear(_navTree, 0, n);
+        NavTreeCells = 0;
+        foreach (var kv in _trunks)
+        {
+            var list = kv.Value;
+            for (int i = 0; i < list.Count; i++)
+            {
+                var t = list[i];
+                int c = (int)Math.Floor((t.X - _navOx) / _navCell);
+                int r = (int)Math.Floor((t.Y - _navOz) / _navCell);
+                if (c < 0 || r < 0 || c >= _navCols || r >= _navRows) continue;
+                int idx = r * _navCols + c;
+                if (_navTree[idx] == 0) NavTreeCells++;
+                if (_navTree[idx] < 255) _navTree[idx]++;
+            }
+        }
+        return NavTreeCells;
+    }
+
+    private static float NavTreeCost(float clear)
+    {
+        if (clear < 2.0f) return 1.0f;
+        if (clear < NavGiantClear) return 1.0f;
+        return 3.0f;
+    }
+
+    // Штраф шага в ячейку ni для агента с отступом clear
+    private float NavCellPenalty(int ni, float clear)
+    {
+        float pen = 0f;
+        if (_navWall.Length == _nav.Length)
+        {
+            int d = _navWall[ni];
+            float scale = clear / NavThreadClearance;
+            if (d == 1) pen += NavWallCost[1] * scale;
+            else if (d == 2) pen += NavWallCost[2] * scale;
+            else if (d == 3 && clear > NavGiantClear) pen += (clear - NavGiantClear) * 1.5f;
+        }
+        if (_navBldAdj.Length == _nav.Length && _navBldAdj[ni] != 0) pen += NavBldAdjCost;
+        if (_navTree.Length == _nav.Length)
+        {
+            int t = _navTree[ni];
+            if (t > 0) pen += t * NavTreeCost(clear);
+        }
+        return pen;
+    }
+
+    // Точка «в стене» для агента: скала всегда, чаща — только для гиганта
+    private bool NavBlockedAtC(float x, float z, float clear)
+    {
+        int c = (int)Math.Floor((x - _navOx) / _navCell);
+        int r = (int)Math.Floor((z - _navOz) / _navCell);
+        if (c < 0 || r < 0 || c >= _navCols || r >= _navRows) return false;
+        int i = r * _navCols + c;
+        if (_nav[i] != 0) return true;
+        return clear >= NavGiantClear && _navTree.Length == _nav.Length && _navTree[i] >= NavTreeBlockGiant;
+    }
     // Зазор от стены при проверке видимости: боец — тело радиусом ~0.55, и
     // нить, натянутая впритык к углу, вела бы его В стену
     private const float NavClearance = 0.7f;
@@ -3789,30 +5579,187 @@ public partial class ArmyCore : RefCounted
                 for (int rr = Math.Max(cr0, 0); rr <= cr1 && rr < _cliffRows && !blocked; rr++)
                     for (int cc = Math.Max(cc0, 0); cc <= cc1 && cc < _cliffCols; cc++)
                         if (_cliff[rr * _cliffCols + cc] != 0) { blocked = true; break; }
-                // Вода реки вне брода: центр и четыре точки внутри ячейки
+                // ── ВОДА — СВОЙ КОД 3 (ТЗ 20.09.2026, п. 1) ───────────────
+                // Прибавка отступа NavCliffExtra писана под ГОРУ: у скалы
+                // строй обязан идти шире. На БРОДЕ она сжимала проход —
+                // фронт отряда на переправе 6.0 → 3.0 м, отряд шёл гуськом
+                // (qa_river_crossing B4/B5). Вода блокирует шаг так же, как
+                // скала, но отступ у неё прежний, и дуги вокруг неё нет
+                bool water = false;
                 if (!blocked && _riverOn)
                 {
                     float q = cell * 0.25f;
                     float cx = x0 + cell * 0.5f, cz = z0 + cell * 0.5f;
                     if (RiverWater(cx, cz) || RiverWater(cx - q, cz - q) || RiverWater(cx + q, cz - q)
                         || RiverWater(cx - q, cz + q) || RiverWater(cx + q, cz + q))
-                        blocked = true;
+                        water = true;
                 }
-                if (blocked) { _nav[r * _navCols + c] = 1; NavBlocked++; }
+                if (blocked || water) { _nav[r * _navCols + c] = (byte)(blocked ? 1 : 3); NavBlocked++; }
             }
         }
-        _navOn = NavBlocked > 0;
+        _navBase = (byte[])_nav.Clone();
+        _navWanted = true;
+        _navBldDirty = true;
+        NavSync();
         return NavBlocked;
     }
 
-    public void SetNavEnabled(bool on) { _navOn = on && _nav.Length > 1; }
-    public bool NavEnabled() { return _navOn; }
+    // Слой построек поверх базового: пересборка стен и компонент. Дёшево
+    // (десятки тысяч ячеек), зовётся лениво — при первом запросе после
+    // смены реестра, а не на каждую из двадцати хижин деревни
+    private void NavSync()
+    {
+        if (!_navBldDirty) return;
+        _navBldDirty = false;
+        if (_nav.Length <= 1 || _navBase.Length != _nav.Length) return;
+        System.Array.Copy(_navBase, _nav, _nav.Length);
+        NavBlocked = 0;
+        for (int i = 0; i < _nav.Length; i++) if (_nav[i] != 0) NavBlocked++;
+        NavBldCells = 0;
+        foreach (var kv in _blds)
+        {
+            var list = kv.Value;
+            for (int i = 0; i < list.Count; i++)
+            {
+                var b = list[i];
+                float rr = b.R + NavBldPad;
+                int c0 = (int)Math.Floor((b.X - rr - _navOx) / _navCell);
+                int c1 = (int)Math.Floor((b.X + rr - _navOx) / _navCell);
+                int r0 = (int)Math.Floor((b.Z - rr - _navOz) / _navCell);
+                int r1 = (int)Math.Floor((b.Z + rr - _navOz) / _navCell);
+                for (int r = Math.Max(r0, 0); r <= r1 && r < _navRows; r++)
+                    for (int c = Math.Max(c0, 0); c <= c1 && c < _navCols; c++)
+                    {
+                        // Ячейка задевает круг: дистанция от центра круга до
+                        // прямоугольника ячейки не больше rr
+                        float cx0 = _navOx + c * _navCell, cz0 = _navOz + r * _navCell;
+                        float ddx = Math.Max(Math.Max(cx0 - b.X, 0.0f), b.X - (cx0 + _navCell));
+                        float ddz = Math.Max(Math.Max(cz0 - b.Z, 0.0f), b.Z - (cz0 + _navCell));
+                        if (ddx * ddx + ddz * ddz > rr * rr) continue;
+                        int idx = r * _navCols + c;
+                        if (_nav[idx] == 0) { _nav[idx] = 2; NavBldCells++; }
+                    }
+            }
+        }
+        // Соседи ячеек построек — под малый штраф A* (путь идёт вдоль стены,
+        // но при равной длине предпочитает не тереться о неё)
+        int nn = _nav.Length;
+        if (_navBldAdj.Length != nn) _navBldAdj = new byte[nn];
+        else System.Array.Clear(_navBldAdj, 0, nn);
+        if (NavBldCells > 0)
+            for (int r = 0; r < _navRows; r++)
+                for (int c = 0; c < _navCols; c++)
+                {
+                    if (_nav[r * _navCols + c] != 2) continue;
+                    for (int dr = -1; dr <= 1; dr++)
+                        for (int dc = -1; dc <= 1; dc++)
+                        {
+                            int rr2 = r + dr, cc2 = c + dc;
+                            if (rr2 < 0 || cc2 < 0 || rr2 >= _navRows || cc2 >= _navCols) continue;
+                            int j = rr2 * _navCols + cc2;
+                            if (_nav[j] == 0) _navBldAdj[j] = 1;
+                        }
+                }
+        _navOn = _navWanted && (NavBlocked + NavBldCells) > 0;
+        NavBuildComponents();
+    }
+
+    // Дистанция до стены в ячейках (0 — сама стена, 4 — четыре и дальше;
+    // третья клетка нужна гигантам с отступом 3.5-4 м)
+    private void NavBuildWallDist()
+    {
+        int n = _navCols * _navRows;
+        _navWall = new byte[n];
+        for (int i = 0; i < n; i++) _navWall[i] = (byte)(_nav[i] != 0 ? 0 : 4);
+        for (int r = 0; r < _navRows; r++)
+            for (int c = 0; c < _navCols; c++)
+            {
+                int i = r * _navCols + c;
+                if (_nav[i] != 0) continue;
+                byte d = 4;
+                for (int dr = -3; dr <= 3 && d > 1; dr++)
+                    for (int dc = -3; dc <= 3; dc++)
+                    {
+                        if (dr == 0 && dc == 0) continue;
+                        // Здание — не стена для отступа: вдоль него идут вплотную
+                        if (!NavCellCliff(c + dc, r + dr)) continue;
+                        int cheb = Math.Max(Math.Abs(dr), Math.Abs(dc));
+                        if (cheb < d) d = (byte)cheb;
+                        if (d <= 1) break;
+                    }
+                _navWall[i] = d;
+            }
+    }
+
+    private void NavBuildComponents()
+    {
+        NavBuildWallDist();
+        int n = _navCols * _navRows;
+        _navComp = new int[n];
+        NavCompCount = 0;
+        var stack = new int[n];
+        for (int i = 0; i < n; i++)
+        {
+            if (_nav[i] != 0 || _navComp[i] != 0) continue;
+            int id = ++NavCompCount;
+            int sp = 0; stack[sp++] = i; _navComp[i] = id;
+            while (sp > 0)
+            {
+                int cur = stack[--sp];
+                int cc = cur % _navCols, cr = cur / _navCols;
+                for (int k = 0; k < 4; k++)
+                {
+                    int nc = cc + NavDc[k], nr = cr + NavDr[k];
+                    if (NavCellBlocked(nc, nr)) continue;
+                    int ni = nr * _navCols + nc;
+                    if (_navComp[ni] != 0) continue;
+                    _navComp[ni] = id; stack[sp++] = ni;
+                }
+            }
+        }
+    }
+
+    public void SetNavEnabled(bool on) { _navWanted = on; _navOn = on && _nav.Length > 1; }
+    public bool NavEnabled() { NavSync(); return _navOn; }
     public float NavCellSize() { return _navCell; }
 
     private bool NavCellBlocked(int c, int r)
     {
         if (c < 0 || r < 0 || c >= _navCols || r >= _navRows) return true;
         return _nav[r * _navCols + c] != 0;
+    }
+
+    // Скала, вода или край карты — но не здание
+    private bool NavCellCliff(int c, int r)
+    {
+        if (c < 0 || r < 0 || c >= _navCols || r >= _navRows) return true;
+        int k = _nav[r * _navCols + c];
+        return k == 1 || k == 3;
+    }
+
+    // Род помехи в точке: 0 — свободно, 1 — скала/вода (гиганту — и чаща),
+    // 2 — фундамент постройки
+    private int NavKindAt(float x, float z, float clear)
+    {
+        int c = (int)Math.Floor((x - _navOx) / _navCell);
+        int r = (int)Math.Floor((z - _navOz) / _navCell);
+        if (c < 0 || r < 0 || c >= _navCols || r >= _navRows) return 0;
+        int i = r * _navCols + c;
+        if (_nav[i] != 0) return _nav[i];
+        return (clear >= NavGiantClear && _navTree.Length == _nav.Length && _navTree[i] >= NavTreeBlockGiant) ? 1 : 0;
+    }
+
+    // Точка вне всех кругов фундаментов с зазором margin: внутри — вытолкнуть
+    private void BldPushOut(ref float x, ref float z, float margin)
+    {
+        if (BldCount == 0) return;
+        for (int k = 0; k < 3; k++)
+        {
+            float ox, oz;
+            float pen = BldPenetration(x, z, margin, out ox, out oz);
+            if (pen <= 0.0f) return;
+            x += ox * (pen + 0.02f); z += oz * (pen + 0.02f);
+        }
     }
 
     private bool NavBlockedAt(float x, float z)
@@ -3825,26 +5772,175 @@ public partial class ArmyCore : RefCounted
 
     public bool NavFree(float x, float z)
     {
+        NavSync();
         if (!_navOn) return true;
         return !NavBlockedAt(x, z);
     }
 
     // Видимость по сетке с зазором NavClearance по обе стороны отрезка:
     // выборка каждые полклетки, в каждой точке — центр и два бока
+    // ── БОКОВОЙ РАЗНОС ТОЧЕК МАРШРУТА (аудит 19.09.2026) ─────────────────
+    // GameManager._nav_spread делал по два перехода границы (NavFree +
+    // NavLineBlocked) на КАЖДУЮ точку маршрута КАЖДОГО бойца приказа: у
+    // орды в раздаче (_drain_orders) это 90-155 мкс на command_move и кадры
+    // по 60-75 мс. Формула та же, что была в GDScript: точка сдвигается
+    // поперёк хода на проекцию смещения бойца (потолок maxOff), не прошла —
+    // на половину, не прошла — остаётся. flat — [x, z, x, z, …]
+    public float[] NavSpread(float[] flat, float fromX, float fromZ, float latX, float latZ, float maxOff, float clear)
+    {
+        NavSync();
+        int n = flat.Length / 2;
+        var outp = new float[n * 2];
+        float px = fromX, pz = fromZ;
+        // Смещение бойца проецируется на перпендикуляр КАЖДОГО колена —
+        // блок ПЕРЕНОСИТСЯ за угол, не разворачиваясь: цели бойцов и так
+        // разнесены тем же смещением в мировых осях (перенос формы), и за
+        // углом поперёк хода ложится глубина блока. «Заворот» (место в
+        // колонне по первому колену на все колена) пробован и замерен хуже:
+        // qa_cliff_bypass, малый габарит блока 55 → 46 % — у цели боец
+        // всё равно стоит по мировому смещению, и второе колено сводило
+        // строй клином
+        for (int i = 0; i < n; i++)
+        {
+            float x = flat[i * 2], z = flat[i * 2 + 1];
+            float dx = x - px, dz = z - pz;
+            float l = (float)Math.Sqrt(dx * dx + dz * dz);
+            float qx = x, qz = z;
+            if (l > 0.05f)
+            {
+                float perpX = -dz / l, perpZ = dx / l;
+                float off = Math.Clamp(latX * perpX + latZ * perpZ, -maxOff, maxOff);
+                float cx = x + perpX * off, cz = z + perpZ * off;
+                if (NavFree(cx, cz) && !NavLineBlockedC(px, pz, cx, cz, clear)) { qx = cx; qz = cz; }
+                else
+                {
+                    cx = x + perpX * off * 0.5f; cz = z + perpZ * off * 0.5f;
+                    if (NavFree(cx, cz) && !NavLineBlockedC(px, pz, cx, cz, clear)) { qx = cx; qz = cz; }
+                }
+            }
+            BldPushOut(ref qx, ref qz, BldClear + 0.3f);
+            outp[i * 2] = qx; outp[i * 2 + 1] = qz;
+            px = qx; pz = qz;
+        }
+        return outp;
+    }
+
+    // Годится ли чужой (отрядный) маршрут этому бойцу: прямая от его точки к
+    // первому углу и от последнего угла к его цели свободны. Один переход
+    // границы вместо двух (GDScript → C# здесь стоит ~7 мкс за вызов)
+    public bool NavReusable(float ax, float az, float bx, float bz, float p0x, float p0z, float plx, float plz, float clear)
+    {
+        NavSync();
+        if (NavLineBlockedC(ax, az, p0x, p0z, clear)) return false;
+        return !NavLineBlockedC(plx, plz, bx, bz, clear);
+    }
+
     public bool NavLineBlocked(float x0, float z0, float x1, float z1)
+    {
+        NavSync();
+        return NavLineBlockedPad(x0, z0, x1, z1, NavClearance, 0f);
+    }
+
+    // Та же прямая глазами агента с отступом clear: зазор — половина отступа
+    // (тело в 1.7 м не пройдёт в метре от кромки), чаща непрозрачна гиганту
+    public bool NavLineBlockedC(float x0, float z0, float x1, float z1, float clear)
+    {
+        NavSync();
+        return NavLineBlockedPad(x0, z0, x1, z1, Math.Max(NavClearance, clear * 0.5f), clear);
+    }
+
+    private bool NavLineBlockedPad(float x0, float z0, float x1, float z1, float pad, float clear)
     {
         if (!_navOn) return false;
         float dx = x1 - x0, dz = z1 - z0;
         float len = (float)Math.Sqrt(dx * dx + dz * dz);
-        if (len < 1e-4f) return NavBlockedAt(x0, z0);
-        float nx = -dz / len * NavClearance, nz = dx / len * NavClearance;
+        if (len < 1e-4f) return NavBlockedAtC(x0, z0, clear);
+        float ux = dx / len, uz = dz / len;
+        float nx = -uz * pad, nz = ux * pad;
+        // Вода: зазор БЕЗ прибавки NavCliffExtra — брод узкий, и широкий
+        // зазор превращал переправу отряда в цепочку (qa_river_crossing B4/B5)
+        float padW = Math.Max(pad - NavCliffExtra * 0.5f, 0.0f);
+        float wnx = -uz * padW, wnz = ux * padW;
+        // Здание: боковой зазор свой, малый — вдоль дома идут вплотную
+        float bp = Math.Min(pad, NavBldSidePad);
+        float bnx = -uz * bp, bnz = ux * bp;
+        // Концы отрезка в ЯЧЕЙКЕ постройки, но вне самого фундамента (ворота,
+        // точка сдачи, подтянутый к стене угол нити): пробы в пределах ячейки
+        // от такого конца не считаются — иначе к воротам «дороги нет» никогда
+        int startOk = -1, endOk = -1;
         int steps = Math.Max((int)Math.Ceiling(len / (_navCell * 0.45f)), 1);
         for (int i = 0; i <= steps; i++)
         {
             float t = (float)i / steps;
             float x = x0 + dx * t, z = z0 + dz * t;
-            if (NavBlockedAt(x, z) || NavBlockedAt(x + nx, z + nz) || NavBlockedAt(x - nx, z - nz))
+            float along = len * t;
+            int kc = NavKindAt(x, z, clear);
+            if (kc == 1 || kc == 3) return true;
+            bool bld = kc == 2;
+            if (!bld && NavBldCells > 0)
+            {
+                bld = NavKindAt(x + bnx, z + bnz, clear) == 2 || NavKindAt(x - bnx, z - bnz, clear) == 2;
+            }
+            if (bld)
+            {
+                bool ex = false;
+                if (along < _navCell)
+                {
+                    if (startOk < 0) startOk = BldDepth(x0, z0, BldClear) <= 0.0f ? 1 : 0;
+                    ex = startOk == 1;
+                }
+                if (!ex && len - along < _navCell)
+                {
+                    if (endOk < 0) endOk = BldDepth(x1, z1, BldClear) <= 0.0f ? 1 : 0;
+                    ex = endOk == 1;
+                }
+                if (!ex) return true;
+            }
+            if (pad > 0.0f && (NavKindAt(x + nx, z + nz, clear) == 1 || NavKindAt(x - nx, z - nz, clear) == 1))
                 return true;
+            if (padW > 0.0f && (NavKindAt(x + wnx, z + wnz, clear) == 3 || NavKindAt(x - wnx, z - wnz, clear) == 3))
+                return true;
+        }
+        return false;
+    }
+
+    // Полоса ОТРЯДА шириной ±halfW задевает здание (ТЗ 19.09.2026, единство
+    // строя): дорога отряда строится от центра, и если центру прямая свободна,
+    // а фланг упирается в башню, — половина отряда шла своим обходом с другой
+    // стороны. Полоса шире прямой: задела дом — маршрут строит A* от центра,
+    // и весь отряд огибает его с одной стороны. Концы — как у прямой
+    private bool NavBandBlockedBld(float x0, float z0, float x1, float z1, float halfW)
+    {
+        if (!_navOn || NavBldCells == 0) return false;
+        float dx = x1 - x0, dz = z1 - z0;
+        float len = (float)Math.Sqrt(dx * dx + dz * dz);
+        if (len < 1e-4f) return false;
+        float ux = dx / len, uz = dz / len;
+        // ── ВЫХОД ИЗ СОБСТВЕННЫХ ВОРОТ — НЕ ПОМЕХА (ТЗ 20.09.2026, п. 2) ───
+        // Отряд появляется на площадке в двух-шести метрах от стены, и полоса
+        // ±halfW задевала ТО ЖЕ здание, из которого он вышел: полоса звала
+        // A*, тот честно огибал казарму — и отряд шёл к точке сбора петлёй
+        // вокруг собственного дома («призрачный угол», скриншоты 11, 12).
+        // Участок у конца, который и так стоит вплотную к дому, из проверки
+        // выпадает: здание, у стены которого путь начинается или кончается,
+        // обойти нельзя и не нужно
+        float skip0 = _navCell;
+        if (BldDepth(x0, z0, halfW + _navCell) > 0.0f) skip0 = halfW + _navCell * 2.0f;
+        float skip1 = _navCell;
+        if (BldDepth(x1, z1, halfW + _navCell) > 0.0f) skip1 = halfW + _navCell * 2.0f;
+        int steps = Math.Max((int)Math.Ceiling(len / (_navCell * 0.45f)), 1);
+        for (int i = 0; i <= steps; i++)
+        {
+            float t = (float)i / steps;
+            float along = len * t;
+            if (along < skip0 || len - along < skip1) continue;
+            float x = x0 + dx * t, z = z0 + dz * t;
+            for (int k = 0; k < 2; k++)
+            {
+                float w = k == 0 ? halfW : halfW * 0.5f;
+                if (NavKindAt(x - uz * w, z + ux * w, 0f) == 2 || NavKindAt(x + uz * w, z - ux * w, 0f) == 2)
+                    return true;
+            }
         }
         return false;
     }
@@ -3922,14 +6018,21 @@ public partial class ArmyCore : RefCounted
     /// точек (без начала и конца). Пусто, если путь прямой (NavLastFound = true)
     /// или пути нет вовсе (NavLastFound = false). NavLastLength — длина по
     /// нити в метрах (прямая — расстояние между концами)
-    public float[] NavPath(float x0, float z0, float x1, float z1)
+    // halfW — полуширина СТРОЯ, огибающего угол (ТЗ 19.09.2026, п. 2): угол
+    // отжимается от кромки ещё и на неё, чтобы внутренний ряд колонны прошёл
+    // на своём отступе, а не сжался к оси (NavSpread половинит сдвиг, чей
+    // путь задевает стену). Одиночке — ноль
+    public float[] NavPath(float x0, float z0, float x1, float z1, float clear, float halfW)
     {
+        NavSync();
         NavCalls++;
         NavLastFound = true;
         float sdx = x1 - x0, sdz = z1 - z0;
         NavLastLength = (float)Math.Sqrt(sdx * sdx + sdz * sdz);
         if (!_navOn) return System.Array.Empty<float>();
-        if (!NavLineBlocked(x0, z0, x1, z1)) return System.Array.Empty<float>();
+        if (_navTreeDirty) NavRefreshTrees();
+        if (!NavLineBlockedC(x0, z0, x1, z1, clear) && (halfW <= 0.0f || !NavBandBlockedBld(x0, z0, x1, z1, halfW)))
+            return System.Array.Empty<float>();
         int sc = (int)Math.Floor((x0 - _navOx) / _navCell), sr = (int)Math.Floor((z0 - _navOz) / _navCell);
         int gc = (int)Math.Floor((x1 - _navOx) / _navCell), gr = (int)Math.Floor((z1 - _navOz) / _navCell);
         sc = Math.Clamp(sc, 0, _navCols - 1); sr = Math.Clamp(sr, 0, _navRows - 1);
@@ -3938,6 +6041,12 @@ public partial class ArmyCore : RefCounted
         int goal = NavNearestFree(gc, gr, 8);
         if (start < 0 || goal < 0) { NavLastFound = false; return System.Array.Empty<float>(); }
         if (start == goal) return System.Array.Empty<float>();
+        // Разные компоненты — пути нет, и заливать сетку незачем
+        if (_navComp.Length == _nav.Length && _navComp[start] != _navComp[goal])
+        {
+            NavLastFound = false; NavUnreach++;
+            return System.Array.Empty<float>();
+        }
         // ── A* ────────────────────────────────────────────────────────────
         _navEpoch++;
         if (_navEpoch == int.MaxValue) { System.Array.Clear(_navStamp, 0, _navStamp.Length); _navEpoch = 1; }
@@ -3963,7 +6072,7 @@ public partial class ArmyCore : RefCounted
                 // Диагональ без срезания угла: оба ортогональных соседа свободны
                 if (k >= 4 && (NavCellBlocked(cc + NavDc[k], cr) || NavCellBlocked(cc, cr + NavDr[k]))) continue;
                 int ni = nr * _navCols + nc;
-                float g = g0 + NavDw[k];
+                float g = g0 + NavDw[k] + NavCellPenalty(ni, clear);
                 if (_navStamp[ni] == _navEpoch)
                 {
                     if (_navClosed[ni] != 0 || g >= _navG[ni]) continue;
@@ -3998,16 +6107,25 @@ public partial class ArmyCore : RefCounted
         float ax = px[0], az = pz[0];
         while (anchor < last)
         {
-            // Самая дальняя точка, видимая из якоря
+            // Самая дальняя точка, видимая из якоря — С ОТСТУПОМ от стен
+            // (NavThreadClearance): нить, натянутая впритык к углу, вела бы
+            // отряд вдоль обрыва гуськом
             int far = anchor + 1;
+            // Зазор нити — ПОЛОВИНА отступа (как у видимости прямой): с полным
+            // отступом нить у стены не спрямлялась вовсе, и тролль получал
+            // угол на каждую клетку. Отступ целиком — в отжиме угла ниже
+            // ...плюс полуширина строя: нить — хорда, касательная к скале, и
+            // ряд, идущий на halfW ближе к стене, чем центр, свою хорду
+            // терял (NavSpread половинил сдвиг — блок сжимался за углом)
+            float pad = Math.Max(NavThreadClearance, clear * 0.5f) + halfW + NavCliffExtra * 0.5f;
             for (int j = last; j > anchor + 1; j--)
             {
-                if (!NavLineBlocked(ax, az, px[j], pz[j])) { far = j; break; }
+                if (!NavLineBlockedPad(ax, az, px[j], pz[j], pad, clear)) { far = j; break; }
             }
             float fx = px[far], fz = pz[far];
             if (far != last)
             {
-                NavCornerPush(ref fx, ref fz);
+                NavCornerPush(ref fx, ref fz, Math.Max(_navCell * 1.5f, clear) + halfW + NavCliffExtra, clear);
                 _navOut.Add(fx); _navOut.Add(fz);
             }
             float ddx = fx - ax, ddz = fz - az;
@@ -4015,27 +6133,240 @@ public partial class ArmyCore : RefCounted
             ax = fx; az = fz;
             anchor = far;
         }
+        // ── ЧИСТКА ЛИШНИХ УГЛОВ И СКРУГЛЕНИЕ (ТЗ 20.09.2026, пп. 1-2) ──────
+        // Отжим угла и подтяжка к дому двигают точку ПОСЛЕ выбора, и угол,
+        // ставший ненужным (а то и лежащий позади старта — «призрачный угол»
+        // у ворот казармы), оставался в нити. Затем острый угол заменяется
+        // дугой по свободной земле, чтобы строй огибал выступ, а не ломался
+        // о точку
+        NavPrune(x0, z0, x1, z1, clear, halfW);
+        NavSmooth(x0, z0, x1, z1, clear, halfW);
+        total = 0f;
+        float lx = x0, lz = z0;
+        for (int i = 0; i + 1 < _navOut.Count; i += 2)
+        {
+            float sx = _navOut[i] - lx, sz = _navOut[i + 1] - lz;
+            total += (float)Math.Sqrt(sx * sx + sz * sz);
+            lx = _navOut[i]; lz = _navOut[i + 1];
+        }
+        { float sx = x1 - lx, sz = z1 - lz; total += (float)Math.Sqrt(sx * sx + sz * sz); }
         NavLastLength = total;
         return _navOut.ToArray();
     }
 
-    // Отжим угла от стены: средняя сторона непроходимых соседей в радиусе
-    // ячейки — и точка уезжает от неё на полклетки, если там свободно
-    private void NavCornerPush(ref float x, ref float z)
+    // ── ГОРЫ ШИРЕ ДОМОВ (ТЗ 20.09.2026, п. 1) ──────────────────────────────
+    // Предыдущий заход свёл обход зданий к тесным 0.2-0.6 м и тем же числом
+    // прижал войска к склонам: отряд шёл впритирку к обрыву и вытягивался в
+    // нитку (скриншоты 1, 2, 6). Отступ РАЗДЕЛЁН: у рукотворной стены он
+    // остался тесным (NavBldSidePad / NavBldCornerPush / NavBldHug), а у
+    // скалы и воды к габариту агента прибавляется NavCliffExtra — он входит
+    // в штраф шага у стены, в зазор нити и в отжим угла, но НЕ в проверку
+    // «точка в стене» (иначе узкий брод стал бы непроходимым)
+    public const float NavCliffExtraM = 1.0f;
+    // Ручка A/B (perf_config.nav_cliff_arc): выключает прибавку отступа у скал
+    // и скругление углов разом — они про одно и то же, обход рельефа
+    private bool _navArcOn = true;
+    public void SetNavArc(bool on) { _navArcOn = on; NavRouteEpoch++; }
+    public int NavRouteEpoch = 0;
+    private float NavCliffExtra { get { return _navArcOn ? NavCliffExtraM : 0.0f; } }
+
+    // Скругление угла дугой: дальше этого радиуса скала уже не «выступ»
+    private const float NavArcMaxR = 16.0f;
+    // Грань дуги — около 20°, то есть 8-10 граней на полный оборот
+    private const float NavArcStep = 0.35f;
+    // Поворот мельче этого — гладить нечего
+    private const float NavArcMinTurn = 0.35f;
+    // Сколько дуги брать с каждой стороны от угла (доля до соседней точки)
+    private const float NavArcShare = 0.6f;
+    private const float NavArcMaxSide = 1.05f;   // не больше 60° на сторону
+    private readonly System.Collections.Generic.List<float> _navArc =
+        new System.Collections.Generic.List<float>(64);
+
+    private static float NavWrapAngle(float a)
+    {
+        while (a > (float)Math.PI) a -= (float)(Math.PI * 2.0);
+        while (a < -(float)Math.PI) a += (float)(Math.PI * 2.0);
+        return a;
+    }
+
+    // ── СНЯТИЕ ЛИШНИХ УГЛОВ ────────────────────────────────────────────────
+    // Натягивание нити выбирает самую дальнюю видимую точку, но отжим угла
+    // и подтяжка к дому двигают её ПОСЛЕ выбора — и соседи угла нередко
+    // видят друг друга напрямую. Такой угол — чистый крюк; у самых ворот
+    // казармы он ложился ПОЗАДИ бойца, и отряд выходил петлёй (скриншоты
+    // 11, 12). Удаляем, пока удаляется, с тем же зазором, что у натягивания
+    private void NavPrune(float x0, float z0, float x1, float z1, float clear, float halfW)
+    {
+        if (_navOut.Count < 2) return;
+        float pad = Math.Max(NavThreadClearance, clear * 0.5f) + halfW + NavCliffExtra * 0.5f;
+        for (int guard = 0; guard < 8; guard++)
+        {
+            bool changed = false;
+            for (int i = 0; i + 1 < _navOut.Count; i += 2)
+            {
+                float ax = i == 0 ? x0 : _navOut[i - 2];
+                float az = i == 0 ? z0 : _navOut[i - 1];
+                float bx = (i + 2 < _navOut.Count) ? _navOut[i + 2] : x1;
+                float bz = (i + 2 < _navOut.Count) ? _navOut[i + 3] : z1;
+                if (!NavLineBlockedPad(ax, az, bx, bz, pad, clear))
+                {
+                    _navOut.RemoveAt(i + 1); _navOut.RemoveAt(i);
+                    changed = true;
+                    break;
+                }
+            }
+            if (!changed) break;
+        }
+    }
+
+    // ── УГОЛ РЕЛЬЕФА — ДУГА, А НЕ ИЗЛОМ (ТЗ 20.09.2026, п. 1) ───────────────
+    // Ломаная из A* давала отряду одну точку поворота: колонна доходила до
+    // неё, разворачивалась на месте и вытягивалась. Выступ скалы
+    // аппроксимируется окружностью вокруг ближайшей непроходимой ячейки, и
+    // угол заменяется дугой по СВОБОДНОЙ земле (2-6 граней, около 20° на
+    // грань). Не вышло — угол остаётся как был: сглаживание никогда не
+    // делает путь непроходимым
+    private void NavSmooth(float x0, float z0, float x1, float z1, float clear, float halfW)
+    {
+        int n = _navOut.Count / 2;
+        if (n == 0) return;
+        float pad = Math.Max(NavThreadClearance, clear * 0.5f) + halfW;
+        _navArc.Clear();
+        for (int k = 0; k < n; k++)
+        {
+            float px = _navOut[k * 2], pz = _navOut[k * 2 + 1];
+            float ax = k == 0 ? x0 : _navOut[k * 2 - 2];
+            float az = k == 0 ? z0 : _navOut[k * 2 - 1];
+            float bx = (k + 1 < n) ? _navOut[k * 2 + 2] : x1;
+            float bz = (k + 1 < n) ? _navOut[k * 2 + 3] : z1;
+            if (!_navArcOn || !NavArcCorner(px, pz, ax, az, bx, bz, clear, pad))
+            {
+                _navArc.Add(px); _navArc.Add(pz);
+            }
+        }
+        _navOut.Clear();
+        _navOut.AddRange(_navArc);
+    }
+
+    private bool NavArcCorner(float px, float pz, float ax, float az, float bx, float bz,
+        float clear, float pad)
+    {
+        // Ближайшая СКАЛА (kind 1): у дома угол подтянут вплотную намеренно
+        int c = (int)Math.Floor((px - _navOx) / _navCell), r = (int)Math.Floor((pz - _navOz) / _navCell);
+        int R = (int)Math.Ceiling(NavArcMaxR / _navCell);
+        float bestD2 = float.MaxValue, cx = 0f, cz = 0f;
+        for (int dr = -R; dr <= R; dr++)
+            for (int dc = -R; dc <= R; dc++)
+            {
+                int cc = c + dc, rr = r + dr;
+                if (cc < 0 || rr < 0 || cc >= _navCols || rr >= _navRows) continue;
+                if (_nav[rr * _navCols + cc] != 1) continue;
+                float wx = _navOx + (cc + 0.5f) * _navCell, wz = _navOz + (rr + 0.5f) * _navCell;
+                float ddx = wx - px, ddz = wz - pz;
+                float d2 = ddx * ddx + ddz * ddz;
+                if (d2 < bestD2) { bestD2 = d2; cx = wx; cz = wz; }
+            }
+        if (bestD2 == float.MaxValue || bestD2 > NavArcMaxR * NavArcMaxR) return false;
+        float rad = (float)Math.Sqrt(bestD2);
+        if (rad < 0.6f) return false;
+        float pa = (float)Math.Atan2(pz - cz, px - cx);
+        float aa = (float)Math.Atan2(az - cz, ax - cx);
+        float ba = (float)Math.Atan2(bz - cz, bx - cx);
+        float d1 = NavWrapAngle(pa - aa), d2s = NavWrapAngle(ba - pa);
+        // Обход выпуклости: обе половины поворачивают в одну сторону
+        if (d1 * d2s <= 0.0f) return false;
+        if (Math.Abs(d1) + Math.Abs(d2s) < NavArcMinTurn) return false;
+        float s1 = Math.Min(Math.Abs(d1) * NavArcShare, NavArcMaxSide) * Math.Sign(d1);
+        float s2 = Math.Min(Math.Abs(d2s) * NavArcShare, NavArcMaxSide) * Math.Sign(d2s);
+        int segs = Math.Clamp((int)Math.Ceiling((Math.Abs(s1) + Math.Abs(s2)) / NavArcStep), 2, 6);
+        var qx = new float[segs + 1]; var qz = new float[segs + 1];
+        for (int i = 0; i <= segs; i++)
+        {
+            float t = (float)i / segs;
+            float ang = pa - s1 + (s1 + s2) * t;
+            qx[i] = cx + (float)Math.Cos(ang) * rad;
+            qz[i] = cz + (float)Math.Sin(ang) * rad;
+            if (NavBlockedAtC(qx[i], qz[i], clear)) return false;
+        }
+        float half = pad * 0.6f;
+        if (NavLineBlockedPad(ax, az, qx[0], qz[0], half, clear)) return false;
+        for (int i = 0; i < segs; i++)
+            if (NavLineBlockedPad(qx[i], qz[i], qx[i + 1], qz[i + 1], half, clear)) return false;
+        if (NavLineBlockedPad(qx[segs], qz[segs], bx, bz, half, clear)) return false;
+        for (int i = 0; i <= segs; i++) { _navArc.Add(qx[i]); _navArc.Add(qz[i]); }
+        return true;
+    }
+    // Отжим угла от стены НА ЗАДАННЫЙ ОТСТУП (ТЗ 19.09.2026): ищется
+    // ближайшая непроходимая клетка в радиусе отжима, и точка уезжает от
+    // неё ровно настолько, чтобы отстоять на push (отступ агента плюс
+    // полуширина строя). Прежний отжим смотрел только восемь соседей: угол
+    // нити на второй-третьей клетке от стены (туда его ставит штраф A*) не
+    // отжимался вовсе, и полуширина строя не работала. Не прошло — ступенями
+    private void NavCornerPush(ref float x, ref float z, float push, float clear)
     {
         int c = (int)Math.Floor((x - _navOx) / _navCell), r = (int)Math.Floor((z - _navOz) / _navCell);
-        float sx = 0f, sz = 0f; int n = 0;
-        for (int dr = -1; dr <= 1; dr++)
-            for (int dc = -1; dc <= 1; dc++)
+        int R = (int)Math.Ceiling(push / _navCell) + 1;
+        float bestD2 = float.MaxValue, bx = 0f, bz = 0f;
+        int kind = 0;
+        for (int dr = -R; dr <= R; dr++)
+            for (int dc = -R; dc <= R; dc++)
             {
-                if (dr == 0 && dc == 0) continue;
                 if (!NavCellBlocked(c + dc, r + dr)) continue;
-                sx += dc; sz += dr; n++;
+                float wx = _navOx + (c + dc + 0.5f) * _navCell, wz = _navOz + (r + dr + 0.5f) * _navCell;
+                float ddx = wx - x, ddz = wz - z;
+                float d2 = ddx * ddx + ddz * ddz;
+                if (d2 < bestD2)
+                {
+                    bestD2 = d2; bx = ddx; bz = ddz;
+                    int cc = c + dc, rr = r + dr;
+                    kind = (cc < 0 || rr < 0 || cc >= _navCols || rr >= _navRows) ? 1 : _nav[rr * _navCols + cc];
+                }
             }
-        if (n == 0) return;
-        float l = (float)Math.Sqrt(sx * sx + sz * sz);
+        if (bestD2 == float.MaxValue) return;
+        float l = (float)Math.Sqrt(bestD2);
         if (l < 1e-4f) return;
-        float nx = x - sx / l * _navCell * 0.6f, nz = z - sz / l * _navCell * 0.6f;
-        if (!NavBlockedAt(nx, nz)) { x = nx; z = nz; }
+        // ЗДАНИЕ — ВПЛОТНУЮ: угол не дальше NavBldCornerPush от ячейки стены,
+        // а затем подтягивается к настоящему кругу фундамента (NavBldHug)
+        if (kind == 2)
+        {
+            float needB = NavBldCornerPush - (l - _navCell * 0.5f);
+            if (needB > 0f)
+            {
+                float nx = x - bx / l * needB, nz = z - bz / l * needB;
+                if (!NavBlockedAtC(nx, nz, clear)) { x = nx; z = nz; }
+            }
+            BldHug(ref x, ref z, bx / l, bz / l, clear);
+            return;
+        }
+        // Вода отжимает угол на прежний отступ: прибавка — про гору
+        if (kind == 3) push = Math.Max(push - NavCliffExtra, _navCell * 0.5f);
+        float need = push - (l - _navCell * 0.5f);
+        if (need <= 0f) return;
+        for (float f = 1.0f; f >= 0.4f; f -= 0.3f)
+        {
+            float nx = x - bx / l * need * f, nz = z - bz / l * need * f;
+            if (!NavBlockedAtC(nx, nz, clear) && !NavLineBlockedPad(x, z, nx, nz, 0f, clear)) { x = nx; z = nz; return; }
+        }
+        float ex = x - bx / l * _navCell * 0.6f, ez = z - bz / l * _navCell * 0.6f;
+        if (!NavBlockedAt(ex, ez)) { x = ex; z = ez; }
+    }
+
+    // Подтяжка угла к стене дома: сперва вон из кругов (с зазором NavBldHug),
+    // потом шагами к ячейке стены, пока круг не в зазоре, — не дальше 2.4 м
+    // и не в скалу. Ячейки сетки грубые (2 м), а круги точные: угол ложится
+    // у самого фундамента, а не у края ячейки
+    private void BldHug(ref float x, ref float z, float dirX, float dirZ, float clear)
+    {
+        BldPushOut(ref x, ref z, NavBldHug);
+        float cx = x, cz = z;
+        for (int k = 1; k <= 8; k++)
+        {
+            float tx = x + dirX * 0.3f * k, tz = z + dirZ * 0.3f * k;
+            if (NavKindAt(tx, tz, clear) == 1) break;
+            float ox, oz;
+            if (BldPenetration(tx, tz, NavBldHug, out ox, out oz) > 0.0f) break;
+            cx = tx; cz = tz;
+        }
+        x = cx; z = cz;
     }
 }

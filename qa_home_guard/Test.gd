@@ -305,13 +305,19 @@ func _c_wake() -> void:
 		u.set_stance("defense")
 		k += 1
 	await pframes(int(_AICfg.HOME_GUARD_TICK_SEC * 60.0) * 2 + 6)
-	verdict("C1 прорыв в зону охраны — тревога, вся охрана проснулась",
-		guard.alarm and guard.asleep_count() == 0,
+	# ТЗ 19.09.2026 (блок 3.3): по тревоге просыпается ПЕРВАЯ ВОЛНА
+	# (HOME_GUARD_WAVE_SQUADS отрядов), остальные — через HOME_GUARD_WAVE_GAP_SEC
+	var n_guard: int = guard.squads.size()
+	var wave1: int = mini(_AICfg.HOME_GUARD_WAVE_SQUADS, n_guard)
+	verdict("C1 прорыв в зону охраны — тревога, проснулась первая волна (%d из %d)" % [wave1, n_guard],
+		guard.alarm and guard.asleep_count() == n_guard - wave1,
 		"тревога %s, спит %d" % [str(guard.alarm), guard.asleep_count()])
 	var awake_ok := true
 	var targeting := 0
 	var total := 0
 	for s in guard.squads:
+		if guard.is_asleep(int(s["sid"])):
+			continue
 		for m in _members(int(s["sid"])):
 			var u := m as Unit
 			total += 1
@@ -321,6 +327,11 @@ func _c_wake() -> void:
 				targeting += 1
 	verdict("C2 проснувшиеся тикают и получили цель (атака)", awake_ok and targeting >= total / 2,
 		"с целью %d из %d" % [targeting, total])
+	# Вторая волна — по истечении срока тревоги (часы двигаем сами)
+	guard.wave_clock = _AICfg.HOME_GUARD_WAVE_GAP_SEC
+	await pframes(int(_AICfg.HOME_GUARD_TICK_SEC * 60.0) * 2 + 6)
+	verdict("C2б через %.0f с тревоги — вторая волна (проснулись все %d)" % [_AICfg.HOME_GUARD_WAVE_GAP_SEC, n_guard],
+		guard.asleep_count() == maxi(n_guard - 2 * wave1, 0), "спит %d" % guard.asleep_count())
 	# Охрана реально пошла на прорыв: центр хотя бы одного отряда сдвинулся к чужим
 	var c0: Array = []
 	for s in guard.squads:
@@ -380,8 +391,8 @@ func _d_castle_hit_and_save() -> void:
 	var hp0: float = keep.current_health
 	keep.take_damage(25.0, shooter)
 	await pframes(int(_AICfg.HOME_GUARD_TICK_SEC * 60.0) * 2 + 6)
-	verdict("D1 удар по замку будит охрану (замок под ударом %.0f с)" % _AICfg.HOME_GUARD_HIT_SEC,
-		guard.alarm and guard.asleep_count() == 0,
+	verdict("D1 удар по замку будит охрану — первую волну (замок под ударом %.0f с)" % _AICfg.HOME_GUARD_HIT_SEC,
+		guard.alarm and guard.asleep_count() == guard.squads.size() - mini(_AICfg.HOME_GUARD_WAVE_SQUADS, guard.squads.size()),
 		"тревога %s, спит %d, запас замка %.0f → %.0f" % [str(guard.alarm), guard.asleep_count(),
 			hp0, keep.current_health])
 	var on_shooter := 0

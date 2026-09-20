@@ -89,6 +89,8 @@ func _xz(a: Vector3, b: Vector3) -> float:
 func _run() -> void:
 	main = load("res://scenes/Main.tscn").instantiate()
 	get_tree().root.add_child(main)
+	# Пень за рекой в партии заморожен (ТЗ 19.09.2026); стенду нужен живой
+	GameManager.call_deferred("thaw_lairs_now")
 	await frames(8)
 	if main.enemy_ai != null:
 		main.enemy_ai.set_process(false)
@@ -309,10 +311,11 @@ func _run() -> void:
 	var vfx_s: Node = monk.heal_vfx_target()
 	var q_s: QuadMesh = (monk._heal_vfx.mesh as QuadMesh) if monk._heal_vfx != null else null
 	var qa_s: QuadMesh = (monk._heal_aura.mesh as QuadMesh) if monk._heal_aura != null else null
-	verdict("C1 на копейщике: эффект есть, квад %.2f м (фикс. %.2f), аура %.2f м" % [
-		q_s.size.y if q_s != null else -1.0, monk.HEAL_VFX_SIZE_M, qa_s.size.x if qa_s != null else -1.0],
+	# Овал на земле вырезан ТЗ 19.09.2026 (п. 1): его отсутствие — свойство
+	verdict("C1 на копейщике: эффект есть, квад %.2f м (фикс. %.2f), овала на земле нет" % [
+		q_s.size.y if q_s != null else -1.0, monk.HEAL_VFX_SIZE_M],
 		vfx_s == hurt_s and q_s != null and is_equal_approx(q_s.size.y, monk.HEAL_VFX_SIZE_M)
-		and qa_s != null and is_equal_approx(qa_s.size.x, monk.AURA_DIAM_M))
+		and qa_s == null)
 	hurt_s.current_health = hurt_s.max_health
 	hurt_s._soa_push_stats()
 	var hurt_a: Unit = _spawn("archer", Constants.FACTION_PLAYER, pc + Vector3(-1.5, 0.0, 0.0))

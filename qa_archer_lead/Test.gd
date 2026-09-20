@@ -115,6 +115,8 @@ func _run_pass(runner: Unit, a: Vector3, b: Vector3, secs: float) -> Dictionary:
 	var seen: Dictionary = {}
 	var offs: Array = []
 	var landed := 0
+	GameManager.pj_hit_log_on = true
+	GameManager.pj_hit_log.clear()
 	var strikes0: int = _ArrowS.strikes
 	var snipe0: int = _ArrowS.snipe_strikes
 	var shots0: int = 0
@@ -141,26 +143,39 @@ func _run_pass(runner: Unit, a: Vector3, b: Vector3, secs: float) -> Dictionary:
 				if (u as Unit).attack_target != null:
 					with_t += 1
 				dmin = minf(dmin, _xz((u as Unit).global_position, rp))
+			var rng0: float = -1.0
+			if not _dbg_men.is_empty() and is_instance_valid(_dbg_men[0]):
+				rng0 = (_dbg_men[0] as Unit).attack_range
 			print("    f=%d живых %d с целью %d ближайший %.1f состояния %s снайп.дальность %.1f" % [
-				f, alive, with_t, dmin, str(st), (_dbg_men[0] as Unit).attack_range])
-		for ch in main.world_root().get_children():
-			if not (ch is _ArrowS):
-				continue
-			var id: int = ch.get_instance_id()
-			var spent: bool = bool(ch.get("_spent"))
+				f, alive, with_t, dmin, str(st), rng0])
+		# СНАРЯД БЕЗ УЗЛА (BigStand-5, этап 3): полёт — запись ядра, промах —
+		# запись торчащей с id полёта (src), попадание — журнал pj_hit_log
+		for fr in GameManager.flight_records():
+			var id: int = int(fr["id"])
 			if not seen.has(id):
-				seen[id] = spent
-				if not spent:
-					shots0 += 1
+				seen[id] = false
+				shots0 += 1
+		for sr in GameManager.stuck_arrow_records():
+			var sid: int = int(sr["src"])
+			if sid == 0 or not seen.has(sid) or bool(seen[sid]):
 				continue
-			if bool(seen[id]) or not spent:
-				continue
-			seen[id] = true
+			seen[sid] = true
 			landed += 1
-			var ap: Vector3 = (ch as Node3D).global_position
+			var ap: Vector3 = sr["pos"]
 			var d: Vector3 = ap - rp
 			d.y = 0.0
 			offs.append(d.dot(dir))
+		for h in GameManager.pj_hit_log:
+			var hid: int = int(h[0])
+			if seen.has(hid) and bool(seen[hid]):
+				continue
+			seen[hid] = true
+			landed += 1
+			var hp: Vector3 = h[1]
+			var dh: Vector3 = hp - rp
+			dh.y = 0.0
+			offs.append(dh.dot(dir))
+		GameManager.pj_hit_log.clear()
 	var mean := 0.0
 	for o in offs:
 		mean += float(o)
@@ -235,7 +250,11 @@ func _run() -> void:
 		_research(c)
 	await pframes(40)
 	var snipers := 0
+	# Всадник с тиком за три секунды у строя успевает срубить пару лучников:
+	# освобождённый узел в списке — правило 5, живость до приведения типа
 	for u in ar[1]:
+		if not is_instance_valid(u) or (u as Unit).is_dead():
+			continue
 		if (u as Archer).is_sniper():
 			snipers += 1
 	verdict("B0 снайперы назначены (%d)" % _UCfg.SNIPE_SQUAD_BASE, snipers == _UCfg.SNIPE_SQUAD_BASE, "%d" % snipers)
@@ -282,7 +301,9 @@ func _run() -> void:
 	while w < 60 * 20:
 		await get_tree().physics_frame
 		w += 1
-		if _xz(_centre(ar2[1]), foe.global_position) <= rng2 + 1.0:
+		# Центр отряда встаёт за дальностью ближней шеренги (SQUAD_SHOT_SLACK:
+		# задние ряды доходят, передние стоят) — допуск по глубине строя
+		if _xz(_centre(ar2[1]), foe.global_position) <= rng2 + 2.5:
 			closed = true
 		if foe.current_health < hp0:
 			fired = true
@@ -306,13 +327,19 @@ func _run() -> void:
 	while w2 < 60 * 25:
 		await get_tree().physics_frame
 		w2 += 1
-		if _xz(_centre(ar2[1]), foe2.global_position) <= rng2 + 1.0:
+		if not is_instance_valid(foe2):
+			fired2 = true
+			break
+		if _xz(_centre(ar2[1]), foe2.global_position) <= rng2 + 2.5:
 			closed2 = true
 		if foe2.current_health < hp2:
 			fired2 = true
 		if closed2 and fired2:
 			break
-	verdict("C3 повторный приказ после перестрелки: отряд снова сблизился и стреляет", closed2 and fired2,
+	var foe2_ok: bool = is_instance_valid(foe2)
+	verdict("C3 повторный приказ после перестрелки: отряд снова сблизился и стреляет (или добил)",
+		fired2 and (closed2 or not foe2_ok),
 		"дистанция %.1f, запас %.0f → %.0f, %d физкадров" % [
-			_xz(_centre(ar2[1]), foe2.global_position), hp2, foe2.current_health, w2])
+			_xz(_centre(ar2[1]), foe2.global_position) if foe2_ok else -1.0, hp2,
+			foe2.current_health if foe2_ok else 0.0, w2])
 	_finish()

@@ -180,12 +180,15 @@ func _tick_zone(delta: float) -> bool:
 			if state == State.MOVING:
 				state = State.IDLE
 			return false
+		var zp: Vector3 = GameManager.land_target(z.clamp_to_zone(lair, global_position))
+		if _same_goal(zp):
+			return false
 		set_attack_target(null)
 		hunting = false
 		zone_returns += 1
 		_zone_from = global_position
 		if _OptG.cmd_meter: _OptG.cmd_src = "gnoll_zone"
-		command_move(GameManager.land_target(z.clamp_to_zone(lair, global_position)))
+		command_move(zp)
 		if _OptG.cmd_meter: _OptG.cmd_src = ""
 		return true
 	_zone_from = Vector3.INF
@@ -249,6 +252,11 @@ func sep_radius() -> float:
 ## Тот же ответ, что у лучника: назначенную цель, до которой не дострелить,
 ## база подменит на достижимую (Unit._prefer_in_range), а сходить с места за
 ## ней он не станет
+## Патруль, кайт, фланг и зона — часы в тике: гнолл по физике не спит
+## (BigStand, этап 3)
+func may_sleep_physics() -> bool:
+	return false
+
 func pursues_target() -> bool:
 	return hunting
 
@@ -268,6 +276,16 @@ const GOBLIN_SHOUT_CHANCE := SHOUT_CHANCE
 
 func _sfx_shout() -> String:
 	return "goblin_attack"
+
+## Грюнты пака (ТЗ 19.09.2026): визги и хрюканье — на удар, урон и марш
+func _sfx_grunt() -> String:
+	return "goblin_grunt"
+
+func _sfx_hurt() -> String:
+	return "goblin_grunt"
+
+func _sfx_move_grunt() -> String:
+	return "goblin_grunt"
 
 func _shout_chance() -> float:
 	return GOBLIN_SHOUT_CHANCE
@@ -340,7 +358,7 @@ func _release_bone() -> void:
 	if _throw_miss:
 		bones_missed += 1
 	var dist: float = from_pos.distance_to(_throw_aim)
-	GameManager.spawn_arrow(parent, from_pos, _throw_aim, dist,
+	GameManager.fire_projectile(parent, from_pos, _throw_aim, dist,
 		_GobCfgG.GNOLL_BONE_SPEED, _GobCfgG.GNOLL_BONE_ARC, _throw_dmg, self,
 		faction, true)
 	# ── МЕТНУЛ — ОТОШЁЛ (спринт 16: «подбегают, метают кость и отступают») ──
@@ -490,9 +508,11 @@ func _tick_kite(delta: float) -> bool:
 		var lim: float = _GobCfgG.GNOLL_PATROL_RADIUS * 1.6
 		if from_lair.length() > lim:
 			p = lair.global_position + from_lair.normalized() * lim
-	if _OptG.cmd_meter: _OptG.cmd_src = "gnoll_kite"
-	command_move(GameManager.land_target(_in_zone_pt(p)))
-	if _OptG.cmd_meter: _OptG.cmd_src = ""
+	var kp: Vector3 = GameManager.land_target(_in_zone_pt(p))
+	if not _same_goal(kp):
+		if _OptG.cmd_meter: _OptG.cmd_src = "gnoll_kite"
+		command_move(kp)
+		if _OptG.cmd_meter: _OptG.cmd_src = ""
 	# Точка отсчёта смещения: по ней и решается, удался ли отход
 	_kite_from = global_position
 	_kite_check_t = _GobCfgG.GNOLL_KITE_GIVEUP
@@ -573,10 +593,27 @@ func _tick_flank(delta: float) -> bool:
 		side = -side
 	var p: Vector3 = foe.global_position + side * _GobCfgG.GNOLL_FLANK_SIDE \
 		- line * _GobCfgG.GNOLL_FLANK_BACK
+	var fp: Vector3 = GameManager.land_target(_in_zone_pt(p))
+	if _same_goal(fp):
+		return false
 	if _OptG.cmd_meter: _OptG.cmd_src = "gnoll_flank"
-	command_move(GameManager.land_target(_in_zone_pt(p)))
+	command_move(fp)
 	if _OptG.cmd_meter: _OptG.cmd_src = ""
 	return true
+
+## ── ПРИКАЗ В ТУ ЖЕ ТОЧКУ НЕ ПЕРЕИЗДАЁТСЯ (BigStand, этап 2) ────────────────
+## Кайт, фланг и возврат в зону считают точку заново каждым тактом, и она
+## почти всегда та же, куда гнолл УЖЕ идёт: каждый `command_move` — маршрут,
+## пробуждение, грязная поза (зонд qa_bigstand: 135/с в куче гноллов).
+## Идущий по приказу с целью ближе SAME_GOAL_M к новой — приказа не получает
+const SAME_GOAL_M := 2.0
+
+func _same_goal(p: Vector3) -> bool:
+	if state != State.MOVING or not _march_pending:
+		return false
+	var dx: float = p.x - _march_target.x
+	var dz: float = p.z - _march_target.z
+	return dx * dx + dz * dz < SAME_GOAL_M * SAME_GOAL_M
 
 ## Центр патруля: пень, а без него — домашняя точка
 func _home() -> Vector3:

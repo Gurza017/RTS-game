@@ -92,6 +92,8 @@ func _reset_voice() -> void:
 func _run() -> void:
 	main = load("res://scenes/Main.tscn").instantiate()
 	get_tree().root.add_child(main)
+	# Пень за рекой в партии заморожен (ТЗ 19.09.2026); стенду нужен живой
+	GameManager.call_deferred("thaw_lairs_now")
 	await frames(8)
 	if main.enemy_ai != null:
 		main.enemy_ai.set_process(false)
@@ -430,15 +432,28 @@ func _run() -> void:
 		troll._sfx_shout() == "troll_growl" and troll._shout_chance() > 0.0 and troll._shout_chance() <= 0.25)
 	verdict("F6 тролль не кричит человеческим голосом на смерти", troll._sfx_death() != "vox_death")
 	# Победный клич: тролль добивает рабочего
-	var vic_sq: Array = _squad("worker", Constants.FACTION_PLAYER, troll.global_position + Vector3(2.0, 0.0, 0.0), 1)
-	await pframes(2)
+	# Клич — с шансом TROLL_VICTORY_CHANCE (ТЗ 18.09.2026, жребий из
+	# AudioManager.rng): одно убийство утверждало исход лотереи (19.09.2026
+	# грюнты пака стали брать тот же rng, и жребий уехал). Событие считается
+	# на КАЖДОЕ добивание, клич — хотя бы раз за серию добиваний
 	var tv0: int = GameManager.troll_victory_events
 	var tvt0: int = _trace("troll_victory")
-	(vic_sq[1][0] as Unit).take_damage(1e9, troll)
-	await frames(2)
+	var kills := 0
+	for k in range(8):
+		var vic_sq: Array = _squad("worker", Constants.FACTION_PLAYER, troll.global_position + Vector3(2.0, 0.0, 0.0), 1)
+		await pframes(2)
+		(vic_sq[1][0] as Unit).take_damage(1e9, troll)
+		kills += 1
+		await frames(2)
+		if _trace("troll_victory") > tvt0:
+			break
+		# окно категории 2.5 с — иначе второй клич подряд отсечёт ограничитель
+		await get_tree().create_timer(2.6).timeout
 	# СПРИНТ 20: рык идёт и на КАЖДОЕ убийство троллем (Unit._die), и над
 	# выбитым отрядом — запросов два, окно категории пропускает один
-	verdict("F7 тролль добил рабочего — клич победы", GameManager.troll_victory_events == tv0 + 1 and _trace("troll_victory") >= tvt0 + 1)
+	verdict("F7 тролль добил рабочего — событие на каждое добивание, клич хотя бы раз (шанс %.2f)" % _GobCfg.TROLL_VICTORY_CHANCE,
+		GameManager.troll_victory_events == tv0 + kills and _trace("troll_victory") >= tvt0 + 1,
+		"добиваний %d, событий %d, кличей %d" % [kills, GameManager.troll_victory_events - tv0, _trace("troll_victory") - tvt0])
 	# И отряд: последний боец отряда игрока пал от тролля
 	var sq_f: Array = _squad("archer", Constants.FACTION_PLAYER, troll.global_position + Vector3(3.0, 0.0, 3.0), 2)
 	await pframes(2)

@@ -216,34 +216,45 @@ func _b_spawn() -> void:
 # того, куда её поведёт автомат
 # ═════════════════════════════════════════════════════════════════════════════
 func _c_follow() -> void:
-	print("\n═════ C. ЭФФЕКТ ЕДЕТ ЗА ЦЕЛЬЮ ═════")
+	print("\n═════ C. ЭФФЕКТ ГАСНЕТ У ИДУЩЕЙ ЦЕЛИ И ВОЗВРАЩАЕТСЯ К ВСТАВШЕЙ ═════")
+	# ── РАЗВОРОТ (ТЗ 18.09.2026, п. 1): эффект НЕ едет за целью ──────────
+	# Прежняя проверка «эффект держится на цели всю дорогу» утверждала ровно
+	# то, что владелец отменил («круги остаются на земле / уезжают с
+	# отрядом»). Теперь: цель тронулась — лента гаснет тем же тиком, лечение
+	# при этом идёт; цель встала — эффект снова на ней
 	var vfx: Node3D = _monk.heal_vfx_node()
 	if vfx == null or _hurt == null or not is_instance_valid(_hurt):
 		verdict("C0 эффект и цель на месте", false)
 		return
-	var worst := 0.0
-	# ── ШАГ УМЕНЬШЕН: ЦЕЛЬ ОБЯЗАНА ОСТАТЬСЯ В ДИСТАНЦИИ КАСТА ─────────────
-	# Прежние 0.06 м за кадр уводили раненого на 5.4 м — со спринта 15 это
-	# вдвое дальше MONK_CAST_RANGE, монах честно прекращает лечение, и стенд
-	# мерил бы отрыв уже ПОГАШЕННОГО эффекта
-	var step_z: float = _UCfg.MONK_CAST_RANGE * 0.4 / 90.0
-	for i in range(90):
-		var p: Vector3 = _hurt.global_position + Vector3(0.0, 0.0, step_z)
-		_hurt.global_position = Vector3(p.x,
-			GameManager.get_terrain_height(p.x, p.z), p.z)
-		_hurt.sync_row()
-		# Раненого лечат — не даём ему вылечиться до конца замера
+	_hurt.set_tick(true)
+	var goal: Vector3 = _hurt.global_position + Vector3(0.0, 0.0, 3.0)
+	_hurt.command_move(goal, false, Vector3.ZERO, false, true)
+	var hidden_while_moving := false
+	var moved := false
+	# Замораживать цель можно только ВСТАВШЕЙ (не MOVING и окно хода погасло):
+	# замороженный боец не тикает, и «идёт» в нём застыло бы навсегда
+	for _i in range(60 * 6):
 		_hurt.current_health = _hurt.max_health * 0.3
 		_hurt._soa_push_stats()
 		await get_tree().physics_frame
-		if i < 10:
-			continue
-		worst = maxf(worst, Vector2(
-			vfx.global_position.x - _hurt.draw_position().x,
-			vfx.global_position.z - _hurt.draw_position().z).length())
-	print("  цель прошла %.2f м, худший отрыв эффекта %.2f м" % [90.0 * step_z, worst])
-	verdict("C1 эффект держится на цели всю дорогу", worst < 0.35,
-		"худший отрыв %.2f м" % worst)
+		if _hurt.state == Unit.State.MOVING and _hurt.moved_recently():
+			moved = true
+			if _monk.heal_vfx_target() != _hurt or not vfx.visible:
+				hidden_while_moving = true
+		if moved and _hurt.state != Unit.State.MOVING and not _hurt.moved_recently():
+			break
+	verdict("C1 у идущей цели эффект гаснет (ТЗ 18.09.2026, п. 1)", moved and hidden_while_moving,
+		"шла %s, гас %s" % [str(moved), str(hidden_while_moving)])
+	_hurt.set_tick(false)
+	var back := false
+	for _i in range(int(_UCfg.MONK_HEAL_TICK * 6.0 * 60.0)):
+		_hurt.current_health = _hurt.max_health * 0.3
+		_hurt._soa_push_stats()
+		await get_tree().physics_frame
+		if _monk.heal_vfx_target() == _hurt and vfx.visible:
+			back = true
+			break
+	verdict("C2 цель встала — эффект снова на ней", back)
 
 # ═════════════════════════════════════════════════════════════════════════════
 # D. НЕПРЕРЫВНОСТЬ МЕЖДУ ТАКТАМИ

@@ -525,10 +525,11 @@ const SFX_BANK := {
 	"spear_hit":   ["WHSH_Whoosh_HoveAud_SwordCombat_07.wav",
 					"WHSH_Whoosh_HoveAud_SwordCombat_26.wav"],
 	# ── БОЛЬШОЙ ГОБЛИН (13.09.2026) ───────────────────────────────────────
-	# СВОИХ ФАЙЛОВ У ТУШИ НЕТ И НЕ ЗАВОДИТСЯ: тяжесть делают ПИТЧ И ГРОМКОСТЬ
-	# поверх готовых сэмплов. Новый сэмпл ради двух событий — это лишний
-	# мегабайт в паке и лишняя строка в реестре прогрева
-	"big_step":    ["Sword_hit_armor 1.mp3", "Sword_hit_armor 3.mp3"],
+	# ШАГ ТУШИ — СВОЙ ГЛУХОЙ СЭМПЛ (ТЗ 19.09.2026, «Фикс больших гоблинов»):
+	# прежний «Sword_hit_armor» с питчем 0.55 звучал как удар молотком по
+	# ведру на каждом шагу. Два синтезированных thud'а (62 и 74 Гц, спад
+	# 0.28 с, шум без металла), 12 КБ на оба — не мегабайт
+	"big_step":    [DIR_GOBLIN_VOICE + "big_step_1.wav", DIR_GOBLIN_VOICE + "big_step_2.wav"],
 	"big_sweep":   ["WHSH_Whoosh_HoveAud_SwordCombat_07.wav",
 					"WHSH_Whoosh_HoveAud_SwordCombat_26.wav"],
 	"vox_action":  ["VOXEfrt_ActionGrunt_HoveAud_SwordCombat_01.wav",
@@ -593,6 +594,60 @@ const SFX_BANK := {
 	# где только считается прицел
 	"gnoll_throw": [DIR_GNOLL_VOICE + "somersault_01.wav",
 					 DIR_GNOLL_VOICE + "somersault_10.wav"],
+	# ── AUDIO SYSTEM UPDATE (ТЗ 19.09.2026) ─────────────────────────────────
+	# Рыцари: выкрик на ПЕРВЫЙ удар «Яростной атаки» (Warrior._after_melee_hit),
+	# в случайном порядке без повтора подряд (shuffle); победа над отрядом —
+	# один файл (GameManager._on_squad_wiped)
+	"knight_angry": ["angry1.wav", "angry2.wav", "angry3.wav", "angry4.wav"],
+	"knight_victory": ["excited2.wav"],
+	# Нарезка пака voicebosch-monster-grunts-174559 (qa_audio_env/Slice.tscn):
+	# первая половина файла — тролли, середина — туши, завершающая треть —
+	# гноллы / гоблины / всадники. Пулы на удар, урон и марш; шанс и отрядный
+	# кулдаун — в squad_voice, порядок — shuffle
+	"troll_grunt": [DIR_TROLL_VOICE + "troll_grunt_1.wav",
+					DIR_TROLL_VOICE + "troll_grunt_2.wav",
+					DIR_TROLL_VOICE + "troll_grunt_3.wav",
+					DIR_TROLL_VOICE + "troll_grunt_4.wav",
+					DIR_TROLL_VOICE + "troll_grunt_5.wav",
+					DIR_TROLL_VOICE + "troll_grunt_6.wav",
+					DIR_TROLL_VOICE + "troll_grunt_7.wav",
+					DIR_TROLL_VOICE + "troll_grunt_8.wav",
+					DIR_TROLL_VOICE + "troll_grunt_9.wav",
+					DIR_TROLL_VOICE + "troll_grunt_10.wav",
+					DIR_TROLL_VOICE + "troll_grunt_11.wav",
+					DIR_TROLL_VOICE + "troll_grunt_12.wav",
+					DIR_TROLL_VOICE + "troll_grunt_13.wav",
+					DIR_TROLL_VOICE + "troll_grunt_14.wav",
+					DIR_TROLL_VOICE + "troll_grunt_15.wav",
+					DIR_TROLL_VOICE + "troll_grunt_16.wav",
+					DIR_TROLL_VOICE + "troll_grunt_17.wav",
+					DIR_TROLL_VOICE + "troll_grunt_18.wav",
+					DIR_TROLL_VOICE + "troll_grunt_19.wav",
+					DIR_TROLL_VOICE + "troll_grunt_20.wav",
+					DIR_TROLL_VOICE + "troll_grunt_21.wav"],
+	"big_grunt": [DIR_GOBLIN_VOICE + "big_grunt_1.wav",
+					DIR_GOBLIN_VOICE + "big_grunt_2.wav",
+					DIR_GOBLIN_VOICE + "big_grunt_3.wav",
+					DIR_GOBLIN_VOICE + "big_grunt_4.wav",
+					DIR_GOBLIN_VOICE + "big_grunt_5.wav",
+					DIR_GOBLIN_VOICE + "big_grunt_6.wav",
+					DIR_GOBLIN_VOICE + "big_grunt_7.wav",
+					DIR_GOBLIN_VOICE + "big_grunt_8.wav"],
+	"goblin_grunt": [DIR_GOBLIN_VOICE + "goblin_grunt_1.wav",
+					DIR_GOBLIN_VOICE + "goblin_grunt_2.wav",
+					DIR_GOBLIN_VOICE + "goblin_grunt_3.wav",
+					DIR_GOBLIN_VOICE + "goblin_grunt_4.wav",
+					DIR_GOBLIN_VOICE + "goblin_grunt_5.wav",
+					DIR_GOBLIN_VOICE + "goblin_grunt_6.wav",
+					DIR_GOBLIN_VOICE + "goblin_grunt_7.wav",
+					DIR_GOBLIN_VOICE + "goblin_grunt_8.wav",
+					DIR_GOBLIN_VOICE + "goblin_grunt_9.wav",
+					DIR_GOBLIN_VOICE + "goblin_grunt_10.wav",
+					DIR_GOBLIN_VOICE + "goblin_grunt_11.wav",
+					DIR_GOBLIN_VOICE + "goblin_grunt_12.wav",
+					DIR_GOBLIN_VOICE + "goblin_grunt_13.wav",
+					DIR_GOBLIN_VOICE + "goblin_grunt_14.wav",
+					DIR_GOBLIN_VOICE + "goblin_grunt_15.wav"],
 }
 
 ## Настройки категории: сколько голосов ей можно занять одновременно,
@@ -641,7 +696,7 @@ const SFX_LIMITS := {
 	"spear_hit":    {"voices": 6, "gap": 0.04,  "db": -6.0},
 	# Туша: шаг РЕДКИЙ и НИЗКИЙ (питч вниз), свип — низкий протяжный замах.
 	# Голосов мало намеренно: пять туш в отряде не должны перекрикивать бой
-	"big_step":     {"voices": 3, "gap": 0.25, "db": -9.0, "pitch": [0.55, 0.68]},
+	"big_step":     {"voices": 3, "gap": 0.25, "db": -14.0, "pitch": [0.92, 1.08]},
 	"big_sweep":    {"voices": 3, "gap": 0.20, "db": -3.0, "pitch": [0.55, 0.70]},
 	# Голоса — редкая приправа поверх гула, их лимиты почти не тронуты
 	"vox_action":   {"voices": 3, "gap": 0.90,  "db": -8.0},
@@ -668,12 +723,13 @@ const SFX_LIMITS := {
 	"build_hammer": {"voices": 4, "gap": 0.10, "db": -4.0, "pitch": [0.92, 1.08]},
 	# Крики атаки орды: вперемешку, с расстройкой высоты и ГРОМКОСТИ
 	# (db_jitter — случайное ± к db на каждый запуск)
-	"goblin_attack": {"voices": 4, "gap": 0.35, "db": -7.0, "pitch": [0.90, 1.10],
+	# ТЗ 20.09.2026 (п. 5.2): возгласы орды тише на 30 % (20·lg 0.7 = −3.1 дБ)
+	"goblin_attack": {"voices": 4, "gap": 0.35, "db": -10.1, "pitch": [0.90, 1.10],
 					  "db_jitter": 3.0},
 	# Смерть гоблина: ±0.08 к высоте — массовая гибель не сливается в один сэмпл
-	"goblin_death": {"voices": 5, "gap": 0.12, "db": -3.0, "pitch": [0.92, 1.08]},
+	"goblin_death": {"voices": 5, "gap": 0.12, "db": -6.1, "pitch": [0.92, 1.08]},
 	# Хор смеха: четыре голоса РАЗОМ, окно между хорами, лёгкая расстройка
-	"goblin_laugh": {"voices": 4, "gap": 0.0, "db": -5.0, "pitch": [0.96, 1.04]},
+	"goblin_laugh": {"voices": 4, "gap": 0.0, "db": -8.1, "pitch": [0.96, 1.04]},
 	# Рык тролля: редкий, тяжёлый; окно держит его от пулемёта при трёх троллях
 	"troll_growl": {"voices": 2, "gap": 1.5, "db": -4.0, "pitch": [0.92, 1.06]},
 	"troll_victory": {"voices": 1, "gap": 2.5, "db": -3.0, "pitch": [0.97, 1.03]},
@@ -688,7 +744,53 @@ const SFX_LIMITS := {
 	# короче: иначе стая заглушает сама себя после первого же наскока
 	"gnoll_throw": {"voices": 4, "gap": 0.22, "db": -6.0, "pitch": [0.92, 1.08],
 					 "db_jitter": 2.0},
+	# ── AUDIO SYSTEM UPDATE (ТЗ 19.09.2026): shuffle — без повтора файла
+	# подряд, жребий из rng (общий поток партии не трогается) ───────────────
+	# ТЗ 20.09.2026 (п. 5.1): рык рыцарей вдвое реже (окно категории и окно
+	# отряда KNIGHT_ANGRY_GAP удвоены) и тише на 35 % (20·lg 0.65 = −3.7 дБ)
+	"knight_angry":   {"voices": 2, "gap": 0.8, "db": -6.7, "pitch": [0.97, 1.03], "shuffle": true},
+	"knight_victory": {"voices": 1, "gap": 3.0, "db": -3.0, "pitch": [0.98, 1.02], "shuffle": true},
+	"troll_grunt":    {"voices": 2, "gap": 0.6, "db": -4.0, "pitch": [0.94, 1.06], "shuffle": true},
+	"big_grunt":      {"voices": 3, "gap": 0.35, "db": -5.0, "pitch": [0.92, 1.08], "db_jitter": 2.0, "shuffle": true},
+	"goblin_grunt":   {"voices": 4, "gap": 0.25, "db": -10.1, "pitch": [0.90, 1.10], "db_jitter": 3.0, "shuffle": true},
 }
+## ── ГРЮНТЫ МОНСТРОВ И ВЫКРИКИ РЫЦАРЕЙ: ШАНС И КУЛДАУН НА ОТРЯД ─────────────
+## «Не на каждый чих»: шанс GRUNT_CHANCE на удар / полученный урон, и не чаще
+## GRUNT_SQUAD_GAP на отряд (squad_voice); марш — реже (GRUNT_MOVE_GAP).
+## Рыцарь на первом ударе кричит наверняка, но не чаще KNIGHT_ANGRY_GAP на отряд
+const GRUNT_CHANCE := 0.30
+const GRUNT_SQUAD_GAP := 1.75
+const GRUNT_MOVE_CHANCE := 0.30
+const GRUNT_MOVE_GAP := 4.0
+const KNIGHT_ANGRY_GAP := 4.0
+var _squad_voice_last: Dictionary = {}    # ключ отряда → сек последнего окна
+var _cat_last_file: Dictionary = {}       # категория → индекс последнего файла
+var squad_voice_calls: int = 0            # стендам: сколько окон открыто
+var squad_voice_played: int = 0           # стендам: сколько прозвучало
+
+## Голос отряда с шансом и кулдауном. Окно ОТКРЫВАЕТСЯ раз в gap на ключ
+## (отряд, у одиночки — сам боец), и жребий бросается ОДИН раз на окно —
+## иначе сотня бойцов одного приказа выбивала бы 30 % каждый и грюнт шёл бы
+## на каждый приказ наверняка. Жребий — из rng (сеяные стенды не едут)
+func squad_voice(cat: String, key: int, at: Vector3, chance: float, gap: float) -> bool:
+	if not enabled:
+		return false
+	var now: float = float(Time.get_ticks_msec()) * 0.001
+	var last: Variant = _squad_voice_last.get(key)
+	if last != null and now - float(last) < gap:
+		return false
+	_squad_voice_last[key] = now
+	squad_voice_calls += 1
+	if chance < 1.0 and rng.randf() >= chance:
+		return false
+	if play_3d(cat, at):
+		squad_voice_played += 1
+		return true
+	return false
+
+## Индекс последнего файла категории (стендам: shuffle без повтора подряд)
+func last_file_index(cat: String) -> int:
+	return int(_cat_last_file.get(cat, -1))
 ## Окно между ХОРАМИ смеха (сек): два выбитых отряда подряд — один хор
 const LAUGH_CHORUS_GAP := 4.0
 ## Микро-задержки голосов хора: «толпа», а не один сэмпл в четыре голоса
@@ -1753,7 +1855,18 @@ func play_3d(cat: String, at: Vector3) -> bool:
 	# помечена занятой, play() на ней не звали, сигнал finished не придёт —
 	# и категория навсегда теряет по голосу на каждый пропавший файл.
 	# Порядок «сначала поток, потом голос» снимает вопрос целиком.
-	var fname: String = String(files[randi() % files.size()])
+	# ── SHUFFLE (ТЗ 19.09.2026): у категорий с "shuffle" файл берётся из rng
+	# и не повторяется подряд; у прочих — прежний общий randi (сеяные стенды)
+	var fi: int
+	if bool(lim.get("shuffle", false)) and files.size() > 1:
+		fi = rng.randi() % files.size()
+		var lastf: int = int(_cat_last_file.get(cat, -1))
+		if fi == lastf:
+			fi = (fi + 1 + rng.randi() % (files.size() - 1)) % files.size()
+		_cat_last_file[cat] = fi
+	else:
+		fi = randi() % files.size()
+	var fname: String = String(files[fi])
 	var s: AudioStream = _stream(sfx_path(fname))
 	if s == null:
 		return false

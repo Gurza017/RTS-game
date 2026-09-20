@@ -135,6 +135,10 @@ func _grow() -> void:
 func register(unit: Unit, world_root: Node3D) -> void:
 	if _slot.has(unit):
 		return
+	# Укрытому в здании кольцо не полагается (ТЗ 19.09.2026-2, п. 1) — его
+	# нарисованная точка замёрзла у ворот, и кольцо легло бы на пустую траву
+	if unit.garrisoned:
+		return
 	_ensure(world_root)
 	if _rings.free.is_empty():
 		_grow()

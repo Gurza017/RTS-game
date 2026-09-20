@@ -118,7 +118,7 @@ const GNOLL_FLANK_BACK := 8.0
 const GNOLL_FLANK_SEC := 4.0
 
 ## ── ИНТЕРВАЛ ПОСЛЕ ПРОМАХА СКАНА (аудит класса, сент. 2026) ───────────────
-const GNOLL_FLANK_MISS_SEC := 1.0
+const GNOLL_FLANK_MISS_SEC := 2.0   # BigStand, этап 2: скан r = 34 м раз в 2 с при промахе (было 1)
 const GNOLL_KITE_MISS_SEC := 0.3
 const GNOLL_SCAN_PHASES := 17
 
@@ -134,6 +134,7 @@ const GNOLL_WAVE_SQUADS := _Spawn.GNOLL_WAVE_SQUADS
 const GNOLL_WAVE_SEC := _Spawn.GNOLL_WAVE_SEC
 const GNOLL_WAVES_MAX := _Spawn.GNOLL_WAVES_MAX
 const GNOLL_COOLDOWN_SEC := _Spawn.GNOLL_COOLDOWN_SEC
+const GNOLL_MAX_ALIVE := _Spawn.GNOLL_MAX_ALIVE
 
 const TROLL_PATROL_RADIUS := 23.4
 const TROLL_PATROL_SEC := 9.0
@@ -162,6 +163,10 @@ const TROLL_SOLIDARITY_SEC := 10.0
 const TROLL_AGGRO_RADIUS := 12.0
 const TROLL_CHASE_SEC := 10.0
 const TROLL_COMBAT_SPEED_MULT := 1.2
+## Клич тролля за убийство — с вероятностью, а не на каждое (ТЗ 18.09.2026,
+## п. 4: «снизить частоту в 3 раза»). Жребий — из AudioManager.rng, общий
+## поток партии не трогается
+const TROLL_VICTORY_CHANCE := 0.34
 ## ── КЛИК И КОЛЬЦО (заказ 10.09.2026) ─────────────────────────────────────
 const TROLL_PICK_BODY_H := 2.55     # спринт 15: −15 %
 const TROLL_PICK_RADIUS := 1.45     # спринт 15: −15 %
@@ -201,9 +206,13 @@ const TROLL_LAIR_AIM_HEIGHT := 1.8
 ## Стрела, долетевшая до здания, не торчит, а растворяется за столько секунд
 const ARROW_BUILDING_FADE := 0.6
 const TROLL_FLASH_COLOR := Color(1.0, 0.22, 0.18)
-## ── ОВАЛ ПНЯ (заказ спринта 15) ─────────────────────────────────────────────
-const TROLL_LAIR_RING_OVAL := Vector2(1.5, 1.0)
-const TROLL_LAIR_RING_SHIFT := 0.45
+## ── ОВАЛ ПНЯ ────────────────────────────────────────────────────────────────
+## ТЗ 18.09.2026, п. 3: кольцо РОВНО ПОД ОСНОВАНИЕМ рисунка — сдвиг к камере
+## снят (спринт 15 сдвигал на 0.45 радиуса, и при радиусе в 11 м кольцо
+## уезжало на 5 м ниже корней — «съехало вниз»). Овал — плоский лепесток по
+## ширине корней: круг на земле под камерой 45° и так сжат вдвое по экрану
+const TROLL_LAIR_RING_OVAL := Vector2(1.0, 0.62)
+const TROLL_LAIR_RING_SHIFT := 0.0
 ## Стартовых стражей у дерева
 const LAIR_START_TROLLS := _Spawn.LAIR_START_TROLLS
 ## Декор логова: колья с черепами и кости
@@ -223,6 +232,10 @@ const LAIR_GLADE_TREE_CLUSTERS := 3
 const LAIR_GLADE_TREES_PER := 5
 ## Снесённый пень восстанавливается не раньше чем через столько секунд
 const LAIR_REGEN_SEC := _Spawn.LAIR_REGEN_SEC
+const LAIR_FREEZE_ENABLED := _Spawn.LAIR_FREEZE_ENABLED
+const LAIR_THAW_STEP_SEC := _Spawn.LAIR_THAW_STEP_SEC
+const LAIR_THAW_CHECK_SEC := _Spawn.LAIR_THAW_CHECK_SEC
+const LAIR_THAW_BANK_MARGIN := _Spawn.LAIR_THAW_BANK_MARGIN
 const LAIR_SPIKE_H := 3.2         # высота кола, м
 const LAIR_BONES_M := 2.0         # сторона квада костей, м
 ## Расчищенная площадка под логово (лес и руда не сажаются)
@@ -315,6 +328,8 @@ const RAID_MAX_SEC := 70.0
 ## Рейд без единой добычи у известной базы дольше этого — домой (спринт 20)
 const RAID_IDLE_SEC := 12.0
 const HARASS_MIN_SEC := 90.0
+const HARASS_MAX_SEC := _Spawn.GOBLIN_HARASS_MAX_SEC
+const ASSAULT_MIN_SQUADS := _Spawn.GOBLIN_ASSAULT_MIN_SQUADS
 ## ── ТАЙМИНГИ (уточнение владельца 11.09.2026) ──────────────────────────────
 const PEACE_SEC := _Spawn.GOBLIN_PEACE_SEC
 ## Перемирие партии (спринт 20): красный ИИ и орда не нападают первые минуты.
@@ -326,9 +341,20 @@ const PATROL_BORDER_POINTS := 8
 const PATROL_BORDER_SEC := 14.0
 ## ГЕНЕРАЛЬНЫЙ ШТУРМ — не раньше 35-й минуты; до того — центр, рудники, рейды
 const ASSAULT_EARLIEST_SEC := _Spawn.GOBLIN_ASSAULT_EARLIEST_SEC
-const SCOUT_UNITS := 2
-const SCOUT_HARASS_SEC := 8.0
-const SCOUT_SORTIE_SEC := 45.0
+const SCOUT_UNITS := _Spawn.SCOUT_UNITS
+const SCOUT_HARASS_SEC := _Spawn.SCOUT_HARASS_SEC
+const SCOUT_SORTIE_SEC := _Spawn.SCOUT_SORTIE_SEC
+const SCOUT_MAX_SQUADS := _Spawn.SCOUT_MAX_SQUADS
+const SCOUT_SORTIE_WEIGHTS := _Spawn.SCOUT_SORTIE_WEIGHTS
+const SCOUT_RUN_SEC := _Spawn.SCOUT_RUN_SEC
+const SCOUT_SORTIE_MAX_SEC := _Spawn.SCOUT_SORTIE_MAX_SEC
+const SCOUT_ORBIT_R := _Spawn.SCOUT_ORBIT_R
+const SCOUT_ORBIT_POINTS := _Spawn.SCOUT_ORBIT_POINTS
+const SCOUT_HUNT_R := _Spawn.SCOUT_HUNT_R
+const SCOUT_LONE_R := _Spawn.SCOUT_LONE_R
+## Уставной размер разведотряда: SCOUT_UNITS, а 0 — полный конный отряд
+static func scout_units() -> int:
+	return SCOUT_UNITS if SCOUT_UNITS > 0 else int(SQUAD_SIZE.get("goblin_rider", 50))
 ## Радиус, в котором «центр карты» считается взятым
 const CENTER_RADIUS := 30.0
 const BUILDING_HUNT_RADIUS := 70.0
@@ -502,6 +528,26 @@ const BIG_AGGRO_RADIUS := 18.0
 const BIG_HUNT_RADIUS := 28.0
 const BIG_PURSUIT_LIMIT := 60.0
 const BIG_HUNT_TICK := 0.5
+## ── СВЯЗКА С ПЕХОТОЙ ОРДЫ (ТЗ 19.09.2026, «Фикс туш») ─────────────────────
+## Туша без цели подхватывает цель соседнего отряда обычных гоблинов в
+## BIG_ESCORT_RADIUS; в покое отставшая от своей пехоты дальше
+## BIG_ESCORT_FOLLOW идёт к ней (ближайший свой боевой отряд гоблинов)
+const BIG_ESCORT_RADIUS := 30.0
+const BIG_ESCORT_FOLLOW := 22.0
+## Порог ленты ходьбы туши — доля её шага (общий 1.0 м/с при шаге 1.54
+## срезал ленту при любом замедлении в толпе)
+const BIG_WALK_ANIM_FRAC := 0.4
+## ── БЕГ ПЕХОТЫ ОРДЫ (ТЗ 18.09.2026, п. 4) ─────────────────────────────────
+## Гоблин с целью БЕЖИТ: шаг ×GOBLIN_RUN_MULT к ходьбе, пока держит цель
+const GOBLIN_RUN_MULT := 1.3
+## ── ОХОТА СВИНО-ВСАДНИКА (ТЗ 18.09.2026, п. 4) ────────────────────────────
+## Скан целей раз в RIDER_HUNT_TICK в RIDER_HUNT_RADIUS: цель с весом для
+## конницы (лучник 2.2, мечник 1.6, рабочий 1.4, копейщик в строю 0.4), с
+## разгоном; удержание — поводок RIDER_PURSUIT_LIMIT, авто-агро RIDER_AGGRO_RADIUS
+const RIDER_HUNT_RADIUS := 30.0
+const RIDER_HUNT_TICK := 0.5
+const RIDER_PURSUIT_LIMIT := 40.0
+const RIDER_AGGRO_RADIUS := 20.0
 ## Вес туши как цели у стрелков (ТЗ 14.09.2026, п. 10: приоритет ×2)
 const BIG_TARGET_PRIO := 2.0
 
@@ -520,11 +566,16 @@ const RESERVE_WAKE_RADIUS := 44.0     # от центра деревни
 const RESERVE_WAKE_FOES := 6          # столько чужих боевых — «штурм», а не разведчик
 ## Ушли чужие — через столько секунд без угрозы резерв идёт на посты
 const RESERVE_CALM_SEC := 8.0
+const RESERVE_HOME_RETRY_SEC := 20.0   # переиздать приказ домой, если отряд не дошёл
 ## Отряд считается вернувшимся на пост в этом радиусе — и снова засыпает
 const RESERVE_HOME_RADIUS := 6.0
 const RESERVE_HEAL_FRAC := 0.03
 ## Сколько конных отрядов вожак вправе взять на одну вылазку
 const RESERVE_LEND_MAX := 2
+const RESERVE_LEND_FLOOR := _Spawn.GOBLIN_RESERVE_LEND_FLOOR
+## Пробуждение волнами (ТЗ 19.09.2026, блок 3.3), числа — spawn_config
+const RESERVE_WAVE_SQUADS := _Spawn.RESERVE_WAVE_SQUADS
+const RESERVE_WAVE_GAP_SEC := _Spawn.RESERVE_WAVE_GAP_SEC
 
 # ── ГНОЛЛЫ: ЗОНА ОТВЕТСТВЕННОСТИ И ОХОТА НА РАБОЧИХ (GnollAI.gd) ────────────
 ## ── ЗОНА СЖАТА ДО ЛЕСА У ПНЯ (ТЗ 14.09.2026, п. 5) ────────────────────────

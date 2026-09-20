@@ -170,8 +170,11 @@ func _run() -> void:
 	await pframes(3)
 	hp2.take_damage(1.0, garcher)
 	await pframes(3)
-	verdict("C7 боец игрока за лучником через полкарты не бежит (ответа нет)",
-		hp2.far_fire_answers == 0 and hp2.attack_target == null)
+	# ТЗ 19.09.2026-3 (п. 3): на дальний обстрел отвечает и стоящий боец
+	# игрока без приказа — идёт на стрелка (отход в лагерь — только у орды)
+	verdict("C7 стоящий боец игрока отвечает на дальний обстрел (идёт на стрелка)",
+		hp2.far_fire_answers == 1 and hp2.attack_target == garcher,
+		"ответов %d, цель %s" % [hp2.far_fire_answers, str(hp2.attack_target)])
 	verdict("C8 у гнолла и тролля общий ответ выключен (свой)", not garcher.answers_far_fire()
 		and not Building.PRELOAD_SCENES["troll"].instantiate().answers_far_fire())
 	_finish()

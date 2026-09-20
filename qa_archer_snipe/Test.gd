@@ -166,9 +166,12 @@ func _a_forge() -> void:
 	_research("1c"); _research("2c"); _research("3c")
 	var atk: float = GameManager.unit_bonus(F, "archer", "bonus_attack")
 	verdict("A5 ряд C копит урон стрелы", atk >= 5.5, "+%.1f" % atk)
-	# ── колонка D: ряд открывает узел ─────────────────────────────────────
+	# ── колонка D: ряд И предыдущий узел D открывают узел (ТЗ-B 19.09.2026:
+	# колонка D идёт цепочкой у всех веток — 2d требует 1d) ─────────────
 	var n2d: Dictionary = _Forge.get_node("archer_2d")
-	verdict("A6 2d открыт после ряда 2 (A+B+C)", GameManager.research_blockers(F, n2d).is_empty())
+	verdict("A6 2d закрыт, пока не изучен 1d (цепочка D)", not GameManager.research_blockers(F, n2d).is_empty())
+	verdict("A6а 1d (залп) исследуется", _research("1d"))
+	verdict("A6 2d открыт после ряда 2 (A+B+C) и 1d", GameManager.research_blockers(F, n2d).is_empty())
 	verdict("A6б 1d — залп, способность-режим", _Forge.is_toggle_ability(_Forge.get_node("archer_1d")))
 	var sq: Array = _squad("archer", F, Vector3(320.0, 0.0, 320.0), 6)
 	var sid: int = sq[0]
@@ -213,17 +216,14 @@ func _a_forge() -> void:
 	big.set_tick(false)
 	await pframes(1)
 	var b0: float = big.current_health
-	var ar = GameManager.spawn_arrow(main.world_root(), a.global_position + Vector3(0, 1, 0),
-		big.global_position, 5.0, 20.0, 0.0, 20.0, a, F)
-	ar.call("_strike", big)
+	# Попадание снаряда ядра «здесь и сейчас» — тем же путём, что событие полёта
+	GameManager.projectile_hit_now(big, 20.0, a, F)
 	var dmg_a: float = b0 - big.current_health
 	_research("4b"); _research("5b")
 	var giant: float = GameManager.unit_bonus(F, "archer", "bonus_giant")
 	verdict("A9 4b+5b: множитель по крупным ×2.0", absf(giant - 1.0) < 0.01, "+%.2f" % giant)
 	var b1: float = big.current_health
-	var ar2 = GameManager.spawn_arrow(main.world_root(), a.global_position + Vector3(0, 1, 0),
-		big.global_position, 5.0, 20.0, 0.0, 20.0, a, F)
-	ar2.call("_strike", big)
+	GameManager.projectile_hit_now(big, 20.0, a, F)
 	var dmg_b: float = b1 - big.current_health
 	verdict("A9б урон стрелы по туше удвоился", absf(dmg_b / maxf(dmg_a, 0.01) - 2.0) < 0.05,
 		"%.1f → %.1f" % [dmg_a, dmg_b])
@@ -284,14 +284,14 @@ func _b_snipers() -> void:
 			for _k in range(now - last):
 				shot_frames.append(f)
 			last = now
-		# Летящие снайперские стрелы: дуга ноль, скорость ×1.3
-		for ch in main.world_root().get_children():
-			if ch is _ArrowS and bool(ch.get("snipe")) and not bool(ch.get("_spent")) \
-					and not bool(ch.get("_pooled")):
+		# Летящие снайперские стрелы: дуга ноль, скорость ×1.3. Снаряд без
+		# узла (этап 3): полёт — запись ядра, читается flight_records
+		for fr in GameManager.flight_records():
+			if bool(fr["snipe"]):
 				snipe_seen += 1
-				if float(ch.get("_arc_height")) != 0.0:
+				if float(fr["arc"]) != 0.0:
 					straight_ok = false
-				if absf(float(ch.get("_speed")) - _UCfg.stat("archer", "arrow_speed", 0.0) * _UCfg.SNIPE_SPEED_MULT) > 0.01:
+				if absf(float(fr["speed"]) - _UCfg.stat("archer", "arrow_speed", 0.0) * _UCfg.SNIPE_SPEED_MULT) > 0.01:
 					fast_ok = false
 		if _alive(gobs) == 0 and f > 90:
 			break
@@ -334,8 +334,14 @@ func _b_snipers() -> void:
 			continue
 		var hs: Vector3 = GameManager.corpses.head_spot_of(body)
 		for ar in body.arrows:
-			if is_instance_valid(ar):
-				var dd: float = Vector2(ar.global_position.x - hs.x, ar.global_position.z - hs.z).length()
+			# В теле лежит id записи ядра (стрела без узла) либо legacy-узел
+			var ap: Vector3 = Vector3.INF
+			if ar is int:
+				ap = GameManager.stuck_arrow_pos(int(ar))
+			elif is_instance_valid(ar):
+				ap = ar.global_position
+			if ap.x != INF:
+				var dd: float = Vector2(ap.x - hs.x, ap.z - hs.z).length()
 				head_worst = maxf(head_worst, dd)
 				if dd < 0.25:
 					head_ok += 1
@@ -391,9 +397,7 @@ func _d_giants() -> void:
 	big.set_tick(false)
 	await pframes(1)
 	var hp0: float = big.current_health
-	var ar = GameManager.spawn_arrow(main.world_root(), a.global_position + Vector3(0, 1, 0),
-		big.global_position, 5.0, 26.0, 0.0, 20.0, a, F, false, true)
-	ar.call("_strike", big)
+	GameManager.projectile_hit_now(big, 20.0, a, F, true)
 	verdict("D1 туша жива после снайперской стрелы (не one-shot)",
 		is_instance_valid(big) and not big.is_dead() and big.current_health < hp0,
 		"%.0f → %.0f" % [hp0, big.current_health if is_instance_valid(big) else 0.0])
@@ -403,9 +407,7 @@ func _d_giants() -> void:
 	big.current_health = 1.0
 	big._soa_push_stats()
 	var pins0: int = _ArrowS.snipe_head_pins
-	var ar2 = GameManager.spawn_arrow(main.world_root(), a.global_position + Vector3(0, 1, 0),
-		big.global_position, 5.0, 26.0, 0.0, 20.0, a, F, false, true)
-	ar2.call("_strike", big)
+	GameManager.projectile_hit_now(big, 20.0, a, F, true)
 	var dead: bool = not is_instance_valid(big) or big.is_dead()
 	verdict("D2 добивающая снайперская стрела остаётся в голове туши",
 		dead and _ArrowS.snipe_head_pins - pins0 >= 1,

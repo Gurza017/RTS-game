@@ -182,17 +182,20 @@ func _run() -> void:
 		"приказов %d → %d, у монаха %d → %d, отряд приказа %d (ждали %d)" % [
 			orders0, int(sm.monk_heal_orders), ho0, int(monk.get("heal_orders")),
 			int(monk.get("_order_sid")), int(sq[0])])
-	# Монах подходит на дистанцию каста к самому раненому
+	# ТЗ 17.09.2026: каст — из ауры; по приказу самый раненый оказывается в
+	# дистанции каста (подход только к дальнему) и получает первый такт
 	var came := false
 	var w := 0
+	var ht0: int = int(monk.get("heal_ticks"))
 	while w < 60 * 12:
 		await get_tree().physics_frame
 		w += 1
-		if _xz(monk.global_position, worst.global_position) <= _UCfg.MONK_CAST_RANGE + 0.6:
+		if _xz(monk.global_position, worst.global_position) <= float(monk.call("cast_range")) \
+				and int(monk.get("heal_ticks")) > ht0:
 			came = true
 			break
-	verdict("A4 монах подошёл к отряду на дистанцию каста", came,
-		"за %d физкадров, каст %.1f м" % [w, _UCfg.MONK_CAST_RANGE])
+	verdict("A4 по приказу самый раненый в дистанции каста и лечение началось", came,
+		"за %d физкадров, каст %.1f м, тактов +%d" % [w, float(monk.call("cast_range")), int(monk.get("heal_ticks")) - ht0])
 
 	# ── B. ФОКУСНОЕ ЛЕЧЕНИЕ ───────────────────────────────────────────────
 	print("\n═════ B. ФОКУС: САМЫЙ РАНЕНЫЙ — ДО 100 %, ПОТОМ СЛЕДУЮЩИЙ ═════")

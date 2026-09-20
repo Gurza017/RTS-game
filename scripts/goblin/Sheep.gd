@@ -36,6 +36,43 @@ const WALK_FPS := 9.0
 ## плюс "rows" → [top, bottom, frame_w] — общий срез по строкам рисунка
 static var _cache: Dictionary = {}
 
+## ── ЧАСЫ СТАДА (стенд qa_sheep_performance_test) ──────────────────────────
+## Одна пара get_ticks_usec вокруг _process КАЖДОЙ овцы, только пока prof_on:
+## в выключенном виде — одно сравнение bool. prof_calls — сколько овце-кадров
+## накоплено (мкс / calls = цена одной овцы за кадр)
+static var prof_on: bool = false
+static var prof_usec: int = 0
+static var prof_calls: int = 0
+
+static func prof_reset() -> void:
+	prof_usec = 0
+	prof_calls = 0
+
+## ── ПОТОЛОК СТАДА ИГРОКА (ТЗ 19.09.2026, блок 1): SHEEP_PLAYER_MAX ─────────
+## Считаются ВСЕ живые овцы стороны — в загонах, у замка и блуждающие.
+## Спрашивают: SheepPen.has_room, Worker._keep_accepts и breed_one — то есть
+## каждое место, где у игрока появляется овца. Овцы логова (owner_faction −1)
+## сюда не входят — их потолок держит TrollLair
+static func owned_count(fac: int) -> int:
+	var n := 0
+	var tree: SceneTree = Engine.get_main_loop() as SceneTree
+	if tree == null:
+		return 0
+	for s in tree.get_nodes_in_group("sheep"):
+		if s == null or not is_instance_valid(s):
+			continue
+		if int(s.get("owner_faction")) != fac:
+			continue
+		if bool(s.get("eaten")) or bool(s.get("dead")):
+			continue
+		n += 1
+	return n
+
+static func owned_cap_ok(fac: int) -> bool:
+	if fac < 0:
+		return true
+	return owned_count(fac) < _UCfgS.SHEEP_PLAYER_MAX
+
 var lair: Node3D = null
 var home: Vector3 = Vector3.ZERO
 var eaten: bool = false
@@ -162,6 +199,84 @@ func arm_breeding(first_delay: float) -> void:
 func is_owned() -> bool:
 	return owner_faction >= 0 and (pen != null or keep != null)
 
+## ── БЛУЖДАЮЩАЯ (ТЗ 19.09.2026, блок 3) ────────────────────────────────────
+## Овца ИГРОКА без привязки: из снесённого загона или не поместившаяся в
+## полный. Хозяин у неё остался (owner_faction), а места нет — пасётся вокруг
+## точки `home` в SHEEP_GRAZE_RADIUS и не плодится (flock_limit 0). Рабочий по
+## ПКМ её НЕ режет, а несёт в незаполненный загон (Worker, режим пастуха)
+func is_stray() -> bool:
+	return owner_faction >= 0 and pen == null and keep == null and not dead and not eaten
+
+## Загон снесён: привязка гаснет, овца остаётся хозяйской и РАЗБЕГАЕТСЯ от
+## места ограды — дом переносится в её же точку, перебежка взводится сразу
+func on_pen_lost() -> void:
+	pen = null
+	keep = null
+	home = global_position
+	_pinned = false
+	if not dead and not eaten and not _carried:
+		_mood = 0
+		force_hop()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ВЫДЕЛЕНИЕ И УТИЛИЗАЦИЯ (ТЗ 19.09.2026, блок 2)
+# ─────────────────────────────────────────────────────────────────────────────
+## Овца — не боец: в selected_units не входит (панели и приказы её не видят),
+## SelectionManager держит её в СВОЁМ списке selected_sheep. Подсветка — то же
+## общее кольцо, что у бойца (UnitVisuals.ring_mesh, один меш на всех),
+## заводится лениво при первом выделении и растянуто под ширину овцы
+const _VisS := preload("res://scripts/units/UnitVisuals.gd")
+const SEL_RING_SCALE := 2.4
+## Двойной клик по овце без загона — все хозяйские овцы в этом радиусе
+const FLOCK_PICK_RADIUS := 20.0
+var _sel_ring: MeshInstance3D = null
+var _selected: bool = false
+
+func set_selected(on: bool) -> void:
+	_selected = on
+	if on and _sel_ring == null:
+		var mi := MeshInstance3D.new()
+		mi.name = "SheepRing"
+		mi.mesh = _VisS.ring_mesh()
+		mi.scale = Vector3(SEL_RING_SCALE, 1.0, SEL_RING_SCALE)
+		mi.position.y = _VisS.RING_Y
+		add_child(mi)
+		_sel_ring = mi
+	if _sel_ring != null:
+		_sel_ring.visible = on
+
+func is_selected() -> bool:
+	return _selected
+
+## Стадо этой овцы для двойного клика: тот же загон, та же зона замка, а у
+## блуждающей — хозяйские без привязки в FLOCK_PICK_RADIUS от неё
+func flock_mates() -> Array:
+	var out: Array = []
+	for s in get_tree().get_nodes_in_group("sheep"):
+		if s == null or not is_instance_valid(s) or bool(s.get("eaten")):
+			continue
+		if int(s.get("owner_faction")) != owner_faction:
+			continue
+		if pen != null and is_instance_valid(pen):
+			if s.get("pen") == pen:
+				out.append(s)
+		elif keep != null and is_instance_valid(keep):
+			if s.get("keep") == keep:
+				out.append(s)
+		elif s.get("pen") == null and s.get("keep") == null:
+			var d: Vector3 = (s as Node3D).global_position - global_position
+			d.y = 0.0
+			if d.length() <= FLOCK_PICK_RADIUS:
+				out.append(s)
+	return out
+
+## Delete по выделенной овце: исчезает мгновенно. Тот же путь, что у съедения
+## троллем (eat): привязки и реестры снимаются им, рабочий, нёсший её, увидит
+## `eaten` в своём тике и возьмётся за следующую
+func dispose() -> void:
+	set_selected(false)
+	eat()
+
 ## Утиный контракт SheepPen.accept_sheep
 func bind_to_pen(p: Node3D, f: int) -> void:
 	pen = p
@@ -244,6 +359,9 @@ func flock_count() -> int:
 ## пришлось бы предзагружать сам в себя
 func breed_one() -> int:
 	if flock_count() >= flock_limit():
+		return 0
+	# Глобальный потолок стада игрока (ТЗ 19.09.2026): 90 на сторону
+	if not owned_cap_ok(owner_faction):
 		return 0
 	var par: Node = get_parent()
 	if par == null:
@@ -445,6 +563,9 @@ func release_from(w: Node3D) -> void:
 	_pinned = false
 	_snap_to_ground()
 	_hop_t = 2.0
+	# Блуждающую опустили не там, где взяли: пасётся отсюда (ТЗ 19.09.2026)
+	if is_stray():
+		home = global_position
 
 func is_carried() -> bool:
 	return _carried
@@ -520,19 +641,32 @@ func kill_flip() -> void:
 		lair.call("on_sheep_eaten", self)
 	_target = Vector3.INF
 	_pinned = true
-	_set_anim(false, _mirror)
+	# ── ТУША НЕ ДЫШИТ (ТЗ 19.09.2026, блок 4) ──────────────────────────────
+	# Прежний kill_flip ставил ленту ПОКОЯ (8 кадров, 6 к/с), и мёртвая овца
+	# продолжала листать дыхание. Кадр ФИКСИРУЕТСЯ: один кадр (лежащий, из
+	# «rest» — последний кадр прыжка), frame_fps 0 — шейдер при нуле показывает
+	# кадр 0 и часов TIME не читает. Спрайт ТОТ ЖЕ, овечий — никакой иконки
+	# мяса на земле нет и быть не должно (уточнение владельца)
+	_walking = false
 	if _mat != null:
+		var tex: Texture2D = _texture("rest", _mirror)
+		if tex == null:
+			tex = _texture("idle", _mirror)
+		if tex != null:
+			_mat.set_shader_parameter("albedo_tex", tex)
+		_mat.set_shader_parameter("frame_count", 1.0)
+		_mat.set_shader_parameter("frame_fps", 0.0)
 		_mat.set_shader_parameter("world_fixed", 1.0)
 		# Окровавленная туша (письмо 10): подкраска, а не мигание
 		_mat.set_shader_parameter("modulate", BLOOD_TINT)
 	if _mi != null:
-		# Овца ложится на бок: голова влево или вправо — от номера узла, а не
-		# случайно (два прогона стенда обязаны дать одну картинку)
-		var side: float = 1.0 if (get_instance_id() % 2) == 0 else -1.0
-		_mi.rotation_degrees = Vector3(0.0, 0.0, 90.0 * side)
-		# Лёжа квад «высок» ровно на свою ШИРИНУ: подъём считается по ней,
-		# иначе туша висит в воздухе или тонет в грунте
-		_mi.position.y = _quad_h * 0.28
+		# НОГАМИ ВВЕРХ: квад в мировой ориентации (world_fixed — ракурс камеры
+		# в игре зафиксирован) перевёрнут на 180° вокруг оси взгляда. Прежнее
+		# «на бок» (±90°) развёрнуто ТЗ 19.09.2026. Высота — та же, что у
+		# живой: квад той же высоты, центр на половине, ноги (теперь сверху)
+		# на высоте бывшей головы, спина на земле
+		_mi.rotation_degrees = Vector3(0.0, 0.0, 180.0)
+		_mi.position.y = _quad_h * 0.5
 
 func is_dead_body() -> bool:
 	return dead
@@ -596,6 +730,16 @@ func butchered() -> void:
 	consume()
 
 func _process(delta: float) -> void:
+	# Часы стада включает только стенд (prof_on); в партии — одно сравнение
+	if prof_on:
+		var t0: int = Time.get_ticks_usec()
+		_step(delta)
+		prof_usec += Time.get_ticks_usec() - t0
+		prof_calls += 1
+		return
+	_step(delta)
+
+func _step(delta: float) -> void:
 	if eaten or _carried:
 		return
 	# ── ТУША ЛЕЖИТ: НИ ХОДЬБЫ, НИ ПРИПЛОДА ────────────────────────────────

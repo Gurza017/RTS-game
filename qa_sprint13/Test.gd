@@ -72,6 +72,8 @@ func _spawn(uid: String, fac: int, at: Vector3) -> Unit:
 func _run() -> void:
 	main = load("res://scenes/Main.tscn").instantiate()
 	get_tree().root.add_child(main)
+	# Пень за рекой в партии заморожен (ТЗ 19.09.2026); стенду нужен живой
+	GameManager.call_deferred("thaw_lairs_now")
 	await pframes(12)
 	if main.enemy_ai != null:
 		main.enemy_ai.set_process(false)
@@ -429,8 +431,10 @@ func _d_butcher() -> void:
 	var tilt: float = 0.0
 	if sh._mi != null:
 		tilt = absf(sh._mi.rotation_degrees.z)
-	verdict("D6 туша ложится на бок (поворот 90°) и билборд у неё снят",
-		bool(sh.dead) and is_equal_approx(tilt, 90.0)
+	# ТЗ 19.09.2026 (блок 4): туша лежит НОГАМИ ВВЕРХ (180° вокруг оси взгляда),
+	# прежнее «на бок» (90°) развёрнуто; кадр заморожен — см. qa_sheep_herding D
+	verdict("D6 туша перевёрнута ногами вверх (поворот 180°) и билборд у неё снят",
+		bool(sh.dead) and is_equal_approx(tilt, 180.0)
 			and float(mat.get_shader_parameter("world_fixed")) > 0.5,
 		"наклон %.0f°, world_fixed %s" % [tilt,
 			str(mat.get_shader_parameter("world_fixed"))])
@@ -513,8 +517,8 @@ func _f_abilities() -> void:
 	# на коде, а на этом (та же ловушка, что у всадника в qa_cavalry)
 	w.set_tick(false)
 	foe.set_tick(false)
-	verdict("F2 узел warrior_1d называется «Яростный Набег»",
-		String(_Forge.get_node("warrior_1d").get("name", "")) == "Яростный Набег",
+	verdict("F2 узел warrior_1d называется «Яростная Атака» (ТЗ-B 19.09.2026)",
+		String(_Forge.get_node("warrior_1d").get("name", "")) == "Яростная Атака",
 		String(_Forge.get_node("warrior_1d").get("name", "")))
 	var speed0: float = w._effective_speed()
 	var cd0: float = w._effective_cooldown()

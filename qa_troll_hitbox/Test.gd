@@ -79,6 +79,8 @@ func _spawn(uid: String, fac: int, at: Vector3) -> Unit:
 func _run() -> void:
 	main = load("res://scenes/Main.tscn").instantiate()
 	get_tree().root.add_child(main)
+	# Пень за рекой в партии заморожен (ТЗ 19.09.2026); стенду нужен живой
+	GameManager.call_deferred("thaw_lairs_now")
 	await frames(8)
 	sm = main.selection_manager
 	if main.enemy_ai != null:
@@ -148,16 +150,19 @@ func _b_arrows() -> void:
 	# там же лежат стрелы из пула, стоящие где попало
 	var on_body := 0
 	var tp: Vector3 = _troll.global_position
+	# Торчащие — записи ядра (снаряд без узла, этап 3) плюс legacy-узлы
+	var pts: Array = []
+	for r in GameManager.stuck_arrow_records():
+		pts.append(r["pos"])
 	for a in GameManager._stuck_arrows:
 		if a == null or not is_instance_valid(a):
 			continue
 		var n3 := a as Node3D
-		if n3 == null:
-			continue
-		var d: float = Vector2(n3.global_position.x - tp.x,
-			n3.global_position.z - tp.z).length()
-		var lift: float = n3.global_position.y - GameManager.get_terrain_height(
-			n3.global_position.x, n3.global_position.z)
+		if n3 != null:
+			pts.append(n3.global_position)
+	for p in pts:
+		var d: float = Vector2(p.x - tp.x, p.z - tp.z).length()
+		var lift: float = p.y - GameManager.get_terrain_height(p.x, p.z)
 		if d < _troll.pick_radius() + 1.0 and lift > 1.0:
 			on_body += 1
 	print("  выстрелов 14: запас %.0f → %.0f, торчащих было %d, стало %d, на туше %d" % [

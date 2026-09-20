@@ -134,9 +134,9 @@ func _a_config() -> void:
 		if String(d.get("name", "")).is_empty():
 			empty.append(String(d.get("id", "")))
 			continue
-		var free_bonus: bool = String(d.get("id", "")).ends_with("d") \
-			and float(d.get("research_time", 0.0)) == 0.0
-		if cost.is_empty() and not free_bonus:
+		# ТЗ-B 19.09.2026: бесплатных узлов нет и в колонке D — каждый
+		# покупается за ресурсы
+		if cost.is_empty():
 			empty.append(String(d.get("id", "")))
 	verdict("A5 у каждого узла есть название и ненулевая цена", empty.is_empty(),
 		"пустых: %d %s" % [empty.size(), str(empty.slice(0, 5))])
@@ -167,12 +167,17 @@ func _a_config() -> void:
 			var d: Dictionary = n
 			if String(d.get("col", "")) != _Forge.ABILITY_COL:
 				d_bad.append(String(d.get("id", "")))
+		# ── «ВЕСЬ СТОЛБЕЦ ИЛИ НИЧЕГО» СНЯТО (ТЗ-B 19.09.2026) ────────────
+		# У рыцаря колонка D — одна способность (1d «Яростная Атака») и её
+		# прокачки (2d-5d — пассивные узлы: рассечение, +2 удара, берсерк);
+		# столбец с одной способностью и четырьмя прокачками — замысел, а не
+		# «полспособности». Осталось свойство: способность только в колонке D
 		var cnt: int = _Forge.ability_nodes(uid).size()
-		if cnt != 0 and cnt != _Forge.ROWS:
+		if cnt > _Forge.ROWS:
 			d_partial.append("%s=%d" % [uid, cnt])
-	verdict("A6 способность = колонка D, и она либо во всём столбце, либо нигде",
+	verdict("A6 способность лежит только в колонке D",
 		d_bad.is_empty() and d_partial.is_empty(),
-		"брак: %s, неполные столбцы: %s" % [str(d_bad), str(d_partial)])
+		"брак: %s, лишние: %s" % [str(d_bad), str(d_partial)])
 	verdict("A6б плата за доступ к способности убрана целиком",
 		is_equal_approx(_Forge.squad_unlock_cost(
 			_Forge.get_node(_Forge.node_id("archer", "1d"))), 0.0),

@@ -1,6 +1,8 @@
 extends StaticBody3D
 class_name Building
 
+const _OptB := preload("res://scripts/perf_config.gd")
+
 const _BBUtil := preload("res://scripts/BillboardUtil.gd")
 const _UCfgB  := preload("res://scripts/unit_stats_config.gd")
 const _Diff := preload("res://scripts/game_difficulty_config.gd")
@@ -95,6 +97,10 @@ func _ready() -> void:
 	# нулевая (та же грабля, что у ResourceNode._register_trunk)
 	if faction != Constants.FACTION_PLAYER:
 		call_deferred("_fog_hide_if_unscouted")
+	# ФУНДАМЕНТ — ТОЖЕ ОТЛОЖЕННО (позиция задаётся после add_child), и
+	# заново при переезде узла (стенды, загрузка партии)
+	set_notify_transform(true)
+	call_deferred("_sync_obstacle")
 
 func _fog_hide_if_unscouted() -> void:
 	if not is_inside_tree() or GameManager.fog == null:
@@ -126,6 +132,7 @@ func set_fog_hidden(hide_it: bool) -> void:
 	collision_layer = 0 if hide_it else Constants.LAYER_BUILDINGS
 
 func _exit_tree() -> void:
+	_drop_obstacle()
 	if is_dropoff:
 		GameManager.unregister_dropoff(faction, self)
 	# ФЛАЖОК ТОЧКИ СБОРА ЖИВЁТ В МИРЕ, А НЕ ПОД ЗДАНИЕМ (см. _refresh_rally_marker),
@@ -135,6 +142,106 @@ func _exit_tree() -> void:
 	if _rally_marker != null and is_instance_valid(_rally_marker):
 		_rally_marker.queue_free()
 	_rally_marker = null
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ФУНДАМЕНТ НЕПРОХОДИМ (ТЗ 19.09.2026 «коллизии зданий»)
+#
+# Постройка — билборд без глубины: низ рисунка стоит у начала координат узла
+# (z = 0), передняя стена — на FRONT_EDGE перед ним, всё «внутри дома» лежит
+# ПОЗАДИ (z < 0). Раньше тело бойца знало только чужие тела, стволы и скалы,
+# и пехота честно уходила в стену и пропадала за картинкой. Теперь фундамент
+# регистрируется в ядре РЯДОМ КРУГОВ (block_circles): ширина — нарисованная
+# полуширина (кольцо на земле, ring_radius), глубина — от передней стены
+# (BLOCK_FRONT) до задней грани коробки размещения. Ворота (gate_depth ≥ 1.7 м
+# от центра), площадка сбора, точки строителей (FRONT_EDGE + отступ) и кольцо
+# подхода атакующих (ring_radius + длина руки) лежат СНАРУЖИ по построению.
+# Круг, а не прямоугольник, — чтобы шаг скользил вдоль (та же геометрия, что
+# у ствола) и не застревал в углах. Руина — не постройка (ходят по ней),
+# загон — ограда без стен (SheepPen), пень тролля — ствол (TrollLair)
+# ─────────────────────────────────────────────────────────────────────────────
+## Передняя грань фундамента перед началом координат, м (строитель встаёт
+## на FRONT_EDGE 0.6 + отступ; тело бойца — ещё ArmyCore.BldClear 0.25)
+const BLOCK_FRONT := 0.35
+## Отступ от нарисованной полуширины: рисунок у стены не режется
+const BLOCK_INSET := 0.10
+var _obstacle_on: bool = false
+var _obstacle_at: Vector3 = Vector3.INF
+
+## Держит ли постройка тела. Руина и загон — нет
+func blocks_movement() -> bool:
+	return not _dead and _OptB.building_obstacles
+
+## Круги фундамента в МИРОВЫХ координатах: (x, z, r) подряд
+func block_circles() -> PackedFloat32Array:
+	var out := PackedFloat32Array()
+	var rx: float = (_draw_half_w if _draw_half_w >= 0.0 else build_size.x * 0.5) - BLOCK_INSET
+	var hz: float = build_size.z * 0.5
+	var cx0: float = global_position.x + (_draw_cx if _draw_half_w >= 0.0 else 0.0)
+	var cz0: float = global_position.z
+	if rx < 0.4 or hz < 0.3:
+		return out
+	# Радиус круга — по глубине: от передней грани до задней; ширина
+	# набирается рядом таких кругов с шагом не шире радиуса
+	var r: float = minf(rx, (hz + BLOCK_FRONT) * 0.5)
+	var zc: float = BLOCK_FRONT - r
+	var span: float = maxf(rx - r, 0.0)
+	var n: int = maxi(int(ceil(span * 2.0 / r)) + 1, 1)
+	for k in range(n):
+		var t: float = 0.0 if n == 1 else (float(k) / float(n - 1) * 2.0 - 1.0)
+		out.append(cx0 + t * span)
+		out.append(cz0 + zc)
+		out.append(r)
+	return out
+
+## ── ТОЧКА СДАЧИ РЕСУРСОВ И ВХОДА — ВОРОТА, А НЕ ЦЕНТР (ТЗ 19.09.2026) ─────
+## Рабочий нёс груз к global_position склада и сдавал в 1.8 м от него — центр
+## крепости лежит ВНУТРИ фундамента, и с боков и с тыла до него не дойти
+## никогда: гружёные стояли у стены и дёргались (скриншот 2). Сдача — у ворот
+## (deposit_point), зона сдачи — круг DEPOSIT_RADIUS вокруг них; толчея у
+## дверей выдавила к самой стене — тоже сдал (полоса DEPOSIT_WALL_PAD у
+## нарисованного края: склад — всё здание)
+const DEPOSIT_RADIUS := 2.4
+const DEPOSIT_WALL_PAD := 0.6
+
+func deposit_point() -> Vector3:
+	return _gate_position()
+
+func at_deposit(p: Vector3) -> bool:
+	var g: Vector3 = deposit_point()
+	var dx: float = p.x - g.x
+	var dz: float = p.z - g.z
+	if dx * dx + dz * dz <= DEPOSIT_RADIUS * DEPOSIT_RADIUS:
+		return true
+	var c: Vector3 = ring_center()
+	var r: float = ring_radius() + DEPOSIT_WALL_PAD
+	dx = p.x - c.x
+	dz = p.z - c.z
+	return dx * dx + dz * dz <= r * r
+
+func _sync_obstacle() -> void:
+	if not is_inside_tree():
+		return
+	if not blocks_movement():
+		_drop_obstacle()
+		return
+	var circles: PackedFloat32Array = block_circles()
+	if circles.is_empty():
+		_drop_obstacle()
+		return
+	_obstacle_on = true
+	_obstacle_at = global_position
+	GameManager.register_building_obstacle(get_instance_id(), circles)
+
+func _drop_obstacle() -> void:
+	if not _obstacle_on:
+		return
+	_obstacle_on = false
+	GameManager.unregister_building_obstacle(get_instance_id())
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_TRANSFORM_CHANGED and _obstacle_on and is_inside_tree():
+		if global_position.distance_squared_to(_obstacle_at) > 0.01:
+			_sync_obstacle()
 
 ## Форма, по которой ЛУЧ МЫШИ попадает в постройку. Держим ссылку: пока
 ## спрайта нет, это коробка из конфига, а как только рисунок загружен —
@@ -378,6 +485,7 @@ func _fit_marker_to_sprite(tex: Texture2D, sprite_quad: QuadMesh) -> void:
 	_draw_half_w = w * 0.5
 	_draw_cx     = cx
 	_draw_base_y = bottom * _BBUtil.V_STRETCH
+	_draw_top_y  = top * _BBUtil.V_STRETCH
 
 # ═════════════════════════════════════════════════════════════════════════════
 # ПО ЧЕМУ КЛИКАЕТ ИГРОК — ПО КАРТИНКЕ, А НЕ ПО КОРОБКЕ ИЗ КОНФИГА
@@ -459,6 +567,17 @@ var _draw_half_w: float = -1.0
 var _draw_cx: float = 0.0
 ## Высота нарисованного основания над грунтом, метры (уже с V_STRETCH)
 var _draw_base_y: float = 0.0
+## Высота верхней кромки рисунка над грунтом, метры (уже с V_STRETCH)
+var _draw_top_y: float = 0.0
+
+## ── ТОЧКА ПРИЦЕЛА СТРЕЛКА ПО ПОСТРОЙКЕ — СЕРЕДИНА РИСУНКА (ТЗ 18.09.2026, п. 3)
+## Прежде стрелок брал по любому зданию 0.8 м — у башни в 7.5 м это подножие,
+## и залп ложился в траву перед ней, а не в тело. Пень тролля переопределяет
+## своим числом (TrollLair.aim_height). Постройка без рисунка — прежние 0.8
+func aim_height() -> float:
+	if _draw_half_w < 0.0:
+		return 0.8
+	return (_draw_base_y + _draw_top_y) * 0.5
 
 ## Куда класть кольцо на земле: середина основания рисунка
 func ring_center() -> Vector3:
@@ -471,6 +590,92 @@ func ring_radius() -> float:
 	if _draw_half_w < 0.0:
 		return maxf(build_size.x, build_size.z) * 0.5
 	return _draw_half_w
+
+# ─────────────────────────────────────────────────────────────────────────────
+# РЕМОНТ ГОТОВОГО ЗДАНИЯ РАБОЧИМИ (ТЗ 19.09.2026, п. 5)
+# ПКМ рабочим по своему повреждённому зданию → Worker.command_build(здание):
+# тот же УТИНЫЙ КОНТРАКТ, что у стройплощадки и рудника (work_position /
+# add_builder / remove_builder), — у рабочего ни нового состояния, ни второй
+# машинерии подхода: он идёт к стене, встаёт (BUILDING, лента молотка) и
+# считается ремонтником, пока запас не полон. Темп — доля запаса в секунду на
+# рабочего (REPAIR_RATE); полный запас снимает артель, и рабочий видит
+# repair_done() как «достроено». Наследники со СВОИМ контрактом
+# (ConstructionSite, Mine) переопределяют эти методы и ремонтом не являются
+# ─────────────────────────────────────────────────────────────────────────────
+const REPAIR_RATE := 0.06
+const REPAIR_WORK_PAD := 0.25
+const REPAIR_FRONT_EDGE := 0.6
+var _repairers: Array = []
+
+func needs_repair() -> bool:
+	return not _dead and current_health < max_health - 0.01
+
+func repair_done() -> bool:
+	return _dead or current_health >= max_health - 0.01
+
+## Расстояние от центра до стены по направлению dir (коробка размещения)
+func edge_distance(dir: Vector3) -> float:
+	var hx: float = build_size.x * 0.5
+	var hz: float = build_size.z * 0.5
+	var ax: float = absf(dir.x)
+	var az: float = absf(dir.z)
+	if ax < 1e-4 and az < 1e-4:
+		return maxf(hx, hz)
+	var tx: float = hx / ax if ax > 1e-4 else 1e9
+	var tz: float = hz / az if az > 1e-4 else 1e9
+	return minf(tx, tz)
+
+## Точка стояния ремонтника: ближайшая к нему точка стены — спереди отрезок
+## нарисованного основания, сзади и сбоку периметр коробки (как у стройки)
+func work_position(from: Vector3) -> Vector3:
+	var o := from - global_position
+	o.y = 0.0
+	if o.length() < 0.01:
+		o = Vector3.FORWARD
+	var hx: float = build_size.x * 0.5
+	if _draw_half_w >= 0.0:
+		hx = minf(hx, _draw_half_w)
+		if o.z > 0.0:
+			var cx: float = clampf(o.x, -hx, hx)
+			return global_position + Vector3(cx, 0.0, REPAIR_FRONT_EDGE + REPAIR_WORK_PAD)
+	var dir: Vector3 = o.normalized()
+	return global_position + dir * (edge_distance(dir) + REPAIR_WORK_PAD)
+
+func add_builder(w: Node) -> void:
+	if w == null or not is_instance_valid(w) or _dead:
+		return
+	if _repairers.has(w):
+		return
+	_repairers.append(w)
+	set_process(true)
+
+func remove_builder(w: Node) -> void:
+	_repairers.erase(w)
+
+func builder_count() -> int:
+	return _repairers.size()
+
+## Такт ремонта: только пока есть ремонтники и запас не полон
+func _tick_repair(delta: float) -> void:
+	if _repairers.is_empty():
+		return
+	if _dead or current_health >= max_health - 0.01:
+		_repairers.clear()
+		return
+	var n := 0
+	for i in range(_repairers.size() - 1, -1, -1):
+		var w = _repairers[i]
+		if w == null or not is_instance_valid(w) or (w as Unit).is_dead():
+			_repairers.remove_at(i)
+			continue
+		n += 1
+	if n == 0:
+		return
+	current_health = minf(current_health + max_health * REPAIR_RATE * float(n) * delta, max_health)
+	_update_hp_bar()
+	if current_health >= max_health - 0.01:
+		current_health = max_health
+		_repairers.clear()
 
 func set_selected(value: bool) -> void:
 	if selection_ring:
@@ -736,7 +941,20 @@ const SPAWN_PER_FRAME := 2
 # больше него за один кадр не выйдет никто.
 const ROW_RELEASE_SEC := 0.25
 
+## ── ОТРЯД ПОЯВЛЯЕТСЯ ЦЕЛИКОМ И СТРОЕМ (ТЗ 19.09.2026-2, п. 2) ───────────────
+## Выход шеренгами по ROW_RELEASE_SEC (история выше) читался владельцем как
+## «отряд возникает сжатой кучей у центра и вечно смыкает ряды»: первые ряды
+## успевали получить смыкание по ЧАСТИЧНОМУ центру, пока задние ещё выходили.
+## Теперь заказ выходит ОДНИМ кадром (SPAWN_WHOLE_SQUAD), сетка появления
+## разрежена в SPAWN_SPACING_MULT раз против строевого интервала, и та же
+## сетка кладётся отряду в РАЗМЕТКУ (squad_set_formation) — смыканию нечего
+## стягивать. Цена — один кадр на инстанцирование уставного отряда
+const SPAWN_WHOLE_SQUAD := true
+const SPAWN_SPACING_MULT := 1.35
+
 var _pending_spawns: Array = []   # элементы: {"name","idx","cols","spacing"}
+## Места появления текущего заказа (sid → [Vector3…]) — под разметку отряда
+var _spawn_slots: Dictionary = {}
 ## Сколько ждать до выпуска следующей шеренги
 var _row_gate: float = 0.0
 
@@ -749,11 +967,12 @@ func _needs_tick() -> bool:
 
 func _process(delta: float) -> void:
 	_drain_pending_spawns(delta)
+	_tick_repair(delta)
 	if production_queue.is_empty():
 		# СТАТИЧНОЕ ЗДАНИЕ НЕ ТИКАЕТ. Десятки построек, каждая из которых
 		# каждый кадр проверяет пустую очередь, — бесплатный, но лишний
-		# обход дерева. Просыпаемся в queue_unit()
-		if _pending_spawns.is_empty() and not _needs_tick():
+		# обход дерева. Просыпаемся в queue_unit() и в add_builder() (ремонт)
+		if _pending_spawns.is_empty() and not _needs_tick() and _repairers.is_empty():
 			set_process(false)
 	if not production_queue.is_empty():
 		_production_timer += delta
@@ -840,13 +1059,20 @@ func _drain_pending_spawns(delta: float = 0.0) -> void:
 	var first: Dictionary = _pending_spawns[0]
 	var cols0: int = maxi(int(first.get("cols", 1)), 1)
 	var row0:  int = int(first.get("idx", 0)) / cols0
+	var sid0: int = int(first.get("squad", 0))
 	var n := 0
-	while n < _pending_spawns.size() and n < SPAWN_PER_FRAME * 4:
-		var j: Dictionary = _pending_spawns[n]
-		var c: int = maxi(int(j.get("cols", 1)), 1)
-		if int(j.get("idx", 0)) / c != row0:
-			break
-		n += 1
+	if SPAWN_WHOLE_SQUAD and sid0 > 0:
+		# Весь заказ одного отряда — одним кадром
+		while n < _pending_spawns.size() and int((_pending_spawns[n] as Dictionary).get("squad", 0)) == sid0:
+			n += 1
+	else:
+		while n < _pending_spawns.size() and n < SPAWN_PER_FRAME * 4:
+			var j: Dictionary = _pending_spawns[n]
+			var c: int = maxi(int(j.get("cols", 1)), 1)
+			if int(j.get("idx", 0)) / c != row0:
+				break
+			n += 1
+	var last_sid := 0
 	for _i in range(n):
 		var job: Dictionary = _pending_spawns.pop_front()
 		var r_pos: Vector3 = job.get("rally", Vector3.ZERO)
@@ -854,7 +1080,34 @@ func _drain_pending_spawns(delta: float = 0.0) -> void:
 			float(job["spacing"]), int(job.get("squad", 0)), int(job.get("lane", 0)),
 			int(job.get("total", 1)), bool(job.get("has_rally", false)), r_pos,
 			job.get("spot", r_pos))
+		last_sid = int(job.get("squad", 0))
+	# Заказ вышел целиком — его сетка появления становится разметкой отряда
+	# (после отложенных add_child/_place_spawned: те тоже deferred и в очереди
+	# раньше). Разметка на точку сбора с флажком ставится самим маршем
+	if SPAWN_WHOLE_SQUAD and last_sid > 0 and _pending_spawns.is_empty():
+		if bool(first.get("has_rally", false)):
+			_spawn_slots.erase(last_sid)
+		else:
+			call_deferred("_commit_spawn_formation", last_sid)
 	_row_gate = ROW_RELEASE_SEC
+
+func _commit_spawn_formation(sid: int) -> void:
+	var slots: Variant = _spawn_slots.get(sid)
+	_spawn_slots.erase(sid)
+	if slots == null or not GameManager.squads.has(sid):
+		return
+	var arr: Array = slots
+	var live: Array = GameManager.squad_members(sid)
+	if live.size() != arr.size():
+		return
+	var dir: Vector3 = spawn_offset
+	dir.y = 0.0
+	dir = dir.normalized() if dir.length() > 0.01 else Vector3.BACK
+	GameManager.squad_set_formation(sid, arr, dir, false)
+	for k in range(live.size()):
+		var u := live[k] as Unit
+		if u != null and is_instance_valid(u):
+			u.post_pos = arr[k]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ВОРОТА — У СТЕНЫ ФАСАДА, А НЕ «ГДЕ-ТО СБОКУ»
@@ -1469,6 +1722,8 @@ func _spawn_one(unit_name: String, idx: int, cols: int = -1, spacing: float = -1
 		cols = squad_cols
 	if spacing < 0.0:
 		spacing = squad_spacing
+	# Сетка появления разрежена (ТЗ 19.09.2026-2, п. 2)
+	spacing *= SPAWN_SPACING_MULT
 	# КВАДРАТ, А НЕ ПОЛОСА. Число колонн из конфига прибито к 5 независимо от
 	# размера заказа: отряд в 10 лучников выходил строем 5×2 — широкой лентой,
 	# а не «кирпичом». Ровный квадрат читается как строй с любого ракурса и
@@ -1586,6 +1841,10 @@ func _spawn_one(unit_name: String, idx: int, cols: int = -1, spacing: float = -1
 	# Вход в дерево — отложенно (вне текущего кадра), позиция и приказ следом:
 	# отложенные вызовы выполняются в порядке постановки, так что к моменту
 	# _place_spawned юнит уже в дереве и global_position корректен
+	if squad_id > 0 and not single:
+		if not _spawn_slots.has(squad_id):
+			_spawn_slots[squad_id] = []
+		(_spawn_slots[squad_id] as Array).append(GameManager.land_target(zone_pos))
 	parent.call_deferred("add_child", unit)
 	call_deferred("_place_spawned", unit, gate, rally, squad_id, exit_dir, zone_pos)
 
@@ -1630,7 +1889,7 @@ func _place_spawned(unit: Unit, gate: Vector3, rally: Vector3,
 func rally_zone() -> Dictionary:
 	var total: int = maxi(squad_size, 1)
 	var cols: int = square_cols(total, squad_cols)
-	var spacing: float = squad_spacing
+	var spacing: float = squad_spacing * SPAWN_SPACING_MULT
 	# ВОРОТА — ПЕРВЫМИ: _gate_position() лениво ставит фасад (_face_front) и
 	# переписывает spawn_offset; читать его ДО этого значит взять начальное
 	# (3, 0, 0) и развернуть площадку вбок (поймал qa_rally_zone A4)
@@ -1728,6 +1987,7 @@ func _die() -> void:
 	if _dead:
 		return
 	_dead = true
+	_drop_obstacle()
 	died.emit(self)
 	spawn_ruin()
 	queue_free()

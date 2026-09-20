@@ -30,6 +30,16 @@ const RESHUFFLE_COOLDOWN_MS := 900
 ## этого даже не заметит, а весь отряд переступит без всякой нужды
 const RESHUFFLE_MIN_LOSS := 0.08
 
+## Квадрат допуска «уже в своей ячейке» — тот же ARRIVE_RADIUS, по которому
+## боец отчитывается о прибытии: ближе него приказ идти некуда
+const ARRIVE_NEAR_SQ := Unit.ARRIVE_RADIUS * Unit.ARRIVE_RADIUS
+## Стоящий не дальше этого от своей ячейки закрепляется без приказа: порог
+## ТОТ ЖЕ, по которому обход смыкания видит дрейф (GameManager.REFORM_DRIFT).
+## Прежние 0.48 (допуск прибытия) были ниже порога дрейфа 0.70: обход не
+## трогал бойца в 0.6 м от ячейки, а само смыкание слало ему приказ — и он,
+## подвинутый разведением на те же 0.6, получал его снова и снова
+const HOLD_NEAR_SQ := 0.70 * 0.70
+
 ## Сомкнуть ряды: рассадить выживших по ПЕРВЫМ местам разметки.
 ##
 ## members — живые бойцы отряда; slots — исходная разметка (по шеренгам);
@@ -44,9 +54,11 @@ static func close_ranks(members: Array, slots: Array,
 	if members.is_empty() or slots.is_empty():
 		return 0
 	var free_men: Array = []
+	var alive_n := 0
 	for m in members:
 		if m == null or not is_instance_valid(m) or m.is_dead():
 			continue
+		alive_n += 1
 		# ── ПРИКАЗ ИГРОКА СМЫКАНИЕМ НЕ ПЕРЕБИВАЕТСЯ ────────────────────────
 		# Смыкание шлёт `command_move` на МЕСТО В РАЗМЕТКЕ, а разметка описывает
 		# ПРЕЖНИЙ строй — то есть точку рядом с бойцом. Отряд, которому игрок
@@ -57,12 +69,62 @@ static func close_ranks(members: Array, slots: Array,
 		# (GameManager._cohesion_guard)
 		if m.player_order_active():
 			continue
+		# ── ДЕРУЩЕГОСЯ СМЫКАНИЕ НЕ ТРОГАЕТ (BigStand, этап 1) ──────────────
+		# Отряд выходит из окна «нас били» (squad_in_combat) раньше, чем его
+		# последние бойцы кончают драться: `_reform_check` по этому событию
+		# слал `command_move` и тем, кто в ATTACKING с живой целью, — боец
+		# бросал удар и шёл в строй (зонд qa_bigstand: 34/с у орды в бою).
+		# Он достроится следующим обходом, когда действительно освободится
+		if m.state == Unit.State.ATTACKING and m.attack_target != null \
+				and is_instance_valid(m.attack_target):
+			continue
 		free_men.append(m)
 	if free_men.is_empty():
 		return 0
 	var moved := 0
-	var n: int = mini(free_men.size(), slots.size())
-	for si in range(n):
+	# ── КТО УЖЕ СТОИТ В ЯЧЕЙКЕ — ОСТАЁТСЯ В НЕЙ (ТЗ 17.09.2026) ─────────────
+	# Жадный разбор «ближайший к месту» с одного прохода на строе, где все
+	# стоят на своих местах с погрешностью разведения, сажал в ячейку СОСЕДА
+	# (тот на пару сантиметров ближе), и дальше цепочкой ехал весь ряд: после
+	# каждой стычки 3-5 лучников уходили на 1-3 м «переставиться»
+	# (qa_archer_fix A4). Первый проход закрепляет стоящих в своей ячейке,
+	# жадный разбор — только для остальных мест и остальных людей
+	var free_slots: Array = []
+	for si in range(slots.size()):
+		free_slots.append(si)
+	var kept: Array = []          # индексы ячеек, занятых на месте
+	# ЗАКРЕПЛЯЮТСЯ ТОЛЬКО ПЕРВЫЕ alive_n ЯЧЕЕК (19.09.2026): места разметки
+	# идут спереди назад, и выбитая первая шеренга обязана закрыться
+	# задними (qa_spear E2 — «дыры уезжают в хвост»); стоящий в хвостовой
+	# ячейке при потерях впереди переезжает вперёд, целый строй по-прежнему
+	# не пересаживается (все живые и так стоят в первых alive_n ячейках)
+	for si in range(mini(slots.size(), alive_n)):
+		var slot: Vector3 = slots[si]
+		var near := -1
+		var near_d := HOLD_NEAR_SQ
+		for i in range(free_men.size()):
+			var um = free_men[i]
+			if um.state != Unit.State.IDLE:
+				continue
+			var p: Vector3 = (um as Node3D).global_position
+			var dx: float = p.x - slot.x
+			var dz: float = p.z - slot.z
+			var d: float = dx * dx + dz * dz
+			if d <= near_d:
+				near_d = d
+				near = i
+		if near < 0:
+			continue
+		var uk = free_men[near]
+		free_men.remove_at(near)
+		uk.formation_row = si / maxi(_per_row(slots, course), 1)
+		uk.hold_post(slot, course)
+		kept.append(si)
+	for si in kept:
+		free_slots.erase(si)
+	var n: int = mini(free_men.size(), free_slots.size())
+	for k in range(n):
+		var si: int = int(free_slots[k])
 		var slot: Vector3 = slots[si]
 		var best := -1
 		var best_d := INF
@@ -81,6 +143,15 @@ static func close_ranks(members: Array, slots: Array,
 		# Ряд пересчитывается вместе с местом: перешедший вперёд боец обязан
 		# опустить копьё, а ушедший назад — поднять (см. Spearman._spear_leveled)
 		u.formation_row = si / maxi(_per_row(slots, course), 1)
+		# ── КТО УЖЕ В СВОЕЙ ЯЧЕЙКЕ, ПРИКАЗА НЕ ПОЛУЧАЕТ (BigStand, этап 1) ──
+		# `command_move` в точку под ногами — это пробуждение, грязная поза,
+		# снятый якорь и ноль метров пути. Стоящему бойцу ближе допуска
+		# прибытия хватает переехавшего поста (Unit.hold_post): по нему
+		# `_sweep_reform` больше не видит дрейфа. Идущий (MOVING) сюда не
+		# попадает — он идёт куда-то ещё, и его надо развернуть приказом
+		if u.state == Unit.State.IDLE and best_d <= HOLD_NEAR_SQ:
+			u.hold_post(slot, course)
+			continue
 		# ── РАЗРЕШЕНИЕ ЗАЛОЧЕННОМУ СТОЙКОЙ ────────────────────────────────
 		# Фаланга стоит намертво (STANCES.defense.lock_position) и обычные
 		# приказы на движение не исполняет вовсе. Смыкание рядов —

@@ -108,13 +108,15 @@ var _spot: Vector3 = Vector3.ZERO
 
 func _a_scene() -> void:
 	print("\n═════ A. СЦЕНА ═════")
-	verdict("A1 радиус поиска раненых — 10 м (заказ)",
-		absf(_UCfg.MONK_HEAL_RADIUS - 10.0) < 0.01,
+	# ТЗ 16.09.2026: аура 20 м по умолчанию (прежний заказ 10 м развёрнут)
+	verdict("A1 радиус ауры — 20 м (ТЗ 16.09.2026)",
+		absf(_UCfg.MONK_HEAL_RADIUS - _UCfg.MONK_AURA_R) < 0.01,
 		"%.1f м" % _UCfg.MONK_HEAL_RADIUS)
-	verdict("A2 дистанция каста короче радиуса поиска (есть куда подходить)",
-		_UCfg.MONK_CAST_RANGE < _UCfg.MONK_HEAL_RADIUS,
-		"каст %.1f м при поиске %.1f м" % [_UCfg.MONK_CAST_RANGE,
-			_UCfg.MONK_HEAL_RADIUS])
+	# ТЗ 17.09.2026: каст — из любой точки ауры (cast_range = heal_radius),
+	# подход — только к пациенту ЗА аурой (стережёт qa_monk_fix A)
+	verdict("A2 дистанция каста равна радиусу ауры (лечит с границы, не в упор)",
+		_UCfg.MONK_STAND_FRAC < 1.0 and _UCfg.MONK_STAND_FRAC > 0.0,
+		"доля стояния %.2f радиуса" % _UCfg.MONK_STAND_FRAC)
 	# Ровное место подальше от воды и склонов: подход меряется в метрах, и
 	# обход берега исказил бы замер
 	_spot = _flat_spot()
@@ -140,9 +142,12 @@ func _a_scene() -> void:
 			<= _UCfg.MONK_HEAL_RADIUS,
 		"раненых %d, до дальнего %.1f м" % [seen,
 			_monk.global_position.distance_to(_men[0].global_position)])
-	verdict("A4 и все они ДАЛЬШЕ дистанции каста (монаху есть куда идти)",
+	verdict("A4 и все они в дистанции каста (монаху идти незачем)",
 		_monk.global_position.distance_to(_men[0].global_position)
-			> _UCfg.MONK_CAST_RANGE)
+			<= float(_monk.call("cast_range")))
+	verdict("A4б каст равен радиусу ауры",
+		absf(float(_monk.call("cast_range")) - float(_monk.call("heal_radius"))) < 0.01,
+		"каст %.1f, аура %.1f" % [float(_monk.call("cast_range")), float(_monk.call("heal_radius"))])
 
 ## Ровная площадка без воды и склонов
 func _flat_spot() -> Vector3:
@@ -171,24 +176,23 @@ func _flat_spot() -> Vector3:
 func _b_approach() -> void:
 	print("\n═════ B. ПОДХОД К РАНЕНОМУ ═════")
 	# Самый раненый — мечник (20 %), к нему монах и обязан пойти
+	# ТЗ 17.09.2026: раненый В АУРЕ — монах с места не сходит и лечит оттуда;
+	# ждём первый такт лечения (heal_ticks), сдвиг монаха за это время < 1 м
 	var want: Unit = _men[0]
-	var d0: float = _monk.global_position.distance_to(want.global_position)
-	var best: float = d0
-	var reached := false
-	for _i in range(60 * 30):
+	var p0: Vector3 = _monk.global_position
+	var drift := 0.0
+	var ticked := false
+	for _i in range(int(_monk.heal_tick_sec() * 3.0 * 60.0) + 60):
 		await get_tree().physics_frame
-		var d: float = _monk.global_position.distance_to(want.global_position)
-		best = minf(best, d)
-		if d <= _UCfg.MONK_CAST_RANGE:
-			reached = true
+		drift = maxf(drift, _monk.global_position.distance_to(p0))
+		if int(_monk.get("heal_ticks")) > 0:
+			ticked = true
 			break
-	print("  было %.1f м, стало %.1f м (дистанция каста %.1f)" % [
-		d0, best, _UCfg.MONK_CAST_RANGE])
-	verdict("B1 монах САМ пошёл к раненому", best < d0 - 1.0,
-		"сократил с %.1f до %.1f м" % [d0, best])
-	verdict("B2 и подошёл на дистанцию заклинания", reached,
-		"ближе всего %.1f м" % best)
-	verdict("B3 пошёл к САМОМУ раненому, а не к ближайшему",
+	print("  сдвиг монаха %.2f м, такт лечения %s" % [drift, str(ticked)])
+	verdict("B1 монах к раненому в ауре НЕ идёт (сдвиг < 1 м)", drift < 1.0,
+		"сдвиг %.2f м" % drift)
+	verdict("B2 и начал лечить с места", ticked, "тактов %d" % int(_monk.get("heal_ticks")))
+	verdict("B3 лечит САМОГО раненого, а не ближайшего",
 		_monk.heal_target == want,
 		"цель %s" % str(_monk.heal_target))
 
@@ -255,20 +259,32 @@ func _d_vfx() -> void:
 		tall > 0.0 and absf(((vfx as MeshInstance3D).mesh as QuadMesh).size.y - Monk.HEAL_VFX_SIZE_M) < 0.01,
 		"квад %.2f при рисунке %.2f м" % [
 			((vfx as MeshInstance3D).mesh as QuadMesh).size.y, tall])
-	# ── ЕДЕТ ЗА ЦЕЛЬЮ ─────────────────────────────────────────────────────
-	var worst := 0.0
+	# ── ЦЕЛЬ ТРОНУЛАСЬ — ЭФФЕКТ ГАСНЕТ (ТЗ 18.09.2026, п. 1) ──────────────
+	# Разворот прежнего «эффект едет за лечимым»: зелёный овал разрешён
+	# только у стоящих, идущий лечимый теряет картинку (лечение при этом
+	# идёт). Признак — факт смещения (moved_recently, порог 0.6 м/с): здесь
+	# цель едет 0.9 м/с
+	var hidden_frames := 0
 	for i in range(60):
-		var p: Vector3 = want.global_position + Vector3(0.0, 0.0, 0.015)
+		var p: Vector3 = want.global_position + Vector3(0.0, 0.0, 0.02)
 		want.global_position = Vector3(p.x,
 			GameManager.get_terrain_height(p.x, p.z), p.z)
 		want.sync_row()
 		await get_tree().physics_frame
-		if i < 8:
+		if i < 20:
 			continue
-		worst = maxf(worst, Vector2(vfx.global_position.x - want.draw_position().x,
-			vfx.global_position.z - want.draw_position().z).length())
-	verdict("D4 эффект едет за лечимым, когда тот идёт", worst < 0.35,
-		"худший отрыв %.2f м" % worst)
+		if _monk.heal_vfx_target() != want or not bool(vfx.get("visible")):
+			hidden_frames += 1
+	verdict("D4 эффект гаснет, пока лечимый идёт (ТЗ 18.09.2026)", hidden_frames >= 12,
+		"погашен %d кадров из 40" % hidden_frames)
+	# Встал — эффект возвращается ближайшим тактом лечения
+	var back := -1
+	for i in range(int(_monk.heal_tick_sec() * 3.0 * 60.0) + 60):
+		await get_tree().physics_frame
+		if _monk.heal_vfx_target() != null and bool(vfx.get("visible")):
+			back = i
+			break
+	verdict("D4б лечимый встал — эффект вернулся", back >= 0, "через %d физкадров" % back)
 
 # ═════════════════════════════════════════════════════════════════════════════
 # E. ОЧЕРЕДЬ: ПО ОДНОМУ, СЛЕДУЮЩИЙ — ПОСЛЕ ПОЛНОГО ИЗЛЕЧЕНИЯ

@@ -31,6 +31,7 @@ extends RefCounted
 
 const _UCfgR := preload("res://scripts/unit_stats_config.gd")
 const _BBUtilR := preload("res://scripts/BillboardUtil.gd")
+const _OptR := preload("res://scripts/perf_config.gd")
 
 enum { LAYOUT_RING = 0, LAYOUT_GRID = 1, LAYOUT_KEEP = 2 }
 
@@ -47,17 +48,29 @@ const FOOT_PAD := 56.0 / 192.0
 const RING_FRAC := 0.30
 const RING_SQUASH := 0.04
 const RING_DEPTH_FRAC := 0.62
-## Сетка на крыше: шаг вбок (м), отход ряда назад по Z и подъём (см. шапку)
-const GRID_DX := 0.44
-const ROW_DZ := -0.42
+## Сетка на крыше: шаг вбок (м), отход ряда назад по Z и подъём (см. шапку).
+## ТЗ 19.09.2026 (п. 4): рассадка РАЗРЕЖЕНА — шаг 0.44 → 0.62 м, ряды глубже
+## (−0.42 → −0.55); бараки — 15 видимых в три ряда по 5
+const GRID_DX := 0.62
+## Сдвиг точки сортировки крыши к камере от подножия постройки, м (см.
+## _build_sprite): передний ряд ROOF_SORT_LIFT, каждый метр глубины ряда
+## снимает ROOF_SORT_ROW, не ниже ROOF_SORT_MIN — крыша всегда поверх стены
+const ROOF_SORT_LIFT := 0.30
+const ROOF_SORT_ROW := 0.10
+const ROOF_SORT_MIN := 0.05
+const ROW_DZ := -0.55
 const ROW_DY := 0.05
-## Крепость: доля полуширины рисунка, где стоят фланговые башни, и число
-## бойцов в центральной группе (остальные — на флангах поровну)
+## Крепость (ТЗ 19.09.2026): 22 на настиле ДВУМЯ ПОЛОВИНКАМИ по 11 (колонки
+## по KEEP_CENTRE_COLS, просвет KEEP_CENTRE_GAP между ними), по 9 на каждой
+## фланговой полубашне (KEEP_FLANK_COLS колонки, выше настила —
+## CASTLE_FLANK_FOOT_FRAC). Итого 40 видимых из 60 сидящих
 const KEEP_FLANK_X := 0.70
-const KEEP_CENTRE_MEN := 30
-const KEEP_CENTRE_COLS := 10
-const KEEP_FLANK_COLS := 4
-const GRID_COLS := 6
+const KEEP_CENTRE_MEN := 22
+const KEEP_HALF_MEN := 11
+const KEEP_CENTRE_COLS := 4
+const KEEP_CENTRE_GAP := 1.3
+const KEEP_FLANK_COLS := 3
+const GRID_COLS := 5
 
 var host: Node3D = null
 var layout: int = LAYOUT_RING
@@ -116,6 +129,25 @@ func squads() -> int:
 			n += 1
 	return n
 
+## Порядковый номер отряда среди сидящих на крыше (0, 1, …), −1 — не на крыше.
+## По нему знамя ветеранов ставится в центр площадки со сдвигом на второй
+## отряд крепости (ТЗ 18.09.2026, п. 7)
+func roof_index_of(sid: int) -> int:
+	var k := 0
+	for rec in host.garrison:
+		var r: Dictionary = rec
+		if not host.roof_accepts(String(r.get("type", ""))):
+			continue
+		if int(r.get("sid", 0)) == sid:
+			return k
+		k += 1
+	return -1
+
+## Точка знамени отряда на крыше: центр площадки; второй отряд — рядом по X
+func banner_point(sid: int) -> Vector3:
+	var k: int = maxi(roof_index_of(sid), 0)
+	return platform_point() + Vector3(float(k) * 1.4, 0.0, 0.0)
+
 ## Первый стрелковый отряд на крыше, 0 — пусто
 func squad_id() -> int:
 	for rec in host.garrison:
@@ -146,7 +178,13 @@ func spot(idx: int, total: int) -> Vector3:
 			return _grid_spot(idx, GRID_COLS, 0.0)
 		LAYOUT_KEEP:
 			if idx < KEEP_CENTRE_MEN:
-				return _grid_spot(idx, KEEP_CENTRE_COLS, 0.0)
+				# Две аккуратные половинки по 11: левая и правая, между ними
+				# просвет KEEP_CENTRE_GAP (проход/лестница в середине настила)
+				var half: int = 0 if idx < KEEP_HALF_MEN else 1
+				var j0: int = idx if half == 0 else idx - KEEP_HALF_MEN
+				var dxc: float = _grid_dx(KEEP_CENTRE_COLS)
+				var shift: float = KEEP_CENTRE_GAP * 0.5 + dxc * float(KEEP_CENTRE_COLS - 1) * 0.5
+				return _grid_spot(j0, KEEP_CENTRE_COLS, -shift if half == 0 else shift)
 			var k: int = idx - KEEP_CENTRE_MEN
 			var per_flank: int = maxi((total - KEEP_CENTRE_MEN + 1) / 2, 1)
 			var side: float = -1.0 if k < per_flank else 1.0
@@ -159,11 +197,15 @@ func spot(idx: int, total: int) -> Vector3:
 		_:
 			return _ring_spot(idx, total)
 
-## Плотная сетка: ряд за рядом назад по Z, колонки от середины
+## Шаг колонки: заказанный GRID_DX, но не шире, чем влезает в рисунок
+func _grid_dx(cols: int) -> float:
+	return minf(GRID_DX, _half_w() * 1.6 / float(maxi(cols, 1)))
+
+## Сетка: ряд за рядом назад по Z, колонки от середины
 func _grid_spot(idx: int, cols: int, x0: float) -> Vector3:
 	var col: int = idx % cols
 	var row: int = idx / cols
-	var dx: float = minf(GRID_DX, _half_w() * 1.6 / float(maxi(cols, 1)))
+	var dx: float = _grid_dx(cols)
 	# Соседние ряды сдвинуты на полшага — шахматка читается плотнее и не
 	# закрывает лица заднего ряда целиком
 	var stagger: float = 0.5 * dx if (row % 2 == 1) else 0.0
@@ -250,6 +292,18 @@ func _build_sprite(idx: int) -> MeshInstance3D:
 	# Низ квада — на поле под ступнями ниже ног, центр квада — на полстороны выше
 	mi.position = Vector3(feet.x, feet.y - SPRITE_SIZE_M * FOOT_PAD + SPRITE_SIZE_M * 0.5, feet.z)
 	mi.rotation = Vector3.ZERO
+	# ── СОРТИРОВКА ПО ПОДНОЖИЮ ХОЗЯИНА (ТЗ 19.09.2026 «Y-sort тролля») ─────
+	# Своя точка на земле у спрайта лежит на высоте крыши и под камерой 45°
+	# приближает его к камере на 0.71·h — гарнизон рисовался поверх тролля,
+	# стоящего перед башней. Якорь — точка сортировки самой постройки (низ её
+	# рисунка, z = 0 узла), плюс сдвиг К КАМЕРЕ: спереди ROOF_SORT_LIFT, чтобы
+	# крыша шла поверх стены, задние ряды на ROOF_SORT_ROW за метр глубины
+	# ближе к стене — порядок рядов между собой цел
+	var mat := quad.material as ShaderMaterial
+	mat.set_shader_parameter("depth_anchor_on", 1.0)
+	mat.set_shader_parameter("depth_anchor", host.global_position + Vector3(host._draw_cx, 0.0, 0.0))
+	var s: Vector3 = spot(idx, cap)
+	mat.set_shader_parameter("depth_push", -maxf(ROOF_SORT_LIFT + s.z * ROOF_SORT_ROW, ROOF_SORT_MIN))
 	host.add_child(mi)
 	return mi
 
@@ -263,16 +317,70 @@ func fire_range() -> float:
 		r = maxf(r, (u as Unit).attack_range)
 	return r * _UCfgR.GARRISON_RANGE_MULT
 
+## Цель жива и в дальности огня: боец — по точке, ПОСТРОЙКА — до края её
+## рисунка (Unit._pad_of), иначе крепость в 25 м от башни числилась бы
+## «за дальностью», хотя её стена в 20
 func _target_alive(t) -> bool:
 	if t == null or not is_instance_valid(t):
 		return false
+	var pad: float = 0.0
 	var u := t as Unit
-	if u == null or u.is_dead() or u.garrisoned:
-		return false
+	if u != null:
+		if u.is_dead() or u.garrisoned:
+			return false
+	else:
+		var b := t as Building
+		if b == null or b.is_dead() or int(b.faction) == int(host.faction) \
+				or int(b.faction) == Constants.FACTION_NEUTRAL:
+			return false
+		pad = b.ring_radius()
 	var p := host.global_position
-	var q := u.global_position
-	var r: float = fire_range()
+	var q := (t as Node3D).global_position
+	var r: float = fire_range() + pad
 	return Vector2(q.x - p.x, q.z - p.z).length_squared() <= r * r
+
+## ── ПРЯМОЙ ПРИКАЗ ГАРНИЗОНУ (ТЗ 19.09.2026, Garrison Manual Targeting) ─────
+## Игрок выделил здание и кликнул ПКМ по чужому отряду или постройке: весь
+## гарнизон переносит огонь на указанную цель и держит её, пока она жива и в
+## дальности; погибла или ушла — обратно к авто-выбору ближайшего. Держится
+## СЫРАЯ ссылка (правило 5): живость проверяется в _target_alive
+var _manual_target = null
+var manual_orders: int = 0
+
+func order_fire(t: Node3D) -> bool:
+	if t == null or not is_instance_valid(t):
+		return false
+	var tu := t as Unit
+	if tu != null:
+		if tu.is_dead() or tu.garrisoned or int(tu.faction) == int(host.faction):
+			return false
+	else:
+		var tb := t as Building
+		if tb == null or tb.is_dead() or int(tb.faction) == int(host.faction) \
+				or int(tb.faction) == Constants.FACTION_NEUTRAL:
+			return false
+	_manual_target = t
+	_fire_target = t
+	_retarget_t = 0.0
+	manual_orders += 1
+	# Отряду в режиме залпа — окно сразу: готовые стреляют на своём тике
+	for rec in host.garrison:
+		var sid: int = int((rec as Dictionary).get("sid", 0))
+		if sid > 0 and host.roof_accepts(GameManager.squad_type(sid)):
+			GameManager.squad_note_order(sid, GameManager.ORDER_ATTACK,
+				(t as Node3D).global_position, t)
+			if GameManager.squad_volley_mode(sid):
+				GameManager.squad_volley_prime(sid, t)
+	return true
+
+## Текущая ручная цель (null — гарнизон на авто-агро)
+func manual_target():
+	if _manual_target == null or not is_instance_valid(_manual_target) 			or not _target_alive(_manual_target):
+		_manual_target = null
+	return _manual_target
+
+func has_manual_target() -> bool:
+	return manual_target() != null
 
 ## Ближайший чужой боец в дальности огня — по сетке ядра, по всем чужим сторонам
 func _pick_target() -> Node3D:
@@ -303,6 +411,18 @@ func tick(delta: float) -> void:
 			_fire_target = null
 		return
 	_retarget_t -= delta
+	# Ручная цель игрока (order_fire) сильнее авто-выбора, пока жива и в
+	# дальности; ушла или пала — гарнизон сам возвращается к ближайшему
+	# Освобождённый объект в Variant РАВЕН null (правило 5): живость — только
+	# через is_instance_valid, иначе выбитая цель висела бы в поле вечно
+	if _manual_target != null and is_instance_valid(_manual_target):
+		if _target_alive(_manual_target):
+			_fire_target = _manual_target
+		else:
+			_manual_target = null
+			_fire_target = null
+	else:
+		_manual_target = null
 	if not _target_alive(_fire_target):
 		_fire_target = null
 		if _retarget_t <= 0.0:
@@ -310,6 +430,8 @@ func tick(delta: float) -> void:
 			_fire_target = _pick_target()
 	var have_target: bool = _fire_target != null
 	var tpos: Vector3 = (_fire_target as Node3D).global_position if have_target else Vector3.ZERO
+	# Постройка: дальность меряется до края рисунка, а не до центра коробки
+	var tpad: float = Unit._pad_of(_fire_target as Node3D) if have_target else 0.0
 	var hp: Vector3 = host.global_position
 	var mult: float = _UCfgR.GARRISON_RANGE_MULT
 	# ОГОНЬ ВЕДУТ ТОЛЬКО ВИДИМЫЕ НА КРЫШЕ: остальные — резерв, они не стреляют
@@ -346,7 +468,7 @@ func tick(delta: float) -> void:
 		else:
 			wait = 0.0
 			if have_target:
-				GameManager.squad_volley_prime(int(sid))
+				GameManager.squad_volley_prime(int(sid), _fire_target as Node3D)
 		_volley_wait[sid] = wait
 	for i in range(n):
 		var u: Unit = units[i]
@@ -360,10 +482,13 @@ func tick(delta: float) -> void:
 		if hold.has(u.squad_id):
 			continue
 		# Личная дальность с баффом: кто не достаёт — ждёт
-		var reach: float = u.attack_range * mult
+		var reach: float = u.attack_range * mult + tpad
 		if Vector2(tpos.x - hp.x, tpos.z - hp.z).length_squared() > reach * reach:
 			continue
 		u.global_position = fire_point(i)
+		# Досягаемость выстрела (Archer._shot_reach) читает поправку на габарит
+		# цели из поля бойца — у укрытого set_attack_target не зовётся, ставим сами
+		u._target_pad = tpad
 		u._on_attack_fired(_fire_target,
 			(u._strike_damage() + u._upgrade_damage_bonus()) * _UCfgR.GARRISON_DAMAGE_MULT)
 		shots_fired += 1
@@ -373,43 +498,65 @@ func tick(delta: float) -> void:
 # УРОН ПО ЛУЧНИКУ НА КРЫШЕ
 # ─────────────────────────────────────────────────────────────────────────────
 ## Кого накрыло: САМЫЙ ЗДОРОВЫЙ из видимых (иначе одна модель добивалась бы
-## залпом, и «резервист встаёт на место» случалось бы вдесятеро реже)
+## залпом, и «резервист встаёт на место» случалось бы вдесятеро реже).
+## Второй элемент ответа — его место на площадке (индекс видимого)
 func pick_hit_archer() -> Unit:
+	return _pick_hit()[0]
+
+func _pick_hit() -> Array:
 	var best: Unit = null
 	var best_hp: float = -1.0
+	var best_i: int = 0
 	var units: Array = roof_units()
 	for i in range(mini(units.size(), cap)):
 		var u: Unit = units[i]
 		if u.current_health > best_hp:
 			best_hp = u.current_health
 			best = u
-	return best
+			best_i = i
+	return [best, best_i]
 
-## Куда падает труп: у ПОДНОЖИЯ, чуть в сторону от ворот
+## Куда падает труп У ПОДНОЖИЯ (ТЗ 19.09.2026, п. 3): ВРАССЫПНУЮ вокруг
+## основания — по золотому углу от номера падения, радиус чуть шире рисунка
+## с разбросом. Прежний веер «чуть в сторону от ворот» клал всех в одну точку
+const FALL_SPREAD_MIN := 0.85
+const FALL_SPREAD_MAX := 1.35
 func corpse_spot(idx: int = 0) -> Vector3:
-	var so: Vector3 = host.spawn_offset
-	var side := Vector3(-so.z, 0.0, so.x)
-	if side.length() < 0.01:
-		side = Vector3.RIGHT
-	side = side.normalized()
-	var fwd := so
-	fwd.y = 0.0
-	fwd = fwd.normalized() if fwd.length() > 0.01 else Vector3.BACK
-	var off: float = (float(idx % 5) - 2.0) * 0.6
-	var p: Vector3 = host.global_position + fwd * (host.ring_radius() * 0.9) + side * off
+	var a: float = float(idx) * 2.39996323 + 0.7
+	var t: float = fposmod(float(idx) * 0.61803398875, 1.0)
+	var r: float = host.ring_radius() * lerpf(FALL_SPREAD_MIN, FALL_SPREAD_MAX, t)
+	var p: Vector3 = host.global_position + Vector3(cos(a) * r, 0.0, sin(a) * r)
 	return Vector3(p.x, GameManager.get_terrain_height(p.x, p.z), p.z)
 
-## Дальний бой по зданию — в лучника на крыше. false — на крыше никого,
-## удар идёт в стены (вызывающий зовёт базовый take_damage)
+## Ложится ли павший НА КРЫШЕ (иначе падает к подножию). ТЗ 19.09.2026
+## (Garrison Archers): ТРУПЫ ЗАЩИТНИКОВ ОСТАЮТСЯ НА ПЛОЩАДКЕ — все, а не
+## каждый второй (прежнее чередование FALL_STAY_EVERY 2 — история; 1 = все)
+const FALL_STAY_EVERY := 1
+
+## ── ПАРАЛЛЕЛЬНЫЙ УРОН (ТЗ 19.09.2026, Parallel Damage Split) ─────────────
+## Град стрел по укреплению бьёт ДВУМЯ РУСЛАМИ разом: здание получает свой
+## полный урон (его списывает хозяин — Castle.take_damage), а защитники на
+## крыше — те же стрелы со срезом укрытия GARRISON_COVER_FRAC (0.5×). Сюда
+## приходит УЖЕ срезанная доля; кому она достаётся — самому здоровому из
+## видимых (иначе одна модель добивалась бы залпом). false — на крыше никого
 func absorb_ranged_hit(amount: float, attacker: Node) -> bool:
-	var u: Unit = pick_hit_archer()
+	var pick: Array = _pick_hit()
+	var u: Unit = pick[0]
 	if u == null:
 		return false
-	var spot: Vector3 = corpse_spot(_fall_index)
+	var idx: int = _fall_index
 	_fall_index += 1
+	var stay_on_roof: bool = (idx % FALL_STAY_EVERY) == 0
+	var spot: Vector3
+	if stay_on_roof:
+		# Тело остаётся на площадке: точка ног его места, высота — крыши
+		spot = host.to_global(slot_local(int(pick[1])))
+	else:
+		spot = corpse_spot(idx)
 	u.garrisoned = false
 	u.garrison_host = null
 	u.global_position = spot
+	u.corpse_ground_override = spot.y if stay_on_roof else -INF
 	u.take_damage(amount, attacker)
 	if not is_instance_valid(u):
 		sync()
@@ -418,6 +565,7 @@ func absorb_ranged_hit(amount: float, attacker: Node) -> bool:
 		_stick_arrow_into(u, spot)
 		sync()
 		return true
+	u.corpse_ground_override = -INF
 	u.garrisoned = false
 	host.absorb_unit(u)
 	sync()
@@ -427,12 +575,25 @@ func _stick_arrow_into(u: Unit, spot: Vector3) -> void:
 	var body = u.corpse_ref()
 	if body == null:
 		return
+	var dir: Vector3 = Vector3(0.0, -1.0, 0.2).normalized()
+	if _OptR.projectile_core:
+		# Стрела без узла (этап 3): слот слоя стрел прямо в тело
+		var lay = GameManager.arrows_mm
+		if not lay.ensure_layer(host.get_parent() as Node3D):
+			return
+		var slot: int = lay.acquire()
+		if slot < 0:
+			return
+		if not GameManager.corpses.stick_arrows(body, lay.core_id, dir, false, slot,
+				lay.quad_length()):
+			GameManager.army.projectile_drop(lay.core_id, slot)
+		return
 	var from := spot + Vector3(0.0, 3.0, 0.0)
 	var a: Node3D = GameManager.spawn_arrow(host.get_parent(), from, spot, 0.25,
 		12.0, 0.0, 0.0, null, host.faction)
 	if a == null:
 		return
-	GameManager.corpses.stick_arrows(body, a, Vector3(0.0, -1.0, 0.2).normalized())
+	GameManager.corpses.stick_arrows(body, a, dir)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ВЫГРУЗКА

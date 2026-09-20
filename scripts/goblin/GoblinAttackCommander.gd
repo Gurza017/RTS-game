@@ -691,6 +691,7 @@ func _heal_at_camp(field: Array) -> void:
 			if Vector2(p.x - camp_pt.x, p.z - camp_pt.z).length_squared() > r2:
 				continue
 			u.current_health = minf(u.max_health, u.current_health + amount)
+			u.push_hp()
 			u._soa_push_stats()
 
 func _at_camp(field: Array) -> bool:

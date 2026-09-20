@@ -146,27 +146,27 @@ var _hurt: Unit = null
 
 ## Один замер: аура погашена → снимок, показана → снимок, разность в её квадрате
 func _measure(save_png: bool) -> Array:
+	# Овала на земле больше нет (ТЗ 19.09.2026, п. 1) — меряется ОДНА лента
+	# лечения над моделью; узел ауры обязан отсутствовать
 	var aura: MeshInstance3D = _monk.get("_heal_aura") as MeshInstance3D
 	var vfx: Node3D = _monk.heal_vfx_node()
-	if aura == null or vfx == null:
+	if aura != null or vfx == null:
 		return [0.0, 0.0, -1.0, 0.0]
 	# Монах и цель заморожены на время пары снимков: такт лечения иначе
-	# включил бы ауру обратно между «фоном» и «рабочим» снимком
+	# включил бы эффект обратно между «фоном» и «рабочим» снимком
 	_monk.set_tick(false)
-	aura.visible = false
 	vfx.visible = false
 	var bg: Image = await _grab()
-	aura.visible = true
 	vfx.visible = true
 	var fg: Image = await _grab()
 	if save_png and _out != "":
 		fg.save_png(_out + ".png")
 		print("  снимок: %s.png" % _out)
-		var amat := (aura.mesh as QuadMesh).material as ShaderMaterial
-		print("  аура: pos=%s размер=%s ground_depth=%s depth_push=%s v_stretch=%s" % [
-			str(aura.global_position), str((aura.mesh as QuadMesh).size),
-			str(amat.get_shader_parameter("ground_depth")), str(amat.get_shader_parameter("depth_push")),
-			str(amat.get_shader_parameter("v_stretch"))])
+		var vmat := ((vfx as MeshInstance3D).mesh as QuadMesh).material as ShaderMaterial
+		print("  лента: pos=%s размер=%s ground_depth=%s depth_push=%s v_stretch=%s" % [
+			str(vfx.global_position), str(((vfx as MeshInstance3D).mesh as QuadMesh).size),
+			str(vmat.get_shader_parameter("ground_depth")), str(vmat.get_shader_parameter("depth_push")),
+			str(vmat.get_shader_parameter("v_stretch"))])
 	_monk.set_tick(true)
 	# Прямоугольник замера — вокруг ЛЕНТЫ лечения (спринт 20: она от земли
 	# вверх), с запасом вниз до овала под ногами
@@ -237,13 +237,13 @@ func _run() -> void:
 		return
 	await frames(3)
 
-	print("\n═════ A. АУРА ЗАМЕТНА ═════")
+	print("\n═════ A. ЛЕНТА ЛЕЧЕНИЯ ЗАМЕТНА (овал на земле снят ТЗ 19.09) ═════")
 	var m: Array = await _measure(true)
-	verdict("A1 аура меняет заметную долю своего квада (≥ %d %%)" % int(MIN_CHANGED_FRAC * 100.0),
+	verdict("A0 узла овала на земле нет", _monk.get("_heal_aura") == null)
+	verdict("A1 лента лечения меняет заметную долю своего квада (≥ %d %%)" % int(MIN_CHANGED_FRAC * 100.0),
 		float(m[0]) >= MIN_CHANGED_FRAC, "%.1f %%" % (float(m[0]) * 100.0))
-	# Спринт 20: в квадрате ауры теперь и лента лечения (искры светлые), а сам
-	# овал тонкий — доля зелёного среди изменившегося ниже прежних 60 %
-	verdict("A2 изменившееся — зелёное (овал и искры, а не мусор; ≥ 25 %)", float(m[1]) >= 0.25,
+	# Без овала зелёное даёт только сама лента (искры светлые) — порог ниже
+	verdict("A2 изменившееся — зелёное (искры, а не мусор; ≥ 15 %)", float(m[1]) >= 0.15,
 		"зелёных %.0f %%" % (float(m[1]) * 100.0))
 
 	print("\n═════ B. У НОГ, А НЕ У ПОЯСА (спринт 20) ═════")

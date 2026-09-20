@@ -127,12 +127,42 @@ func best_enemy(node: Node3D, radius: float, crowd_penalty: float) -> Node3D:
 	var u := node as Unit
 	if u == null or u._soa < 0:
 		return null
-	# Стрелок читает вес цели (большие гоблины ×2, ТЗ 14.09.2026, п. 10)
-	return _core().BestEnemyW(u._soa, radius, crowd_penalty, u.target_prio_scan())
+	# Стрелок читает вес цели (большие гоблины ×2, ТЗ 14.09.2026, п. 10);
+	# конница — свой вес (ТЗ 18.09.2026, п. 4: слабые цели, не копья в лоб)
+	return _core().BestEnemyPrio(u._soa, radius, crowd_penalty, u.target_prio_mode())
 
 ## Все бойцы в радиусе от точки. Холодный путь (разбор клика)
+## Массив собирается В GDSCRIPT по строкам ядра (BigStand-5, этап 4):
+## Godot.Collections.Array из C# нёс по финализируемой обёртке на КАЖДЫЙ
+## узел, и они набивали gen1 (зонд qa_bigstand/GcProbe: ~59 на вызов при
+## тысячах объектов в очереди финализации к моменту сборки). Порядок тот же —
+## обход сетки тот же самый
 func query_radius(pos: Vector3, radius: float) -> Array:
-	return _core().QueryRadius(pos.x, pos.z, radius)
+	var rows: PackedInt32Array = _core().QueryRadiusRows(pos.x, pos.z, radius)
+	var out: Array = []
+	if rows.is_empty():
+		return out
+	var reg: Array = GameManager._row_units
+	var cap: int = reg.size()
+	out.resize(rows.size())
+	var k: int = 0
+	for r in rows:
+		if r < cap:
+			var raw = reg[r]
+			if raw != null and is_instance_valid(raw):
+				out[k] = raw
+				k += 1
+	if k < out.size():
+		out.resize(k)
+	return out
+
+## Строки бойцов в радиусе — для горячих путей, которым узлы нужны не все
+func query_radius_rows(pos: Vector3, radius: float) -> PackedInt32Array:
+	return _core().QueryRadiusRows(pos.x, pos.z, radius)
+
+## Живые чужие в радиусе — одним числом, без массива
+func enemy_count(pos: Vector3, radius: float, my_faction: int) -> int:
+	return _core().EnemyCount(pos.x, pos.z, radius, my_faction, Unit.State.DEAD)
 
 ## ── ПЕРВЫЙ ЖИВОЙ ЧУЖОЙ В РАДИУСЕ ОТ ТОЧКИ ──────────────────────────────────
 ## Для летящей стрелы (Arrow._check_hit). От query_radius отличается тем, что

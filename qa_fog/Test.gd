@@ -214,7 +214,10 @@ func _c_vision() -> void:
 	sp.faction = Constants.FACTION_PLAYER
 	main.world_add(sp)
 	sp.global_position = Vector3(spot.x, main.get_terrain_height(spot.x, spot.z), spot.z)
-	await pframes(2)
+	# Поза — в строку ядра явно (источники тумана ядро берёт по строкам с
+	# FPosValid; первый тик бойца шардирован и до двух физкадров не гарантирован)
+	sp.sync_row()
+	await pframes(4)
 	fog.refresh()
 	var after: bool = fog.is_lit(spot.x, spot.z)
 	verdict("C4 свой юнит раскрывает туман вокруг себя",
@@ -337,8 +340,17 @@ func _d_hiding() -> void:
 		await pframes(2)
 		verdict("D7а спячка гасит физический тик", not gob.tick_on,
 			"тик физики=%s" % str(gob.tick_on))
+		# BigStand, этап 3: скрытый туманом СТОЯЩИЙ боец спит и по картинке
+		# (Unit: ветка тумана в tick_visual), а на свет его выводит пересчёт
+		# маски (GameManager.wake_hidden_sleepers). Свойство теперь такое:
+		# визуальный тик либо жив, либо снят у УЖЕ СКРЫТОГО спящего — и в этом
+		# случае боец числится в реестре скрытых спящих
 		verdict("D7б но НЕ визуальный — иначе прятаться в тумане нечем",
-			gob.draw_on, "тик визуала=%s" % str(gob.draw_on))
+			gob.draw_on or (gob._proc_sleeping and gob._hp_fog_hidden
+				and GameManager._fog_sleepers.has(gob)),
+			"тик визуала=%s, спит скрытым=%s, в реестре=%s" % [str(gob.draw_on),
+				str(gob._proc_sleeping and gob._hp_fog_hidden),
+				str(GameManager._fog_sleepers.has(gob))])
 		# ВОЗВРАЩАЕМ КАК БЫЛО: счётчик спящих общий на партию, и оставленный
 		# расстроенным он портит число ходящих для всех блоков ниже
 		main.goblin_ai._set_dormant(gob, false)

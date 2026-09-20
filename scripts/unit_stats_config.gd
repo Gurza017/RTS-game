@@ -36,7 +36,7 @@ const STATS := {
 		"attack_cooldown": 2.0,                     # пауза между ударами, с
 		"defense": 0.0,                      # защита (стойка «оборона» даёт +5)
 		"armor": 3.0,                     # броня: доля снижения, см. ARMOR_SOFTNESS
-		"morale": 65.0,                     # мораль 0..100
+		"morale": 75.0,                     # мораль 0..100
 		"push_force": 1.0,                   # напор в свалке
 		"description": "Backbone infantry. Holds the line shoulder to shoulder — spears level automatically when the enemy closes in.",
 	},
@@ -86,10 +86,10 @@ const STATS := {
 		"health": 165.0,                     # чуть ниже людского копейщика
 		"name_genitive_plural": "гоблинов",
 		"movement_speed": 2.2,               # скорость, м/с: орда идёт быстрее людей
-		"attack_1": 18.0,                     # «Attack Fast» — три быстрых тычка...
-		"attack_2": 25.0,                    # ...затем «Attack Strong» (ротация 3+1)
+		"attack_1": 12.0,                     # «Attack Fast» — три быстрых тычка...
+		"attack_2": 18.0,                    # ...затем «Attack Strong» (ротация 3+1)
 		"attack_range": 2.2,                 # длина копья, м
-		"attack_cooldown": 2.0,              # пауза между ударами, с
+		"attack_cooldown": 2.5,              # пауза между ударами, с
 		"defense": 0.0,                      # защита
 		"armor": 1.0,                        # брони нет вовсе
 		"morale": 75.0,                     # орда дрогнет раньше людей
@@ -100,7 +100,7 @@ const STATS := {
 	## ── БОЛЬШОЙ ГОБЛИН: ТУША-МЯСО (заказ 13.09.2026) ──────────────────────
 	# Смысл рода войск целиком в трёх числах: ЖИВУЧЕСТИ у него нет (55 против
 	"big_goblin": {
-		"health": 2250.0,                    # = 100 × 165 × BIG_GOBLIN_HP_SQUADS (ТЗ 14.09.2026: число, не ссылка)
+		"health": 1850.0,                    # = 100 × 165 × BIG_GOBLIN_HP_SQUADS (ТЗ 14.09.2026: число, не ссылка)
 		"name_genitive_plural": "больших гоблинов",
 		"movement_speed": 1.54,              # 2.2 × 0.7 (−30 % от гоблина)
 		"attack_1": 55.0,                    # ×3 от гоблина
@@ -108,7 +108,7 @@ const STATS := {
 		"attack_range": 3.5,
 		"attack_cooldown": 2.7,
 		"defense": 2.0,
-		"armor": 2.0,
+		"armor": 6.0,
 		# Мораль высокая: туша не бежит — она затем и нужна, чтобы стоять
 		"morale": 90.0,
 		"push_force": 10.0,
@@ -129,8 +129,8 @@ const STATS := {
 		"defense": 0.0,
 		"armor": 0.0,
 		# ── МОРАЛЬ ПОДНЯТА (заказ 13.09.2026: «не должны быть в вечном ужасе») ──
-		"morale": 55.0,
-		"push_force": 0.5,
+		"morale": 75.0,
+		"push_force": 0.0,
 		"description": "Gnoll bone-thrower. Fast, fragile, never fights in melee.",
 	},
 	"goblin_rider": {
@@ -138,16 +138,16 @@ const STATS := {
 		"name_genitive_plural": "наездников",
 		# ── СКОРОСТЬ КАБАНА: ЗАКАЗ ВЛАДЕЛЬЦА «РАССЕКАТЬ ПОЛЕ» ─────────────
 		"movement_speed": 4.6,
-		"attack_1": 35.0,                    # урон обычного удара седока
-		"attack_2": 45.0,                    # урон мощного удара (ротация 3+1)
-		"attack_range": 2.2,                 # длина руки с седла, м
-		"attack_cooldown": 1.1,              # пауза между ударами, с — вдвое чаще пехоты
+		"attack_1": 25.0,                    # урон обычного удара седока
+		"attack_2": 35.0,                    # урон мощного удара (ротация 3+1)
+		"attack_range": 2.5,                 # длина руки с седла, м
+		"attack_cooldown": 2.1,              # пауза между ударами, с — вдвое чаще пехоты
 		"defense": 0.0,                      # защита
 		"armor": 4.0,                        # броня: шкура кабана
 		"morale": 110.0,                     # мораль выше сотни: конница не дрогнет
-		"push_force": 25.0,                  # напор: кабан давит строй сильнее рыцаря
+		"push_force": 18.0,                  # напор: кабан давит строй сильнее рыцаря
 		# ── УДАРНАЯ КОННИЦА: ТОЛЧОК ВДВОЕ И ПОЧТИ НА КАЖДЫЙ УДАР ───────────
-		"charge_push_mult": 5.5,
+		"charge_push_mult": 3.5,
 		"push_every": 1,
 		# ── НАТИСК С РАЗГОНА (заказ владельца, авг. 2026) ──────────────────
 		"charge_range": 14.0,   # спринт 15: разгон длиннее — иначе 10 м пробега не набрать (было 10.0),                # за сколько метров до цели начинается разгон
@@ -157,13 +157,13 @@ const STATS := {
 		"charge_impact_frac": 0.5,           # доля МАКС. запаса ЖЕРТВЫ, снимаемая тараном
 		# ── ОДИН ВСАДНИК = ДВА ПЕХОТИНЦА ПРИ СЧЁТЕ СИЛЫ ОТРЯДА ────────
 		"squad_weight": 2.0,
-		"charge_splash": 3.0,                # радиус первого ряда контакта, м
+		"charge_splash": 2.0,                # радиус первого ряда контакта, м
 		"charge_knockback": 2.2,             # на сколько метров отлетают накрытые
 		# Сколько метров кабан проезжает СКВОЗЬ строй сразу после удара.
-		"charge_breakthrough": 1.8,
+		"charge_breakthrough": 2.0,
 		# ── ЦЕНА ЛОБОВОГО НАВАЛА НА КОПЬЯ ──────────────────────────────────
 		# ── УДАР ПО РЯДАМ (заказ спринта 15) ──────────────────────────────
-		"charge_row_kill": 1,
+		"charge_row_kill": 2,
 		"charge_row2_frac": 0.3,
 		"charge_row_depth": 1.1,
 		"charge_counter_frac": 0.35,         # доля СВОЕГО запаса за навал на копья
@@ -180,18 +180,18 @@ const STATS := {
 		"attack_1": 70.0,                    # удар дубиной по цели
 		"attack_2": 100.0,
 		"attack_range": 4.5,                 # длина дубины, м
-		"attack_cooldown": 1.167,            # 1.4 / 1.2: темп ударов +20 % (заказ 10.09.2026)
+		"attack_cooldown": 1.7,            # 1.4 / 1.2: темп ударов +20 % (заказ 10.09.2026)
 		"defense": 0.0,
 		"armor": 12.0,                       # толстая шкура
 		"morale": 300.0,                     # не паникует никогда
-		"push_force": 60.0,                  # сминает шеренгу напором
+		"push_force": 30.0,                  # сминает шеренгу напором
 		"push_every": 1,
-		"charge_push_mult": 6.6,
-		"charge_range": 16.0,                # разгон с шестнадцати метров
+		"charge_push_mult": 4.6,
+		"charge_range": 10.0,                # разгон с шестнадцати метров
 		"charge_min_runup": 6.0,
 		"charge_speed_mult": 1.8,
 		"charge_impact_frac": 0.6,           # доля МАКС. запаса жертвы за таран
-		"charge_splash": 3.5,                # кого накрывает удар с разгона, м
+		"charge_splash": 2.5,                # кого накрывает удар с разгона, м
 		"charge_knockback": 3.0,             # на сколько отлетают, м
 		"charge_breakthrough": 2.5,          # вклинивается в строй, м
 		"charge_counter_frac": 0.02,         # копья царапают, а не валят
@@ -216,7 +216,7 @@ const STATS := {
 		"push_force": 0.5,                   # напор: рабочего сдвигает любой боец
 		# ── БАЗОВАЯ ДОБЫЧА НАМЕРЕННО СКРОМНАЯ ──────────────────────────────
 		"gather_time": 6.0,                  # секунд на один цикл добычи
-		"gather_amount": 5.0,                # сколько ресурса приносит за ходку
+		"gather_amount": 15.0,                # сколько ресурса приносит за ходку
 		"description": "Gathers resources and builds structures. Fights back with an axe when cornered.",
 	},
 }
@@ -266,6 +266,14 @@ static func get_stance(stance_id: String) -> Dictionary:
 
 ## ═══════════════════════════════════════════════════════════════════════════
 ## ═══════════════════════════════════════════════════════════════════════════
+## ОТСТУП ОТ СКАЛ ПРИ ОБХОДЕ — ПО ГАБАРИТУ (ТЗ 19.09.2026, обход гор и углов)
+## Читает Unit.nav_clearance(): пехота и гоблины, конница (charge_range > 0),
+## гиганты (fine_ring_radius > 0), тролль — своё. Метры от кромки скалы
+const NAV_CLEARANCE_INFANTRY := 1.5
+const NAV_CLEARANCE_CAVALRY := 2.2
+const NAV_CLEARANCE_GIANT := 3.5
+const NAV_CLEARANCE_TROLL := 4.0
+
 ## БОЕВАЯ МАТЕМАТИКА: КАК БРОНЯ СНИЖАЕТ УРОН
 const ARMOR_SOFTNESS := 25.0
 
@@ -297,6 +305,15 @@ const PANIC_RATIO := 0.5
 const PANIC_LAST_MEN := 6
 
 const PANIC_LAST_MEN_MIN_ROSTER := PANIC_LAST_MEN * 2
+## ── ПРЕДОХРАНИТЕЛЬ ПАНИКИ (срочный багфикс 19.09.2026) ─────────────────────
+## Паника возможна ТОЛЬКО при критических потерях: живых не больше этой доли
+## полного штата (0.30 — из 30 лучников осталось 9). Отряд в бою без потерь,
+## отряд без урона за окно RECENT_HIT_WINDOW_MS и отряд вне боя не срываются
+## НИКОГДА — ни абсолютным, ни относительным порогом
+const PANIC_ALIVE_FRAC := 0.30
+## …и даже тогда не гарантированно: каждая НОВАЯ потеря ниже порога — жребий
+## с этим шансом (аура своей легенды делит шанс, чужой — умножает)
+const PANIC_CHANCE := 0.5
 ## ── ДЛИТЕЛЬНОСТЬ СТУПОРА СОКРАЩЕНА НА 30 % (заказ 13.09.2026) ──────────────
 const PANIC_STUN_SEC := 14.0
 ## ── КОНУС РАЗБЕГА (заказ 13.09.2026) ───────────────────────────────────────
@@ -304,9 +321,14 @@ const PANIC_CONE_DEG := 30.0
 ## ── ОТ КРАЯ КАРТЫ ОТТАЛКИВАЕМСЯ (заказ 13.09.2026) ─────────────────────────
 const PANIC_EDGE_MARGIN := 18.0
 ## На сколько метров паникующие разбегаются. РАЗБЕГАЮТСЯ ВРАССЫПНУЮ, А НЕ
-const PANIC_FLEE_DIST := 20.0
+const PANIC_FLEE_DIST := 12.0
+## Паника — строго один раз (ТЗ 19.09.2026): отбежал → в замок лечиться;
+## места нет — ждёт у кольца замка, переспрашивая раз в PANIC_HEAL_RETRY_SEC
+const PANIC_MAX_RUNS := 1
+const PANIC_HEAL_RETRY_SEC := 10.0
+const PANIC_HEAL_WAIT_R := 3.0
 ## ── НАСКОЛЬКО ШИРОКО ОТРЯД ПРИ ЭТОМ РАССЫПАЕТСЯ ────────────────────────────
-const PANIC_SPREAD := 6.0
+const PANIC_SPREAD := 4.0
 const PANIC_REGROUP_MULT := 1.6
 ## Во сколько раз режется защита паникующего (−30 %)
 const PANIC_ARMOR_MULT := 0.70
@@ -388,18 +410,18 @@ static func smith_icon(icon_name: String) -> Texture2D:
 ## ── СТАРТОВЫЙ ЗАПАС УРЕЗАН ДО ИГРОВОГО ─────────────────────────────────────
 ## ══ ЗАФИКСИРОВАНО ВЛАДЕЛЬЦЕМ 10.09.2026 — НЕ МЕНЯТЬ ═════════════════════
 const PLAYER_STARTING_RESOURCES := {
-	Constants.RESOURCE_WOOD:  160000.0,   # дерево: замок, рабочие, дома
-	Constants.RESOURCE_GOLD:  160000.0,   # золото: найм, исследования, способности
-	Constants.RESOURCE_STONE: 160000.0,   # камень: только постройки
-	Constants.RESOURCE_FOOD:  160000.0,   # еда: капает с домов, тратится на найм
+	Constants.RESOURCE_WOOD:  65600.0,   # дерево: замок, рабочие, дома
+	Constants.RESOURCE_GOLD:  55600.0,   # золото: найм, исследования, способности
+	Constants.RESOURCE_STONE: 57600.0,   # камень: только постройки
+	Constants.RESOURCE_FOOD:  15600.0,   # еда: капает с домов, тратится на найм
 }
 
 ## ЗАПАС ИИ ПРАВИТСЯ ОТДЕЛЬНО ОТ ИГРОЦКОГО — и ровно ради этого блоки разные:
 const AI_STARTING_RESOURCES := {
-	Constants.RESOURCE_WOOD:  11450.0,     # дерево
-	Constants.RESOURCE_GOLD:  11350.0,     # золото
-	Constants.RESOURCE_STONE: 11300.0,     # камень
-	Constants.RESOURCE_FOOD:  11300.0,     # еда
+	Constants.RESOURCE_WOOD:  15450.0,     # дерево
+	Constants.RESOURCE_GOLD:  15350.0,     # золото
+	Constants.RESOURCE_STONE: 15300.0,     # камень
+	Constants.RESOURCE_FOOD:  15300.0,     # еда
 }
 
 ## Стартовый запас фракции. ВСЕГДА возвращает полный набор из четырёх ресурсов:
@@ -575,7 +597,11 @@ const FOOD_UPKEEP_FACTIONS := [Constants.FACTION_PLAYER]
 
 ## ── СТАДО ИГРОКА: ПОТОЛКИ ВЫПАСА (заказ спринта 13) ───────────────────────
 ## У ЗАМКА пасётся мало и медленно: CASTLE_GRAZE_LIMIT овец в радиусе
-const SHEEP_PEN_CAPACITY  := 20
+const SHEEP_PEN_CAPACITY  := 30
+## Загонов у игрока — не больше SHEEP_PEN_MAX_COUNT (как крепости, отказ с
+## подсказкой), овец у игрока всего — не больше SHEEP_PLAYER_MAX (ТЗ 19.09.2026)
+const SHEEP_PEN_MAX_COUNT := 3
+const SHEEP_PLAYER_MAX    := 90
 const CASTLE_GRAZE_LIMIT  := 5
 const CASTLE_GRAZE_RADIUS := 20.0
 const STARVE_MORALE_PER_SEC := 1.5
@@ -592,8 +618,8 @@ static func is_house(building_id: String) -> bool:
 ## ── КРЕПОСТЬ ТОЖЕ ДАЁТ ЛИМИТ (заказ владельца 10.09.2026) ─────────────────
 ## ЛИМИТ НАСЕЛЕНИЯ ИГРОКА (заказ 09.09.2026)
 const POP_LIMIT_ENABLED   := true
-const POP_BASE_WORKERS    := 5     # рабочих без крепости и домов (стартовая бригада)
-const POP_BASE_SQUADS     := 0     # боевых отрядов без крепости
+const POP_BASE_WORKERS    := 10     # рабочих без крепости и домов (стартовая бригада)
+const POP_BASE_SQUADS     := 3     # боевых отрядов без крепости
 const CASTLE_WORKER_SLOTS := 10    # +рабочих за каждую крепость
 const CASTLE_SQUAD_SLOTS  := 5     # +отрядов за каждую крепость
 const HOUSE_WORKER_SLOTS  := 3     # +рабочих за каждый дом
@@ -623,14 +649,21 @@ const TOWER_RETARGET_SEC     := 0.25
 ## Бафф высоты — любому укрытому стрелку (башня, бараки, крепость)
 const GARRISON_RANGE_MULT    := 1.30
 const GARRISON_DAMAGE_MULT   := 1.30
+## Срез укрытия (ТЗ 19.09.2026): защитник на крыше получает эту долю урона
+## стрелы, стены — полный урон параллельно (Castle.take_damage)
+const GARRISON_COVER_FRAC    := 0.5
 ## Сколько стрелковых отрядов помещается на крышу и сколько стрелков видно
 const ROOF_SQUADS := {"tower": 1, "barracks": 1, "castle": 2}
-const ROOF_VISIBLE := {"tower": 10, "barracks": 30, "castle": 60}
+## ТЗ 19.09.2026 (п. 4): бараки — 15 на крыше из 30 (остальные в резерве),
+## крепость — 40 из 60 (9 на левой башне + 22 на настиле двумя половинками
+## по 11 + 9 на правой башне); павшего на крыше сменяет резервист
+const ROOF_VISIBLE := {"tower": 10, "barracks": 15, "castle": 40}
 ## На какой доле высоты рисунка стоят ноги (крепость: настил и фланговые башни)
 ## 15.09.2026: опущены — бойцы «летали» над зубцами (башня 0.60 → 0.52,
 ## бараки 0.56 → 0.44, крепость 0.66 → 0.50, фланги 0.78 → 0.54)
 const ROOF_FOOT_FRAC := {"tower": 0.52, "barracks": 0.44, "castle": 0.50}
-const CASTLE_FLANK_FOOT_FRAC := 0.54
+## Фланговые полубашни крепости выше настила (ступеньки): ноги на 0.60 рисунка
+const CASTLE_FLANK_FOOT_FRAC := 0.60
 ## Крепостей на игрока — не больше трёх, каждая следующая дороже в CASTLE_COST_MULT раз
 const CASTLE_MAX_COUNT := 3
 const CASTLE_COST_MULT := 4.0
@@ -662,18 +695,26 @@ const BIG_GOBLIN_HP_SQUADS := 0.5     # 13.09.2026: запас порезан в
 const SQUAD_SIZE_BIG_GOBLIN := 5
 const MONK_LIMIT           := 3
 ## Лечение: радиус ауры, такт и «секунд на полный запас одного бойца»
-const MONK_HEAL_RADIUS     := 10.0
+const MONK_HEAL_RADIUS     := 20.0   # ТЗ 16.09.2026: аура 20 м по умолчанию (было 10)
+## ИСТОРИЯ (до 17.09.2026 каст был «в упор», 3 м): теперь каст — из любой
+## точки ауры (Monk.cast_range() = heal_radius()), а монах встаёт на
+## MONK_STAND_FRAC радиуса от центра отряда-пациента — снаружи строя.
+## Константу читают стенды как помощник расстановки
 const MONK_CAST_RANGE      := 3.0
+const MONK_STAND_FRAC      := 0.7    # где встать: доля радиуса ауры от центра отряда
+const MONK_MOVE_SLACK      := 3.0    # новый приказ подхода — только если точка ушла дальше
 const MONK_HEAL_LEASH      := 14.0
 const MONK_STEP_SEC        := 0.6
 const MONK_HEAL_TICK       := 0.5
 ## Одиночное лечение МЕДЛЕННОЕ (письмо 12, tier 1): полный запас за 14 с;
-const MONK_HEAL_SEC_PER_MAN := 14.0
+const MONK_HEAL_SEC_PER_MAN := 10.0
 ## ── ДИСТАНЦИЯ МЕЖДУ МОНАХАМИ (письмо 12) ───────────────────────────────────
 const MONK_SPACING := 5.0
 ## ── ВОСКРЕШЕНИЕ (письмо 12, tier 3, forge monk_3d) ─────────────────────────
-const MONK_RES_SEC := 20.0
-const MONK_RES_COOLDOWN := 8.0
+const MONK_RES_SEC := 5.0            # канал воскрешения (ТЗ 17.09.2026: 15 → 5)
+const MONK_RES_COOLDOWN := 5.0       # откат между каналами; 4d / 5d — короче
+const MONK_RES_COOLDOWN_4D := 4.0
+const MONK_RES_COOLDOWN_5D := 2.0
 ## 13.09.2026: павшие ищутся в MONK_RES_SEARCH_RADIUS (шире радиуса лечения:
 const MONK_RES_SEARCH_RADIUS := 30.0
 const MONK_RES_YIELD_FRAC := 0.4
@@ -688,6 +729,17 @@ const MONK_AURA_BASE_R := 4.0
 const MONK_AURA_TICK := 1.0
 const MONK_AURA_HOLD_MS := 1700
 const MONK_AOE_RATE        := 0.5
+## ── АВТОНОМНЫЙ МОНАХ (ТЗ 16.09.2026) ───────────────────────────────────────
+## Скан раз в MONK_SCAN_SEC (или по событию), радиус ауры по умолчанию
+## MONK_AURA_R; свободный монах выбирает самый побитый ОТРЯД; нет раненых —
+## один скан по карте и марш к ближайшему своему отряду на MONK_FRONT_DIST;
+## никого — сон по физике. Под ударом — отход на MONK_RETREAT_DIST к своим
+const MONK_SCAN_SEC        := 1.2
+const MONK_AURA_R          := 20.0
+const MONK_FRONT_DIST      := 10.0
+const MONK_RETREAT_DIST    := 10.0
+## Сколько квадов VFX лечения на одного монаха (массовый каст: на самых раненых)
+const MONK_VFX_MAX         := 8
 
 const SQUAD_SIZE_HARD_CAP := 100
 
@@ -911,8 +963,8 @@ static func perk_mask_of(chosen: Array) -> int:
 ## Копейщики / Рыцари (мечники) / Лучники / Монахи — четыре НЕЗАВИСИМЫХ блока.
 static var VET_CONFIG: Dictionary = {
 	"spearman": {"thresholds": [50, 105, 155, 235, 310, 390, 455], "bonuses": _VET_BONUS_TEMPLATE.duplicate(true)},
-	"warrior":  {"thresholds": [130, 260, 520, 780, 1040, 1300, 1690], "bonuses": _VET_BONUS_TEMPLATE.duplicate(true)},
-	"archer":   {"thresholds": [130, 260, 520, 780, 1040, 1300, 1690], "bonuses": _VET_BONUS_TEMPLATE.duplicate(true)},
+	"warrior":  {"thresholds": [130, 260, 520, 780, 940, 1100, 1500], "bonuses": _VET_BONUS_TEMPLATE.duplicate(true)},
+	"archer":   {"thresholds": [130, 260, 520, 780, 940, 1100, 1500], "bonuses": _VET_BONUS_TEMPLATE.duplicate(true)},
 	# ── МОНАХ: НАГРАДЫ — АУРЫ ПОДДЕРЖКИ (письмо 12), опыт — за лечение ─────
 	"monk":     {"thresholds": [50, 130, 260, 390, 520, 650, 780], "bonuses": _VET_MONK_TEMPLATE.duplicate(true)},
 	# ── ГОБЛИНЫ: ШКАЛА ЛЮДЕЙ ЦЕЛИКОМ (заказ владельца) ──────────────────────
@@ -1087,10 +1139,10 @@ static func veteran_choice_info(unit_type: String, choice_id: String) -> Diction
 ## ═══════════════════════════════════════════════════════════════════════════
 ## ═══════════════════════════════════════════════════════════════════════════
 ## ГАРНИЗОН ЗАМКА (CASTLE REFILL & HEAL)
-const GARRISON_SQUAD_LIMIT   := 5     # сколько отрядов помещается в один Замок
+const GARRISON_SQUAD_LIMIT   := 7    # сколько отрядов помещается в один Замок
 ## HP в секунду каждой раненой модели, ОДНОВРЕМЕННО у всех моделей отряда
 const GARRISON_HEAL_PER_SEC  := 1.0
-const GARRISON_REVIVE_SECONDS := 10.0  # секунд на одну восстановленную модель
+const GARRISON_REVIVE_SECONDS := 5.0  # секунд на одну восстановленную модель
 ## Дистанция до Замка, с которой отряд «входит внутрь»
 const GARRISON_ENTER_RADIUS  := 5.0
 const GARRISON_AUTO_RELEASE  := true
@@ -1379,7 +1431,12 @@ const BONUS_KEYS := ["bonus_attack", "bonus_armor", "bonus_defense",
 					 # урона по крупным (0.5 = ×1.5), число снайперов в отряде,
 					 # доля к перезарядке снайперского выстрела
 					 "bonus_cooldown_pct", "bonus_armor_pen", "bonus_giant",
-					 "bonus_snipers", "bonus_snipe_cd"]
+					 "bonus_snipers", "bonus_snipe_cd",
+					 # ── ДРЕВО МЕЧНИКА (ТЗ-B 19.09.2026): удары сверх серии
+					 # «Яростной Атаки», число задетых соседей и доля урона
+					 # им («Рассечение»), доля силы удара ниже половины запаса
+					 "bonus_rage_hits", "bonus_cleave", "bonus_cleave_dmg",
+					 "bonus_berserk"]
 
 ## Шаблон с нулями — КОПИЯ, а не сам словарь: вызывающий волен его править
 static func zero_modifiers() -> Dictionary:

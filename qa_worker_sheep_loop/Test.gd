@@ -103,6 +103,8 @@ func _spawn_sheep(at: Vector3) -> Node3D:
 func _run() -> void:
 	main = load("res://scenes/Main.tscn").instantiate()
 	get_tree().root.add_child(main)
+	# Пень за рекой в партии заморожен (ТЗ 19.09.2026); стенду нужен живой
+	GameManager.call_deferred("thaw_lairs_now")
 	await frames(8)
 	if main.enemy_ai != null:
 		main.enemy_ai.set_process(false)

@@ -119,6 +119,8 @@ func _free_all(arr: Array) -> void:
 func _run() -> void:
 	main = load("res://scenes/Main.tscn").instantiate()
 	get_tree().root.add_child(main)
+	# Пень за рекой в партии заморожен (ТЗ 19.09.2026); стенду нужен живой
+	GameManager.call_deferred("thaw_lairs_now")
 	await frames(8)
 	if main.enemy_ai != null:
 		main.enemy_ai.set_process(false)
@@ -516,9 +518,9 @@ func _f_monks() -> void:
 	await pframes(3)
 	verdict("F8 павший оставил тело, годное к подъёму (+%d)" % (GameManager.corpses.raisable_count(pf) - corpses0),
 		GameManager.corpses.raisable_count(pf) == corpses0 + 1)
-	await pframes(60 * 3)
-	verdict("F9 без исследования монах павших не поднимает", m.resurrected_total == 0 and m.res_target() == null)
-	GameManager.finish_research(pf, _Forge.node_id("monk", "3d"))
+	# Воскрешение — БОНУС РЯДА 2 (2d уже изучен выше ради «Благодати»), и с
+	# 17.09.2026 канал 5 с идёт параллельно лечению: считаем кадры канала
+	# С МОМЕНТА ГИБЕЛИ, а не после лишнего исследования 3d
 	var channel := false
 	var raised := false
 	var res_frames := 0
@@ -530,7 +532,8 @@ func _f_monks() -> void:
 		if m.resurrected_total >= 1:
 			raised = true
 			break
-	verdict("F10 с «Воскрешением» монах подошёл и вёл канал (%d кадров ≈ %.0f с, срок %.0f с)" % [
+	verdict("F9 воскрешение доступно с бонуса ряда 2 (can_resurrect)", bool(m.can_resurrect()))
+	verdict("F10 монах вёл канал из ауры (%d кадров ≈ %.0f с, срок %.0f с)" % [
 			res_frames, float(res_frames) / 60.0, m.res_sec()],
 		channel and float(res_frames) / 60.0 >= m.res_sec() * 0.8)
 	verdict("F11 павший поднят: тел −1, вспышка %d" % m.res_flashes,
@@ -559,7 +562,12 @@ func _f_monks() -> void:
 	b["aura_attack"] = 2.0
 	b["aura_armor"] = 1.0
 	b["aura_rate"] = 0.1
-	var arc: Array = _squad("archer", pf, base + Vector3(-2.0, 0.0, 2.0), 1)
+	# Ауры наград — MONK_AURA_BASE_R (4 м) вокруг монаха; с 17.09.2026 он
+	# лечит с границы ауры лечения (14 м от отряда) и к пациентам не
+	# подходит — для замера самих аур ставим его к отряду вплотную
+	m.global_position = (grp[1] as Unit).global_position + Vector3(1.5, 0.0, 0.0)
+	m.sync_row()
+	var arc: Array = _squad("archer", pf, m.global_position + Vector3(-2.0, 0.0, 2.0), 1)
 	var ar: Unit = arc[0]
 	var cd0: float = ar._effective_cooldown()
 	var dmg0: float = (grp[1] as Unit)._upgrade_damage_bonus()

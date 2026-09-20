@@ -253,6 +253,9 @@ func _block_panic() -> void:
 	await frames(20)
 	var sid := _sid(weak)
 	var m0: float = GameManager.squad_morale(sid)
+	# Срыв — по критическим потерям и ЖРЕБИЮ (багфикс 19.09.2026): стенду
+	# нужен детерминированный исход, шанс 1.0
+	GameManager.panic_chance_override = 1.0
 	for u in weak:
 		(u as Unit).command_attack(strong[0], true, true, true)
 	for u in strong:
@@ -267,8 +270,8 @@ func _block_panic() -> void:
 			panicked = true
 			m_at_panic = GameManager.squad_morale(sid)
 			break
-	verdict("C1 отряд сорвался в панику под избиением", panicked,
-		"мораль была %.0f, стала %.0f" % [m0, m_at_panic])
+	verdict("C1 отряд сорвался в панику под избиением (критические потери)", panicked,
+		"мораль была %.0f, стала %.0f, живых %d из %d" % [m0, m_at_panic, _alive(weak), weak.size()])
 	if not panicked:
 		for u in weak + strong:
 			if is_instance_valid(u):

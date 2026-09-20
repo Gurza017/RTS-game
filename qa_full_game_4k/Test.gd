@@ -212,6 +212,22 @@ func _arrow_stats() -> Dictionary:
 	var hanging := 0
 	var worst := 0.0
 	var mm = GameManager.arrows_mm
+	# Снаряды без узла (этап 3): полёты и торчащие — записи ядра, точка — слот
+	for fr in GameManager.flight_records():
+		if not bool(fr["bone"]):
+			flying += 1
+	for r in GameManager.stuck_arrow_records():
+		if bool(r["bone"]):
+			continue
+		stuck += 1
+		var rp: Vector3 = r["pos"]
+		var rl: float = rp.y - GameManager.get_terrain_height(rp.x, rp.z)
+		if rl > 0.5:
+			hanging += 1
+			print("    ВИСИТ (ядро): y=%.2f грунт=%.2f в теле=%s гаснет=%.2f" % [
+				rp.y, rp.y - rl, str(r["corpse"]), float(r["fade"])])
+		worst = maxf(worst, rl)
+	# Legacy-узлы (ручка projectile_core выключена)
 	for a in arrows:
 		var spent: bool = bool(a.get("_spent"))
 		var pooled: bool = bool(a.get("_pooled"))
@@ -242,7 +258,7 @@ func _arrow_stats() -> Dictionary:
 		"nodes": arrows.size(), "flying": flying, "stuck": stuck,
 		"hanging": hanging, "worst": worst,
 		"slots": (mm.capacity if mm != null else 0),
-		"free": (mm.free.size() if mm != null else 0),
+		"free": (mm.free_count() if mm != null else 0),
 		"pool": GameManager.arrow_pool_size(),
 		"registry": GameManager.stuck_arrow_count(),
 		"fired": GameManager.arrows_fired,
@@ -632,11 +648,16 @@ func _run() -> void:
 
 	verdict("A1 торчащие стрелы не висят в воздухе", worst_hang == 0,
 		"худший снимок: %d висящих, худший подъём над грунтом %.2f м" % [worst_hang, worst_lift])
-	# Буфер: слотов не больше, чем узлов стрел, плюс один шаг роста
-	verdict("A2 буфер стрел не течёт (слотов <= узлов + шаг роста)",
-		int(arrows_after["slots"]) <= int(arrows_after["nodes"]) + 64,
-		"слотов %d при узлах %d (выпущено %d)" % [int(arrows_after["slots"]),
-			int(arrows_after["nodes"]), int(arrows_after["fired"])])
+	# Буфер не течёт: занятых слотов (ёмкость минус свободные) не больше, чем
+	# снарядов в полёте и в земле плюс legacy-узлов (узел держит слот пожизненно).
+	# Снаряд без узла (BigStand-5, этап 3) возвращает слот в свободные сам —
+	# по прилёту без следа, по сроку торчания, по гибели тела
+	var occupied: int = int(arrows_after["slots"]) - int(arrows_after["free"])
+	verdict("A2 буфер стрел не течёт (занятых слотов <= в полёте + в земле + узлов)",
+		occupied <= int(arrows_after["flying"]) + int(arrows_after["stuck"]) + int(arrows_after["nodes"]),
+		"слотов %d, свободных %d, в полёте %d, в земле %d, узлов %d (выпущено %d)" % [
+			int(arrows_after["slots"]), int(arrows_after["free"]), int(arrows_after["flying"]),
+			int(arrows_after["stuck"]), int(arrows_after["nodes"]), int(arrows_after["fired"])])
 	verdict("A3 торчащих на поле не больше потолка + догорающие",
 		int(arrows_after["registry"]) <= GameManager.MAX_STUCK_ARROWS + 64,
 		"в реестре %d при потолке %d" % [int(arrows_after["registry"]), GameManager.MAX_STUCK_ARROWS])

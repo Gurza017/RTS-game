@@ -192,6 +192,10 @@ func _capture(f: int) -> void:
 	remove_from_group(Constants.building_group(old))
 	faction = f
 	add_to_group(Constants.building_group(f))
+	# Свой рудник виден всегда: обход тумана чужие/ничейные постройки прячет
+	# и показывает, а player_buildings не трогает (ТЗ-C 19.09.2026)
+	if f == Constants.FACTION_PLAYER:
+		set_fog_hidden(false)
 	_capture_by = -1
 	_capture_t = 0.0
 	captures += 1
@@ -277,6 +281,11 @@ func add_builder(w: Node) -> void:
 
 func remove_builder(_w: Node) -> void:
 	pass
+
+## У рудника «работа кончилась» — только руина: базовый repair_done по
+## полному запасу гнал бы рабочего прочь от целого рудника (ТЗ 19.09, ремонт)
+func repair_done() -> bool:
+	return _dead
 
 func builder_count() -> int:
 	return workers.size()

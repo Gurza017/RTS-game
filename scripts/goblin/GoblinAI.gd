@@ -154,7 +154,7 @@ func _wave_squads() -> int:
 func _is_special(sid: int) -> bool:
 	return garrison_sids.has(sid) or mine_guard_sids.has(sid) \
 		or _revenge_sids.has(sid) or (sid > 0 and sid == scout_sid) \
-		or reserve_sids.has(sid)
+		or scouts.has(sid) or reserve_sids.has(sid)
 
 func setup(p_main: Node3D, p_village: Vector3) -> void:
 	main = p_main
@@ -183,6 +183,8 @@ func reset() -> void:
 	_scout_state_at = -1.0e9
 	scout_sorties = 0
 	scout_harasses = 0
+	scouts.clear()
+	_scout_rest_at = -1.0e9
 	known_bases.clear()
 	raid_sids.clear()
 	_raid_last = -1.0e9
@@ -235,11 +237,25 @@ func _revenge_goal(sid: int) -> Vector3:
 		sin(a) * _GobCfg.REVENGE_RING)
 
 func _process(delta: float) -> void:
+	# Часы подсистемы (perf_config.sys_meter, qa_bigstand): одна проверка bool
+	if not _OptGA.sys_meter:
+		_process_timed(delta)
+		return
+	var _sys_t0: int = Time.get_ticks_usec()
+	_process_timed(delta)
+	_OptGA.sys_add("goblin_ai", Time.get_ticks_usec() - _sys_t0)
+
+func _process_timed(delta: float) -> void:
 	if main == null:
 		return
 	clock += delta
 	# Недоразданные приказы прошлого такта — по порции за кадр (см. _drain_orders)
-	_drain_orders()
+	if _OptGA.sys_meter:
+		var td: int = Time.get_ticks_usec()
+		_drain_orders()
+		_OptGA.sys_add("ga_drain", Time.get_ticks_usec() - td)
+	else:
+		_drain_orders()
 	_think -= delta
 	if _think > 0.0:
 		return
@@ -250,6 +266,47 @@ func _process(delta: float) -> void:
 # ОДИН ТАКТ
 # ═════════════════════════════════════════════════════════════════════════════
 func tick() -> void:
+	if _OptGA.sys_meter:
+		_tick_timed()
+		return
+	_tick_body()
+
+## Тот же такт с часами по этапам (аудит 19.09.2026: qa_bigstand/Owner
+## показывал худший вызов goblin_ai 40-65 мс — надо знать, ЧТО в такте дорого)
+func _tick_timed() -> void:
+	var t0: int = Time.get_ticks_usec()
+	last_action = ""
+	_regroup()
+	var t1: int = Time.get_ticks_usec(); _OptGA.sys_add("ga_regroup", t1 - t0)
+	_tick_revenge()
+	if not _awake:
+		var wake_at: float = _Diff.goblin_dormant_sec()
+		if clock < wake_at and not _attacked():
+			last_action = "спит (%.0f с до подъёма)" % (wake_at - clock)
+			if not _revenge_sids.is_empty():
+				_issue_orders(true)
+			return
+		_wake_horde()
+	var t2: int = Time.get_ticks_usec()
+	_economy()
+	_retreat_broken()
+	_sweep_heal()
+	var t3: int = Time.get_ticks_usec(); _OptGA.sys_add("ga_econ_heal", t3 - t2)
+	_tick_raids()
+	var t4: int = Time.get_ticks_usec(); _OptGA.sys_add("ga_raids", t4 - t3)
+	if not first_contact:
+		_check_first_contact()
+	var was: String = phase
+	_decide_phase()
+	var t5: int = Time.get_ticks_usec(); _OptGA.sys_add("ga_decide", t5 - t4)
+	if phase != was:
+		GameManager.tm_event("goblin_phase", {"from": was, "to": phase, "wave": _wave_squads()})
+	if phase != was and (phase == PHASE_CENTER or phase == PHASE_HUNT):
+		_blow_horn("наступление: " + phase)
+	_issue_orders()
+	_OptGA.sys_add("ga_issue", Time.get_ticks_usec() - t5)
+
+func _tick_body() -> void:
 	last_action = ""
 	_regroup()
 	# Месть идёт по своим часам, спячка орды ей не указ
@@ -276,6 +333,8 @@ func tick() -> void:
 		_check_first_contact()
 	var was: String = phase
 	_decide_phase()
+	if phase != was:
+		GameManager.tm_event("goblin_phase", {"from": was, "to": phase, "wave": _wave_squads()})
 	if phase != was and (phase == PHASE_CENTER or phase == PHASE_HUNT):
 		_blow_horn("наступление: " + phase)
 	_issue_orders()
@@ -618,15 +677,31 @@ func _check_first_contact() -> void:
 ## HARASS_MIN_SEC, и есть куда идти (база найдена разведкой либо известна по
 ## постройкам)
 func _assault_ready() -> bool:
-	if _wave_squads() < _GobCfg.army_squads():
-		return false
-	if clock - _harass_since < _GobCfg.HARASS_MIN_SEC:
+	var field: int = _wave_squads()
+	var in_harass: float = clock - _harass_since
+	if in_harass < _GobCfg.HARASS_MIN_SEC:
 		return false
 	# Не раньше 35-й минуты (уточнение владельца): до того — центр, рудники,
 	# точечные рейды
 	if clock < _GobCfg.ASSAULT_EARLIEST_SEC:
 		return false
+	if field < _GobCfg.army_squads():
+		# ── ПОТОЛОК БЕСПОКОЙСТВА (аудит партий 19.09.2026) ────────────────
+		# Полная армия не набиралась никогда: рейды таяли, раненые сидели в
+		# хижинах, и орда 27 минут ходила микро-рейдами. После HARASS_MAX_SEC
+		# наступление идёт тем, что есть, — не меньше ASSAULT_MIN_SQUADS
+		if in_harass < _GobCfg.HARASS_MAX_SEC or field < _GobCfg.ASSAULT_MIN_SQUADS:
+			return false
 	return _assault_target() != Vector3.ZERO
+
+## Состояние ворот наступления — телеметрии и стендам
+func assault_gate() -> Dictionary:
+	return {
+		"wave": _wave_squads(), "need": _GobCfg.army_squads(), "field": _field_squads(),
+		"harass_sec": snappedf(maxf(clock - _harass_since, 0.0), 1.0) if phase == PHASE_HARASS else 0.0,
+		"clock_ok": clock >= _GobCfg.ASSAULT_EARLIEST_SEC,
+		"target_ok": _assault_target() != Vector3.ZERO,
+	}
 
 ## Чужие у деревни (тот же радиус, что у обороны командира)
 func _village_threatened() -> bool:
@@ -767,11 +842,274 @@ func _scout_look(sq: Dictionary) -> void:
 				known_bases[f] = (b as Node3D).global_position
 				break
 
-## Разведка — МАЛЫЙ ОТРЯД (SCOUT_UNITS конных), свой и вне волны. Автомат:
-## out — обход точек; harass — у найденной базы бьёт ближайшего рабочего
-## SCOUT_HARASS_SEC; home — отход в деревню и передышка SCOUT_SORTIE_SEC.
-## Возвращает план или пустой словарь
+# ═════════════════════════════════════════════════════════════════════════════
+# РАЗВЕДКА ВСАДНИКОВ — ПОЛНЫЕ ОТРЯДЫ, ВЕЕР, ОХОТА (ТЗ 19.09.2026, блок 3.4)
+# ═════════════════════════════════════════════════════════════════════════════
+# Прежняя разведка — два всадника, обход точек, укол и домой. Теперь:
+#   • пул до SCOUT_MAX_SQUADS ПОЛНЫХ конных отрядов (scout_units), в вылазку
+#     выходят 1 / 2 / 3 разом по весам SCOUT_SORTIE_WEIGHTS (жребий —
+#     AudioManager.rng, общий поток партии не трогается);
+#   • веер: у каждого отряда своя ДОРОЖКА (lane) — орбита радиусом
+#     SCOUT_ORBIT_R вокруг базы (известной или PLAYER_BASE_ANCHOR), дорожки
+#     разнесены по углу на треть круга и идут в разные стороны: один режет
+#     снизу, второй сверху, третий — по центру;
+#   • охота: на орбите отряд ищет добычу в SCOUT_HUNT_R — рабочих, затем
+#     ОДИНОКИЙ стрелковый отряд (без пехоты в SCOUT_LONE_R) — налёт на
+#     SCOUT_HARASS_SEC, потом ОТХОД (hit-and-run) на следующую точку орбиты
+#     SCOUT_RUN_SEC в режиме отхода, и снова орбита;
+#   • домой — при потерях (RAID_RETREAT_HP), сопротивлении (RAID_FLEE_*) или
+#     по сроку вылазки SCOUT_SORTIE_MAX_SEC; дома передышка SCOUT_SORTIE_SEC.
+# Совместимость: scout_sid / scout_state — ПЕРВЫЙ живой разведотряд (стенды).
+## sid → {"state": out|harass|run|home, "at": clock, "lane": int, "wp": int,
+##        "wp_at": clock, "out_at": clock, "prey": Node|null}
+var scouts: Dictionary = {}
+var _scout_rest_at: float = -1.0e9
+var scout_spawned: int = 0
+var scout_kills_prey: int = 0
+
+## Первый живой разведотряд (совместимость со стендами спринта 17)
+func _sync_scout_compat() -> void:
+	scout_sid = 0
+	for sid in scouts:
+		scout_sid = int(sid)
+		scout_state = String((scouts[sid] as Dictionary)["state"])
+		return
+	scout_state = "out"
+
+## Сколько отрядов идёт в вылазку: 1 / 2 / 3 по весам SCOUT_SORTIE_WEIGHTS
+func _scout_sortie_size() -> int:
+	var w: Array = _GobCfg.SCOUT_SORTIE_WEIGHTS
+	var r: float = AudioManager.rng.randf()
+	var acc: float = 0.0
+	for i in range(w.size()):
+		acc += float(w[i])
+		if r <= acc:
+			return mini(i + 1, _GobCfg.SCOUT_MAX_SQUADS)
+	return mini(w.size(), _GobCfg.SCOUT_MAX_SQUADS)
+
+## Точка орбиты дорожки lane: центр — известная база (игрока в приоритете),
+## иначе якорь базы игрока; направление обхода чередуется по дорожке
+func _scout_orbit_center() -> Vector3:
+	if known_bases.has(Constants.FACTION_PLAYER):
+		return known_bases[Constants.FACTION_PLAYER]
+	for f in known_bases:
+		return known_bases[f]
+	return main.PLAYER_BASE_ANCHOR
+
+func _scout_orbit_point(lane: int, wp: int) -> Vector3:
+	var c: Vector3 = _scout_orbit_center()
+	var n: int = maxi(_GobCfg.SCOUT_ORBIT_POINTS, 3)
+	var dir_sign: float = -1.0 if (lane % 2 == 1) else 1.0
+	var a: float = TAU * float(lane) / 3.0 + dir_sign * TAU * float(wp % n) / float(n)
+	var p := Vector3(c.x + cos(a) * _GobCfg.SCOUT_ORBIT_R, 0.0, c.z + sin(a) * _GobCfg.SCOUT_ORBIT_R)
+	return GameManager.land_target(p)
+
+## Добыча разведки от точки c: рабочий чужой стороны в SCOUT_HUNT_R, иначе
+## ОДИНОКИЙ стрелковый отряд (в SCOUT_LONE_R от его центра нет чужой пехоты)
+func _scout_prey(c: Vector3) -> Node3D:
+	var r2: float = _GobCfg.SCOUT_HUNT_R * _GobCfg.SCOUT_HUNT_R
+	var best: Node3D = null
+	var bd: float = INF
+	for f in [Constants.FACTION_PLAYER, Constants.FACTION_ENEMY]:
+		if not _target_faction_allowed(f):
+			continue
+		for n in main.get_tree().get_nodes_in_group(Constants.unit_group(f)):
+			if n == null or not is_instance_valid(n):
+				continue
+			var u := n as Unit
+			if u == null or u.is_dead() or u.garrisoned or not (u is Worker):
+				continue
+			var d: float = c.distance_squared_to(u.global_position)
+			if d < bd and d <= r2:
+				bd = d
+				best = u
+	if best != null:
+		return best
+	# Одинокие стрелки: отряд лучников, у центра которого нет своей пехоты
+	for f2 in [Constants.FACTION_PLAYER, Constants.FACTION_ENEMY]:
+		if not _target_faction_allowed(f2):
+			continue
+		for sq in GameManager.squads_of_faction(f2):
+			var rec: Dictionary = sq
+			if String(rec.get("type", "")) != "archer":
+				continue
+			var sid: int = int(rec.get("id", 0))
+			var sc: Vector3 = GameManager.squad_centroid(sid)
+			if sc == Vector3.ZERO:
+				continue
+			var d2: float = c.distance_squared_to(sc)
+			if d2 > r2 or d2 >= bd:
+				continue
+			if _lone_squad(sid, f2, sc):
+				var mem: Array = GameManager.squad_members(sid)
+				if not mem.is_empty():
+					bd = d2
+					best = mem[0]
+	return best
+
+## Нет ли у стрелкового отряда пехотного прикрытия своей стороны рядом
+func _lone_squad(sid: int, f: int, c: Vector3) -> bool:
+	var r2: float = _GobCfg.SCOUT_LONE_R * _GobCfg.SCOUT_LONE_R
+	for sq in GameManager.squads_of_faction(f):
+		var rec: Dictionary = sq
+		var osid: int = int(rec.get("id", 0))
+		if osid == sid:
+			continue
+		var t: String = String(rec.get("type", ""))
+		if t == "archer" or t == "worker" or t == "monk":
+			continue
+		var oc: Vector3 = GameManager.squad_centroid(osid)
+		if oc != Vector3.ZERO and c.distance_squared_to(oc) <= r2:
+			return false
+	return true
+
+## Планы всех разведотрядов (по одному на отряд) — см. шапку раздела
+func _scout_plans() -> Array:
+	var out: Array = []
+	# Реестр: выбитые — вон; записи вожака по sid
+	var by_id: Dictionary = {}
+	for s in squads:
+		by_id[int((s as Dictionary)["id"])] = s
+	for sid in scouts.keys():
+		if not by_id.has(int(sid)):
+			scouts.erase(sid)
+	# Новая вылазка: никто не в поле, передышка прошла — выходят 1-3 отряда
+	var in_field := 0
+	var at_home: Array = []
+	for sid in scouts:
+		var st: Dictionary = scouts[sid]
+		if String(st["state"]) == "home":
+			at_home.append(int(sid))
+		else:
+			in_field += 1
+	if in_field == 0 and clock - _scout_rest_at >= _GobCfg.SCOUT_SORTIE_SEC \
+			and main != null and main.has_method("spawn_goblin_squad"):
+		var want: int = _scout_sortie_size()
+		var lane := 0
+		var launched: Array = []
+		for sid_h in at_home:
+			if launched.size() >= want:
+				break
+			launched.append(sid_h)
+		while launched.size() < want and scouts.size() < _GobCfg.SCOUT_MAX_SQUADS:
+			var nsid: int = main.spawn_goblin_squad("goblin_rider", _GobCfg.scout_units(), village)
+			if nsid <= 0:
+				break
+			scout_spawned += 1
+			scouts[nsid] = {"state": "home", "at": clock, "lane": 0, "wp": 0,
+				"wp_at": -1.0e9, "out_at": clock, "prey": null}
+			launched.append(nsid)
+		if not launched.is_empty():
+			_regroup()
+			by_id.clear()
+			for s in squads:
+				by_id[int((s as Dictionary)["id"])] = s
+			for sid_l in launched:
+				var st2: Dictionary = scouts[sid_l]
+				st2["state"] = "out"
+				st2["at"] = clock
+				st2["out_at"] = clock
+				st2["lane"] = lane
+				st2["wp"] = 0
+				st2["wp_at"] = -1.0e9
+				lane += 1
+			scout_sorties += 1
+			last_action += "|вышла разведка: %d конных отрядов веером" % launched.size()
+	for sid in scouts.keys():
+		var sq: Dictionary = by_id.get(int(sid), {})
+		if sq.is_empty():
+			continue
+		var st: Dictionary = scouts[sid]
+		sq["role"] = ROLE_SCOUT
+		var c: Vector3 = _squad_center(sq)
+		_scout_look(sq)
+		var peak: int = maxi(int(sq.get("peak", 1)), 1)
+		var alive: int = (sq["members"] as Array).size()
+		var weak: bool = float(alive) < float(peak) * _GobCfg.RAID_RETREAT_HP
+		var state: String = String(st["state"])
+		match state:
+			"home":
+				if c.distance_to(village) > _GobCfg.SCOUT_ARRIVE + 4.0:
+					if clock - float(st["at"]) > 1.0 and (sq.get("ordered_goal", Vector3.INF) as Vector3).distance_to(village) > 2.0:
+						sq["target"] = village
+						out.append({"sq": sq, "goal": village, "center": c, "retreat": true})
+					continue
+				_scout_rest_at = maxf(_scout_rest_at, float(st["at"]))
+				continue
+			"harass":
+				var prey = st.get("prey")
+				var prey_ok: bool = prey != null and is_instance_valid(prey) \
+					and not (prey as Unit).is_dead() and not (prey as Unit).garrisoned
+				var resisted: bool = _foes_near(c, _GobCfg.RAID_FLEE_RADIUS) >= _GobCfg.RAID_FLEE_FOES
+				if weak or resisted:
+					_scout_go_home(st, sq, c, out, "потери" if weak else "сопротивление")
+					continue
+				if not prey_ok or clock - float(st["at"]) >= _GobCfg.SCOUT_HARASS_SEC:
+					if not prey_ok:
+						scout_kills_prey += 1
+					# HIT-AND-RUN: отход на следующую точку орбиты в режиме отхода
+					st["state"] = "run"
+					st["at"] = clock
+					st["wp"] = int(st["wp"]) + 1
+					st["prey"] = null
+					var rp: Vector3 = _scout_orbit_point(int(st["lane"]), int(st["wp"]))
+					sq["target"] = rp
+					out.append({"sq": sq, "goal": rp, "center": c, "retreat": true})
+					continue
+				sq["target"] = (prey as Node3D).global_position
+				out.append({"sq": sq, "foe": prey, "wake": true})
+				continue
+			"run":
+				if weak:
+					_scout_go_home(st, sq, c, out, "потери")
+					continue
+				if clock - float(st["at"]) < _GobCfg.SCOUT_RUN_SEC:
+					continue
+				st["state"] = "out"
+				st["at"] = clock
+				st["wp_at"] = -1.0e9
+		# out: срок вылазки, потери, добыча, орбита
+		if weak or clock - float(st["out_at"]) >= _GobCfg.SCOUT_SORTIE_MAX_SEC:
+			_scout_go_home(st, sq, c, out, "потери" if weak else "срок")
+			continue
+		var prey2: Node3D = _scout_prey(c)
+		if prey2 != null:
+			st["state"] = "harass"
+			st["at"] = clock
+			st["prey"] = prey2
+			scout_harasses += 1
+			last_action += "|разведка налетает на добычу"
+			sq["target"] = prey2.global_position
+			out.append({"sq": sq, "foe": prey2, "wake": true})
+			continue
+		var goal: Vector3 = _scout_orbit_point(int(st["lane"]), int(st["wp"]))
+		if c.distance_to(goal) <= _GobCfg.SCOUT_ARRIVE:
+			if float(st["wp_at"]) < 0.0:
+				st["wp_at"] = clock
+			elif clock - float(st["wp_at"]) >= _GobCfg.SCOUT_DWELL_SEC:
+				st["wp"] = int(st["wp"]) + 1
+				st["wp_at"] = -1.0e9
+				goal = _scout_orbit_point(int(st["lane"]), int(st["wp"]))
+		sq["target"] = goal
+		out.append({"sq": sq, "goal": goal, "center": c, "wake": true})
+	_sync_scout_compat()
+	return out
+
+func _scout_go_home(st: Dictionary, sq: Dictionary, c: Vector3, out: Array, why: String) -> void:
+	st["state"] = "home"
+	st["at"] = clock
+	st["prey"] = null
+	sq["target"] = village
+	last_action += "|разведка отходит домой (%s)" % why
+	out.append({"sq": sq, "goal": village, "center": c, "retreat": true})
+
+## Разведка — ИСТОРИЯ (спринт 17): один малый отряд, обход точек, укол и
+## домой. Оставлена как обёртка: первый план из _scout_plans()
 func _scout_plan(_field: Array) -> Dictionary:
+	var plans: Array = _scout_plans()
+	return plans[0] if not plans.is_empty() else {}
+
+func _scout_plan_legacy(_field: Array) -> Dictionary:
 	var sq: Dictionary = {}
 	for s in squads:
 		if int((s as Dictionary)["id"]) == scout_sid:
@@ -1084,7 +1422,13 @@ func _mine_guard_plan(sq: Dictionary, idx: int) -> Dictionary:
 #     ORDER_BUDGET_MEMBERS бойцов за кадр.
 var _order_queue: Array = []
 var _order_at: int = 0
-const ORDER_BUDGET_MEMBERS := 150
+## БЮДЖЕТ РЕЖЕТ И ВНУТРИ ОТРЯДА (аудит 19.09.2026): 150 бойцов за кадр при
+## 90-155 мкс на приказ (маршрут, разметка, пробуждение) давали кадры по
+## 60-75 мс в qa_bigstand/Owner — самый высокий пик партии. Теперь отряд
+## раздаётся с того места, где кончился бюджет (plan["_k"]), а бюджет —
+## ORDER_BUDGET_MEMBERS 40 (~5 мс кадра); очередь в 750 бойцов уходит за
+## 19 кадров, такт вожака — 120
+const ORDER_BUDGET_MEMBERS := 24
 ## Как часто повторять марш В ТУ ЖЕ точку отряду вне боя (страховка от
 ## застрявших). Прежние две секунды (каждый такт) были не страховкой, а
 ## основной статьёй расхода кадра
@@ -1096,8 +1440,9 @@ func _drain_orders() -> void:
 	var left: int = ORDER_BUDGET_MEMBERS
 	while _order_at < _order_queue.size() and left > 0:
 		var plan: Dictionary = _order_queue[_order_at]
-		_order_at += 1
-		left -= _issue_squad(plan)
+		left -= _issue_squad(plan, left)
+		if bool(plan.get("_done", true)):
+			_order_at += 1
 	if _order_at >= _order_queue.size():
 		_order_queue.clear()
 		_order_at = 0
@@ -1151,8 +1496,8 @@ func _issue_orders(only_revenge: bool = false) -> void:
 			continue
 		if _revenge_sids.has(sid0):
 			continue                       # ниже, общим путём
-		if sid0 == scout_sid:
-			continue                       # разведчик ведётся своим автоматом ниже
+		if sid0 == scout_sid or scouts.has(sid0):
+			continue                       # разведка ведётся своим автоматом ниже
 		# Резерв ведёт DormantReserve; в поле попадает только конница, взятая
 		# на вылазку (она в raid_sids)
 		if reserve_sids.has(sid0) and not raid_sids.has(sid0):
@@ -1253,8 +1598,8 @@ func _issue_orders(only_revenge: bool = false) -> void:
 		if hill == null:
 			hill_mine_sid = 0
 		if phase == PHASE_HARASS:
-			var sp: Dictionary = _scout_plan(rest)
-			if not sp.is_empty():
+			for sp_v in _scout_plans():
+				var sp: Dictionary = sp_v
 				var ssq: Dictionary = sp["sq"]
 				handled[int(ssq["id"])] = true
 				if sp.has("foe") or bool(sp.get("retreat", false)):
@@ -1304,6 +1649,14 @@ func _issue_orders(only_revenge: bool = false) -> void:
 		var sid: int = int(sq["id"])
 		if tactical.has(sid) or handled.has(sid):
 			continue                       # приказы этого отряда уже в плане
+		# РЕЗЕРВ ВЕДЁТ DormantReserve, и общий путь его не касается (19.09.2026):
+		# из списка field он выброшен, а здесь обход идёт по ВСЕМ отрядам —
+		# проснувшийся резерв уходил с ордой к центру карты и домой не
+		# возвращался никогда (qa_reserve_sleep: 12 075 приказов horde_ai за
+		# окно, все двенадцать отрядов в 60-140 м от постов). Взятая взаймы
+		# конница — исключение, её план — рейд
+		if reserve_sids.has(sid) and not raid_sids.has(sid):
+			continue
 		if only_revenge and not (String(sq["role"]) == ROLE_REVENGE or _revenge_sids.has(sid)):
 			continue
 		# Отряды расходятся по фронту, а не лезут в одну точку
@@ -1356,10 +1709,13 @@ func garrison_idx_of(sid: int) -> int:
 
 ## Исполнить одну запись плана (обход состава — дорогая часть).
 ## Возвращает число бойцов, которым выдан приказ, — им и меряется бюджет кадра
-func _issue_squad(plan: Dictionary) -> int:
+func _issue_squad(plan: Dictionary, budget: int = 1000000) -> int:
 	var sq: Dictionary = plan["sq"]
 	var members: Array = sq["members"]
 	var issued := 0
+	# Продолжение с места, где кончился бюджет прошлого кадра
+	var k0: int = int(plan.get("_k", 0))
+	plan["_done"] = true
 	# Зонд BigStand: источник приказов — вожак орды (метку снимает физтик)
 	if _OptGA.cmd_meter: _OptGA.cmd_src = "horde_ai"
 	# Живость — на СЫРОЙ ссылке, до приведения типа (правило 5): цель могла
@@ -1376,14 +1732,24 @@ func _issue_squad(plan: Dictionary) -> int:
 		# Приказ командира штурма снимает режим отхода (щуп вернулся к линии
 		# и снова идёт в бой): в отходе боец не берёт целей вовсе
 		var wake: bool = bool(plan.get("wake", false))
-		for m in members:
+		for ka in range(k0, members.size()):
+			if issued >= budget:
+				plan["_k"] = ka
+				plan["_done"] = false
+				return issued
+			var m = members[ka]
 			if not is_instance_valid(m):
 				continue
 			var u := m as Unit
 			if u != null and not u.is_dead():
 				if wake and u.retreating:
 					u.end_retreat(true)
-				u.command_attack(foe, true, true)
+				if _OptGA.sys_meter:
+					var ta: int = Time.get_ticks_usec()
+					u.command_attack(foe, true, true)
+					_OptGA.sys_add("ga_cmd_attack", Time.get_ticks_usec() - ta)
+				else:
+					u.command_attack(foe, true, true)
 				issued += 1
 		return issued
 	var goal: Vector3 = plan["goal"]
@@ -1397,14 +1763,21 @@ func _issue_squad(plan: Dictionary) -> int:
 		# костров толпой, и смыкание собирает его там же (хижина снимает
 		# разметку потому, что её отряд уходит в ворота — здесь он остаётся)
 		var nr: int = members.size()
-		var rslots: Array = []
-		for kr in range(nr):
-			var hr: Vector2 = _GobCfg.horde_offset(kr, nr, int(sq["id"]))
-			rslots.append(Vector3(goal.x + hr.x, 0.0, goal.z + hr.y))
-		GameManager.squad_set_formation(int(sq["id"]), rslots,
-			(goal - center).normalized() if goal.distance_to(center) > 0.1 else Vector3.FORWARD,
-			false)
-		for kr2 in range(nr):
+		var rslots: Array = plan.get("_slots", [])
+		if k0 == 0:
+			rslots = []
+			for kr in range(nr):
+				var hr: Vector2 = _GobCfg.horde_offset(kr, nr, int(sq["id"]))
+				rslots.append(Vector3(goal.x + hr.x, 0.0, goal.z + hr.y))
+			plan["_slots"] = rslots
+			GameManager.squad_set_formation(int(sq["id"]), rslots,
+				(goal - center).normalized() if goal.distance_to(center) > 0.1 else Vector3.FORWARD,
+				false)
+		for kr2 in range(k0, mini(nr, rslots.size())):
+			if issued >= budget:
+				plan["_k"] = kr2
+				plan["_done"] = false
+				return issued
 			if not is_instance_valid(members[kr2]):
 				continue
 			var ur := members[kr2] as Unit
@@ -1420,16 +1793,26 @@ func _issue_squad(plan: Dictionary) -> int:
 	# на месте. Теперь у каждого своё место в толпе (диск со сдвигом,
 	# goblin_config.horde_offset), и оно же кладётся в разметку отряда —
 	# чтобы смыкание после боя собирало ТОЛПУ, а не квадрат фаланги
-	var slots: Array = []
+	var slots: Array = plan.get("_slots", [])
 	var n: int = members.size()
-	for k in range(n):
-		var ho: Vector2 = _GobCfg.horde_offset(k, n, int(sq["id"]))
-		slots.append(Vector3(goal.x + ho.x, 0.0, goal.z + ho.y))
-	GameManager.squad_set_formation(int(sq["id"]), slots,
-		(goal - center).normalized() if goal.distance_to(center) > 0.1 else Vector3.FORWARD,
-		false)
+	if k0 == 0:
+		var _tf: int = Time.get_ticks_usec() if _OptGA.sys_meter else 0
+		slots = []
+		for k in range(n):
+			var ho: Vector2 = _GobCfg.horde_offset(k, n, int(sq["id"]))
+			slots.append(Vector3(goal.x + ho.x, 0.0, goal.z + ho.y))
+		plan["_slots"] = slots
+		GameManager.squad_set_formation(int(sq["id"]), slots,
+			(goal - center).normalized() if goal.distance_to(center) > 0.1 else Vector3.FORWARD,
+			false)
+		if _OptGA.sys_meter:
+			_OptGA.sys_add("ga_form", Time.get_ticks_usec() - _tf)
 	var wake2: bool = bool(plan.get("wake", false))
-	for k2 in range(n):
+	for k2 in range(k0, mini(n, slots.size())):
+		if issued >= budget:
+			plan["_k"] = k2
+			plan["_done"] = false
+			return issued
 		if not is_instance_valid(members[k2]):
 			continue
 		var u2 := members[k2] as Unit
@@ -1437,7 +1820,12 @@ func _issue_squad(plan: Dictionary) -> int:
 			continue
 		if wake2 and u2.retreating:
 			u2.end_retreat(true)
-		u2.command_move(GameManager.land_target(slots[k2]))
+		if _OptGA.sys_meter:
+			var tm: int = Time.get_ticks_usec()
+			u2.command_move(GameManager.land_target(slots[k2]))
+			_OptGA.sys_add("ga_cmd_move", Time.get_ticks_usec() - tm)
+		else:
+			u2.command_move(GameManager.land_target(slots[k2]))
 		issued += 1
 	return issued
 

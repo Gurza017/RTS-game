@@ -123,6 +123,13 @@ func _run() -> void:
 	if GameManager.fog != null:
 		GameManager.fog.enabled = false
 	await pframes(4)
+	# ВСЯ ОРДА ЗАМОРАЖИВАЕТСЯ (18.09.2026): плато рудника стоит в 20 м от
+	# стартового отряда свино-всадников, а всадники с этого дня ОХОТЯТСЯ
+	# (скан 30 м, поводок 40) — отряд стенда вырезался ударом по рядам ещё на
+	# подходе (убийца goblin_rider hunting=true, урон ×100 запаса)
+	for n in get_tree().get_nodes_in_group("all_units"):
+		if is_instance_valid(n) and n is Unit and (n as Unit).faction != Constants.FACTION_PLAYER:
+			(n as Unit).set_tick(false)
 	# Логово: стражи и стая замораживаются — чужие тела в замере не нужны
 	for l in GameManager.get("troll_lairs"):
 		if l == null or not is_instance_valid(l):
@@ -224,6 +231,15 @@ func _b_order() -> void:
 	var men: Array = _squad("warrior", Constants.FACTION_PLAYER, foot, 10)
 	await pframes(3)
 	for u in men:
+		(u as Unit).died.connect(func(uu):
+			var k = (uu as Unit)._slain_by
+			var kd: String = "?"
+			if k != null and is_instance_valid(k) and k is Unit:
+				kd = "%s sq%d hunting=%s post %s target_lock=%s" % [str((k as Unit).stat_id), (k as Unit).squad_id,
+					str((k as Unit).get("hunting")), str((k as Unit).post_pos), str((k as Unit).target_lock)]
+			print("    ПОГИБ %s в %s, убийца %s в %s [%s], hp %.0f" % [str(uu), str((uu as Node3D).global_position), str(k),
+				str((k as Node3D).global_position) if (k != null and is_instance_valid(k) and k is Node3D) else "?",
+				kd, (uu as Unit).current_health]))
 		(u as Unit).command_move(top, false, Vector3.ZERO, false, true)
 	var routed := 0
 	for u in men:
@@ -232,12 +248,23 @@ func _b_order() -> void:
 	verdict("B1 приказ получил маршрут у всех (%d из %d)" % [routed, men.size()], routed == men.size())
 	var arrived := -1
 	var worst_spread := 0.0
+	var reported: Dictionary = {}
 	for f in range(60 * 120):
 		await get_tree().physics_frame
 		if f % 30 == 0:
 			worst_spread = maxf(worst_spread, _spread(men))
 		var n_in := 0
 		for u in men:
+			# Живость на сырой ссылке (правило 5); погибший — печатаем убийцу
+			if u == null or not is_instance_valid(u):
+				continue
+			if (u as Unit).is_dead():
+				if not reported.has(u):
+					reported[u] = true
+					var k = (u as Unit)._slain_by
+					print("    боец погиб на кадре %d, убийца: %s в %s" % [f, str(k),
+						str((k as Node3D).global_position) if (k != null and is_instance_valid(k)) else "?"])
+				continue
 			if _xz((u as Unit).global_position, top) < 6.0:
 				n_in += 1
 		if n_in >= 9:

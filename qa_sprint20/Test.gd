@@ -117,6 +117,8 @@ func _freeze(men: Array) -> void:
 func _run() -> void:
 	main = load("res://scenes/Main.tscn").instantiate()
 	get_tree().root.add_child(main)
+	# Пень за рекой в партии заморожен (ТЗ 19.09.2026); стенду нужен живой
+	GameManager.call_deferred("thaw_lairs_now")
 	await frames(8)
 	if main.enemy_ai != null:
 		main.enemy_ai.set_process(false)
@@ -182,10 +184,9 @@ func _run() -> void:
 	var ay: float = (aura.global_position.y - pp.y) if aura != null else -1.0
 	var aq := (aura.mesh as QuadMesh) if aura != null else null
 	var aura_flat: bool = aura != null and absf(aura.rotation_degrees.x + 90.0) < 0.5
-	verdict("A4 овал ЛЕЖИТ на земле (%.2f м над точкой, квад плашмя %.2f × %.2f)" % [ay,
-		aq.size.x if aq != null else 0.0, aq.size.y if aq != null else 0.0],
-		aura != null and aura.visible and ay < 0.1 and aq != null and aura_flat
-		and absf(aq.size.y - aq.size.x) < 0.01 and absf(aq.size.x - _MonkS.AURA_DIAM_M) < 0.01)
+	# ТЗ 19.09.2026 (п. 1): овала на земле НЕТ вовсе — вырезан владельцем
+	verdict("A4 овала на земле нет (ТЗ 19.09; ay %.2f, flat %s)" % [ay, str(aura_flat)],
+		aura == null and aq == null)
 	_free_all([monk, pat])
 	await pframes(3)
 
@@ -308,8 +309,24 @@ func _run() -> void:
 		spilled += 1
 		if spread[sid_s] != big:
 			to_other += 1
-	verdict("D2 из 5 отрядов на тушу идут %d, остальным %d — ближайший враг в %.0f м" % [sm.BIG_TARGET_SQUADS, spilled, sm.BIG_SPILL_R],
-		spilled == 5 - sm.BIG_TARGET_SQUADS and to_other == spilled)
+	# ТЗ 19.09.2026-3 (п. 3): лишние отряды уходят ТОЛЬКО на СОСЕДНИХ
+	# ГИГАНТОВ; пехота-сосед разливом не считается — без второго гиганта все
+	# пять фокусятся на туше (никто не убегает за гоблином к пню)
+	verdict("D2 второго гиганта нет — все 5 отрядов на туше (пехота рядом разливом не считается)",
+		spilled == 0 and to_other == 0, "переписано %d" % spilled)
+	var big_b: Unit = _spawn("troll", GB, dp + Vector3(12.0, 0.0, 0.0))
+	big_b.set_tick(false)
+	await pframes(3)
+	var spread2: Dictionary = sm._big_target_spread(big)
+	var to_big2 := 0
+	for sid_s2 in spread2:
+		if spread2[sid_s2] == big_b:
+			to_big2 += 1
+	verdict("D2б второй тролль в %.0f м — лишние %d отрядов уходят на него" % [sm.BIG_SPILL_R, 5 - sm.BIG_TARGET_SQUADS],
+		spread2.size() == 5 - sm.BIG_TARGET_SQUADS and to_big2 == spread2.size(),
+		"переписано %d, на второго %d" % [spread2.size(), to_big2])
+	big_b.take_damage(1e12)
+	await pframes(2)
 	# Застрявший на подходе переключается сам. Воспроизводим «не продвигаюсь»
 	# честно и детерминированно: одиночный мечник с приказом на тушу в 8 м и
 	# нулевым шагом (зажат), рядом в 3 м — чужой копейщик. Через

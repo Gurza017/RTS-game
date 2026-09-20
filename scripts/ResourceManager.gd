@@ -51,7 +51,28 @@ func add_resource(faction: int, type: int, amount: float) -> void:
 	if not resources.has(faction):
 		_init_faction(faction)
 	resources[faction][type] = resources[faction].get(type, 0.0) + amount
+	if amount > 0.0:
+		_tm_acc(tm_income, faction, type, amount)
+	elif amount < 0.0:
+		_tm_acc(tm_spent, faction, type, -amount)
 	resources_changed.emit(faction)
+
+# ── ТЕЛЕМЕТРИЯ ЭКОНОМИКИ (ТЗ 19.09.2026, п. 3): нарастающие приток и расход
+# по стороне и ресурсу; TelemetryLogger берёт разность раз в 10 с
+var tm_income: Dictionary = {}
+var tm_spent: Dictionary = {}
+
+func tm_reset() -> void:
+	tm_income.clear()
+	tm_spent.clear()
+
+func _tm_acc(d: Dictionary, faction: int, type: int, amount: float) -> void:
+	var per: Variant = d.get(faction)
+	if per == null:
+		per = {}
+		d[faction] = per
+	var cur: Variant = (per as Dictionary).get(type)
+	(per as Dictionary)[type] = amount + (0.0 if cur == null else float(cur))
 
 ## ── СЧЁТЧИК ДОБЫТОГО ЗА ПАРТИЮ ───────────────────────────────────────────────
 ## Нарастающий итог того, что РЕАЛЬНО принесли в замок (и накапали пассивные
@@ -102,6 +123,8 @@ func consume(faction: int, type: int, amount: float) -> float:
 	var have: float = float((resources[faction] as Dictionary).get(type, 0.0))
 	var take: float = minf(have, maxf(amount, 0.0))
 	(resources[faction] as Dictionary)[type] = have - take
+	if take > 0.0:
+		_tm_acc(tm_spent, faction, type, take)
 	if faction == Constants.FACTION_PLAYER and take > 0.0:
 		resources_changed.emit(faction)
 	return amount - take
@@ -119,6 +142,7 @@ func spend(faction: int, costs: Dictionary) -> bool:
 		return false
 	for type in costs.keys():
 		resources[faction][type] -= costs[type]
+		_tm_acc(tm_spent, faction, int(type), float(costs[type]))
 	resources_changed.emit(faction)
 	return true
 

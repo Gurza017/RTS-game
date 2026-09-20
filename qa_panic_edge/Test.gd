@@ -188,6 +188,9 @@ func _c_cone() -> void:
 	var fled := 0
 	var near_d := INF
 	var far_d := 0.0
+	# Запас к конусу — угловой размер круга связности на дальности бегства (при
+	# 12 м и 4 м это 18°) плюс 15° на толчею; число из конфига, не +20
+	var cone_slack: float = rad_to_deg(atan(_UCfg.PANIC_SPREAD / _UCfg.PANIC_FLEE_DIST)) + 15.0
 	for m in men:
 		var u := m as Unit
 		if u == null or not is_instance_valid(u) or u.is_dead():
@@ -201,18 +204,18 @@ func _c_cone() -> void:
 		# направления нет вовсе, и он давал «отклонение 84°» на исправном
 		# веере: точка бегства лежит в двадцати метрах, и мерить направление
 		# по трёхметровому сдвигу бессмысленно
-		if d.length() < _UCfg.PANIC_FLEE_DIST * 0.5:
+		if d.length() < _UCfg.PANIC_FLEE_DIST * 0.6:
 			continue
 		fled += 1
 		var a: float = rad_to_deg(absf(axis.angle_to(d.normalized())))
 		worst = maxf(worst, a)
-		if a <= _UCfg.PANIC_CONE_DEG + 20.0:
+		if a <= _UCfg.PANIC_CONE_DEG + cone_slack:
 			in_cone += 1
 		if a > 90.0:
 			behind += 1
 		n += 1
 	print("  сдвиг: ближний %.1f м, дальний %.1f м; убежало (>%.0f м) %d из %d" % [
-		near_d, far_d, _UCfg.PANIC_FLEE_DIST * 0.5, fled, men.size()])
+		near_d, far_d, _UCfg.PANIC_FLEE_DIST * 0.6, fled, men.size()])
 	verdict("C1 никто не бежит НАВСТРЕЧУ угрозе",
 		behind == 0, "против оси пошли %d из %d" % [behind, n])
 	# Запас к конусу — угловой размер круга связности на дальности бегства:
@@ -220,7 +223,7 @@ func _c_cone() -> void:
 	verdict("C2 подавляющее большинство убежавших — внутри конуса",
 		fled > 0 and float(in_cone) >= float(fled) * 0.8,
 		"в конусе ±%.0f° — %d из %d убежавших, худший %.0f°" % [
-			_UCfg.PANIC_CONE_DEG + 20.0, in_cone, fled, worst])
+			_UCfg.PANIC_CONE_DEG + cone_slack, in_cone, fled, worst])
 	for m in men:
 		if is_instance_valid(m):
 			(m as Unit).take_damage(1e12)

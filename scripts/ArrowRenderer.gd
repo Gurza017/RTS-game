@@ -1,13 +1,20 @@
 extends RefCounted
 ## ═══════════════════════════════════════════════════════════════════════════
-## ВСЕ СТРЕЛЫ — ОДНИМ MultiMesh (этап D3)
+## ВСЕ СТРЕЛЫ — ОДНИМ MultiMesh (этап D3), СЛОТЫ РАЗДАЁТ ЯДРО (BigStand-5, 3)
 ## ═══════════════════════════════════════════════════════════════════════════
 ## Раньше каждая стрела была узлом со СВОИМ мешем и материалом — то есть своим
 ## вызовом отрисовки (замер qa_shotcorpse: 36 торчащих = +36 вызовов, в свалке
-## с лучниками их 100-150). Логика стрелы (полёт, попадание, сроки, пул)
-## остаётся в узле Arrow как была; сюда переехала только КАРТИНКА: один
-## MultiMeshInstance3D, буфер — в ядре (ArmyCore.Rb, та же инфраструктура, что
-## у армии), подача — общим RbFlush раз в кадр.
+## с лучниками их 100-150). Сюда переехала КАРТИНКА: один MultiMeshInstance3D,
+## буфер — в ядре (ArmyCore.Rb, та же инфраструктура, что у армии), подача —
+## общим RbFlush раз в кадр.
+##
+## С этапа 3 BigStand-5 у рядового снаряда нет узла вовсе: выстрел — запись
+## полёта в ядре (ArmyCore.ProjectileFire), слот слоя ядро берёт из своего
+## списка свободных (RbAcquire), промах втыкается в грунт там же, торчащие
+## живут массивом ядра (StuckTick). Слой здесь владеет только ЖИЗНЕННЫМ ЦИКЛОМ:
+## узел MultiMesh, материал, текстура, рост ёмкости (instance_count — ресурс
+## сцены, ядро его не трогает). Узел Arrow остался legacy-путём под ручкой
+## perf_config.projectile_core = false (A/B на одной сборке) и стендам.
 ##
 ## Ось и растворение едут в instance-цвете (см. mm_arrow.gdshader): у стрел
 ## каналы урона свободны, и COLOR ровно вмещает ax.xyz + fade.
@@ -18,19 +25,60 @@ extends RefCounted
 ## на смену сцены не пересоздаётся, и это осознанная мелкая утечка записи).
 
 const _SHADER := preload("res://shaders/mm_arrow.gdshader")
+const _GobCfg := preload("res://scripts/goblin/goblin_config.gd")
 const GROW := 64
+
+## Длина квада в метрах. Задаётся ЯВНО, а не из пикселей: сама картинка
+## 64x64 почти пустая (полезная область 43x12), и вывод длины из размера листа
+## давал квадрат 0.69x0.69 с крошечной стрелой посередине. 0.65 вместо прежних
+## 0.75 — заказ владельца «убавить на 10-15%». Кость короче: она метательная
+const ARROW_LENGTH := 0.65
+const BONE_LENGTH := 0.42
+const BONE_SHEET := "res://assets/factions/orc/Troll/Gnoll/Gnoll_Bone.png"
+const _ARROW_PATHS := [
+	"res://assets/factions/humans/units/archer/Arrow-Sheet.png",
+	"res://assets/sprites/units/Arrow.png",
+]
+
+## Слой костей гноллов (своя картинка, свой кувырок)
+var is_bone: bool = false
 
 var mmi: MultiMeshInstance3D = null
 var mm: MultiMesh = null
 var mat: ShaderMaterial = null
 var core_id: int = -1
 var capacity: int = 0
-var free: Array = []
 ## Поколение слоя. Растёт на каждой пересборке (смена сцены): слот, взятый у
 ## прошлого поколения, возвращать в список свободных нельзя — его номер может
 ## оказаться за ёмкостью нового буфера, и первый же acquire отдал бы номер, по
 ## которому ядро пишет за край массива
 var gen: int = 0
+
+## Длина квада этого слоя (метры) — её же ядро берёт для точки втыкания
+func quad_length() -> float:
+	return BONE_LENGTH if is_bone else ARROW_LENGTH
+
+## Модуль оси у ЛЕТЯЩЕГО снаряда слоя: признак кувырка (см. mm_arrow.gdshader)
+func flight_axis_k() -> float:
+	return _GobCfg.GNOLL_BONE_AXIS_K if is_bone else 1.0
+
+## Слой готов для выстрела без узла: текстуру и размеры берёт сам
+func ensure_layer(world: Node3D) -> bool:
+	if mmi != null and is_instance_valid(mmi) and mmi.is_inside_tree():
+		return true
+	var tex: Texture2D = load_bone_texture() if is_bone else load_arrow_texture()
+	var aspect: float = 43.0 / 12.0
+	if tex != null:
+		var sz := tex.get_size()
+		if sz.y > 0.0:
+			aspect = sz.x / sz.y
+	else:
+		aspect = 6.0
+	if not ensure(world, tex, quad_length(), aspect):
+		return false
+	if is_bone:
+		set_spin(_GobCfg.GNOLL_BONE_SPIN)
+	return true
 
 func ensure(world: Node3D, tex: Texture2D, length: float, aspect: float) -> bool:
 	if mmi != null and is_instance_valid(mmi) and mmi.is_inside_tree():
@@ -63,20 +111,35 @@ func ensure(world: Node3D, tex: Texture2D, length: float, aspect: float) -> bool
 	world.add_child(mmi)
 	core_id = GameManager.army.rb_create(mm.get_rid())
 	capacity = 0
-	free = []
 	return true
 
+## Нарастить слой: буфер и свободные — в ядре, instance_count — у ресурса
+## сцены (его ядро не трогает). РОСТ ГЕОМЕТРИЧЕСКИЙ: смена instance_count —
+## это перевыделение буфера в сервере отрисовки, и шаг в 64 на залпе 2000
+## стрел стоил 31 перевыделение (зонд LaunchProbe: 18.5 против 8 мкс на выстрел)
+func grow() -> void:
+	if core_id < 0:
+		return
+	var new_cap: int = maxi(capacity * 2, GROW)
+	GameManager.army.rb_grow(core_id, new_cap)
+	mm.instance_count = new_cap
+	capacity = new_cap
+
+## Слот под legacy-узел (Arrow) или декор стенда. Свободные ведёт ядро
 func acquire() -> int:
 	if core_id < 0:
 		return -1
-	if free.is_empty():
-		var new_cap: int = capacity + GROW
-		GameManager.army.rb_ensure(core_id, new_cap)
-		for i in range(capacity, new_cap):
-			free.append(i)
-		mm.instance_count = new_cap
-		capacity = new_cap
-	return free.pop_back()
+	var i: int = GameManager.army.rb_acquire(core_id)
+	if i < 0:
+		grow()
+		i = GameManager.army.rb_acquire(core_id)
+	return i
+
+## Сколько слотов свободно (стенды)
+func free_count() -> int:
+	if core_id < 0:
+		return 0
+	return GameManager.army.rb_free_count(core_id)
 
 ## Вернуть слот. Зовёт Arrow при освобождении УЗЛА (не при уходе в пул: там
 ## слот остаётся за узлом и переписывается следующим выстрелом)
@@ -85,8 +148,7 @@ func release(idx: int, slot_gen: int = -1) -> void:
 		return
 	if slot_gen >= 0 and slot_gen != gen:
 		return
-	GameManager.army.rb_hide_slot(core_id, idx)
-	free.append(idx)
+	GameManager.army.rb_release(core_id, idx)
 
 ## Полная запись слота: позиция + ось + доля покрытия. Базис пишется единичным
 ## (ориентацию целиком строит шейдер из оси в цвете)
@@ -117,7 +179,60 @@ func hide(idx: int) -> void:
 	if idx >= 0 and core_id >= 0:
 		GameManager.army.rb_hide_slot(core_id, idx)
 
-## ── РЕЕСТР ПОЛЁТОВ, КОТОРЫЕ ВЕДЁТ ЯДРО (perf_config.arrow_core) ───────────
+## ── ТЕКСТУРЫ СЛОЯ ─────────────────────────────────────────────────────────
+## Картинка обрезается по непрозрачной области: в исходных 64x64 стрела
+## занимает 43x12 в середине, и без обрезки квад был бы почти пустым
+static var _tex_cache: Dictionary = {}
+
+## Кость: первый кадр четырёхкадровой ленты, обрезанный по рисунку. Крутиться
+## в полёте ей нечем: слой кладёт квад на ВЕКТОР СКОРОСТИ (mm_arrow), листания
+## кадров у него нет вовсе. Кадр режется тем же способом, что часовой башни —
+## Image.get_region: AtlasTexture в sampler2D уезжает целиком
+static func load_bone_texture() -> Texture2D:
+	if _tex_cache.has(BONE_SHEET):
+		return _tex_cache[BONE_SHEET]
+	if not ResourceLoader.exists(BONE_SHEET):
+		_tex_cache[BONE_SHEET] = null
+		return null
+	var tex := load(BONE_SHEET) as Texture2D
+	var img: Image = tex.get_image() if tex != null else null
+	if img == null:
+		_tex_cache[BONE_SHEET] = null
+		return null
+	var fh: int = img.get_height()
+	var frames: int = maxi(img.get_width() / maxi(fh, 1), 1)
+	var frame: Image = img.get_region(Rect2i(0, 0, maxi(img.get_width() / frames, 1), fh))
+	var r: Rect2i = frame.get_used_rect()
+	if r.size.x > 0 and r.size.y > 0:
+		frame = frame.get_region(r)
+	var out: Texture2D = ImageTexture.create_from_image(frame)
+	_tex_cache[BONE_SHEET] = out
+	return out
+
+static func load_arrow_texture() -> Texture2D:
+	for p in _ARROW_PATHS:
+		var path: String = p
+		if _tex_cache.has(path):
+			return _tex_cache[path]
+		if not ResourceLoader.exists(path):
+			continue
+		var tex := load(path) as Texture2D
+		if tex == null:
+			continue
+		var img := tex.get_image()
+		if img == null:
+			continue
+		if img.is_compressed() and img.decompress() != OK:
+			continue
+		var rect := img.get_used_rect()
+		var out: Texture2D = tex
+		if rect.size.x > 0 and rect.size.y > 0:
+			out = ImageTexture.create_from_image(img.get_region(rect))
+		_tex_cache[path] = out
+		return out
+	return null
+
+## ── РЕЕСТР ПОЛЁТОВ LEGACY-УЗЛОВ (perf_config.arrow_core, projectile_core off)
 ## id полёта → узел стрелы: события от BatchArrows приходят по id
 var _flights: Dictionary = {}
 
@@ -132,7 +247,8 @@ var flights_expired: int = 0     # стендам: сколько полётов
 ## ── ЖЁСТКИЙ СРОК ПОЛЁТА ПОД ЯДРОМ (спринт 18) ──────────────────────────────
 ## Пока летит ядро, у узла выключен _process, а с ним и MAX_FLIGHT_SEC: полёт,
 ## чьё событие потерялось, висел бы вечно (кость крутится на месте — жалоба
-## владельца). Раз в секунду: старше MAX_FLIGHT_SEC — гасим принудительно
+## владельца). Раз в секунду: старше MAX_FLIGHT_SEC — гасим принудительно.
+## Снаряды БЕЗ узла срок полёта считают в самом ядре (_afMaxAge)
 func sweep_flights(max_sec: float) -> void:
 	if _flights.is_empty():
 		return
@@ -157,7 +273,15 @@ func unregister_flight(id: int) -> void:
 	_flights.erase(id)
 	_flight_since.erase(id)
 
+## Полётов этого слоя: узлы legacy плюс записи ядра
 func flight_count() -> int:
+	var n: int = _flights.size()
+	if core_id >= 0:
+		n += GameManager.army.flights_on(core_id)
+	return n
+
+## Только legacy-узлы в полёте (GameManager решает, звать ли забор событий)
+func legacy_flight_count() -> int:
 	return _flights.size()
 
 ## Разобрать события ядра за кадр: касание чужого или приземление.

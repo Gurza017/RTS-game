@@ -172,9 +172,10 @@ func _run() -> void:
 	print("  роли: %s" % str(roles))
 	verdict("B2 один отряд назначен резервом на рудник холма", int(roles.get(ai.ROLE_MINE_HOLD, 0)) == _GobCfg.EXPAND_MINE_SQUADS
 		and ai.hill_mine_sid > 0, "резервов %d" % int(roles.get(ai.ROLE_MINE_HOLD, 0)))
-	verdict("B3 разведка вышла: малый конный отряд из %d" % _GobCfg.SCOUT_UNITS,
+	# ТЗ 19.09.2026 (блок 3.4): разведка — ПОЛНЫЕ конные отряды (scout_units)
+	verdict("B3 разведка вышла: полный конный отряд из %d" % _GobCfg.scout_units(),
 		ai.scout_sid > 0 and GameManager.squad_type(ai.scout_sid) == "goblin_rider"
-		and GameManager.squad_members(ai.scout_sid).size() == _GobCfg.SCOUT_UNITS,
+		and GameManager.squad_members(ai.scout_sid).size() == _GobCfg.scout_units(),
 		"разведчик %d (%s, %d бойцов)" % [ai.scout_sid, GameManager.squad_type(ai.scout_sid),
 			GameManager.squad_members(ai.scout_sid).size()])
 	verdict("B3б разведчик вне волны (особая роль)", ai._is_special(ai.scout_sid))
@@ -223,8 +224,10 @@ func _run() -> void:
 	for m in GameManager.squad_members(ai.scout_sid):
 		if (m as Unit).retreating:
 			scout_retreating = true
-	verdict("C3 после укола разведка ОТХОДИТ домой, а не выбивает базу",
-		String(ai.scout_state) == "home" and _xz(ssq.get("target", Vector3.ZERO), ai.village) < 1.0
+	# ТЗ 19.09.2026 (блок 3.4): после налёта — hit-and-run, ОТХОД в режиме
+	# отхода (run — на следующую точку орбиты; home — при потерях/сроке)
+	verdict("C3 после укола разведка ОТХОДИТ (run/home) в режиме отхода, а не выбивает базу",
+		(String(ai.scout_state) == "run" or String(ai.scout_state) == "home")
 		and scout_retreating, "состояние %s, отход=%s" % [String(ai.scout_state), str(scout_retreating)])
 	var alive_w := 0
 	for w in workers:

@@ -17,6 +17,15 @@ class_name Arrow
 const _GobCfgA := preload("res://scripts/goblin/goblin_config.gd")
 const _Opt := preload("res://scripts/perf_config.gd")
 const _AXIS_SHADER := preload("res://shaders/axis_billboard.gdshader")
+const _LayerS := preload("res://scripts/ArrowRenderer.gd")
+
+## ── LEGACY-УЗЕЛ (BigStand-5, этап 3) ──────────────────────────────────────
+## В штатной игре рядовой снаряд УЗЛА БОЛЬШЕ НЕ ИМЕЕТ: выстрел — запись
+## полёта в ядре (GameManager.fire_projectile → ArmyCore.ProjectileFire),
+## промах и торчание — там же, попадание — событие пачкой. Этот узел живёт
+## под ручкой perf_config.projectile_core = false (A/B на одной сборке) и в
+## стендах, испытывающих его напрямую; константы ниже читают и ядро-путь, и
+## стенды — они остаются источником чисел
 
 var _start_pos:  Vector3 = Vector3.ZERO
 var _end_pos:    Vector3 = Vector3.ZERO
@@ -85,10 +94,10 @@ const STUCK_FADE := 4.0
 # 0.65 вместо прежних 0.75 — заказ владельца «убавить на 10-15%»: рядом с
 # фигурой бойца в 0.97 м стрела в три четверти метра читалась бревном.
 # Толщина следует за длиной сама: квад строится как (длина, длина/пропорции)
-const ARROW_LENGTH := 0.65
+const ARROW_LENGTH := _LayerS.ARROW_LENGTH
 ## Кость короче стрелы: она метательная, а не стрелковая
-const BONE_LENGTH := 0.42
-const BONE_SHEET := "res://assets/factions/orc/Troll/Gnoll/Gnoll_Bone.png"
+const BONE_LENGTH := _LayerS.BONE_LENGTH
+const BONE_SHEET := _LayerS.BONE_SHEET
 # Какая доля длины стрелы ТОРЧИТ над землёй после промаха (остальное в грунте)
 const STUCK_EXPOSED := 2.0 / 3.0
 # ── МИНИМАЛЬНЫЙ НАКЛОН ВНИЗ ПРИ ВТЫКАНИИ ────────────────────────────────────
@@ -198,10 +207,7 @@ func core_event(victim, pos: Vector3, axis: Vector3) -> void:
 ## срез по альфе не умеет гасить плавно, он просто выключает пиксель
 var _scissor0: float = 0.2
 
-const _ARROW_PATHS := [
-	"res://assets/factions/humans/units/archer/Arrow-Sheet.png",
-	"res://assets/sprites/units/Arrow.png",
-]
+const _ARROW_PATHS := _LayerS._ARROW_PATHS
 
 func _ready() -> void:
 	_build_visual()
@@ -474,60 +480,15 @@ func _build_visual() -> void:
 		_slot_i = _layer().acquire()
 		_slot_gen = _layer().gen
 
-# Картинка обрезается по непрозрачной области: в исходных 64x64 стрела
-# занимает 43x12 в середине, и без обрезки квад был бы почти пустым
-static var _tex_cache: Dictionary = {}
-
-## Кость: первый кадр ленты, обрезанный по рисунку (см. _load_arrow_texture)
+# Картинки слоя (обрезка по рисунку, кэш) живут в ArrowRenderer — их
+# берёт и путь без узла
 func _load_bone_texture() -> Texture2D:
-	if _tex_cache.has(BONE_SHEET):
-		return _tex_cache[BONE_SHEET]
-	if not ResourceLoader.exists(BONE_SHEET):
-		_tex_cache[BONE_SHEET] = null
-		return null
-	var tex := load(BONE_SHEET) as Texture2D
-	var img: Image = tex.get_image() if tex != null else null
-	if img == null:
-		_tex_cache[BONE_SHEET] = null
-		return null
-	var fh: int = img.get_height()
-	var frames: int = maxi(img.get_width() / maxi(fh, 1), 1)
-	var frame: Image = img.get_region(Rect2i(0, 0, maxi(img.get_width() / frames, 1), fh))
-	var r: Rect2i = frame.get_used_rect()
-	if r.size.x > 0 and r.size.y > 0:
-		frame = frame.get_region(r)
-	var out: Texture2D = ImageTexture.create_from_image(frame)
-	_tex_cache[BONE_SHEET] = out
-	return out
+	return _LayerS.load_bone_texture()
 
 func _load_arrow_texture() -> Texture2D:
-	# КОСТЬ ГНОЛЛА — ПЕРВЫЙ КАДР ЧЕТЫРЁХКАДРОВОЙ ЛЕНТЫ. Крутиться в полёте ей
-	# нечем: слой стрел кладёт квад на ВЕКТОР СКОРОСТИ (mm_arrow), листания
-	# кадров у него нет вовсе. Кадр режется тем же способом, что часовой
-	# башни — Image.get_region: AtlasTexture в sampler2D уезжает целиком
 	if bone:
 		return _load_bone_texture()
-	for p in _ARROW_PATHS:
-		var path: String = p
-		if _tex_cache.has(path):
-			return _tex_cache[path]
-		if not ResourceLoader.exists(path):
-			continue
-		var tex := load(path) as Texture2D
-		if tex == null:
-			continue
-		var img := tex.get_image()
-		if img == null:
-			continue
-		if img.is_compressed() and img.decompress() != OK:
-			continue
-		var rect := img.get_used_rect()
-		var out: Texture2D = tex
-		if rect.size.x > 0 and rect.size.y > 0:
-			out = ImageTexture.create_from_image(img.get_region(rect))
-		_tex_cache[path] = out
-		return out
-	return null
+	return _LayerS.load_arrow_texture()
 
 # ── ПОЛЁТ ────────────────────────────────────────────────────────────────────
 

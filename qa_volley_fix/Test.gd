@@ -73,9 +73,13 @@ func _squad(uid: String, fac: int, at: Vector3, n: int, cols: int, gap: float) -
 		men.append(u)
 	return [men, sid]
 
-## Стрелы, торчащие в земле, — узлы Arrow под корнем мира
+## Стрелы (не кости), торчащие в земле: записи ядра (снаряд без узла,
+## BigStand-5 этап 3) плюс legacy-узлы Arrow под корнем мира (ручка выключена)
 func _stuck_points() -> Array:
 	var out: Array = []
+	for r in GameManager.stuck_arrow_records():
+		if not bool(r["bone"]):
+			out.append(r["pos"])
 	for c in main.world_root().get_children():
 		var n3 := c as Node3D
 		if n3 == null:
@@ -124,9 +128,12 @@ const WINDOW_SEC := 20
 var _shots_v: int = 0
 var _miss_v: int = 0
 
-## Стрелы (не кости), торчащие в земле, — по реестру торчащих
+## Стрелы (не кости), торчащие в земле, — записи ядра плюс legacy-узлы
 func _stuck_count() -> int:
 	var n := 0
+	for r in GameManager.stuck_arrow_records():
+		if not bool(r["bone"]):
+			n += 1
 	for a in GameManager._stuck_arrows:
 		if a == null or not is_instance_valid(a):
 			continue
@@ -202,11 +209,7 @@ func _b_ready_mode() -> void:
 	# гаснут по своему сроку, поэтому перед вторым замером поле чистится
 	var pts_v: Array = _stuck_points()
 	var spread_v: float = _spread(pts_v)
-	for c in main.world_root().get_children():
-		if c is Node3D and c.get_script() != null \
-				and String((c.get_script() as Script).resource_path).ends_with("Arrow.gd") \
-				and c.has_method("despawn_now"):
-			c.call("despawn_now")
+	GameManager.clear_stuck_arrows()
 	await pframes(4)
 	GameManager.squad_set_ability(_sid, _nid, false)
 	verdict("B1 переключатель выключен — режим «по готовности»",

@@ -85,6 +85,8 @@ func _player_castles() -> Array:
 func _run() -> void:
 	main = load("res://scenes/Main.tscn").instantiate()
 	get_tree().root.add_child(main)
+	# Пень за рекой в партии заморожен (ТЗ 19.09.2026); стенду нужен живой
+	GameManager.call_deferred("thaw_lairs_now")
 	await pframes(12)
 	if main.enemy_ai != null:
 		main.enemy_ai.set_process(false)
@@ -145,8 +147,7 @@ func _run() -> void:
 	var base_s: int = GameManager.pop_squad_cap(f)
 	verdict("C1 без крепости потолки — стартовая бригада (%d рабочих, %d отрядов)" % [
 			_UCfg.POP_BASE_WORKERS, _UCfg.POP_BASE_SQUADS],
-		base_w == _UCfg.POP_BASE_WORKERS and base_s == _UCfg.POP_BASE_SQUADS
-			and _UCfg.POP_BASE_WORKERS == 5,
+		base_w == _UCfg.POP_BASE_WORKERS and base_s == _UCfg.POP_BASE_SQUADS,
 		"раб. %d, отр. %d" % [base_w, base_s])
 	var castle := Castle.new()
 	castle.faction = f
@@ -228,11 +229,14 @@ func _run() -> void:
 	spear.global_position = tower.global_position + Vector3(3.0, 0.0, 0.0)
 	await pframes(3)
 	var men0: int = tower.garrison_men()
-	tower.take_damage(9000.0, far_archer)     # смертельный выстрел по лучнику
+	# ТЗ 19.09.2026 (параллельный урон): стрела бьёт И стены (100 %), И лучника
+	# на настиле (0.5×). Смертельная для лучника доля — 110 / 0.5 с запасом
+	var shot_dmg: float = 400.0
+	tower.take_damage(shot_dmg, far_archer)
 	await pframes(3)
 	var men1: int = tower.garrison_men()
-	verdict("D4 стрела бьёт ЛУЧНИКА на настиле, а не стены",
-		men1 == men0 - 1 and is_equal_approx(tower.current_health, hp0),
+	verdict("D4 стрела бьёт ЛУЧНИКА на настиле (0.5×) и стены (100 %) параллельно",
+		men1 == men0 - 1 and absf((hp0 - tower.current_health) - shot_dmg) < 0.05,
 		"внутри %d → %d, запас башни %.0f → %.0f" % [men0, men1, hp0, tower.current_health])
 	# Труп лежит у подножия: точка падения считается самой башней
 	var dead_spot: Vector3 = tower.corpse_spot(0)

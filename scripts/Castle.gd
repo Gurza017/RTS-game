@@ -30,6 +30,19 @@ func roof_accepts(unit_type: String) -> bool:
 func has_roof_garrison() -> bool:
 	return _roof != null and _roof.squad_id() > 0
 
+## ── ПРЯМОЙ ПРИКАЗ ГАРНИЗОНУ КРЫШИ (ТЗ 19.09.2026) ─────────────────────────
+## Здание выделено, ПКМ по чужому отряду или постройке — весь стрелковый
+## гарнизон переносит огонь на цель (RoofGarrison.order_fire). false — крыши
+## нет, на ней пусто или цель не годится (своя, ничейная, мёртвая)
+func order_roof_fire(target: Node3D) -> bool:
+	if _roof == null or _roof.squad_id() <= 0:
+		return false
+	return bool(_roof.order_fire(target))
+
+## Ручная цель гарнизона (null — авто-агро)
+func roof_manual_target():
+	return _roof.manual_target() if _roof != null else null
+
 ## Выпустить всех с крыши (ПКМ пустым выделением / кнопка). false — пусто
 func release_roof() -> bool:
 	if _roof == null:
@@ -327,8 +340,14 @@ func release_unit(u: Unit, at: Vector3) -> void:
 ## Броня бойца здесь не считается: здание её не имеет, а урон уже посчитан
 ## стрелком по своей формуле. Наследники (башня, хижина) получают то же
 ## правило без единой развилки
+## Прямой удар по укрытому (снаряд, нацеленный до входа; брызги; вызов) —
+## целиком в СТЕНЫ, минуя параллельный срез крыши: тот считается на стрелах,
+## прилетевших ПО ЗДАНИЮ (Castle.take_damage), а не по бойцу внутри
 func absorb_damage_for(_u: Unit, amount: float, attacker: Node3D = null) -> void:
-	take_damage(amount, attacker)
+	if is_dead() or amount <= 0.0:
+		return
+	last_hit_ms = Time.get_ticks_msec()
+	super.take_damage(amount, attacker)
 
 ## Вытряхнуть наружу тех членов отряда, кто уже успел зайти внутрь, не трогая
 ## приказов тех, кто остался снаружи. Нужно при ОТМЕНЕ похода в замок: иначе
@@ -372,6 +391,7 @@ func release_garrison(squad_id: int) -> bool:
 ## Вернуть бойцов отряда на карту и отправить их от ворот. Слот в garrison
 ## снимает ВЫЗЫВАЮЩИЙ — так авто-выход может убрать запись до обхода массива
 func _release_members(squad_id: int) -> void:
+	GameManager.squad_note_healed(squad_id)
 	var gate := _gate_position()
 	var exit_dir := spawn_offset
 	exit_dir.y = 0.0
@@ -433,6 +453,8 @@ func _release_members(squad_id: int) -> void:
 func _die() -> void:
 	if is_dead():
 		return
+	if is_stronghold():
+		GameManager.tm_event("castle_fell", {"fac": int(faction)})
 	_evacuate_on_death()
 	super._die()
 
@@ -446,15 +468,25 @@ func _gives_gold() -> bool:
 ## подножия со стрелой, на его место встаёт резервист; ближний бой — только
 ## в стены. Разделитель — дальность оружия нападающего (MELEE_RANGE_MAX)
 const MELEE_RANGE_MAX := 5.0
+## Сколько стрел укрытие принимает на себя — статистика стендов (ТЗ 19.09.2026)
+var roof_hits: int = 0
+var roof_hit_damage: float = 0.0
 func take_damage(amount: float, attacker: Node = null) -> void:
 	if is_dead() or amount <= 0.0:
 		return
-	# Удар по замку отмечается ДО крыши: стрела, принятая лучником на крыше,
-	# в запас стен не идёт, но «замок под ударом» — уже да (охрана ИИ)
+	# Удар по замку отмечается ДО крыши (охрана ИИ читает «замок под ударом»)
 	last_hit_ms = Time.get_ticks_msec()
-	if _roof != null and _ranged_attacker(attacker) \
-			and bool(_roof.absorb_ranged_hit(amount, attacker)):
-		return
+	# ── ПАРАЛЛЕЛЬНЫЙ УРОН (ТЗ 19.09.2026, Parallel Damage Split) ─────────
+	# Дальний бой по укреплению идёт ДВУМЯ РУСЛАМИ независимо: стены получают
+	# полный (100 %) урон стрелы, и ТЕ ЖЕ стрелы бьют защитников на крыше со
+	# срезом укрытия GARRISON_COVER_FRAC (0.5×). Прежнее «крыша приняла — стены
+	# целы» снято: гарнизон гибнет медленнее, а здание ломается параллельно.
+	# Ближний бой — только в стены, как и было
+	if _roof != null and _ranged_attacker(attacker):
+		var share: float = amount * _UCfg.GARRISON_COVER_FRAC
+		if share > 0.0 and bool(_roof.absorb_ranged_hit(share, attacker)):
+			roof_hits += 1
+			roof_hit_damage += share
 	super.take_damage(amount, attacker)
 
 func _ranged_attacker(attacker: Node) -> bool:

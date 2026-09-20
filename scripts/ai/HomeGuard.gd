@@ -1,4 +1,5 @@
 extends Node
+const _OptSys := preload("res://scripts/perf_config.gd")
 
 ## ═══════════════════════════════════════════════════════════════════════════
 ## ОХРАНА КРЕПОСТИ КРАСНОГО ИИ (заказ 15.09.2026)
@@ -183,12 +184,22 @@ func _threatened() -> bool:
 		return true
 	if _foes_in_zone() >= _AICfg.HOME_GUARD_WAKE_FOES:
 		return true
+	# «Бьют саму охрану» — УДАР, а не наличие цели (см. DormantReserve)
 	for s in squads:
-		if GameManager.squad_in_combat(int(s["sid"])):
+		if GameManager.squad_hit_recently(int(s["sid"])):
 			return true
 	return false
 
 func _process(delta: float) -> void:
+	# Часы подсистемы (perf_config.sys_meter, qa_bigstand): одна проверка bool
+	if not _OptSys.sys_meter:
+		_process_timed(delta)
+		return
+	var _sys_t0: int = Time.get_ticks_usec()
+	_process_timed(delta)
+	_OptSys.sys_add("home_guard", Time.get_ticks_usec() - _sys_t0)
+
+func _process_timed(delta: float) -> void:
 	_tick_t += delta
 	if _tick_t < _AICfg.HOME_GUARD_TICK_SEC:
 		return
@@ -217,12 +228,19 @@ func _process(delta: float) -> void:
 		if not alarm:
 			alarm = true
 			wakes += 1
+			waves = 0
+			wave_clock = _AICfg.HOME_GUARD_WAVE_GAP_SEC   # первая волна — сразу
+			GameManager.tm_event("guard_alarm", {"squads": squads.size()})
+		else:
+			wave_clock += dt
 		_fight()
 		return
 	if alarm:
 		_calm_t += dt
 		if _calm_t >= _AICfg.HOME_GUARD_CALM_SEC:
 			alarm = false
+			waves = 0
+			wave_clock = 0.0
 			_go_home()
 		return
 	# Мирно: вернувшиеся на пост засыпают, спящие лечатся
@@ -237,8 +255,17 @@ func _process(delta: float) -> void:
 		var post: Vector3 = s["post"]
 		if Vector2(c.x - post.x, c.z - post.z).length() <= _AICfg.HOME_GUARD_HOME_R:
 			_set_sleep(sid, true)
-		elif not GameManager.squad_in_combat(sid) and _all_idle(sid):
+		elif not GameManager.squad_hit_recently(sid) and _home_due(s):
 			_order_home(s)
+
+## Пора ли переиздать приказ домой (см. DormantReserve._home_due)
+func _home_due(s: Dictionary) -> bool:
+	var sid: int = int(s["sid"])
+	var nms: int = Time.get_ticks_msec()
+	if _all_idle(sid) or nms - int(s.get("home_ms", 0)) >= int(_AICfg.HOME_GUARD_HOME_RETRY_SEC * 1000.0):
+		s["home_ms"] = nms
+		return true
+	return false
 
 func _all_idle(sid: int) -> bool:
 	for m in _members(sid):
@@ -246,13 +273,30 @@ func _all_idle(sid: int) -> bool:
 			return false
 	return true
 
-## Тревога: разбудить и бросить на ближайшего чужого у замка
+## ── ВОЛНЫ ПРОБУЖДЕНИЯ (ТЗ 19.09.2026, блок 3.3) ────────────────────────────
+## По тревоге просыпается HOME_GUARD_WAVE_SQUADS отрядов, следующая волна —
+## через HOME_GUARD_WAVE_GAP_SEC тревоги; тот, по кому бьют, — вне очереди
+var wave_clock: float = 0.0
+var waves: int = 0
+var waves_total: int = 0
+
+## Тревога: разбудить ВОЛНУ и бросить на ближайшего чужого у замка
 func _fight() -> void:
 	var cp: Vector3 = _castle_pos()
+	var budget: int = 0
+	if wave_clock >= _AICfg.HOME_GUARD_WAVE_GAP_SEC:
+		budget = maxi(_AICfg.HOME_GUARD_WAVE_SQUADS, 1)
+		wave_clock = 0.0
+		waves += 1
+		waves_total += 1
 	for s in squads:
 		var sid: int = int(s["sid"])
 		if _asleep.has(sid):
-			_set_sleep(sid, false)
+			if budget > 0 or GameManager.squad_hit_recently(sid):
+				_set_sleep(sid, false)
+				budget -= 1
+			else:
+				continue
 		if GameManager.squad_in_combat(sid):
 			continue
 		var c: Vector3 = _centroid(sid)
@@ -286,9 +330,11 @@ func post_spot(s: Dictionary, k: int) -> Vector3:
 
 func _order_home(s: Dictionary) -> void:
 	var ms: Array = _members(int(s["sid"]))
+	_OptSys.cmd_src = "home_guard"
 	for k in range(ms.size()):
 		var p: Vector3 = post_spot(s, k)
 		(ms[k] as Unit).command_move(GameManager.land_target(Vector3(p.x, 0.0, p.z)))
+	_OptSys.cmd_src = ""
 
 func _heal(sid: int, dt: float) -> void:
 	var per: float = _AICfg.HOME_GUARD_HEAL_FRAC * dt
@@ -296,6 +342,7 @@ func _heal(sid: int, dt: float) -> void:
 		var u := m as Unit
 		if u.current_health < u.max_health:
 			u.current_health = minf(u.max_health, u.current_health + u.max_health * per)
+			u.push_hp()
 			u._soa_push_stats()
 
 ## Замок снесён: снять отметку, разбудить — дальше их подберёт EnemyAI как

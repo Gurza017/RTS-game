@@ -150,6 +150,15 @@ var mine_sid: int = 0
 var mines_captured: int = 0
 
 func _process(delta: float) -> void:
+	# Часы подсистемы (perf_config.sys_meter, qa_bigstand): одна проверка bool
+	if not _OptEA.sys_meter:
+		_process_timed(delta)
+		return
+	var _sys_t0: int = Time.get_ticks_usec()
+	_process_timed(delta)
+	_OptEA.sys_add("red_ai", Time.get_ticks_usec() - _sys_t0)
+
+func _process_timed(delta: float) -> void:
 	if main == null:
 		return
 	clock += delta
@@ -199,6 +208,12 @@ func tick() -> void:
 		_hold_everyone_home(castle)
 		return
 	_train_army(castle)
+	# ── ПОДКРЕПЛЕНИЕ И ОТВЕТНЫЙ УДАР (ТЗ 19.09.2026-3, п. 2) ────────────────
+	_tick_reinforcement()
+	_update_retaliation()
+	if retaliation_active():
+		_command_retaliation(castle)
+		return
 	# ── ГЕНЕРАЛЬНЫЙ ШТУРМ С 35-й МИНУТЫ (спринт 17) ─────────────────────────
 	# Оборонительный режим держит центр и рудники; когда часы перевалили
 	# AI_ASSAULT_AT_SEC и лимит армии набран — волна на базу игрока
@@ -211,6 +226,130 @@ func _assault_time() -> bool:
 	if clock < _AICfg.AI_ASSAULT_AT_SEC:
 		return false
 	return army_ready() or _wave_out
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ОТВЕТНЫЙ УДАР (TOTAL_RETALIATION) И ПОДКРЕПЛЕНИЕ — ТЗ 19.09.2026-3, п. 2
+# ═════════════════════════════════════════════════════════════════════════════
+## Потери стороны считает GameManager.note_loss (из Unit._die); здесь — только
+## сравнение счётчика с отметкой прошлого удара раз в такт. Пока удар идёт,
+## ВСЯ полевая армия (все роли, кроме отхода разбитых) получает ROLE_ASSAULT
+## к источнику потерь — точке последнего убийцы, — а без неё к базе игрока:
+## это ATTACK-MOVE, по дороге отряды дерутся авто-агро и перехватом марша.
+## Охрана крепости (HomeGuard) в удар не идёт: она и есть DEFEND_BASE
+var retaliation_until: float = -1.0
+var retaliation_target: Vector3 = Vector3.ZERO
+var retaliations: int = 0
+var retaliation_refusals: int = 0
+
+## Почему удар сейчас не идёт; пустая строка — можно. Защита крепости
+## (источник потерь у дома) — без проверки силы
+func _retaliation_refusal(target: Vector3) -> String:
+	var field := 0
+	var men := 0
+	for s in squads:
+		var sq: Dictionary = s
+		if String(sq["role"]) == ROLE_RETREAT:
+			continue
+		field += 1
+		men += (sq["members"] as Array).size()
+	if field < _AICfg.RETALIATION_MIN_SQUADS:
+		return "полевых отрядов %d < %d" % [field, _AICfg.RETALIATION_MIN_SQUADS]
+	if _home_pos != Vector3.ZERO and target.distance_to(_home_pos) <= _AICfg.RETALIATION_HOME_R:
+		return ""
+	var foes: int = GameManager.unit_grid.enemy_count(target, _AICfg.RETALIATION_SCAN_R, Constants.FACTION_ENEMY)
+	if float(men) < float(foes) * _AICfg.RETALIATION_ADVANTAGE:
+		return "в поле %d против %d у цели" % [men, foes]
+	return ""
+var _retal_next_ok: float = 0.0
+var _retal_mark: int = 0
+
+func retaliation_active() -> bool:
+	return retaliation_until >= 0.0 and clock < retaliation_until
+
+func _update_retaliation() -> void:
+	var lost: int = GameManager.losses_of(Constants.FACTION_ENEMY)
+	if retaliation_until >= 0.0 and clock >= retaliation_until:
+		retaliation_until = -1.0
+		_retal_mark = lost
+		# Удар кончился — планы переиздать: отряды стоят на чужой земле
+		for s in squads:
+			(s as Dictionary)["issued"] = false
+		last_action += "|ответный удар окончен"
+	if retaliation_until >= 0.0 or clock < _retal_next_ok:
+		return
+	if lost - _retal_mark < _AICfg.RETALIATION_LOSSES:
+		return
+	var src: Variant = GameManager.last_loss_from.get(Constants.FACTION_ENEMY)
+	var target: Vector3 = _player_base_pos()
+	if src != null and (src as Vector3) != Vector3.ZERO:
+		target = src
+	if target == Vector3.ZERO:
+		return
+	# ── УМНЫЙ УДАР (аудит партий 19.09.2026): не по откату, а по силе ───────
+	# Счёт потерь при отказе не сбрасывается — как только сила есть, удар идёт
+	var why: String = _retaliation_refusal(target)
+	if why != "":
+		_retal_next_ok = clock + _AICfg.RETALIATION_RECHECK_SEC
+		retaliation_refusals += 1
+		last_action += "|ответный удар отложен: " + why
+		GameManager.tm_event("red_retaliation_skip", {"why": why, "lost": lost - _retal_mark})
+		return
+	GameManager.tm_event("red_retaliation", {"lost": lost - _retal_mark, "at": [snappedf(target.x, 0.1), snappedf(target.z, 0.1)]})
+	retaliation_until = clock + _AICfg.RETALIATION_SEC
+	_retal_next_ok = retaliation_until + _AICfg.RETALIATION_COOLDOWN_SEC
+	_retal_mark = lost
+	retaliation_target = target
+	retaliations += 1
+	last_action += "|ОТВЕТНЫЙ УДАР: потеряно %d, вся армия на %s" % [lost, str(target.round())]
+
+## Раскладка удара: фронт поперёк оси «армия → цель», отряды одного рода
+## разведены шагом ширины отряда (та же арифметика, что у волны штурма)
+func _command_retaliation(_castle: Castle) -> void:
+	var target: Vector3 = retaliation_target
+	var pool: Array = []
+	for s in squads:
+		if String((s as Dictionary)["role"]) != ROLE_RETREAT:
+			pool.append(s)
+	if pool.is_empty():
+		_apply_orders()
+		return
+	var wave_c := _field_centroid(pool)
+	var course := target - (wave_c if wave_c != Vector3.ZERO else _home_pos)
+	course.y = 0.0
+	if course.length() < 0.01:
+		course = Vector3.FORWARD
+	course = course.normalized()
+	var right := Vector3(-course.z, 0.0, course.x)
+	var per_type_total: Dictionary = {}
+	for s in pool:
+		var uid: String = String((s as Dictionary)["type"])
+		per_type_total[uid] = int(per_type_total.get(uid, 0)) + 1
+	var per_type_idx: Dictionary = {}
+	for s in pool:
+		var sq: Dictionary = s
+		var uid: String = String(sq["type"])
+		var i: int = int(per_type_idx.get(uid, 0))
+		per_type_idx[uid] = i + 1
+		var n: int = int(per_type_total[uid])
+		var side: float = -1.0 if i % 2 == 0 else 1.0
+		var off := _AICfg.tactic_offset(_tactic, uid, course, side)
+		var centered: float = float(i) - float(n - 1) * 0.5
+		off += right * (centered * maxf(SQUAD_LATERAL_STEP, _screen_step_for(uid)))
+		_set_role(sq, ROLE_ASSAULT, GameManager.land_target(target + off))
+	_apply_orders()
+
+## Одноразовое подкрепление на REINFORCE_AT_SEC часов ИИ: ставит Main
+## (spawn_ai_reinforcements), отряды уходят под охрану крепости
+var reinforced: bool = false
+var reinforced_squads: int = 0
+
+func _tick_reinforcement() -> void:
+	if reinforced or clock < _AICfg.REINFORCE_AT_SEC:
+		return
+	reinforced = true
+	if main != null and main.has_method("spawn_ai_reinforcements"):
+		reinforced_squads = int(main.spawn_ai_reinforcements())
+		last_action += "|подкрепление: %d отрядов" % reinforced_squads
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ВЕТЕРАНСКИЕ НАГРАДЫ ИИ

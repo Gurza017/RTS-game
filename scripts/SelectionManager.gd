@@ -1,5 +1,6 @@
 extends Node
 class_name SelectionManager
+const _OptSys := preload("res://scripts/perf_config.gd")
 
 const DRAG_THRESHOLD        := 6.0
 const GROUP_DOUBLE_TAP_TIME := 0.35
@@ -108,6 +109,66 @@ const RMB_DOUBLE_SLOP := 24.0
 # ── Двойной клик ЛКМ ─────────────────────────────────────────────────────────
 var _last_lmb_click_time: float = -10.0
 var _last_lmb_click_id:   int   = 0
+## ── ВЫДЕЛЕННЫЕ ОВЦЫ (ТЗ 19.09.2026, блок 2) ────────────────────────────────
+## Овца — не боец: в selected_units не входит (панель и приказы её не видят,
+## ПКМ ей ничего не приказывает по построению — пустое выделение приказов не
+## отдаёт), а живёт в своём списке. ЛКМ — подсветить, двойной ЛКМ — всё стадо
+## того же загона (Sheep.flock_mates), Delete — утилизировать (Sheep.dispose).
+## Выделяются только овцы игрока (owner_faction): дикое стадо тролля — нет
+var selected_sheep: Array = []
+var _last_sheep_click_id: int = 0
+var _last_sheep_click_time: float = -10.0
+## Стендам: сколько овец утилизировано клавишей Delete
+var sheep_disposed: int = 0
+
+func _clear_sheep_selection() -> void:
+	for s in selected_sheep:
+		if s != null and is_instance_valid(s) and s.has_method("set_selected"):
+			s.call("set_selected", false)
+	selected_sheep.clear()
+
+func _sheep_selectable(s) -> bool:
+	if s == null or not (s is Node) or not is_instance_valid(s):
+		return false
+	if not (s as Node).is_in_group("sheep"):
+		return false
+	if bool(s.get("eaten")):
+		return false
+	return int(s.get("owner_faction")) == Constants.FACTION_PLAYER
+
+func _select_sheep(s) -> void:
+	if not _sheep_selectable(s) or selected_sheep.has(s):
+		return
+	selected_sheep.append(s)
+	s.call("set_selected", true)
+
+## Клик по овце: одиночный — она одна, двойной — всё её стадо
+func _click_sheep(s, additive: bool) -> void:
+	var now := Time.get_ticks_msec() / 1000.0
+	var is_double: bool = s.get_instance_id() == _last_sheep_click_id \
+		and (now - _last_sheep_click_time) < DOUBLE_CLICK_TIME
+	_last_sheep_click_time = now
+	_last_sheep_click_id = s.get_instance_id()
+	if not additive:
+		_clear_sheep_selection()
+	if is_double and s.has_method("flock_mates"):
+		for m in s.call("flock_mates"):
+			_select_sheep(m)
+	_select_sheep(s)
+
+## Delete: выделенные овцы исчезают мгновенно
+func _dispose_selected_sheep() -> int:
+	var n := 0
+	var doomed: Array = selected_sheep.duplicate()
+	_clear_sheep_selection()
+	for s in doomed:
+		if s == null or not is_instance_valid(s) or bool(s.get("eaten")):
+			continue
+		if s.has_method("dispose"):
+			s.call("dispose")
+			n += 1
+	sheep_disposed += n
+	return n
 var _fp                        = null   # FormationPreview — нетипизировано, чтобы не зависеть от кэша классов
 
 func setup(p_camera: Camera3D, p_drag_rect: ColorRect) -> void:
@@ -805,6 +866,15 @@ func _movable_count() -> int:
 ## Свёрнутые события мыши обрабатываются здесь — ровно один пересчёт за кадр
 ## отрисовки, и только если курсор реально сместился
 func _process(_delta: float) -> void:
+	# Часы подсистемы (perf_config.sys_meter, qa_bigstand): одна проверка bool
+	if not _OptSys.sys_meter:
+		_process_timed(_delta)
+		return
+	var _sys_t0: int = Time.get_ticks_usec()
+	_process_timed(_delta)
+	_OptSys.sys_add("selection", Time.get_ticks_usec() - _sys_t0)
+
+func _process_timed(_delta: float) -> void:
 	if not _fp_pending:
 		return
 	_fp_pending = false
@@ -1021,6 +1091,19 @@ const PICK_TIE := 0.01
 
 ## Высота туловища спрайта бойца: на неё считается поправка ракурса
 const UNIT_BODY_H := 1.0
+## ── ЯКОРЬ КЛИКА ПЕХОТИНЦА — СЕРЕДИНА ТУЛОВИЩА, А НЕ СТУПНИ (ТЗ 18.09.2026, п. 3)
+## Счёт кандидата — расстояние от якоря до ТОЧКИ ЗЕМЛИ под курсором минус
+## радиус, и якорь стоял у ступней: круг попадания на экране был симметричен
+## вокруг ног — половина его лежала в пустой траве ПОД спрайтом, а шлем и
+## копьё на 1.5-2 м выше ступней оставались вне круга («клики попадают в
+## пустую зону под спрайтом»). Якорь уходит за ступни на lean × UNIT_PICK_MID,
+## как у тролля (pick_body_h): круг накрывает фигуру от колен до макушки
+const UNIT_PICK_MID := 0.45
+## Выше этой высоты по своему спрайту пехотинец курсор НЕ накрывает (макушка):
+## кандидат, у которого «высота» больше, стоит перед точкой клика, а не под
+## ней — сосед на метр ближе к камере перехватывал клик по туловищу заднего
+## (qa_knights_push A0б). Сверх потолка отрыв идёт в счёт
+const UNIT_PICK_TOP := 1.8
 ## Потолок поправки: при совсем пологой камере боец не должен «расползаться»
 const UNIT_PICK_MAX := 2.5
 ## Запас радиуса сбора кандидатов под КРУПНОГО бойца (тролль): его якорь
@@ -1208,6 +1291,9 @@ func _pick_at(screen_pos: Vector2, mask: int) -> Dictionary:
 			if ubh > 0.0:
 				anchor += lean * ubh
 				radius = (node as Unit).pick_radius() + ubh * lean.length()
+			else:
+				# Пехотинец: якорь под серединой фигуры (ТЗ 18.09.2026, п. 3)
+				anchor += lean * UNIT_PICK_MID
 		var score: float
 		if ground.x == INF:
 			# Луч смотрит горизонтально — сравниваем по расстоянию до основания
@@ -1236,6 +1322,10 @@ func _pick_at(screen_pos: Vector2, mask: int) -> Dictionary:
 		var height: float = 0.0
 		if lean_len2 > 0.0:
 			height = maxf((ground - Vector2(np.x, np.z)).dot(lean) / lean_len2, 0.0)
+		# Пехотинец: курсор выше макушки — это не он (ТЗ 18.09.2026, п. 3)
+		if node is Unit and (node as Unit).pick_body_h() <= 0.0 and height > UNIT_PICK_TOP:
+			score += height - UNIT_PICK_TOP
+			height = 0.0
 		var better := false
 		if score < best_score - PICK_TIE:
 			better = true
@@ -1271,6 +1361,10 @@ func _pick_at(screen_pos: Vector2, mask: int) -> Dictionary:
 			best_height = height
 			best = node
 	out["target"] = best
+	# Насколько курсор «промахнулся» мимо кандидата сверх его круга клика
+	# (0 — попал в круг). Читает приказ монаху: клик по земле в полутора
+	# метрах от своего бойца — марш в точку, а не приказ лечить его
+	out["score"] = best_score if best != null else INF
 	if (out["position"] as Vector3) == Vector3.ZERO:
 		if ground.x != INF:
 			out["position"] = Vector3(ground.x, 0.0, ground.y)
@@ -1342,8 +1436,11 @@ func clear_selection() -> void:
 ## Возвращает, сколько бойцов расформировано (нужно стенду)
 func disband_selected() -> int:
 	_purge_invalid()
+	# Выделенные ОВЦЫ утилизируются тем же нажатием (ТЗ 19.09.2026, блок 2):
+	# исчезают сразу, тела нет — это не боец, а живность
+	var sheep_gone: int = _dispose_selected_sheep()
 	if selected_units.is_empty():
-		return 0
+		return sheep_gone
 	var doomed: Array = []
 	for u in selected_units:
 		if not is_instance_valid(u):
@@ -1355,7 +1452,7 @@ func disband_selected() -> int:
 			continue
 		doomed.append(un)
 	if doomed.is_empty():
-		return 0
+		return sheep_gone
 	# Выделение снимается ПЕРЕД казнью: кольца выделения гасятся штатным путём,
 	# а панель получает пустой набор один раз, а не по разу на каждого павшего
 	_clear_selection()
@@ -1365,7 +1462,7 @@ func disband_selected() -> int:
 			continue
 		un.take_damage(un.max_health * 1000.0 + 1e6, null)
 	GameManager.on_selection_changed(selected_units)
-	return doomed.size()
+	return doomed.size() + sheep_gone
 
 func _handle_single_click(screen_pos: Vector2, additive: bool) -> void:
 	if _over_ui(screen_pos):
@@ -1374,6 +1471,21 @@ func _handle_single_click(screen_pos: Vector2, additive: bool) -> void:
 	if not additive:
 		_clear_selection()
 	var pick := _pick_at(screen_pos, Constants.LAYER_UNITS | Constants.LAYER_BUILDINGS)
+	# ── ЛКМ ПО ОВЦЕ — ПОДСВЕТКА (ТЗ 19.09.2026, блок 2) ──────────────────────
+	# Тело овцы лежит на слое ресурсов (Sheep._build_pick_body), в маску бойцов
+	# и зданий оно не входит; спрашиваем ОТДЕЛЬНО и только когда под курсором
+	# не нашлось ни бойца, ни здания — прежний разбор клика не трогается.
+	# Исключение — ЗАГОН: его форма попадания накрывает всю площадку, и клик по
+	# овце внутри ограды отдавал бы загон; овца выигрывает у загона.
+	# Овцы игрока: одиночный клик — одна, двойной — всё стадо загона; приказов
+	# выделенным овцам нет вовсе (в selected_units они не входят)
+	var sheep_hit = null
+	if pick["target"] == null or (pick["target"] is Building
+			and (pick["target"] as Building).has_method("accept_sheep")):
+		var sp = _pick_at(screen_pos, Constants.LAYER_RESOURCES)["target"]
+		if _sheep_selectable(sp):
+			sheep_hit = sp
+			pick["target"] = null
 	if pick["target"] != null:
 		var target = pick["target"]
 		# ── ЛКМ ПО ЧУЖОМУ ОТРЯДУ = РАЗВЕДКА, А НЕ ВЫДЕЛЕНИЕ ─────────────────
@@ -1402,6 +1514,8 @@ func _handle_single_click(screen_pos: Vector2, additive: bool) -> void:
 				_select_same_type_on_screen(target)
 			else:
 				_select(target)
+	elif sheep_hit != null:
+		_click_sheep(sheep_hit, additive)
 	# Досюда доходит только клик, который разведкой НЕ стал (на чужой ветке
 	# стоит return): значит открытую карточку пора закрыть
 	clear_recon()
@@ -1488,6 +1602,13 @@ func _select(node) -> void:
 ## Один узел в выделение, без разворачивания на отряд
 func _select_one(node) -> void:
 	if _sel_set.has(node):
+		return
+	# ── УКРЫТЫЙ В ЗДАНИИ НЕ ВЫДЕЛЯЕТСЯ (ТЗ 19.09.2026-2, п. 1) ──────────────
+	# Клик по отряду разворачивается на ВЕСЬ состав (squad_of), и в него
+	# попадали бойцы, уже сидящие в бараке: кольцо им ставилось по
+	# замёрзшей нарисованной точке — у ворот, на пустой траве («кольца висят
+	# там, где стояли юниты»). Того, кого нет на карте, выделять нечем
+	if node is Unit and (node as Unit).garrisoned:
 		return
 	selected_units.append(node)
 	_sel_set[node] = true
@@ -1685,6 +1806,8 @@ func clear_recon() -> void:
 	recon_units.clear()
 
 func _clear_selection() -> void:
+	# Овцы снимаются вместе с бойцами (ТЗ 19.09.2026, блок 2)
+	_clear_sheep_selection()
 	for u in selected_units:
 		if is_instance_valid(u) and u.has_method("set_selected"):
 			u.set_selected(false)
@@ -1734,6 +1857,18 @@ func _consume_rmb_double(screen_pos: Vector2) -> bool:
 ## Есть ли в выделении хоть один рабочий. Публичная — её же читает
 ## Main._update_hover_cursor, чтобы курсор сбора показывался ровно тогда, когда
 ## клик по дереву действительно что-то сделает
+## Насколько клик вправе промахнуться мимо бойца, чтобы монах прочёл его как
+## «лечить этого»: промах больше — марш в точку (ТЗ 19.09.2026, блок 2)
+const MONK_HEAL_PICK := 0.0
+
+## Есть ли в выделении хоть один, кто вообще умеет бить (attack_damage > 0;
+## монах — нет, рабочий — да): выделению без удара приказ атаки бессмыслен —
+## оно идёт к точке маршем
+func selection_can_attack() -> bool:
+	for u in selected_units:
+		if is_instance_valid(u) and u is Unit and (u as Unit).attack_damage > 0.0 				and not (u as Unit).is_dead():
+			return true
+	return false
 func selection_has_worker() -> bool:
 	for u in selected_units:
 		if is_instance_valid(u) and u is Worker:
@@ -2031,6 +2166,13 @@ func _handle_right_click(screen_pos: Vector2, run: bool = false) -> void:
 	if target == null and pos == Vector3.ZERO:
 		return
 	pos.y = 0.0
+	# ── ВЫДЕЛЕНО УКРЕПЛЕНИЕ С ГАРНИЗОНОМ, ПКМ ПО ВРАГУ — ПРИКАЗ ГАРНИЗОНУ ──
+	# (ТЗ 19.09.2026, Garrison Manual Targeting). Стоит ДО точки сбора: клик
+	# по чужому отряду или постройке — это цель для лучников на крыше, а не
+	# место сбора новобранцев. Цель мертва / ушла — гарнизон сам вернётся к
+	# авто-агро (RoofGarrison.tick)
+	if _try_garrison_fire_order(target):
+		return
 	# ── ВЫДЕЛЕНО ЗДАНИЕ — ПКМ ЭТО ТОЧКА СБОРА, И ТОЧКА (спринт 19, письмо 9) ──
 	# Прежде клик «съедали» боец или постройка под курсором: разбор шёл
 	# сверху вниз через гарнизон, стройку, руину, и до точки сбора доходил
@@ -2042,16 +2184,31 @@ func _handle_right_click(screen_pos: Vector2, run: bool = false) -> void:
 	# Игрок вручную указал монаху отряд/бойца: автопоиск раненых сброшен,
 	# монах лечит и поднимает павших ЭТОГО отряда до полного исполнения
 	# (Monk.command_heal). Остальным выделенным — обычный марш к точке
+	# ── ПРИКАЗ ЛЕЧИТЬ — ТОЛЬКО ПО КЛИКУ В САМОГО БОЙЦА (ТЗ 19.09.2026, блок 2) ─
+	# Круг клика бойца щедрый (до 2.5 м у пологой камеры): ПКМ по земле между
+	# двумя своими отрядами читался как «лечить», и монах шёл не в точку, а к
+	# отряду. Лечить — когда курсор в фигуре (промах не больше MONK_HEAL_PICK)
 	if target != null and target is Unit and target.faction == Constants.FACTION_PLAYER \
+			and float(pick.get("score", 0.0)) <= MONK_HEAL_PICK \
 			and _try_monk_heal_order(target as Unit):
 		return
+	# Монах (и вообще невооружённое выделение) по земле у чужого строя ИДЁТ, а
+	# не «атакует»: command_attack у него пустой, и клик пропадал вовсе
+	if target != null and target is Unit and target.faction == Constants.FACTION_PLAYER \
+			and not selection_can_attack():
+		target = null
+	# ПКМ монахом по чужому бойцу — марш к нему, а не «атака» (у монаха
+	# attack_damage 0, command_attack пуст, и клик пропадал вовсе)
+	if target != null and target is Unit and target.faction != Constants.FACTION_PLAYER \
+			and not selection_can_attack():
+		target = null
 	# ── КЛИК ПО ХИТБОКСУ ОТРЯДА, А НЕ ПО ЧЕЛОВЕЧКУ ──────────────────────────
 	# Луч/сетка нашли под курсором только грунт (или своего), а рядом с этой
 	# точкой стоит чужой строй — значит игрок целился в отряд и промазал мимо
 	# конкретной модели на полтора шага. Это приказ атаки (см. SQUAD_CLICK_REACH)
 	if target == null or (target is Unit and target.faction == Constants.FACTION_PLAYER):
 		var zone := _enemy_in_squad_zone(pos)
-		if zone != null:
+		if zone != null and selection_can_attack():
 			target = zone
 
 	# ПКМ ОТРЯДОМ ПО СВОЕМУ ЗАМКУ — завести отряд в гарнизон: там его лечат
@@ -2109,6 +2266,10 @@ func _handle_right_click(screen_pos: Vector2, run: bool = false) -> void:
 		return
 
 	if _try_rebuild_ruin(target):
+		return
+
+	# ПКМ РАБОЧИМ ПО ПОВРЕЖДЁННОМУ СВОЕМУ ЗДАНИЮ — РЕМОНТ (ТЗ 19.09.2026, п. 5)
+	if _try_repair(target):
 		return
 
 	# ПКМ ПО СТРОЙПЛОЩАДКЕ — поставить выделенных рабочих на стройку.
@@ -2199,6 +2360,19 @@ func _handle_right_click(screen_pos: Vector2, run: bool = false) -> void:
 				var mine_t = target
 				if sid > 0 and front.has(sid):
 					mine_t = front[sid]
+				# ── СТРЕЛКИ БЬЮТ РОВНО ТУДА, КУДА КЛИКНУЛИ (ТЗ 19.09.2026-2, п. 3) ─
+				# Раскладка по фронту и разлив у крупной цели придуманы против
+				# ТОЛЧЕИ пехоты у одной модели; стрелкам толпиться негде, а
+				# «пять отрядов лучников по троллю — половина стреляет по
+				# соседям» читалось как распыление огня. Цель-БОЕЦ у стрелкового
+				# отряда не подменяется; кольцо у постройки остаётся (там
+				# раскладка — про место, а не про цель)
+				if sid > 0 and GameManager.squad_type(sid) == "archer":
+					mine_t = target
+					# Кольцо осады стрелкам не раздаётся (см. _ring_squads_around);
+					# прежний сектор от старого приказа не должен тянуть их к стене
+					if target is Building:
+						GameManager.squad_clear_attack_anchor(sid)
 				# lock = true — приказ игрока, держится до истребления цели
 				u.command_attack(mine_t, true, true, true)
 				if sid > 0 and not (sid in atk_squads):
@@ -2823,6 +2997,35 @@ func _try_rebuild_ruin(target) -> bool:
 		(w as Worker).command_build(site as Node3D)
 	return true
 
+## Ремонт готового здания (ТЗ 19.09.2026, п. 5): своё, повреждённое, не
+## стройплощадка и не руина, в выделении есть рабочие → рабочие идут чинить
+## тем же command_build (утиный контракт Building.work_position/add_builder);
+## прочие выделенные идут к зданию маршем. Стоит ПОСЛЕ рудника и руины и
+## ДО стройплощадки: у тех свой контракт
+func _try_repair(target) -> bool:
+	if target == null or not is_instance_valid(target) or not (target is Building):
+		return false
+	var b := target as Building
+	if b.faction != Constants.FACTION_PLAYER or b.is_dead():
+		return false
+	if b.is_in_group("construction_sites") or b.is_in_group("ruins"):
+		return false
+	if not b.has_method("needs_repair") or not bool(b.call("needs_repair")):
+		return false
+	var crew: Array = []
+	for u in selected_units:
+		if is_instance_valid(u) and u is Worker:
+			crew.append(u)
+	if crew.is_empty():
+		return false
+	for w in crew:
+		(w as Worker).command_build(b as Node3D)
+	for u in selected_units:
+		if is_instance_valid(u) and u is Unit and not (u is Worker) and u.has_method("command_move"):
+			(u as Unit).command_move(b.work_position((u as Node3D).global_position), false,
+				Vector3.ZERO, false, true)
+	return true
+
 func _try_join_construction(target) -> bool:
 	if target == null or not is_instance_valid(target):
 		return false
@@ -2843,6 +3046,42 @@ func _try_join_construction(target) -> bool:
 ## Выделение — только свои постройки: точка сбора ставится в точку земли под
 ## курсором безусловно (см. _handle_right_click). Здания без отрядов
 ## (рудник, дом) точку сбора не держат — им она ни к чему
+## ПКМ по чужому отряду/постройке при выделенном СВОЁМ укреплении с гарнизоном
+## на крыше: приказ огня гарнизону (Castle.order_roof_fire). false — в
+## выделении есть не-здания, зданий с гарнизоном нет или цель не вражеская
+var garrison_fire_orders: int = 0
+func _try_garrison_fire_order(target) -> bool:
+	if target == null or not is_instance_valid(target):
+		return false
+	var enemy: bool = false
+	if target is Unit:
+		enemy = (target as Unit).faction != Constants.FACTION_PLAYER and not (target as Unit).is_dead()
+	elif target is Building:
+		var tb := target as Building
+		enemy = tb.faction != Constants.FACTION_PLAYER and tb.faction != Constants.FACTION_NEUTRAL \
+			and not tb.is_dead()
+	if not enemy:
+		return false
+	var forts: Array = []
+	for u in selected_units:
+		if not is_instance_valid(u):
+			continue
+		if not (u is Building) or (u as Building).faction != Constants.FACTION_PLAYER:
+			return false
+		if u is Castle and (u as Castle).has_roof_garrison():
+			forts.append(u)
+	if forts.is_empty():
+		return false
+	var sent := 0
+	for f in forts:
+		if (f as Castle).order_roof_fire(target as Node3D):
+			sent += 1
+	if sent > 0:
+		garrison_fire_orders += 1
+	# Подсветка цели — тем же слоем, что у приказа отряду: приказ записан за
+	# отрядом крыши, а _refresh_order_marks читает отряды выделенных укреплений
+	return sent > 0
+
 func _rally_click(pos: Vector3) -> bool:
 	var buildings: Array = []
 	for u in selected_units:
@@ -3152,7 +3391,11 @@ const RING_SPILL_RANGE := 26.0
 ## Сколько отрядов помещается вокруг крупной цели и где искать врага
 ## лишним (спринт 20, модуль 3.3)
 const BIG_TARGET_SQUADS := 3
-const BIG_SPILL_R := 5.0
+## ТЗ 19.09.2026-3 (п. 3): лишние отряды уходят ТОЛЬКО на СОСЕДНИХ ГИГАНТОВ
+## (тролль, туша) в BIG_SPILL_R от туши; нет соседей — все фокусятся на ней.
+## Прежний разлив «ближайший враг в 5 м» уводил отряды за гноллом-кайтером
+## к пню («убегают за карту»)
+const BIG_SPILL_R := 30.0
 var big_spills: int = 0        # стендам: скольким отрядам цель переписана
 
 func _big_target_spread(big: Unit) -> Dictionary:
@@ -3161,20 +3404,39 @@ func _big_target_spread(big: Unit) -> Dictionary:
 	if sids.size() <= BIG_TARGET_SQUADS:
 		return out
 	var bp: Vector3 = big.global_position
+	var giants: Array = _giants_near(bp, BIG_SPILL_R, big)
+	if giants.is_empty():
+		return out
 	var order: Array = []
 	for sid in sids:
 		var c: Vector3 = GameManager.squad_centroid(int(sid))
 		order.append([c.distance_squared_to(bp), int(sid), c])
 	order.sort_custom(func(a, b): return float(a[0]) < float(b[0]))
+	var gi: int = 0
 	for k in range(BIG_TARGET_SQUADS, order.size()):
 		var sid2: int = int(order[k][1])
-		var c2: Vector3 = order[k][2]
-		var alt: Node3D = _nearest_hostile(c2, BIG_SPILL_R, big)
-		if alt == null:
-			alt = _nearest_hostile(bp, BIG_SPILL_R, big)
-		if alt != null:
-			out[sid2] = alt
-			big_spills += 1
+		out[sid2] = giants[gi % giants.size()]
+		gi += 1
+		big_spills += 1
+	return out
+
+## Живые чужие гиганты (крупная цель — fine_ring_radius > 0) в радиусе,
+## кроме исключённого; ближние первыми
+func _giants_near(p: Vector3, r: float, skip: Node3D) -> Array:
+	var found: Array = []
+	for n in GameManager.unit_grid.query_radius(p, r):
+		if n == null or not is_instance_valid(n) or n == skip:
+			continue
+		var e := n as Unit
+		if e == null or e.is_dead() or e.faction == Constants.FACTION_PLAYER or e.garrisoned:
+			continue
+		if e.fine_ring_radius() <= 0.0:
+			continue
+		found.append([e.global_position.distance_squared_to(p), e])
+	found.sort_custom(func(a, b): return float(a[0]) < float(b[0]))
+	var out: Array = []
+	for f in found:
+		out.append(f[1])
 	return out
 
 ## Ближайший живой чужой боец к точке (кроме исключённого)
@@ -3204,6 +3466,19 @@ func _ring_squads_around(b: Building) -> Dictionary:
 			continue
 		var sid: int = (u as Unit).squad_id
 		if sid <= 0:
+			continue
+		# ── СТРЕЛКИ У СТЕНЫ НЕ ТОЛПЯТСЯ — КОЛЬЦО И РАЗЛИВ НЕ ДЛЯ НИХ ─────
+		# (ТЗ 19.09.2026, Garrison Archers). Дуга подхода и «лишние — на
+		# соседний дом» придуманы против толчеи ПЕХОТЫ у одной стены; отряд
+		# лучников бьёт с 20 м и места у стены не занимает. Десять отрядов
+		# лучников по башне здесь получали: три — сектор у стены, остальные —
+		# СОСЕДНИЕ здания того же вида либо «держать позицию» во втором ряду,
+		# то есть теряли указанную цель (жалоба «лучники теряют фокус»)
+		if _OptSys.ring_skip_ranged and (u as Unit)._is_ranged():
+			# И прежний сектор снимается ЗДЕСЬ: иначе стрелковый отряд шёл бы
+			# к точке ПРОШЛОЙ осады (qa_mass_siege S1: отставание 33 м у
+			# лучников со старым якорем)
+			GameManager.squad_clear_attack_anchor(sid)
 			continue
 		if not by_squad.has(sid):
 			by_squad[sid] = []

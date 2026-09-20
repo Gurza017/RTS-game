@@ -1,28 +1,38 @@
 ## ═══════════════════════════════════════════════════════════════════════════
-## ГОЛОСОВОЕ УПРАВЛЕНИЕ: микрофон → Vosk в фоне → приказ отрядам по типу войск
+## ГОЛОСОВОЕ УПРАВЛЕНИЕ: микрофон → Vosk в фоне → приказ отрядам области
 ## ═══════════════════════════════════════════════════════════════════════════
 ## Изолированный узел: свой аудио-бус с захватом, свой слой интерфейса (иконка
-## микрофона, плашка распознанного текста), свой C#-распознаватель в фоновом
-## потоке. Главный поток за кадр делает две дешёвые вещи: забирает буфер
-## микрофона (копия нескольких сотен пар float) и опрашивает очередь
-## результатов. Ни один шаг распознавания в главном потоке не идёт.
+## микрофона и плашка распознанного текста — обе в ПРАВОМ НИЖНЕМ углу, ТЗ
+## 19.09.2026), свой C#-распознаватель в фоновом потоке. Главный поток за кадр
+## делает две дешёвые вещи: забирает буфер микрофона (копия нескольких сотен
+## пар float) и опрашивает очередь результатов. Ни один шаг распознавания в
+## главном потоке не идёт.
 ##
 ## Управление: зажать V (push-to-talk), сказать, отпустить. Через 0.3-0.8 с
-## плашка внизу показывает текст, отряды откликаются и исполняют.
+## плашка показывает текст, отряды откликаются и исполняют.
 ##
-## КТО: «копейщики / фаланга», «лучники / стрелки», «мечники / пехота»,
-## «конница / всадники», «все / армия»; ни одна группа не названа — все боевые.
-## Групп в одной фразе может быть несколько.
+## ОБЛАСТЬ ДЕЙСТВИЯ (ТЗ 19.09.2026, блок 2): есть выделенные боевые отряды —
+## команда ТОЛЬКО им; никто не выделен — всем своим боевым отрядам В КАДРЕ
+## (центр отряда в усечённой пирамиде камеры). Прежнее «пусто — вся армия»
+## (03.09.2026) и «пусто — никому» (спринт 18) сняты этим ТЗ.
+## ФИЛЬТР РОДА (блок 3): «копья / копейщики / фаланга», «луки / лучники /
+## стрелки», «мечи / рыцари / мечников / пехота», «конница / всадники» —
+## сужают область до рода; «все» или ничего — вся область.
 ## ЧТО (voice_commands_config.INTENTS):
-##   «в атаку»          → марш по курсу на ATTACK_M, звучит ГОРН
-##   «вперёд / марш»    → марш по курсу на FORWARD_M, стойка как была
-##   «отступать [на N]» → отход назад на N м лицом к противнику; фаланга
-##                        поднимает копья на время отхода и опускает по приходу
-##   «стоять»           → встать на месте, стойка не меняется
-##   «держать позицию»  → стойка «оборона» (копья вниз)
-##   «вольно»           → стойка «атака» (копья вверх, просто стоят)
+##   «в атаку»               → приказ атаки на ближайшего врага, звучит ГОРН;
+##                             врага нет — марш на ATTACK_M по курсу
+##   «вперёд / вправо»       → сдвиг ВПРАВО по экрану на VOICE_STEP_M
+##   «назад / влево»         → сдвиг ВЛЕВО по экрану
+##   «вверх», «вниз»         → сдвиг вверх / вниз по экрану
+##   «отступать [на N]»      → вектор, ОБРАТНЫЙ последнему движению отряда;
+##                             фаланга поднимает копья на время отхода и
+##                             опускает по приходу
+##   «стоять»                → встать на месте, стойка не меняется
+##   «держать строй / деф»   → стойка «оборона» ВСЕМ отрядам области: встать,
+##                             бросить цели, сомкнуть строй (блок 6)
+##   «вольно»                → стойка «атака» (авто-агро, копья вверх)
 ## Приказы идут ТЕМИ ЖЕ функциями, что и мышь (set_stance, command_move с
-## player_order); строй переносится целиком одним вектором на всех.
+## player_order, squad_close_ranks); строй переносится целиком одним вектором.
 extends Node
 class_name VoiceControl
 
@@ -40,6 +50,15 @@ const REFORM_CHECK_SEC := 0.25
 const REFORM_TIMEOUT_SEC := 25.0
 ## Отряд «пришёл», когда его центр в этом радиусе от точки назначения
 const REFORM_ARRIVE_M := 2.0
+## Интерфейс: отступ от правого и нижнего края экрана, размер шрифта плашки
+## распознанного текста (компактный, заказ ~24 px), просвет между иконкой и
+## плашкой. Правый нижний угол пуст: нижняя панель выделения живёт слева
+## (HUD.PANEL_LEFT), панель ресурсов и подпись строя — сверху
+const UI_MARGIN := 12.0
+const TEXT_FONT_PX := 24
+const MIC_TEXT_GAP := 8.0
+## «Отступать» без вектора движения: прочь от ближайшего врага в этом радиусе
+const RETREAT_FOE_SEARCH_M := 60.0
 
 var _rec = null                       # VoiceRecognizer (C#)
 var _capture: AudioEffectCapture = null
@@ -47,6 +66,8 @@ var _player: AudioStreamPlayer = null
 var _listening: bool = false
 var _tail: int = 0
 var _layer: CanvasLayer = null
+var _ui_box: VBoxContainer = null
+var _mic_box: HBoxContainer = null
 var _mic_dot: ColorRect = null
 var _mic_bar: ColorRect = null
 var _mic_label: Label = null
@@ -58,9 +79,14 @@ var _last_error: String = ""
 var last_command: Dictionary = {}
 var last_voice_event: String = ""
 var commands_applied: int = 0
+## Откуда взята область последней команды: "selection" / "view" / ""
+var last_area: String = ""
 ## Фаланги в отходе: sid → {"target": центр назначения, "until_ms"}
 var _reform: Dictionary = {}
 var _reform_timer: float = 0.0
+## Последний вектор движения, выданный отряду голосом: sid → единичный
+## вектор XZ. По нему «отступать» строит обратный вектор (блок 5)
+var _last_vec: Dictionary = {}
 
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
@@ -110,25 +136,73 @@ func start_recognizer() -> void:
 	_rec = _Recognizer.new()
 	var dir: String = model_path()
 	if dir == "":
-		_last_error = "модель не найдена (voice_models/%s)" % MODEL_DIR
+		# Называем КУДА смотрели: в собранной игре это единственный способ
+		# понять, что рядом с .exe забыли папку voice_models
+		_last_error = "модель не найдена (%s); искали: %s" % [MODEL_DIR, ", ".join(model_dirs())]
 		push_warning("VoiceControl: " + _last_error)
+		_mic_label.text = "V — нет модели"
 		return
 	var grammar: String = JSON.stringify(_Cfg.grammar_words())
 	if not _rec.Start(dir, grammar, AudioServer.get_mix_rate()):
 		_last_error = String(_rec.GetError())
 		push_warning("VoiceControl: " + _last_error)
+		_mic_label.text = "V — ошибка"
 
-## Модель ищется рядом с проектом (res://voice_models, папка под .gdignore) и
-## рядом с исполняемым файлом (экспорт). PCK её не содержит намеренно: 45 МБ
-## и тысячи файлов, которые Godot иначе пытался бы импортировать
-static func model_path() -> String:
-	var candidates: Array = [
-		ProjectSettings.globalize_path("res://voice_models/" + MODEL_DIR),
-		OS.get_executable_path().get_base_dir().path_join("voice_models").path_join(MODEL_DIR),
+## ── ГДЕ ИЩЕТСЯ МОДЕЛЬ ──────────────────────────────────────────────────────
+## PCK её не содержит НАМЕРЕННО: 88 МБ и тысячи файлов, которые Godot иначе
+## пытался бы импортировать, — а главное, нативной libvosk нужен НАСТОЯЩИЙ
+## путь на диске: читать из pck она не умеет вовсе. Значит, в собранной игре
+## модель обязана лежать отдельной папкой рядом с .exe, и если её забыли
+## скопировать, голосового управления в билде нет совсем (ровно эта потеря и
+## чинилась 20.09.2026 — в редакторе всё работало, в Alfa 1.0x модели рядом
+## не оказалось).
+##
+## Обход каталога здесь ЗАКОННЫЙ и правилу 8 («не перебирать DirAccess ради
+## ассетов») не противоречит: там речь о res:// и .import, у которых в
+## экспорте другие имена, а тут — обычная папка на диске, вне ресурсов.
+##
+## Порядок кандидатов: проект → рядом с .exe → папка данных экспорта
+## (data_<имя>_<платформа>, туда же едут нативные DLL) → user://.
+static func model_dirs() -> Array:
+	var exe: String = OS.get_executable_path().get_base_dir()
+	var roots: Array = [
+		ProjectSettings.globalize_path("res://voice_models"),
+		exe.path_join("voice_models"),
 	]
-	for c in candidates:
-		if DirAccess.dir_exists_absolute(String(c)):
-			return String(c)
+	var d := DirAccess.open(exe)
+	if d != null:
+		d.list_dir_begin()
+		var nm: String = d.get_next()
+		while nm != "":
+			if d.current_is_dir() and nm.begins_with("data_"):
+				roots.append(exe.path_join(nm).path_join("voice_models"))
+			nm = d.get_next()
+		d.list_dir_end()
+	roots.append(ProjectSettings.globalize_path("user://voice_models"))
+	return roots
+
+static func model_path() -> String:
+	for r in model_dirs():
+		var root: String = String(r)
+		var exact: String = root.path_join(MODEL_DIR)
+		if DirAccess.dir_exists_absolute(exact):
+			return exact
+		# Игрок мог положить ДРУГУЮ версию модели: берём первую vosk-model-*.
+		# Имя папки в неё не зашито — зашит только порядок поиска
+		var dd := DirAccess.open(root)
+		if dd == null:
+			continue
+		dd.list_dir_begin()
+		var nm: String = dd.get_next()
+		var found: String = ""
+		while nm != "":
+			if dd.current_is_dir() and nm.begins_with("vosk-model"):
+				found = root.path_join(nm)
+				break
+			nm = dd.get_next()
+		dd.list_dir_end()
+		if found != "":
+			return found
 	return ""
 
 func recognizer_ready() -> bool:
@@ -182,6 +256,10 @@ func _end() -> void:
 
 func _process(delta: float) -> void:
 	_tick_reform(delta)
+	# Плашка гаснет по сроку и без распознавателя (headless, стенды)
+	if _text_panel.visible and Time.get_ticks_msec() > _text_until_ms:
+		_text_panel.visible = false
+		_layout_corner()
 	if _rec == null:
 		return
 	# Кадры микрофона — пока кнопка зажата и ещё TAIL_FRAMES после
@@ -199,18 +277,16 @@ func _process(delta: float) -> void:
 	# Уровень и частичный текст — только пока слушаем
 	if _listening:
 		var lvl: float = clampf(float(_rec.GetLevel()) * 6.0, 0.0, 1.0)
-		_mic_bar.size.x = 8.0 + 72.0 * lvl
+		_mic_bar.custom_minimum_size.x = 8.0 + 72.0 * lvl
 		var part: String = String(_rec.GetPartial())
 		if part != "":
 			_show_text(part, Color(0.75, 0.75, 0.75), 0.5)
 	else:
-		_mic_bar.size.x = 8.0
+		_mic_bar.custom_minimum_size.x = 8.0
 	# Готовый результат
 	var text: String = String(_rec.PollFinal())
 	if text != "":
 		apply_text(text)
-	if _text_panel.visible and Time.get_ticks_msec() > _text_until_ms:
-		_text_panel.visible = false
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ТЕКСТ → ПРИКАЗ. Отдельная точка входа: стенд кормит её строками без микрофона
@@ -221,31 +297,35 @@ func apply_text(text: String) -> Dictionary:
 	if intent == "":
 		_show_text("не понял: «%s»" % text, Color(1.0, 0.6, 0.6), TEXT_SHOW_SEC)
 		return m
+	# ── ОБЛАСТЬ: ВЫДЕЛЕНИЕ, ИНАЧЕ КАДР; ПОВЕРХ — ФИЛЬТР РОДА ─────────────
+	# «Защита только копейщикам» (спринт 18, письмо 4) РАЗВЁРНУТА ТЗ 19.09.2026,
+	# блок 6: «держать строй» переводит в оборону ВСЕ отряды области (с
+	# фильтром рода, если он назван) — оборона это остановка, снятие целей и
+	# смыкание строя, а не только копья вниз
 	var sids: Array = squads_for(m["groups"])
-	# ── «ЗАЩИТА» — ТОЛЬКО КОПЕЙЩИКАМ (четвёртое письмо спринта 18) ────────
-	# «Деф / защита / держать строй» — режим фаланги: копейщики выделения
-	# смыкаются стеной копий, ВСЕ ОСТАЛЬНЫЕ (лучники, мечники, конница)
-	# команду не получают вовсе: ни стойки, ни строя, ни сброса приказа.
-	# Выделение пусто — все копейщики армии: команда никого не срывает с
-	# места, «срыва армии» из прежней жалобы здесь нет
-	if intent == "defense":
-		sids = _spearmen_only(sids if not sids.is_empty() else _all_squads_of_type("spearman"))
 	if sids.is_empty():
 		_show_text("некому: «%s»" % text, Color(1.0, 0.85, 0.5), TEXT_SHOW_SEC)
 		return m
+	var dist: float = float(m["distance"])
 	match intent:
 		"defense":
-			_order_stance(sids, "defense")
+			_order_hold(sids)
 		"at_ease":
 			_order_stance(sids, "attack")
 		"stop":
 			_order_stop(sids)
 		"forward":
-			_order_march(sids, _Cfg.FORWARD_M, false)
+			_order_dir(sids, screen_right(), dist)
+		"back":
+			_order_dir(sids, -screen_right(), dist)
+		"up":
+			_order_dir(sids, screen_up(), dist)
+		"down":
+			_order_dir(sids, -screen_up(), dist)
 		"attack":
 			_order_attack(sids)
 		"retreat":
-			_order_retreat(sids, float(m["distance"]))
+			_order_retreat(sids, dist)
 	# Отклик: на атаку — горн, на остальное — один клич первого отряда, не хор
 	if intent == "attack":
 		AudioManager.play_voice("horn_attack")
@@ -258,16 +338,34 @@ func apply_text(text: String) -> Dictionary:
 	_show_text(text, Color(1, 1, 1), TEXT_SHOW_SEC)
 	return m
 
-## ── ГОЛОС — ТОЛЬКО ВЫДЕЛЕННЫМ (спринт 18, второе письмо) ─────────────────
-## Жалоба: «голосовые команды выполняет ВСЯ армия на карте». Раньше отряды
-## брались по типу из реестра ВСЕЙ армии игрока. Теперь — из текущего
-## выделения (рамка ЛКМ, клик по отряду, группа Ctrl+1..9): слово рода войск
-## сужает выделение до этого типа, без слова («все» или ничего) — всё
-## выделенное боевое. Пусто выделение — пусто и множество: с места никто не
-## срывается. Рабочих не трогаем и здесь
+# ─────────────────────────────────────────────────────────────────────────────
+# ОБЛАСТЬ ДЕЙСТВИЯ
+# ─────────────────────────────────────────────────────────────────────────────
+## Отряды, которым адресована команда (ТЗ 19.09.2026, блоки 2-3).
+## Есть выделенные боевые отряды игрока (рамка ЛКМ, клик, Ctrl+1..9) —
+## команда ТОЛЬКО им; выделение пусто (или в нём одни постройки и рабочие) —
+## всем своим боевым отрядам, чей центр В КАДРЕ. Слово рода войск сужает
+## область до этого рода; без слова («все» или ничего) — вся область.
+## Рабочие и монахи — не боевые (squad_is_combat), их не трогаем нигде
 func squads_for(groups: Array) -> Array:
-	var out: Array = []
 	var all: bool = groups.has("all") or groups.is_empty()
+	var area: Array = selected_squads()
+	last_area = "selection"
+	if area.is_empty():
+		area = squads_in_view()
+		last_area = "view"
+	var out: Array = []
+	for sid in area:
+		var s: int = int(sid)
+		if all or groups.has(GameManager.squad_type(s)):
+			out.append(s)
+	if out.is_empty() and area.is_empty():
+		last_area = ""
+	return out
+
+## Боевые отряды игрока в текущем выделении, без повторов, в порядке выделения
+func selected_squads() -> Array:
+	var out: Array = []
 	var sm = _selection_manager()
 	if sm == null:
 		return out
@@ -283,28 +381,65 @@ func squads_for(groups: Array) -> Array:
 			continue
 		if not GameManager.squad_is_combat(sid):
 			continue
-		var kind: String = GameManager.squad_type(sid)
-		if all or groups.has(kind):
-			seen[sid] = true
-			out.append(sid)
+		seen[sid] = true
+		out.append(sid)
 	return out
 
-## Только копейщики из списка отрядов
-func _spearmen_only(sids: Array) -> Array:
-	var out: Array = []
-	for sid in sids:
-		if GameManager.squad_type(int(sid)) == "spearman":
-			out.append(int(sid))
-	return out
-
-## Все отряды игрока данного рода войск (для «защиты» без выделения)
-func _all_squads_of_type(kind: String) -> Array:
+## Боевые отряды игрока, чей центр (медиана) попадает в кадр камеры.
+## Один обход реестра отрядов на команду — покадрового пути здесь нет
+func squads_in_view() -> Array:
 	var out: Array = []
 	for sq in GameManager.squads_of_faction(Constants.FACTION_PLAYER):
 		var d := sq as Dictionary
-		if String(d["type"]) == kind:
-			out.append(int(d["id"]))
+		var sid: int = int(d["id"])
+		if not GameManager.squad_is_combat(sid):
+			continue
+		var c: Vector3 = GameManager.squad_centroid(sid)
+		if in_view(c):
+			out.append(sid)
 	return out
+
+## Видна ли точка мира на экране. Камера ортографическая с фиксированным
+## ракурсом, усечённая пирамида — честный ответ «в кадре ли»; камеры нет
+## (стенд без сцены) — по точке фокуса и радиусу видимой земли, а нет и её —
+## считаем видимым всё
+func in_view(p: Vector3) -> bool:
+	var cam: Camera3D = get_viewport().get_camera_3d() if is_inside_tree() else null
+	if cam != null and is_instance_valid(cam):
+		return cam.is_position_in_frustum(p)
+	if GameManager.has_view_point():
+		var vp: Vector3 = GameManager.view_point()
+		var r: float = GameManager.view_radius()
+		return Vector2(p.x - vp.x, p.z - vp.z).length() <= r
+	return true
+
+## ── ОСИ ЭКРАНА В МИРЕ (ТЗ 19.09.2026, блок 4) ─────────────────────────────
+## «Вперёд» — вправо по экрану, «вверх» — вверх по экрану. Ракурс камеры
+## зафиксирован (RTSCamera.FIXED_YAW 0: X+ мира = экранное право, Z− = верх
+## экрана), но оси берутся у самой камеры — из её базиса, спроецированного на
+## землю, — и не разойдутся с картинкой, если ракурс когда-нибудь подвинут
+func screen_right() -> Vector3:
+	var cam: Camera3D = get_viewport().get_camera_3d() if is_inside_tree() else null
+	if cam != null and is_instance_valid(cam):
+		var r: Vector3 = cam.global_transform.basis.x
+		r.y = 0.0
+		if r.length_squared() > 1e-6:
+			return r.normalized()
+	return Vector3(1, 0, 0)
+
+func screen_up() -> Vector3:
+	var cam: Camera3D = get_viewport().get_camera_3d() if is_inside_tree() else null
+	if cam != null and is_instance_valid(cam):
+		var u: Vector3 = -cam.global_transform.basis.z
+		u.y = 0.0
+		if u.length_squared() > 1e-6:
+			return u.normalized()
+	return Vector3(0, 0, -1)
+
+## Последний вектор движения отряда, выданный голосом (окно для стендов)
+func last_vec(sid: int) -> Vector3:
+	var v: Variant = _last_vec.get(sid)
+	return (v as Vector3) if v != null else Vector3.ZERO
 
 func _selection_manager():
 	var mn = GameManager.main
@@ -316,6 +451,9 @@ func _selection_manager():
 func spearman_squads() -> Array:
 	return squads_for(["spearman"])
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ПРИКАЗЫ
+# ─────────────────────────────────────────────────────────────────────────────
 func _order_stance(sids: Array, stance: String) -> void:
 	for sid in sids:
 		_reform.erase(int(sid))   # ручная стойка отменяет отложенное опускание копий
@@ -323,6 +461,41 @@ func _order_stance(sids: Array, stance: String) -> void:
 			if is_instance_valid(u) and (u as Unit).has_method("set_stance"):
 				(u as Unit).set_stance(stance)
 		GameManager.on_squad_stance(int(sid), stance)   # стена копий (спринт 18)
+
+## ── «ДЕРЖАТЬ СТРОЙ» = ОБОРОНА С МЕСТА ВСЕМ ОТРЯДАМ ОБЛАСТИ (блок 6) ──────
+## Три действия, и порядок между ними важен:
+##  1. СМЫКАНИЕ СТРОЯ — первым. Штатное squad_close_ranks(force) судит о
+##     целости строя по посту бойца (post_pos), а остановка (command_move в
+##     собственную точку) переносит пост под ноги — сомкни после неё, и
+##     растянутый строй читался бы целым. Смыкание само не трогает ни
+##     дерущихся, ни идущих по приказу игрока — их останавливает шаг 2.
+##  2. ОСТАНОВКА тех, кто дерётся (цель снята — преследование кончилось) или
+##     идёт по прежнему приказу игрока: встать где стоят.
+##  3. СТОЙКА «оборона» каждому и отрядная точка входа on_squad_stance — тот
+##     же путь, что у кнопки [ЗАЩИТА] панели: копейщикам со «Стеной копий»
+##     достаётся стена, стоящему отряду — разметка «где стоим»
+##     (_formation_in_place), без единого шага (ТЗ 14.09.2026, п. 8).
+## РАЗВОРОТ: до ТЗ 19.09.2026 голосовая «защита» шла ТОЛЬКО копейщикам
+## (спринт 18, письмо 4); теперь — всем родам области, с фильтром рода,
+## если он назван («лучники держать строй» — только лучникам)
+func _order_hold(sids: Array) -> void:
+	for sid in sids:
+		var s: int = int(sid)
+		_reform.erase(s)
+		var members: Array = GameManager.squad_members(s)
+		if members.is_empty():
+			continue
+		GameManager.squad_close_ranks(s, true)
+		for u in members:
+			if not is_instance_valid(u):
+				continue
+			var uu := u as Unit
+			if uu.attack_target != null or uu.player_order_active() or uu.target_lock:
+				uu.command_move(uu.global_position, false, Vector3.ZERO, false, true)
+		for u2 in members:
+			if is_instance_valid(u2) and (u2 as Unit).has_method("set_stance"):
+				(u2 as Unit).set_stance("defense")
+		GameManager.on_squad_stance(s, "defense")
 
 ## Встать на месте: приказ идти в собственную точку — прибытие мгновенное,
 ## боец переходит в покой, цель атаки снята; стойка и курс не меняются
@@ -335,19 +508,54 @@ func _order_stop(sids: Array) -> void:
 			var uu := u as Unit
 			uu.command_move(uu.global_position, false, Vector3.ZERO, false, true)
 
-## Марш всем составом по курсу отряда: каждому бойцу своя точка, смещённая на
-## один и тот же вектор, — строй переносится целиком (тот же приём, что у
-## стены строя). back = true — назад, лицом к противнику
-func _order_march(sids: Array, dist: float, back: bool) -> void:
+## ── СДВИГ ПО ОСИ ЭКРАНА (блоки 4-5) ───────────────────────────────────────
+## Марш всем составом на dist по единичному вектору dir: каждому бойцу своя
+## точка, смещённая на один и тот же вектор, — строй переносится целиком (тот
+## же приём, что у стены строя и у марша мышью). Разметка отряда переезжает
+## вместе с людьми, курс = направление хода: по нему считаются ряды фаланги и
+## смыкание после боя. face — куда смотреть по приходу (по умолчанию по ходу;
+## отход смотрит НАЗАД, на противника). Вектор запоминается — по нему строит
+## обратный «отступать» (remember = false — сам отход: повторное «отступать»
+## обязано вести ДАЛЬШЕ в ту же сторону, а не разворачивать отряд обратно)
+func _order_dir(sids: Array, dir: Vector3, dist: float, face: Vector3 = Vector3.ZERO,
+		remember: bool = true) -> void:
+	dir.y = 0.0
+	if dir.length_squared() < 1e-6:
+		return
+	dir = dir.normalized()
+	var face_dir: Vector3 = face if face.length_squared() > 1e-6 else dir
+	var shift: Vector3 = dir * dist
 	for sid in sids:
-		_reform.erase(int(sid))
-		var course: Vector3 = squad_heading(int(sid))
-		var shift: Vector3 = course * (-dist if back else dist)
-		for u in GameManager.squad_members(int(sid)):
+		var s: int = int(sid)
+		_reform.erase(s)
+		var members: Array = GameManager.squad_members(s)
+		if members.is_empty():
+			continue
+		_shift_formation(s, members, shift, face_dir)
+		for u in members:
 			if not is_instance_valid(u):
 				continue
 			var uu := u as Unit
-			uu.command_move(uu.global_position + shift, false, course, false, true)
+			uu.command_move(uu.global_position + shift, false, face_dir, false, true)
+		if remember:
+			_last_vec[s] = dir
+
+## Разметка отряда, перенесённая на тот же вектор: места — текущие точки
+## бойцов плюс сдвиг, порядок от передовой к тылу по курсу (так требует
+## смыкание рядов, см. SelectionManager._issue_march_keeping_shape)
+func _shift_formation(sid: int, members: Array, shift: Vector3, course: Vector3) -> void:
+	var ordered: Array = []
+	for u in members:
+		if is_instance_valid(u):
+			ordered.append(u)
+	ordered.sort_custom(func(a, b):
+		return (a as Node3D).global_position.dot(course) > (b as Node3D).global_position.dot(course))
+	var slots: Array = []
+	for u in ordered:
+		var p: Vector3 = (u as Node3D).global_position + shift
+		p.y = 0.0
+		slots.append(p)
+	GameManager.squad_set_formation(sid, slots, course, false)
 
 ## ── «В АТАКУ» — ЭТО ПРИКАЗ АТАКИ, А НЕ МАРШ ВСЛЕПУЮ ─────────────────────────
 ## ЖАЛОБА ВЛАДЕЛЬЦА (спринт 15): «лучники по команде "в атаку" должны выдвигаться
@@ -382,6 +590,10 @@ func _order_attack(sids: Array) -> void:
 		if foe == null:
 			march_sids.append(s)
 			continue
+		var fp: Vector3 = foe.global_position
+		var to_foe := Vector3(fp.x - c.x, 0.0, fp.z - c.y)
+		if to_foe.length_squared() > 1e-6:
+			_last_vec[s] = to_foe.normalized()   # «отступать» после атаки — прочь от неё
 		for u in GameManager.squad_members(s):
 			if not is_instance_valid(u):
 				continue
@@ -390,8 +602,10 @@ func _order_attack(sids: Array) -> void:
 				# Те же четыре аргумента, что у правого клика (SelectionManager):
 				# приказ игрока, разгон разрешён, замок цели
 				uu.command_attack(foe, true, true, true)
-	if not march_sids.is_empty():
-		_order_march(march_sids, _Cfg.ATTACK_M, false)
+	# Врага рядом нет — марш по курсу отряда (курс, а не ось экрана: «в атаку»
+	# оставлено как было, ТЗ 19.09.2026)
+	for s2 in march_sids:
+		_order_dir([s2], squad_heading(int(s2)), _Cfg.ATTACK_M)
 
 ## Ближайший живой чужой боец в радиусе от точки — по сетке соседей, а не
 ## перебором армии. Зовётся ИЗ ПРИКАЗА (раз на команду), не из кадра
@@ -413,16 +627,23 @@ func _nearest_foe(at: Vector3, radius: float) -> Node3D:
 			best = u
 	return best
 
-## ОТХОД. Заказ владельца: фаланга не пятится с опущенными копьями. Копья
-## поднимаются (стойка «атака»), отряд отходит на N м, по приходу встаёт,
-## разворачивается лицом к противнику (face_on_arrive = курс) и снова
-## опускает копья (стойка «оборона»). Отряды в другой стойке просто отходят
+## ── ОТХОД: СТРОГО ОБРАТНО ПОСЛЕДНЕМУ ДВИЖЕНИЮ (блок 5) ────────────────────
+## Шёл вправо — отходит влево, шёл вверх — вниз. Вектор берётся: (1) из
+## последнего голосового приказа отряду, (2) иначе из курса разметки
+## (последний приказ мышью — squad_course), (3) отряд стоял и курса нет —
+## прочь от ближайшего врага в RETREAT_FOE_SEARCH_M, (4) врага нет — назад
+## от направления на чужую базу (squad_heading). Лицом — на то, откуда
+## отходим. Заказ владельца: фаланга не пятится с опущенными копьями. Копья
+## поднимаются (стойка «атака»), отряд отходит, по приходу встаёт лицом к
+## противнику (face_on_arrive) и снова опускает копья (стойка «оборона»).
+## Отряды в другой стойке просто отходят
 func _order_retreat(sids: Array, dist: float) -> void:
 	for sid in sids:
 		var s: int = int(sid)
 		var members: Array = GameManager.squad_members(s)
 		if members.is_empty():
 			continue
+		var back: Vector3 = retreat_dir(s)
 		var in_defense := 0
 		for u in members:
 			if is_instance_valid(u) and (u as Unit).stance == "defense":
@@ -432,18 +653,31 @@ func _order_retreat(sids: Array, dist: float) -> void:
 			for u in members:
 				if is_instance_valid(u):
 					(u as Unit).set_stance("attack")   # копья вверх на время отхода
-		var course: Vector3 = squad_heading(s)
-		var shift: Vector3 = course * (-dist)
-		for u in members:
-			if not is_instance_valid(u):
-				continue
-			var uu := u as Unit
-			uu.command_move(uu.global_position + shift, false, course, false, true)
+		var centre_before: Vector3 = GameManager.squad_centroid(s)
+		_order_dir([s], back, dist, -back, false)
 		if phalanx:
 			_reform[s] = {
-				"target": GameManager.squad_centroid(s) + shift,
+				"target": centre_before + back * dist,
 				"until_ms": Time.get_ticks_msec() + int(REFORM_TIMEOUT_SEC * 1000.0),
 			}
+
+## Куда отходит отряд (единичный вектор XZ) — см. _order_retreat
+func retreat_dir(sid: int) -> Vector3:
+	var lv: Vector3 = last_vec(sid)
+	if lv.length_squared() > 1e-6:
+		return -lv.normalized()
+	var course: Vector3 = GameManager.squad_course(sid)
+	course.y = 0.0
+	if course.length_squared() > 1e-6:
+		return -course.normalized()
+	var mid: Vector3 = GameManager.squad_centroid(sid)
+	var foe: Node3D = _nearest_foe(mid, RETREAT_FOE_SEARCH_M)
+	if foe != null:
+		var fp: Vector3 = foe.global_position
+		var away := Vector3(mid.x - fp.x, 0.0, mid.z - fp.z)
+		if away.length_squared() > 1e-6:
+			return away.normalized()
+	return -squad_heading(sid)
 
 ## Такт отхода: отряд пришёл (центр у цели или все встали) — копья вниз
 func _tick_reform(delta: float) -> void:
@@ -481,7 +715,7 @@ func reform_pending(sid: int) -> bool:
 	return _reform.has(sid)
 
 ## Курс отряда: курс последнего строевого приказа; без него — на замок
-## противника от центра отряда
+## противника от центра отряда. Читает марш «в атаку» без врага рядом
 static func squad_heading(sid: int) -> Vector3:
 	var c: Vector3 = GameManager.squad_course(sid)
 	c.y = 0.0
@@ -496,58 +730,112 @@ static func squad_heading(sid: int) -> Vector3:
 	return d.normalized() if d.length_squared() > 1e-6 else Vector3(1, 0, 0)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ИНТЕРФЕЙС: иконка микрофона слева сверху, плашка текста внизу по центру
+# ИНТЕРФЕЙС: иконка микрофона и плашка текста — В ПРАВОМ НИЖНЕМ УГЛУ
+# (ТЗ 19.09.2026, блок 1). В левом верхнем иконка перекрывала панель
+# выделенного рабочего, плашка по центру низа — панель выделения. Оба узла
+# привязаны к правому нижнему углу якорями (1, 1) и растут ВЛЕВО и ВВЕРХ
+# (grow BEGIN): контейнер сам берёт размер по содержимому, а угол остаётся
+# на месте при любом тексте и любом размере окна
 # ─────────────────────────────────────────────────────────────────────────────
 func _setup_ui() -> void:
 	_layer = CanvasLayer.new()
 	_layer.layer = 40
 	add_child(_layer)
-	var mic := HBoxContainer.new()
-	mic.position = Vector2(12, 60)
-	mic.add_theme_constant_override("separation", 6)
-	_layer.add_child(mic)
-	_mic_dot = ColorRect.new()
-	_mic_dot.custom_minimum_size = Vector2(14, 14)
-	_mic_dot.color = Color(0.5, 0.5, 0.5)
-	mic.add_child(_mic_dot)
-	_mic_bar = ColorRect.new()
-	_mic_bar.custom_minimum_size = Vector2(8, 14)
-	_mic_bar.size = Vector2(8, 14)
-	_mic_bar.color = Color(0.3, 0.9, 0.3)
-	mic.add_child(_mic_bar)
-	_mic_label = Label.new()
-	_mic_label.text = "V — говорить"
-	_mic_label.add_theme_font_size_override("font_size", 13)
-	mic.add_child(_mic_label)
+	# Один столбик у правого нижнего угла: сверху плашка текста (пока видна),
+	# снизу иконка микрофона. Оба прижаты к правому краю столбика, столбик
+	# растёт влево и вверх — перекрыться им нечем по построению
+	_ui_box = VBoxContainer.new()
+	_ui_box.name = "VoiceCorner"
+	_ui_box.alignment = BoxContainer.ALIGNMENT_END
+	_ui_box.add_theme_constant_override("separation", int(MIC_TEXT_GAP))
+	_pin_bottom_right(_ui_box, UI_MARGIN, UI_MARGIN)
+	_layer.add_child(_ui_box)
+	# Столбик кладётся в угол ЯВНО по каждому изменению размера: у Control под
+	# CanvasLayer рост минимального размера двигает размер, но не позицию
+	# (grow BEGIN не срабатывает — проверено зондом), а сжатия по скрытию
+	# плашки у контейнера нет вовсе
+	_ui_box.resized.connect(_layout_corner)
+	get_viewport().size_changed.connect(_layout_corner)
 
 	_text_panel = PanelContainer.new()
+	_text_panel.name = "VoiceText"
 	_text_panel.visible = false
-	_text_panel.anchor_left = 0.5
-	_text_panel.anchor_right = 0.5
-	_text_panel.anchor_top = 1.0
-	_text_panel.anchor_bottom = 1.0
-	_text_panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
-	_text_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
-	_text_panel.offset_bottom = -110
+	_text_panel.size_flags_horizontal = Control.SIZE_SHRINK_END
 	var style := StyleBoxFlat.new()
 	style.bg_color = Color(0, 0, 0, 0.6)
 	style.set_corner_radius_all(6)
-	style.content_margin_left = 14
-	style.content_margin_right = 14
-	style.content_margin_top = 6
-	style.content_margin_bottom = 6
+	style.content_margin_left = 12
+	style.content_margin_right = 12
+	style.content_margin_top = 4
+	style.content_margin_bottom = 4
 	_text_panel.add_theme_stylebox_override("panel", style)
-	_layer.add_child(_text_panel)
+	_ui_box.add_child(_text_panel)
 	_text_label = Label.new()
-	_text_label.add_theme_font_size_override("font_size", 20)
+	_text_label.add_theme_font_size_override("font_size", TEXT_FONT_PX)
 	_text_panel.add_child(_text_label)
+
+	_mic_box = HBoxContainer.new()
+	_mic_box.name = "MicBox"
+	_mic_box.size_flags_horizontal = Control.SIZE_SHRINK_END
+	_mic_box.add_theme_constant_override("separation", 6)
+	_ui_box.add_child(_mic_box)
+	_mic_dot = ColorRect.new()
+	_mic_dot.custom_minimum_size = Vector2(14, 14)
+	_mic_dot.color = Color(0.5, 0.5, 0.5)
+	_mic_dot.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	_mic_box.add_child(_mic_dot)
+	_mic_bar = ColorRect.new()
+	_mic_bar.custom_minimum_size = Vector2(8, 14)
+	_mic_bar.color = Color(0.3, 0.9, 0.3)
+	_mic_bar.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	_mic_box.add_child(_mic_bar)
+	_mic_label = Label.new()
+	_mic_label.text = "V — говорить"
+	_mic_label.add_theme_font_size_override("font_size", 13)
+	_mic_box.add_child(_mic_label)
+
+## Якоря правого нижнего угла: узел растёт влево и вверх от точки
+## (−right, −bottom) относительно кромок экрана
+static func _pin_bottom_right(c: Control, bottom: float, right: float) -> void:
+	c.anchor_left = 1.0
+	c.anchor_right = 1.0
+	c.anchor_top = 1.0
+	c.anchor_bottom = 1.0
+	c.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	c.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	c.offset_left = -right
+	c.offset_right = -right
+	c.offset_top = -bottom
+	c.offset_bottom = -bottom
+
+## Столбик — размером в своё содержимое, правым нижним углом в точке
+## (экран − UI_MARGIN). Сначала размер (это снова зовёт resized), потом позиция
+func _layout_corner() -> void:
+	if _ui_box == null or not is_inside_tree():
+		return
+	var vp: Vector2 = get_viewport().get_visible_rect().size
+	var ms: Vector2 = _ui_box.get_combined_minimum_size()
+	if _ui_box.size != ms:
+		_ui_box.size = ms
+		return
+	_ui_box.position = vp - Vector2(UI_MARGIN, UI_MARGIN) - ms
 
 func _show_text(text: String, color: Color, sec: float) -> void:
 	_text_label.text = text
 	_text_label.add_theme_color_override("font_color", color)
 	_text_panel.visible = true
-	_text_panel.reset_size()
 	_text_until_ms = Time.get_ticks_msec() + int(sec * 1000.0)
+	_layout_corner()
 
 func shown_text() -> String:
 	return _text_label.text if _text_panel.visible else ""
+
+## Окна для стендов: прямоугольники иконки и плашки на экране, размер шрифта
+func mic_rect() -> Rect2:
+	return _mic_box.get_global_rect() if _mic_box != null else Rect2()
+
+func text_rect() -> Rect2:
+	return _text_panel.get_global_rect() if _text_panel != null else Rect2()
+
+func text_font_px() -> int:
+	return _text_label.get_theme_font_size("font_size") if _text_label != null else 0

@@ -86,6 +86,8 @@ func _food() -> float:
 func _run() -> void:
 	main = load("res://scenes/Main.tscn").instantiate()
 	get_tree().root.add_child(main)
+	# Пень за рекой в партии заморожен (ТЗ 19.09.2026); стенду нужен живой
+	GameManager.call_deferred("thaw_lairs_now")
 	await frames(8)
 	if main.enemy_ai != null:
 		main.enemy_ai.set_process(false)
@@ -188,6 +190,13 @@ func _run() -> void:
 		thief.sheep_phase() == Worker.SheepPhase.CARRY and s.get("captor") == thief and not bool(s.call("is_free"))
 			and thief.state == Unit.State.RETURNING and thief._anim_name == "walk",
 		"фаза %d, лента «%s», физкадров до взятия %d" % [thief.sheep_phase(), thief._anim_name, guard])
+	# Овцу поднимает СЛЕДУЮЩИЙ тик рабочего (ветка CARRY), а тик шардирован:
+	# на живой карте партии шардов три, и два физкадра после смены фазы его
+	# не гарантируют — ждём СВОЙСТВО с потолком (правило 11)
+	guard = 0
+	while guard < 12 and absf((s.global_position.y - thief.global_position.y) - Worker.SHEEP_CARRY_Y) > 0.05:
+		await get_tree().physics_frame
+		guard += 1
 	var lift: float = s.global_position.y - thief.global_position.y
 	var off: float = Vector2(s.global_position.x - thief.global_position.x, s.global_position.z - thief.global_position.z).length()
 	verdict("B3 овца едет над головой рабочего", absf(lift - Worker.SHEEP_CARRY_Y) < 0.05 and off < 0.3,

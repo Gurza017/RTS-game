@@ -113,6 +113,8 @@ func _run() -> void:
 	get_tree().root.content_scale_size = Vector2i(1600, 900)
 	main = load("res://scenes/Main.tscn").instantiate()
 	get_tree().root.add_child(main)
+	# Пень за рекой в партии заморожен (ТЗ 19.09.2026); стенду нужен живой
+	GameManager.call_deferred("thaw_lairs_now")
 	await frames(12)
 	if main.enemy_ai != null:
 		main.enemy_ai.set_process(false)

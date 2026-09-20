@@ -29,6 +29,7 @@ extends Building
 ## Файл без class_name: подключается через preload (как Tower/Archery).
 
 const _UCfgP := preload("res://scripts/unit_stats_config.gd")
+const _SheepP := preload("res://scripts/goblin/Sheep.gd")
 
 ## Сетка меша ограды: 4 × 3 при пропорции картинки 256×192 — по одной ячейке
 ## на «тайл» рисунка, этого хватает, чтобы лечь на любой здешний склон
@@ -42,6 +43,10 @@ const FENCE_TEX := "res://assets/environment/resources/Wooden/Wooden Fence_64x64
 ## Насколько овцам разрешено выходить за ограду (доля полуширины загона).
 ## Единица означала бы «строго внутри», а овца обязана заходить и выходить
 const ROAM_FACTOR := 1.35
+
+## Ограда без стен: овцы пасутся внутри, рабочий заносит овцу в загон
+func blocks_movement() -> bool:
+	return false
 
 func _ready() -> void:
 	# ПОЛЯ СТАВЯТСЯ ДО super._ready(): базовый _ready сразу строит картинку и
@@ -58,9 +63,15 @@ func _exit_tree() -> void:
 	# ОВЦЫ ПЕРЕЖИВАЮТ ЗАГОН: снесённая ограда не убивает стадо, но привязка
 	# гаснет — иначе овцы вечно паслись бы вокруг несуществующего узла и не
 	# размножались бы вовсе (потолок спрашивается у привязки)
+	# ТЗ 19.09.2026: овцы снесённого загона РАЗБЕГАЮТСЯ (Sheep.on_pen_lost —
+	# привязка гаснет, хозяин остаётся, дом переносится в точку овцы) и
+	# становятся блуждающими: их собирает рабочий по ПКМ (Worker, пастух)
 	for s in get_tree().get_nodes_in_group("sheep"):
 		if s != null and is_instance_valid(s) and s.get("pen") == self:
-			s.set("pen", null)
+			if s.has_method("on_pen_lost"):
+				s.call("on_pen_lost")
+			else:
+				s.set("pen", null)
 	super._exit_tree()
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -221,8 +232,12 @@ func sheep_count() -> int:
 			n += 1
 	return n
 
+## Место есть, когда не полон ЗАГОН и не полон ПОТОЛОК ИГРОКА
+## (Sheep.owned_cap_ok, SHEEP_PLAYER_MAX — ТЗ 19.09.2026)
 func has_room() -> bool:
-	return sheep_count() < capacity()
+	if sheep_count() >= capacity():
+		return false
+	return bool(_SheepP.owned_cap_ok(faction))
 
 ## Принять принесённую овцу. Утиный контракт: Worker._sheep_dest ищет по
 ## группе `sheep_pens` любой узел с этим методом

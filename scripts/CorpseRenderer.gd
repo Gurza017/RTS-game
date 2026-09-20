@@ -41,6 +41,7 @@ extends RefCounted
 ## переданный world_root.
 
 const _SHADER := preload("res://shaders/mm_corpse.gdshader")
+const _ArrowC := preload("res://scripts/Arrow.gd")
 const _Vis := preload("res://scripts/units/UnitVisuals.gd")
 const _UCfgC := preload("res://scripts/unit_stats_config.gd")
 
@@ -647,7 +648,10 @@ func _begin_fade(cc: Corpse, secs: float) -> void:
 	cc.sent       = 1.0
 	_fading.append(cc)
 	for a in cc.arrows:
-		if is_instance_valid(a) and a.has_method("fade_out_in"):
+		# Стрела ядра (id записи, этап 3) или legacy-узел Arrow
+		if a is int:
+			GameManager.army.stuck_fade(int(a), secs)
+		elif is_instance_valid(a) and a.has_method("fade_out_in"):
 			a.fade_out_in(secs)
 
 
@@ -864,13 +868,30 @@ func attach_arrow(c, arrow) -> bool:
 ## ПОД КАКИМ УГЛОМ. Вектор попадания доворачивается на свой для каждого тела
 ## угол: строго по траектории все стрелы на поле смотрели бы в одну сторону,
 ## как расчёска
-func stick_arrows(c, killer, incoming: Vector3, head: bool = false) -> bool:
+## ── СТРЕЛА БЕЗ УЗЛА (BigStand-5, этап 3) ─────────────────────────────────
+## killer — либо legacy-узел Arrow (stick_decor), либо НОМЕР СЛОЯ ядра; тогда
+## slot — слот стрелы в слое, length — длина её квада, а в списке тела лежит
+## id записи торчащей (ArmyCore.ProjectileStick): тело гасит её StuckFade
+func stick_arrows(c, killer, incoming: Vector3, head: bool = false,
+		slot: int = -1, length: float = 0.0) -> bool:
 	var cc := c as Corpse
 	if cc == null or killer == null:
 		return false
-	if not attach_arrow(cc, killer):
+	if cc.arrows.size() >= MAX_ARROWS_PER_CORPSE:
 		return false
 	var spot: Vector3 = _head_spot(cc) if head else _arrow_spot(cc)
+	if killer is int:
+		if slot < 0:
+			return false
+		# Растворение — своё по виду снаряда (кость тает быстрее стрелы)
+		var fade: float = _ArrowC.BONE_STUCK_FADE if int(killer) == GameManager.bones_mm.core_id 			else _ArrowC.STUCK_FADE
+		var sid: int = GameManager.army.projectile_stick(int(killer), slot, spot,
+			_arrow_dir(cc, incoming), length, true, 0.0, fade)
+		if sid < 0:
+			return false
+		cc.arrows.append(sid)
+		return true
+	cc.arrows.append(killer)
 	killer.call("stick_decor", spot, _arrow_dir(cc, incoming))
 	return true
 
@@ -919,7 +940,9 @@ func _arrow_dir(cc: Corpse, incoming: Vector3) -> Vector3:
 ## (уходит в пул), а не queue_free: пул на то и заведён
 func _drop_arrows(cc: Corpse) -> void:
 	for a in cc.arrows:
-		if is_instance_valid(a) and a.has_method("despawn_now"):
+		if a is int:
+			GameManager.army.stuck_remove(int(a))
+		elif is_instance_valid(a) and a.has_method("despawn_now"):
 			a.despawn_now()
 	cc.arrows.clear()
 
@@ -990,6 +1013,33 @@ func find_raisable_priority(fac: int, at: Vector3, radius: float,
 			da = d2
 			best_any = cc
 	return best_want if best_want != null else best_any
+
+## Ближайшее годное тело ИМЕННО ЭТОГО ОТРЯДА (ТЗ 18.09.2026, п. 2). Монах
+## ведёт отряд-пациент до полного штата, и спрашивать «ближайшее тело своей
+## стороны, а потом сверить отряд» нельзя: в замесе ближайшим почти всегда
+## лежит чужой по отряду павший, сверка отвечает «нет», и подъём кончался на
+## первом теле — отряд оставался с 31 из 60
+func find_raisable_of_squad(fac: int, sid: int, at: Vector3, radius: float):
+	var best: Corpse = null
+	var bd: float = radius * radius
+	for c in _raisable_list(fac):
+		var cc := c as Corpse
+		if cc.squad_id != sid:
+			continue
+		var dx: float = cc.pos.x - at.x
+		var dz: float = cc.pos.z - at.z
+		var d: float = dx * dx + dz * dz
+		if d < bd:
+			bd = d
+			best = cc
+	return best
+
+func raisable_count_of_squad(fac: int, sid: int) -> int:
+	var n := 0
+	for c in _raisable_list(fac):
+		if (c as Corpse).squad_id == sid:
+			n += 1
+	return n
 
 func find_raisable(fac: int, at: Vector3, radius: float):
 	var best: Corpse = null

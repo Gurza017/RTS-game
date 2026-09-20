@@ -88,6 +88,8 @@ func _run() -> void:
 	Engine.max_fps = 0
 	main = load("res://scenes/Main.tscn").instantiate()
 	get_tree().root.add_child(main)
+	# Пень за рекой в партии заморожен (ТЗ 19.09.2026); стенду нужен живой
+	GameManager.call_deferred("thaw_lairs_now")
 	for _i in range(10):
 		await get_tree().process_frame
 	if main.enemy_ai != null:

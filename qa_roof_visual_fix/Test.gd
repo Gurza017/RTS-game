@@ -173,7 +173,7 @@ func _run() -> void:
 	main._camera._update_position()
 	await frames(2)
 	print("\n═════ A. БАРАКИ ═════")
-	_check_building("A", bar, bar._roof, cam, 0, 6,
+	_check_building("A", bar, bar._roof, cam, 0, bar._roof.GRID_COLS,
 		float(_UCfg.ROOF_FOOT_FRAC["barracks"]), "barracks", int(_UCfg.ROOF_VISIBLE["barracks"]))
 	print("\n═════ B. КРЕПОСТЬ: НАСТИЛ ═════")
 	_check_building("B", keep, keep._roof, cam, 0, keep._roof.KEEP_CENTRE_COLS,
@@ -191,8 +191,9 @@ func _run() -> void:
 	var wfl2: Vector3 = keep.to_global(keep._roof.slot_local(fl1))
 	verdict("C фланг: задний ряд дальше от камеры и выше на экране",
 		_depth(cam, wfl2) > _depth(cam, wfl) + 0.05 and cam.unproject_position(wfl2).y < cam.unproject_position(wfl).y)
+	# ТЗ 19.09.2026: на фланге 9, правый начинается с fl0 + 9
 	verdict("C фланги — по обе стороны настила", pfl.x < keep._draw_cx - _half_w(keep) * 0.4
-		and keep._roof.slot_local(fl0 + 15).x > keep._draw_cx + _half_w(keep) * 0.4)
+		and keep._roof.slot_local(fl0 + 9).x > keep._draw_cx + _half_w(keep) * 0.4)
 	print("\n═════ D. БАШНЯ ═════")
 	# Кольцо башни: место 0 — центр, дальше по эллипсу; передний — с наибольшим
 	# экранным y, задний — с наименьшим

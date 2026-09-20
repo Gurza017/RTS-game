@@ -46,6 +46,31 @@ func _ready() -> void:
 	display_name = "Гоблин-копейщик"
 	super._ready()
 	_setup_visual()
+	_base_move_speed = move_speed
+
+## ── БЕГ (ТЗ 18.09.2026, п. 4) ─────────────────────────────────────────────
+## Есть цель — гоблин бежит на +30 % (GOBLIN_RUN_MULT) и врезается в ряды;
+## цель снята — шаг прежний. Переключается ПО СОБЫТИЮ (set_attack_target), а
+## не в тике: ведомый ядром боец в GDScript-тик не входит. Кэш скорости
+## (Unit._base_speed) ключуется на move_speed, строку ядра обновляет тот же
+## _soa_push_stats, что у тролля (TROLL_COMBAT_SPEED_MULT)
+var _base_move_speed: float = 0.0
+
+func set_attack_target(target: Node3D) -> void:
+	super.set_attack_target(target)
+	_sync_run_speed()
+
+func _sync_run_speed() -> void:
+	if _base_move_speed <= 0.0:
+		return
+	var want: float = _base_move_speed * (_GobCfgV.GOBLIN_RUN_MULT
+		if attack_target != null else 1.0)
+	if not is_equal_approx(want, move_speed):
+		move_speed = want
+		_soa_push_stats()
+
+func is_running() -> bool:
+	return _base_move_speed > 0.0 and move_speed > _base_move_speed + 0.01
 
 func _strike_damage() -> float:
 	_combo_step += 1
@@ -76,6 +101,16 @@ const GOBLIN_SHOUT_CHANCE := SHOUT_CHANCE
 
 func _sfx_shout() -> String:
 	return "goblin_attack"
+
+## Грюнты пака (ТЗ 19.09.2026): визги и хрюканье — на удар, урон и марш
+func _sfx_grunt() -> String:
+	return "goblin_grunt"
+
+func _sfx_hurt() -> String:
+	return "goblin_grunt"
+
+func _sfx_move_grunt() -> String:
+	return "goblin_grunt"
 
 func _shout_chance() -> float:
 	return GOBLIN_SHOUT_CHANCE

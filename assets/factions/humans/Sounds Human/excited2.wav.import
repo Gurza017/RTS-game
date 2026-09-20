@@ -1,0 +1,24 @@
+[remap]
+
+importer="wav"
+type="AudioStreamWAV"
+uid="uid://pp1q6qbow4jo"
+path="res://.godot/imported/excited2.wav-79998903bcac584778cd7dc1f7cabcf6.sample"
+
+[deps]
+
+source_file="res://assets/factions/humans/Sounds Human/excited2.wav"
+dest_files=["res://.godot/imported/excited2.wav-79998903bcac584778cd7dc1f7cabcf6.sample"]
+
+[params]
+
+force/8_bit=false
+force/mono=false
+force/max_rate=false
+force/max_rate_hz=44100
+edit/trim=false
+edit/normalize=false
+edit/loop_mode=0
+edit/loop_begin=0
+edit/loop_end=-1
+compress/mode=2

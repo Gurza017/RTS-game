@@ -1,0 +1,19 @@
+[remap]
+
+importer="mp3"
+type="AudioStreamMP3"
+uid="uid://bvmmdbhcvm8kf"
+path="res://.godot/imported/voicebosch-monster-grunts-174559.mp3-f56bc72f1ea231d677c0c9872a6e8e5d.mp3str"
+
+[deps]
+
+source_file="res://assets/factions/humans/Sounds Human/voicebosch-monster-grunts-174559.mp3"
+dest_files=["res://.godot/imported/voicebosch-monster-grunts-174559.mp3-f56bc72f1ea231d677c0c9872a6e8e5d.mp3str"]
+
+[params]
+
+loop=false
+loop_offset=0
+bpm=0
+beat_count=0
+bar_beats=4

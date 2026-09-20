@@ -167,6 +167,13 @@ func _a_archers_disengage() -> void:
 	var budget := travel_budget_ms(bows, away)
 	var t0 := Time.get_ticks_msec()
 	var snapped_back := 0
+	# ── МЕРИТЬ ПИК, А НЕ КОНЕЦ (17.09.2026) ──────────────────────────────
+	# Бюджет втрое щедрее дороги: отряд доходит за ~30 с из 77, встаёт, и
+	# дальше его догоняют копейщики — ответ на удар, бой, подход к цели; к
+	# концу бюджета двое из шести честно возвращались к точке боя (после
+	# прихода это уже другая история, см. выше). Свойство «отряд реально ушёл»
+	# — ПИК удаления за окно, а не точка на последнем кадре
+	var peak: Dictionary = {}
 	while Time.get_ticks_msec() - t0 < budget:
 		await get_tree().process_frame
 		for u in bows:
@@ -175,17 +182,25 @@ func _a_archers_disengage() -> void:
 			var un: Unit = u
 			if un.state == Unit.State.MOVING and un.attack_target != null:
 				snapped_back += 1
+			var pp: Vector3 = un.global_position
+			var dd: float = Vector2(pp.x - start.x, pp.z - start.z).length()
+			var key: int = un.get_instance_id()
+			if dd > float(peak.get(key, 0.0)):
+				peak[key] = dd
 	verdict("A3 никто не развернулся обратно к бою НА МАРШЕ", snapped_back == 0,
 		"случаев возврата к цели на марше: %d" % snapped_back)
 
 	var progressed := 0
+	var at_end := 0
 	for u in bows:
 		if not is_instance_valid(u):
 			continue
+		if float(peak.get((u as Unit).get_instance_id(), 0.0)) > 25.0:
+			progressed += 1
 		var p: Vector3 = (u as Node3D).global_position
 		if Vector2(p.x - start.x, p.z - start.z).length() > 25.0:
-			progressed += 1
-	print("  ушли дальше 25 м от точки боя: %d из %d" % [progressed, bows.size()])
+			at_end += 1
+	print("  ушли дальше 25 м от точки боя (пик за окно): %d из %d; на последнем кадре: %d" % [progressed, bows.size(), at_end])
 	verdict("A4 отряд реально ушёл, а не топтался на месте",
 		progressed >= bows.size() - 1, "ушло %d из %d" % [progressed, bows.size()])
 

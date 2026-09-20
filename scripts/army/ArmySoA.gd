@@ -138,6 +138,13 @@ func gc_allocated() -> int:
 	return int(_c.GcAllocated())
 func gc_count(gen: int) -> int:
 	return int(_c.GcCount(gen))
+## Сведения о последней сборке (см. ArmyCore.GcInfo)
+func gc_info() -> PackedFloat64Array:
+	return _c.GcInfo()
+func gc_probe() -> PackedFloat64Array:
+	return _c.GcProbe()
+func gc_set_latency(mode: int) -> int:
+	return _c.GcSetLatency(mode)
 
 func top() -> int:
 	return _c.Top()
@@ -222,16 +229,40 @@ func build_nav_grid(cell: float) -> int:
 func set_nav_enabled(on: bool) -> void:
 	_c.SetNavEnabled(on)
 
+## Отступ у скал и скругление углов нити (ТЗ 20.09.2026, п. 1): ручка A/B
+func set_nav_arc(on: bool) -> void:
+	_c.SetNavArc(on)
+
 func nav_free(x: float, z: float) -> bool:
 	return bool(_c.NavFree(x, z))
 
-func nav_line_blocked(x0: float, z0: float, x1: float, z1: float) -> bool:
+func nav_line_blocked(x0: float, z0: float, x1: float, z1: float, clear: float = 0.0) -> bool:
+	if clear > 0.0:
+		return bool(_c.NavLineBlockedC(x0, z0, x1, z1, clear))
 	return bool(_c.NavLineBlocked(x0, z0, x1, z1))
+
+## Слой стволов сетки навигации: пересчёт по флагу рубки (ТЗ 19.09.2026)
+func nav_trees_dirty() -> bool:
+	return bool(_c.NavTreesDirty())
+
+func nav_refresh_trees() -> int:
+	return int(_c.NavRefreshTrees())
+
+## Концы чужой нити видны с точек бойца (см. GameManager._nav_reusable)
+func nav_reusable(ax: float, az: float, bx: float, bz: float, p0: Vector3, pl: Vector3, clear: float = 1.5) -> bool:
+	return bool(_c.NavReusable(ax, az, bx, bz, p0.x, p0.z, pl.x, pl.z, clear))
+
+## Боковой разнос точек маршрута одним вызовом (см. GameManager._nav_spread)
+func nav_spread(flat: PackedFloat32Array, fx: float, fz: float, latx: float, latz: float, max_off: float, clear: float = 1.5) -> PackedFloat32Array:
+	return PackedFloat32Array(_c.NavSpread(flat, fx, fz, latx, latz, max_off, clear))
 
 ## Плоский массив [x, z, x, z, …] промежуточных точек; пусто — путь прямой
 ## (nav_last_found = true) либо пути нет (false). Длина нити — nav_last_length
-func nav_path(x0: float, z0: float, x1: float, z1: float) -> PackedFloat32Array:
-	return PackedFloat32Array(_c.NavPath(x0, z0, x1, z1))
+## clear — отступ агента от стены (Unit.nav_clearance: пехота 1.5, конница
+## 2.2, гиганты 3.5-4.0): штраф у стены, зазор нити, отжим угла и видимость
+## half_w — полуширина строя: угол отжимается от стены и на неё
+func nav_path(x0: float, z0: float, x1: float, z1: float, clear: float = 1.5, half_w: float = 0.0) -> PackedFloat32Array:
+	return PackedFloat32Array(_c.NavPath(x0, z0, x1, z1, clear, half_w))
 
 func nav_last_found() -> bool:
 	return bool(_c.NavLastFound)
@@ -241,6 +272,17 @@ func nav_last_length() -> float:
 
 func nav_calls() -> int:
 	return int(_c.NavCalls)
+
+## Сколько запросов отбито компонентами связности (пути нет — без A*)
+func nav_unreach() -> int:
+	return int(_c.NavUnreach)
+
+func nav_comp_count() -> int:
+	return int(_c.NavCompCount)
+
+## Отступ нити маршрута от стен, м (ТЗ 19.09.2026, п. 2)
+func nav_wall_margin() -> float:
+	return float(_c.NavWallMargin())
 
 ## Высота по формуле ядра (стенды сверяют с Main.get_terrain_height)
 func height_at(x: float, z: float, relief_amp: float) -> float:
@@ -255,6 +297,10 @@ func set_river(on: bool, half_w: float, meander: float, k: float, ford_z: float,
 func set_sep_radius(i: int, r: float) -> void:
 	_c.SetSepRadius(i, r)
 
+## Тело гиганта: добавка к радиусу блокировки чужого шага (ТЗ 19.09.2026-3)
+func set_body_radius(i: int, r: float) -> void:
+	_c.SetBodyRadius(i, r)
+
 func get_sep_radius(i: int) -> float:
 	return _c.GetSepRadius(i)
 
@@ -264,6 +310,10 @@ func set_combat(i: int, dmg: float, rng: float, spd: float) -> void:
 ## Вес цели для стрелков (ТЗ 14.09.2026, п. 10; см. Unit.target_weight)
 func set_target_weight(i: int, w: float) -> void:
 	_c.SetTargetWeight(i, w)
+
+## Вес цели для конницы (ТЗ 18.09.2026, п. 4; см. Unit.cav_target_weight)
+func set_cav_weight(i: int, w: float) -> void:
+	_c.SetCavWeight(i, w)
 
 func set_slot(i: int, off_x: float, off_z: float) -> void:
 	_c.SetSlot(i, off_x, off_z)
@@ -313,6 +363,17 @@ func atk_snooze_clear(i: int) -> float:
 func tick_snooze(delta: float, spare: float) -> int:
 	return _c.TickSnooze(delta, spare)
 
+## Пары [строка, остаток кулдауна] плоско (без Godot-обёртки — этап 4)
+func take_woken_f() -> PackedFloat32Array:
+	return _c.TakeWokenF()
+
+func press_woken_count() -> int:
+	return _c.PressWokenCount()
+
+## Пары [строка, секунд с взвода] плоско
+func take_press_woken_f() -> PackedFloat32Array:
+	return _c.TakePressWokenF()
+
 func take_woken() -> Array:
 	return _c.TakeWoken()
 
@@ -333,6 +394,10 @@ func fog_setup(cols: int, rows: int, half_x: float, half_z: float,
 func fog_reset() -> void:
 	_c.FogReset()
 
+## Штамп «разведано» без «видно» (ориентир на карте, ТЗ 18.09.2026, п. 10)
+func fog_stamp_seen(x: float, z: float, r: float) -> void:
+	_c.FogStampSeen(x, z, r)
+
 ## Источники плоскими тройками [x, z, r]; возвращает [lit, seen, rgba]
 func fog_refresh(src: PackedFloat32Array) -> Array:
 	return _c.FogRefresh(src)
@@ -343,6 +408,17 @@ func fog_refresh(src: PackedFloat32Array) -> Array:
 func fog_refresh_rows(faction: int, vis_mult: float, vis_min: float,
 		src_cell: float, pad: float, extra: PackedFloat32Array) -> Array:
 	return _c.FogRefreshRows(faction, vis_mult, vis_min, src_cell, pad, extra)
+
+## Пересчёт без Godot-обёртки в ответе; маски — fog_lit/fog_seen/fog_rgba
+func fog_refresh_rows_packed(faction: int, vis_mult: float, vis_min: float,
+		src_cell: float, pad: float, extra: PackedFloat32Array) -> int:
+	return _c.FogRefreshRowsPacked(faction, vis_mult, vis_min, src_cell, pad, extra)
+func fog_lit() -> PackedByteArray:
+	return _c.FogLit()
+func fog_seen() -> PackedByteArray:
+	return _c.FogSeen()
+func fog_rgba() -> PackedByteArray:
+	return _c.FogRgba()
 
 func fog_source_count() -> int:
 	return _c.FogSourceCount()
@@ -365,18 +441,79 @@ func rear_press_pass(delta: float, shards: int, phase: int) -> int:
 ## в GDScript-автомат; направление — на живую строку цели каждый такт
 const F_AUTOPILOT := 1 << 22
 
-func autopilot_arm(i: int, speed: float, stop: float) -> void:
-	_c.AutopilotArm(i, speed, stop)
+## BigStand, этап 4: темп подтягивания и его порог, плановый возврат в
+## GDScript раз в cadence, сторона обхода своих — всё, чем ядро заменяет
+## покадровый вход в _process_attack у идущего к цели
+func autopilot_arm(i: int, speed: float, pull_speed: float, stop: float,
+		pull_lim: float, cadence: float, side_sign: float) -> void:
+	_c.AutopilotArm(i, speed, pull_speed, stop, pull_lim, cadence, side_sign)
+
+## Марш стены к точке (Unit._phalanx_march): стоп на ARRIVE_RADIUS
+func autopilot_arm_goal(i: int, speed: float, gx: float, gz: float,
+		stop: float, cadence: float) -> void:
+	_c.AutopilotArmGoal(i, speed, gx, gz, stop, cadence)
 
 func autopilot_clear(i: int) -> void:
 	_c.AutopilotClear(i)
 
 func autopilot_pass(delta: float, shards: int, phase: int,
-		tick: int, scan_mod: int, scan_r: float) -> int:
-	return _c.AutopilotPass(delta, shards, phase, tick, scan_mod, scan_r)
+		tick: int, scan_mod: int, scan_r: float,
+		flank_trig: float, flank_recheck: int, flank_strength: float) -> int:
+	return _c.AutopilotPass(delta, shards, phase, tick, scan_mod, scan_r,
+		flank_trig, flank_recheck, flank_strength)
 
 func take_press_woken() -> Array:
 	return _c.TakePressWoken()
+
+## ── СПИСОК СТРОК, КОТОРЫМ НУЖЕН GDSCRIPT-ТИК (BigStand-5, этап 1) ─────────
+## Диспетчер GameManager идёт по этому списку, а не по реестру узлов: ведомые
+## ядром (автопилот, напор, дрёма в ATTACKING, матрица отряда) в него не
+## попадают и в интерпретатор не входят вовсе. Биты — зеркало Unit.tick_on
+## (F_TICK_ON), «в тике свои часы» (F_TICK_ALWAYS, may_sleep_physics = false)
+## и «отряд ведёт матрицей» (F_MATRIX_LED). Разбор — ArmyCore.TickRows
+const F_TICK_ON := 1 << 23
+const F_TICK_ALWAYS := 1 << 24
+const F_MATRIX_LED := 1 << 25
+## Ожидание такта агро в ядре (этап 1б): таймер тикает в TickRows
+const F_IDLE_WAIT := 1 << 26
+
+## ── ОТРЯДНЫЕ ПЕРЕСЧЁТЫ ОДНИМ ВЫЗОВОМ (BigStand-5, этап 2) ────────────────
+## Коридор: [n, cx, cz, far, watch, fac, clear_trunk, clear_enemy] — габариты,
+## стволы и чужие за один переход границы, ответ плоским массивом
+func squad_corridor(rows: PackedInt32Array, dead: int, aggro_r: float,
+		intercept: float, margin: float) -> PackedFloat32Array:
+	return _c.SquadCorridor(rows, dead, aggro_r, intercept, margin)
+
+## Бухгалтерия боя отряда по колонкам (см. ArmyCore.SquadMelee): снимков
+## px/pz больше нет — они стоили 32 КБ управляемых аллокаций на пересчёт
+func squad_melee(rows: PackedInt32Array, attacking_state: int) -> PackedInt32Array:
+	return _c.SquadMelee(rows, attacking_state)
+
+## Отрицательный номер (−i−1) — строка скрыта туманом и тикает реже: дельта
+## × fog_slow_div (ТЗ 19.09.2026, Fog-of-War Sleep)
+func tick_rows(shards: int, phase: int, attacking_state: int, idle_state: int,
+		delta: float, army_ticks: int = 0, player_fac: int = 0, fog_slow_div: int = 0) -> PackedInt32Array:
+	return _c.TickRows(shards, phase, attacking_state, idle_state, delta, army_ticks, player_fac, fog_slow_div)
+
+func tick_hidden() -> int:
+	return int(_c.TickHidden)
+
+func tick_slowed() -> int:
+	return int(_c.TickSlowed)
+
+func idle_wait_arm(i: int, t: float) -> void:
+	_c.IdleWaitArm(i, t)
+
+## Возвращает остаток таймера агро — поле бойца на время ожидания заморожено
+func idle_wait_clear(i: int) -> float:
+	return _c.IdleWaitClear(i)
+
+## Сколько строк ядро оставило себе последним TickRows (стендам)
+func tick_skipped() -> int:
+	return int(_c.TickSkipped)
+
+func tick_listed() -> int:
+	return int(_c.TickListed)
 
 
 func rb_create(mm_rid: RID) -> int:
@@ -434,9 +571,40 @@ func row_sync_draw(i: int, p: Vector3) -> void:
 	_c.RowSyncDraw(i, p.x, p.y, p.z)
 
 func batch_visual(delta: float, lerp_k: float, snap_sq: float,
-		bob_amp: float, bob_sprint: float, anim_core: bool = false,
-		decal_core: bool = false) -> void:
-	_c.BatchVisual(delta, lerp_k, snap_sq, bob_amp, bob_sprint, anim_core, decal_core)
+		bob_amp: float, bob_sprint: float, anim_core: bool, decal_core: bool,
+		now_ms: int, view_x: float, view_z: float, view_r2: float,
+		fog_watch: bool, player_fac: int, flash_sec: float,
+		walk_min: float, move_min: float, turn_cos2: float) -> void:
+	_c.BatchVisual(delta, lerp_k, snap_sq, bob_amp, bob_sprint, anim_core, decal_core,
+		now_ms, view_x, view_z, view_r2, fog_watch, player_fac, flash_sec,
+		walk_min, move_min, turn_cos2)
+
+## ── ТИХИЕ СТРОКИ (BigStand-5, этап 5) ─────────────────────────────────────
+## Боец объявляет себя тихим: GDScript-тик картинки не идёт, пока ядро не
+## заметит повод (срок, туман, LOD, ходьба, взгляд ведомого)
+func vis_quiet(i: int, look_x: float, look_z: float, moving: bool, moving2: bool,
+		seen: bool, lit: bool, wake_at_ms: int, now_ms: int) -> void:
+	_c.VisQuiet(i, look_x, look_z, moving, moving2, seen, lit, wake_at_ms, now_ms)
+
+func vis_wake(i: int) -> void:
+	_c.VisWake(i)
+
+func vis_is_quiet(i: int) -> bool:
+	return _c.VisIsQuiet(i)
+
+## Вспышка попадания у привязанной строки — гасит ядро
+func vis_hit(i: int, peak: float, sec: float) -> void:
+	_c.VisHit(i, peak, sec)
+
+## Строки, которым нужен GDScript-тик картинки на этом шарде
+func vis_rows(shards: int, phase: int) -> PackedInt32Array:
+	return _c.VisRows(shards, phase)
+
+func vis_listed() -> int:
+	return _c.VisListed
+
+func vis_quiet_count() -> int:
+	return _c.VisQuietN
 
 ## ── ДЕКЛАРАТИВНЫЕ СТРЕЛЫ (хак физтика №1) ─────────────────────────────────
 ## Измерительная ручка: проверка чужих тел на шаге выключена (потолок хака №2)
@@ -456,11 +624,120 @@ func arrow_flights() -> int:
 	return _c.ArrowFlights()
 
 func batch_arrows(delta: float, hit_radius: float) -> void:
-	_c.BatchArrows(delta, hit_radius)
+	_c.BatchArrows(delta, hit_radius, 0.0)
 
 ## [id, жертва|null, точка, ось] × N
 func take_arrow_events() -> Array:
 	return _c.TakeArrowEvents()
+
+## ── СНАРЯДЫ БЕЗ УЗЛА (BigStand-5, этап 3) ────────────────────────────────
+## Флаги полёта — те же биты, что ArmyCore.Pf*
+const PF_SNIPE := 1 << 1
+const PF_TARGET := 1 << 2
+const PF_BONE := 1 << 3
+
+## Выстрел: слот слоя ядро берёт само; −1 — в слое нет свободного слота
+## (вызывающий растит слой rb_grow и повторяет)
+func projectile_fire(b: int, s: Vector3, e: Vector3, arc_h: float, rate: float,
+		fac: int, ax_k: float, dmg: float, shooter_id: int, tgt_id: int, flags: int,
+		length: float, life: float, fade: float, max_age: float) -> int:
+	return _c.ProjectileFire(b, s, e, arc_h, rate, fac, ax_k, dmg, shooter_id,
+		tgt_id, flags, length, life, fade, max_age)
+
+func batch_arrows_relief(delta: float, hit_radius: float, relief_amp: float) -> void:
+	_c.BatchArrows(delta, hit_radius, relief_amp)
+
+func has_projectile_events() -> bool:
+	return _c.HasProjectileEvents()
+
+## [id, тип, строка жертвы, id стрелка, id цели, флаги, слой, слот] × N
+func take_projectile_events_i() -> PackedInt64Array:
+	return _c.TakeProjectileEventsI()
+
+## [x, y, z, ax, ay, az, урон, длина] × N
+func take_projectile_events_f() -> PackedFloat32Array:
+	return _c.TakeProjectileEventsF()
+
+## [n, x, y, z] × групп промахов за кадр (клетки 32 м) или пусто
+func take_miss_sound() -> PackedFloat32Array:
+	return _c.TakeMissSound()
+
+## Промах / посадка у здания: втыкание в грунт целиком в ядре → id торчащей
+func projectile_land(b: int, slot: int, pos: Vector3, axis: Vector3,
+		length: float, life: float, fade: float, relief_amp: float, src_id: int = 0) -> int:
+	return _c.ProjectileLand(b, slot, pos.x, pos.y, pos.z, axis.x, axis.y, axis.z,
+		length, life, fade, relief_amp, src_id)
+
+## В тело (in_corpse — без срока, гасит тело) или декором с сроком
+func projectile_stick(b: int, slot: int, at: Vector3, dir: Vector3, length: float,
+		in_corpse: bool, life: float, fade: float) -> int:
+	return _c.ProjectileStick(b, slot, at.x, at.y, at.z, dir.x, dir.y, dir.z,
+		length, in_corpse, life, fade)
+
+func projectile_drop(b: int, slot: int) -> void:
+	_c.ProjectileDrop(b, slot)
+
+func projectile_config(max_stuck: int, evict_fade: float, min_down: float,
+		exposed: float, jitter: float) -> void:
+	_c.ProjectileConfig(max_stuck, evict_fade, min_down, exposed, jitter)
+
+func flights_on(b: int) -> int:
+	return _c.FlightsOn(b)
+
+## Стендам: [id, слой, слот, флаги] × N
+func flight_list() -> PackedInt32Array:
+	return _c.FlightList()
+
+## Стендам: [sx, sy, sz, ex, ey, ez, t, возраст, дуга, темп, урон] или пусто
+func flight_info(id: int) -> PackedFloat32Array:
+	return _c.FlightInfo(id)
+
+## Стендам: instance id стрелка полёта (0 — нет)
+func flight_shooter(id: int) -> int:
+	return _c.FlightShooter(id)
+
+func stuck_tick(delta: float) -> void:
+	_c.StuckTick(delta)
+
+func stuck_fade(id: int, secs: float) -> void:
+	_c.StuckFade(id, secs)
+
+func stuck_remove(id: int) -> void:
+	_c.StuckRemove(id)
+
+func stuck_count() -> int:
+	return _c.StuckCount()
+
+func projectiles_reset() -> void:
+	_c.ProjectilesReset()
+
+func stuck_fading_count() -> int:
+	return _c.StuckFadingCount()
+
+func stuck_left(id: int) -> float:
+	return _c.StuckLeft(id)
+
+func stuck_is_fading(id: int) -> bool:
+	return _c.StuckIsFading(id)
+
+func stuck_in_corpse(id: int) -> bool:
+	return _c.StuckInCorpse(id)
+
+## Стендам: [id, слой, слот, вТеле, id полёта] × N в порядке вставки
+func stuck_list() -> PackedInt32Array:
+	return _c.StuckList()
+
+func rb_acquire(b: int) -> int:
+	return _c.RbAcquire(b)
+
+func rb_release(b: int, idx: int) -> void:
+	_c.RbRelease(b, idx)
+
+func rb_grow(b: int, new_cap: int) -> void:
+	_c.RbGrow(b, new_cap)
+
+func rb_free_count(b: int) -> int:
+	return _c.RbFreeCount(b)
 
 ## Лента строки: кадров, к/с, зацикленность, стартовая фаза (в кадрах). Кадр
 ## дальше листает BatchVisual (этап E1)
@@ -554,6 +831,10 @@ func best_enemy(row: int, radius: float, crowd_penalty: float):
 func best_enemy_w(row: int, radius: float, crowd_penalty: float, use_prio: bool):
 	return _c.BestEnemyW(row, radius, crowd_penalty, use_prio)
 
+## prio: 0 — ближайший, 1 — вес стрелка, 2 — вес конницы
+func best_enemy_prio(row: int, radius: float, crowd_penalty: float, prio: int):
+	return _c.BestEnemyPrio(row, radius, crowd_penalty, prio)
+
 func nearest_of_side(x: float, z: float, want_side: int, radius: float):
 	return _c.NearestOfSide(x, z, want_side, radius)
 
@@ -561,8 +842,19 @@ func nearest_of_side(x: float, z: float, want_side: int, radius: float):
 func most_wounded_of_side(x: float, z: float, side: int, radius: float, exclude_row: int):
 	return _c.MostWoundedOfSide(x, z, side, radius, exclude_row)
 
+## Узлы собирает GDScript по строкам (SpatialGrid.query_radius, этап 4):
+## Godot-массив узлов из C# — финализируемая обёртка на каждый элемент
 func query_radius(x: float, z: float, radius: float) -> Array:
-	return _c.QueryRadius(x, z, radius)
+	return GameManager.unit_grid.query_radius(Vector3(x, 0.0, z), radius)
+
+## Те же бойцы — СТРОКАМИ ядра (PackedInt32Array, без финализируемых
+## обёрток на элемент; BigStand-5, этап 4). Узел по строке — GameManager._row_units
+func query_radius_rows(x: float, z: float, radius: float) -> PackedInt32Array:
+	return _c.QueryRadiusRows(x, z, radius)
+
+## Счёт живых чужих в радиусе без массива
+func enemy_count(x: float, z: float, radius: float, fac: int) -> int:
+	return _c.EnemyCount(x, z, radius, fac, Unit.State.DEAD)
 
 # ── РЕЕСТР СТВОЛОВ ──────────────────────────────────────────────────────────
 # Переехал сюда из GameManager вместе с колонками: это был последний вызов
@@ -585,6 +877,36 @@ func trunk_block(x: float, z: float, body_r: float) -> Vector3:
 
 func trunk_near(x: float, z: float, radius: float) -> bool:
 	return _c.TrunkNear(x, z, radius)
+
+# ── ФУНДАМЕНТЫ ПОСТРОЕК (ТЗ 19.09.2026 «коллизии зданий») ──────────────────
+# Постройка — ряд кругов (x, z, r), ключ — instance id; блокируют шаг любой
+# стороны (скольжение вдоль, стоящий внутри выходит) и режут сетку навигации
+func register_obstacle(id: int, flat: PackedFloat32Array) -> void:
+	_c.RegisterObstacle(id, flat)
+
+func unregister_obstacle(id: int) -> void:
+	_c.UnregisterObstacle(id)
+
+func clear_obstacles() -> void:
+	_c.ClearObstacles()
+
+func obstacle_count() -> int:
+	return int(_c.ObstacleCount())
+
+## Вектор выталкивания из ближайшего фундамента (как trunk_block)
+func bld_block(x: float, z: float, body_r: float) -> Vector3:
+	return _c.BldBlock(x, z, body_r)
+
+## Глубина проникновения точки в фундамент; 0 — свободно
+func bld_depth(x: float, z: float, body_r: float) -> float:
+	return float(_c.BldDepth(x, z, body_r))
+
+func bld_near(x: float, z: float, radius: float) -> bool:
+	return bool(_c.BldNear(x, z, radius))
+
+## Сколько ячеек сетки навигации заняли постройки (стендам)
+func nav_bld_cells() -> int:
+	return int(_c.NavBldCells)
 
 # ── ПАКЕТНЫЕ ПРОХОДЫ ────────────────────────────────────────────────────────
 func batch_move(lim_x: float, lim_z: float, bounds_on: bool, water_on: bool,

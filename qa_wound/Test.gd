@@ -143,6 +143,9 @@ func _run() -> void:
 	# бойца из четырёх разных мест. Визуальный тик сам замечает, что здоровье
 	# разошлось с отданным в отрисовку (см. Unit.tick_visual)
 	u.current_health = u.max_health
+	# Долю жизни в картинке ведёт ядро по колонке (этап 5): прямая запись
+	# поля обязана пушить колонку — то же правило, что у монаха (qa_monk_forge)
+	u._soa_push_stats()
 	await pframes(4)
 	await frames(6)
 	var d5: Array = dmg_of(u)

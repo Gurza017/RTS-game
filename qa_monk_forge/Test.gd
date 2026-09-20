@@ -5,7 +5,8 @@ extends Node
 ## ═══════════════════════════════════════════════════════════════════════════
 ##   A  ФОРМА    — 15 узлов a/b/c и 5 бонусов d; цены и время ПО РЯДУ,
 ##                 бонусы даром; иконки на месте и файлы существуют
-##   B  БОНУС    — изучены все три узла ряда → четвёртый выдаётся САМ и даром
+##   B  КОЛОНКА D — ПЛАТНАЯ И ПОСЛЕДОВАТЕЛЬНАЯ (ТЗ-B 19.09.2026): ряд A+B+C
+##                 только ОТКРЫВАЕТ узел D, даром он не выдаётся, 2d требует 1d
 ##   C  ЭФФЕКТЫ  — радиус ауры, такт, объём, число целей, самохил читаются
 ##                 монахом ПРЯМО из реестра изученного
 ##   D  СПАСЕНИЯ — щит, «Второе Дыхание», самовоскрешение
@@ -65,6 +66,16 @@ func _spawn(scene: String, fac: int, at: Vector3) -> Unit:
 func _learn(cell: String) -> void:
 	GameManager.finish_research(F, "monk_" + cell)
 
+## Ряд r изучен целиком, предыдущих D нет: rd остаётся закрытым (цепочка D);
+## с предыдущими D — открыт
+func _row_then_check(r: String) -> bool:
+	GameManager.researched.erase(F)
+	_learn(r + "a"); _learn(r + "b"); _learn(r + "c")
+	var closed: bool = not GameManager.can_research(F, "monk_" + r + "d")
+	for k in range(1, int(r)):
+		_learn("%dd" % k)
+	return closed and GameManager.can_research(F, "monk_" + r + "d")
+
 func _run() -> void:
 	main = load("res://scenes/Main.tscn").instantiate()
 	get_tree().root.add_child(main)
@@ -106,11 +117,9 @@ func _a_shape() -> void:
 				ok_icon = false
 				missing += " иконка:%d%s" % [r, col]
 			if col == "d":
-				# Бонус даром и мгновенно
-				if float(node.get("cost_gold", 0.0)) != 0.0 \
-						or float(node.get("cost_wood", 0.0)) != 0.0 \
-						or float(node.get("cost_stone", 0.0)) != 0.0 \
-						or float(node.get("research_time", 0.0)) != 0.0:
+				# Колонка D ПЛАТНАЯ (ТЗ-B 19.09.2026): цена и время больше нуля
+				if float(node.get("cost_gold", 0.0)) <= 0.0 \
+						or float(node.get("research_time", 0.0)) <= 0.0:
 					ok_free = false
 			else:
 				var want: Array = rows[r]
@@ -122,7 +131,7 @@ func _a_shape() -> void:
 	verdict("A1 все 20 ячеек ветки на месте", missing == "", "нет:%s" % missing)
 	verdict("A2 цена и время — по ряду (100/15, 250/30, 500+50/45, 1000+150/60, 2000+300/90)",
 		ok_cost)
-	verdict("A3 бонусный столбец бесплатен и мгновенен", ok_free)
+	verdict("A3 столбец D платный: у каждого узла цена и время", ok_free)
 	verdict("A4 у каждой ячейки есть существующая иконка", ok_icon)
 	# Столбцы идут сверху вниз: 2a требует 1a и так далее
 	var chain := true
@@ -140,24 +149,29 @@ func _a_shape() -> void:
 
 # ═════════════════════════════════════════════════════════════════════════════
 func _b_bonus() -> void:
-	print("\n═════ B. БОНУС РЯДА ВЫДАЁТСЯ САМ ═════")
+	print("\n═════ B. КОЛОНКА D ПОКУПАЕТСЯ, А НЕ ВЫДАЁТСЯ ═════")
 	GameManager.researched.erase(F)
 	_learn("1a")
-	verdict("B1 одного узла мало", not GameManager.is_researched(F, "monk_1d"))
+	verdict("B1 одного узла мало — 1d закрыт", not GameManager.can_research(F, "monk_1d"))
 	_learn("1b")
-	verdict("B2 двух узлов мало", not GameManager.is_researched(F, "monk_1d"))
+	verdict("B2 двух узлов мало — 1d закрыт", not GameManager.can_research(F, "monk_1d"))
 	_learn("1c")
-	verdict("B3 третий узел ряда открывает бонус САМ",
-		GameManager.is_researched(F, "monk_1d"))
-	verdict("B4 бонус соседнего ряда при этом не открылся",
-		not GameManager.is_researched(F, "monk_2d"))
-	# Порядок изучения не важен: бонус судит по факту, а не по событию
-	GameManager.researched.erase(F)
-	_learn("2c")
-	_learn("2a")
-	_learn("2b")
-	verdict("B5 порядок изучения ряда не важен",
-		GameManager.is_researched(F, "monk_2d"))
+	verdict("B3 третий узел ряда ОТКРЫВАЕТ 1d, но даром не выдаёт",
+		GameManager.can_research(F, "monk_1d") and not GameManager.is_researched(F, "monk_1d"))
+	GameManager._grant_row_bonuses(F, "monk_1c")
+	verdict("B4 прежний путь бонуса ряда ничего не выдаёт (платный узел)",
+		not GameManager.is_researched(F, "monk_1d"))
+	# Покупка списывает золото по цене узла
+	ResourceManager.add_resource(F, Constants.RESOURCE_GOLD, 10000.0)
+	var g0: float = ResourceManager.get_amount(F, Constants.RESOURCE_GOLD)
+	var t: float = GameManager.start_research(F, "monk_1d")
+	var cost1d: float = float(_Forge.get_node("monk_1d").get("cost_gold", 0.0))
+	verdict("B5 1d покупается за золото и время (%.0f з, %.0f с)" % [cost1d, float(_Forge.get_node("monk_1d").get("research_time", 0.0))],
+		t > 0.0 and absf(g0 - ResourceManager.get_amount(F, Constants.RESOURCE_GOLD) - cost1d) < 0.01,
+		"время %.0f, списано %.0f" % [t, g0 - ResourceManager.get_amount(F, Constants.RESOURCE_GOLD)])
+	GameManager.finish_research(F, "monk_1d")
+	verdict("B6 2d без 1d недоступен даже с изученным рядом 2, а с 1d — доступен",
+		_row_then_check("2"))
 
 # ═════════════════════════════════════════════════════════════════════════════
 func _c_effects() -> void:
@@ -183,35 +197,37 @@ func _c_effects() -> void:
 	_learn("1c")
 	verdict("C4 «Самохил I» — 30 % отданного",
 		absf(monk.self_heal_frac() - 0.30) < 0.01)
-	verdict("C5 бонус ряда 1 включил лечение троих",
+	_learn("1d")
+	verdict("C5 купленный 1d включил лечение троих",
 		GameManager.is_researched(F, "monk_1d") and monk.max_heal_targets() == 3,
 		"целей %d" % monk.max_heal_targets())
 	# Ряд 2: воскрешение
 	verdict("C6 без «Первого Чуда» воскрешения нет", not monk.can_resurrect())
-	_learn("2a"); _learn("2b"); _learn("2c")
-	verdict("C7 бонус ряда 2 включил воскрешение",
+	_learn("2a"); _learn("2b"); _learn("2c"); _learn("2d")
+	verdict("C7 купленный 2d включил воскрешение",
 		monk.can_resurrect() and monk.max_resurrect_count() == 1
 			and absf(monk.res_health_frac() - 0.3) < 0.01,
 		"поднимает %d с %.0f %%" % [monk.max_resurrect_count(),
 			monk.res_health_frac() * 100.0])
 	# Ряд 4: конвейерные числа
-	_learn("3a"); _learn("3b"); _learn("3c")
-	verdict("C8 бонус ряда 3 — лечит весь отряд и даёт самовоскрешение",
+	_learn("3a"); _learn("3b"); _learn("3c"); _learn("3d")
+	verdict("C8 купленный 3d — лечит весь отряд и даёт самовоскрешение",
 		monk.max_heal_targets() > 3 and monk.has_self_revive(),
 		"целей %d" % monk.max_heal_targets())
-	_learn("4a"); _learn("4b"); _learn("4c")
+	_learn("4a"); _learn("4b"); _learn("4c"); _learn("4d")
 	# «TickSpeed = 0.3s» читается как ПОТОЛОК, а не как жёсткое равенство:
 	# к четвёртому ряду такт от прежних узлов уже быстрее трёх десятых, и
 	# «поставить ровно 0.3» означало бы УХУДШИТЬ его этим исследованием
 	verdict("C9 «Непрерывный Поток» — такт не медленнее 0.3 с",
 		monk.heal_tick_sec() <= 0.301, "%.2f с" % monk.heal_tick_sec())
-	verdict("C10 бонус ряда 4 — двое за канал с половины запаса",
+	verdict("C10 купленный 4d — двое за канал с половины запаса",
 		monk.max_resurrect_count() == 2 and absf(monk.res_health_frac() - 0.5) < 0.01)
-	_learn("5a"); _learn("5b"); _learn("5c")
+	_learn("5a"); _learn("5b"); _learn("5c"); _learn("5d")
 	verdict("C11 «Глобальный Покров» — аура на всю карту",
 		monk.heal_radius() > 1000.0, "%.0f м" % monk.heal_radius())
-	verdict("C12 бонус ряда 5 — конвейер по 3-4 раз в 3 с",
-		monk.max_resurrect_count() >= 3 and absf(monk.res_cooldown() - 3.0) < 0.01,
+	# Откат конвейера — из конфига (17.09.2026: 15/12/3 → 5/4/2, правило 10)
+	verdict("C12 купленный 5d — конвейер по 3-4 с коротким откатом (MONK_RES_COOLDOWN_5D)",
+		monk.max_resurrect_count() >= 3 and absf(monk.res_cooldown() - _UCfg.MONK_RES_COOLDOWN_5D) < 0.01,
 		"%d за канал, откат %.0f с" % [monk.max_resurrect_count(), monk.res_cooldown()])
 	verdict("C13 «Абсолютное Целительство» включено",
 		monk.full_heal_tick())
@@ -253,9 +269,9 @@ func _d_saves() -> void:
 		"спасений %d" % int(m2.get("death_saves")))
 	m2.queue_free()
 	await pframes(6)
-	# Самовоскрешение (бонус ряда 3)
+	# Самовоскрешение (узел 3d)
 	GameManager.researched.erase(F)
-	_learn("3a"); _learn("3b"); _learn("3c")
+	_learn("3d")
 	var m3: Unit = _spawn(MONK, F, spot + Vector3(12.0, 0.0, 0.0))
 	await pframes(6)
 	verdict("D5 самовоскрешение доступно", m3.has_self_revive())

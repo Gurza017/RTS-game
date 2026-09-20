@@ -179,8 +179,10 @@ func _test_gate_spawn() -> void:
 		first_batch, mid_batch, full])
 	verdict("A7 первая шеренга выходит целиком, а не по два бойца",
 		first_batch >= 3, "в первой партии %d" % first_batch)
-	verdict("A8 между шеренгами есть пауза",
-		mid_batch < 12, "через 0.14 с уже %d из 12" % mid_batch)
+	# ТЗ 19.09.2026-2 (п. 2): отряд появляется ЦЕЛИКОМ одним кадром — паузы
+	# между шеренгами больше нет по замыслу (разворот прежнего требования)
+	verdict("A8 отряд появляется целиком, без пауз между шеренгами (ТЗ 19.09)",
+		first_batch == 12 and mid_batch == 12, "сразу %d, через 0.14 с %d из 12" % [first_batch, mid_batch])
 	verdict("A9 отряд вышел полностью", full == 12, "вышло %d" % full)
 
 	# И построился квадратом: ширина примерно равна глубине
@@ -487,8 +489,15 @@ func _test_aggro_band() -> void:
 	verdict("D1 порог ответной атаки лежит в диапазоне 10–12",
 		Unit.COUNTER_CHARGE_RANGE >= 10.0 and Unit.COUNTER_CHARGE_RANGE <= 12.0,
 		"COUNTER_CHARGE_RANGE=%.1f" % Unit.COUNTER_CHARGE_RANGE)
-	verdict("D2 радиус собственного обзора не меньше 10",
-		Unit.AGGRO_RADIUS >= 10.0, "AGGRO_RADIUS=%.1f" % Unit.AGGRO_RADIUS)
+	# ── РАЗВОРОТ (ТЗ 20.09.2026, п. 4.3) ──────────────────────────────────
+	# Прежние «не меньше 10» утверждали снятое требование: инициатива сужена
+	# до пяти метров, и сходить с места по своей воле боец вправе только к
+	# тому, кто уже в AGGRO_RADIUS. Ответ на ОБСТРЕЛ при этом не тронут —
+	# его держит COUNTER_CHARGE_RANGE (D1), и он обязан быть шире
+	verdict("D2 ответ на обстрел шире радиуса собственной инициативы",
+		Unit.COUNTER_CHARGE_RANGE > Unit.AGGRO_RADIUS,
+		"AGGRO_RADIUS=%.1f, COUNTER_CHARGE_RANGE=%.1f" % [
+			Unit.AGGRO_RADIUS, Unit.COUNTER_CHARGE_RANGE])
 
 	# Стрелок ВНУТРИ полосы: отряд обязан подняться
 	var near_sq := _mk_squad("spearman", 6, Vector3(200, 0, 200))
@@ -576,11 +585,13 @@ func _test_reform() -> void:
 	print("  цели выживших:")
 	for m in alive:
 		print("    %s" % str((m as Unit).move_target))
+	# Стоящий в своей ячейке приказа не получает (17.09.2026: hold_post переносит
+	# пост, move_target не трогается) — сверяемся и с постом
 	var front_taken := 0
 	for si in range(mini(8, slots.size())):
 		var slot: Vector3 = slots[si]
 		for m in alive:
-			if (m as Unit).move_target.distance_to(slot) < 0.4:
+			if (m as Unit).move_target.distance_to(slot) < 0.4 					or (m as Unit).post_pos.distance_to(slot) < 0.4:
 				front_taken += 1
 				break
 	print("  выживших %d, занято первых мест разметки: %d" % [alive.size(), front_taken])
@@ -589,7 +600,7 @@ func _test_reform() -> void:
 	var last_slots_used := 0
 	for si in range(8, slots.size()):
 		for m in alive:
-			if (m as Unit).move_target.distance_to(slots[si] as Vector3) < 0.4:
+			if (m as Unit).move_target.distance_to(slots[si] as Vector3) < 0.4 					or (m as Unit).post_pos.distance_to(slots[si] as Vector3) < 0.4:
 				last_slots_used += 1
 				break
 	verdict("E3 хвост разметки остаётся пустым", last_slots_used == 0,

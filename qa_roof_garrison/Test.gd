@@ -229,7 +229,9 @@ func _a_barracks() -> void:
 		"внутри %d за %d физкадров" % [_inside(ar[1]), w])
 	await frames(4)
 	var roof = b._roof
-	verdict("A4 на крыше 30 спрайтов плотной сеткой", int(roof.shown()) == 30, "%d" % int(roof.shown()))
+	# ТЗ 19.09.2026 (п. 4): на крыше бараков ВИДНЫ ROOF_VISIBLE (15), остальные — резерв
+	verdict("A4 на крыше %d спрайтов (резерв внутри)" % int(_UCfg.ROOF_VISIBLE["barracks"]),
+		int(roof.shown()) == int(_UCfg.ROOF_VISIBLE["barracks"]), "%d" % int(roof.shown()))
 	# Геометрия: все спрайты внутри рисунка по ширине, выше половины рисунка,
 	# ряды уходят назад по Z (сортировка), шаг вбок компактный
 	var spr := b.get_node_or_null("BuildingSprite") as MeshInstance3D
@@ -286,20 +288,19 @@ func _a_barracks() -> void:
 		if now > last_shots:
 			frames_with_shots[f] = now - last_shots
 			last_shots = now
-		for ch in main.world_root().get_children():
-			if not (ch is _ArrowS) or bool(ch.get("_spent")) or bool(ch.get("_pooled")):
-				continue
-			var sh = ch.get("shooter")
+		# Снаряд без узла (BigStand-5, этап 3): полёт — запись ядра
+		for frec in GameManager.flight_records():
+			var sh = frec["shooter"]
 			if sh == null or not is_instance_valid(sh) or not (sh is Unit) or not (sh as Unit).garrisoned:
 				continue
-			if bool(ch.get("snipe")):
+			if bool(frec["snipe"]):
 				snipe_seen += 1
-				if float(ch.get("_arc_height")) != 0.0:
+				if float(frec["arc"]) != 0.0:
 					straight_ok = false
 			else:
 				dmg_seen += 1
 				var base: float = (sh as Unit)._strike_damage() + (sh as Unit)._upgrade_damage_bonus()
-				if absf(float(ch.get("damage")) - base * _UCfg.GARRISON_DAMAGE_MULT) > 0.05:
+				if absf(float(frec["damage"]) - base * _UCfg.GARRISON_DAMAGE_MULT) > 0.05:
 					dmg_ok = false
 	var hp1 := 0.0
 	for g in foes[1]:
@@ -389,9 +390,11 @@ func _b_castle() -> void:
 	await _wait_inside(sp[1], 600)
 	await frames(4)
 	var roof = c._roof
-	verdict("B2 все 60 лучников на крыше", _inside(men) == 60 and int(roof.shown()) == 60,
+	# ТЗ 19.09.2026 (п. 4): 60 внутри, видимых — ROOF_VISIBLE (40)
+	var vis_c: int = int(_UCfg.ROOF_VISIBLE["castle"])
+	verdict("B2 все 60 лучников внутри, на крыше видны %d" % vis_c, _inside(men) == 60 and int(roof.shown()) == vis_c,
 		"внутри %d, спрайтов %d, за %d физкадров" % [_inside(men), int(roof.shown()), w])
-	# Раскладка: 30 в центре, 15 + 15 по флангам, фланги выше и шире
+	# Раскладка (ТЗ 19.09): 22 в центре двумя половинками, 9 + 9 по флангам, фланги выше
 	var spr := c.get_node_or_null("BuildingSprite") as MeshInstance3D
 	var top: float = (spr.mesh as QuadMesh).size.y * _BB.V_STRETCH if spr != null else c.build_size.y * 2.0
 	var half_w: float = c._draw_half_w if c._draw_half_w > 0.0 else c.build_size.x * 0.5
@@ -401,9 +404,10 @@ func _b_castle() -> void:
 	var flank_higher := true
 	var cy: float = roof.slot_local(0).y
 	var ccols: int = int(roof.KEEP_CENTRE_COLS)
-	for i in range(60):
+	var cmen: int = int(roof.KEEP_CENTRE_MEN)
+	for i in range(vis_c):
 		var p: Vector3 = roof.slot_local(i)
-		if i < 30:
+		if i < cmen:
 			if absf(p.x - c._draw_cx) > half_w * 0.6 or p.y < top * 0.35 or p.y > top:
 				centre_ok = false
 		else:
@@ -413,8 +417,8 @@ func _b_castle() -> void:
 				right += 1
 			if p.y < cy + 0.3:
 				flank_higher = false
-	verdict("B3 раскладка: 30 в центре настила, 15 слева и 15 справа на башнях выше",
-		centre_ok and left == 15 and right == 15 and flank_higher,
+	verdict("B3 раскладка: %d в центре настила, 9 слева и 9 справа на башнях выше" % cmen,
+		centre_ok and cmen == 22 and left == 9 and right == 9 and flank_higher,
 		"центр %s, слева %d, справа %d, фланги выше=%s" % [str(centre_ok), left, right, str(flank_higher)])
 	var zs_ok: bool = roof.slot_local(0).z > roof.slot_local(ccols).z and roof.slot_local(ccols).z > roof.slot_local(ccols * 2).z
 	verdict("B4 ряды центра уходят назад по Z (сортировка перекрытия)", zs_ok,
@@ -427,10 +431,8 @@ func _b_castle() -> void:
 	var by_sid: Dictionary = {}
 	for f in range(60 * 6):
 		await get_tree().physics_frame
-		for ch in main.world_root().get_children():
-			if not (ch is _ArrowS) or bool(ch.get("_spent")) or bool(ch.get("_pooled")):
-				continue
-			var sh = ch.get("shooter")
+		for frec in GameManager.flight_records():
+			var sh = frec["shooter"]
 			if sh == null or not is_instance_valid(sh) or not (sh is Unit):
 				continue
 			by_sid[(sh as Unit).squad_id] = true

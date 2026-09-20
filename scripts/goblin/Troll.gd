@@ -21,6 +21,7 @@ extends Unit
 
 const _SSParser := preload("res://scripts/SpriteSheetParser.gd")
 const _GobCfgT  := preload("res://scripts/goblin/goblin_config.gd")
+const _UStatsNav := preload("res://scripts/unit_stats_config.gd")
 
 const SHEET_DIR := "res://assets/factions/orc/Troll/"
 ## Ключи idle/walk/attack — те, что знает базовый автомат внешности.
@@ -190,6 +191,11 @@ func _apply_troll_scale(asp: AnimatedSprite3D) -> void:
 func sep_radius() -> float:
 	return SEP_MIN_DIST * _GobCfgT.TROLL_SIZE_SCALE
 
+## Голод, патруль и поводок погони — часы в тике: тролль по физике не спит
+## (BigStand, этап 3)
+func may_sleep_physics() -> bool:
+	return false
+
 ## Клик — по всему спрайту и кольцу у ног; кольцо крупнее (см. Unit)
 func pick_body_h() -> float:
 	return _GobCfgT.TROLL_PICK_BODY_H
@@ -259,6 +265,10 @@ func arrow_sockets() -> int:
 ## ── ТОНКИЙ ОВАЛ ВМЕСТО ТОЛСТЫХ ДУГ ────────────────────────────────────────
 ## Радиус в МЕТРАХ для 64-сегментного меша обвода; ноль у пехоты означает
 ## «рисовать обычным кольцом бойца» (см. Unit.fine_ring_radius)
+## Отступ от скал при обходе — самый широкий (ТЗ 19.09.2026)
+func nav_clearance() -> float:
+	return _UStatsNav.NAV_CLEARANCE_TROLL
+
 func fine_ring_radius() -> float:
 	return _GobCfgT.TROLL_FINE_RING_R
 
@@ -437,6 +447,13 @@ func _sfx_death() -> String:
 func _sfx_swing() -> String:
 	return "troll_attack"
 
+## Грюнты пака (ТЗ 19.09.2026): тяжёлые рыки — на удар дубиной и на урон
+func _sfx_grunt() -> String:
+	return "troll_grunt"
+
+func _sfx_hurt() -> String:
+	return "troll_grunt"
+
 func _sfx_hit() -> String:
 	return "sword_hit"
 
@@ -537,6 +554,7 @@ func _release_swing() -> void:
 	last_sweep_units.clear()
 	var tgt_hit: bool = false
 	if n_hit > 0:
+		_grunt_attack()
 		_note_hit_landed()
 	for k in range(n_hit):
 		var v: Unit = hit[k][1]
@@ -593,18 +611,12 @@ func blood_spots() -> float:
 var _shove_t: float = 0.0
 
 ## Сколько чужих стоит в пределах дубины (кольцо вокруг тролля)
+## Счёт — в ядре, без массива (BigStand-5, этап 4): спрашивается КАЖДЫЙ
+## физтик, а query_radius строил Godot-массив с финализатором на каждый узел
 func _foes_around() -> int:
 	var mp: Vector3 = global_position
 	var reach: float = attack_range + _GobCfgT.TROLL_SWEEP_REACH_PAD
-	var n := 0
-	for u in GameManager.unit_grid.query_radius(mp, reach):
-		if u == null or not is_instance_valid(u):
-			continue
-		var v := u as Unit
-		if v == null or v.is_dead() or v.faction == faction:
-			continue
-		n += 1
-	return n
+	return GameManager.unit_grid.enemy_count(mp, reach, faction)
 
 ## РАЗДВИНУТЬ КОЛЬЦО. Не удар и не урон: всех чужих в пределах дубины сдвигает
 ## НАРУЖУ на TROLL_SHOVE_PUSH тем же каналом скорости, что у конницы

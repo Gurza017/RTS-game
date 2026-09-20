@@ -15,6 +15,16 @@ func _ready() -> void:
 	_setup_warrior_visual()
 
 # Мечник рубит сталью: замах — свист меча, попадание — лязг по броне
+## ── АГРО МЕЧНИКА — 5 м (ТЗ 18.09.2026, п. 4) ─────────────────────────────
+const WARRIOR_AGGRO_RADIUS := 5.0
+
+func aggro_radius() -> float:
+	return WARRIOR_AGGRO_RADIUS
+
+## Мечник — желанная цель конницы (ТЗ 18.09.2026, п. 4)
+func cav_target_weight() -> float:
+	return 1.6
+
 func _sfx_swing() -> String:
 	return "sword_attack"
 
@@ -36,6 +46,15 @@ func _sfx_swing() -> String:
 # ускоренным под щитом до конца партии.
 const RAGE_HITS := 5
 const RAGE_SPEED_MULT := 1.45
+## ── АГРО ПОСЛЕ РЫВКА (ТЗ-B 19.09.2026) ────────────────────────────────────
+## «Сразу по окончании рывка юниты должны автоматически входить в состояние
+## агро». Рывок — марш по двойному ПКМ; по прибытии боец вставал в IDLE и
+## ждал лотерею такта агро (0.5-2 с) с радиусом мечника 5 м — а точка приказа
+## лежит перед строем, и в 5 м никого: мечники «замирали». Теперь конец
+## рывка (прибытие, истечение серии или её срока) — СОБЫТИЕ: ближайший чужой
+## в RUSH_AGGRO_R берётся целью тем же тиком (command_attack с forced, без
+## замка — авто-агро дальше ведёт бой как обычно)
+const RUSH_AGGRO_R := 14.0
 ## ── СТЕНА ЩИТОВ НА ПОСЛЕДНИХ МЕТРАХ РАЗГОНА (заказ владельца, спринт 15) ────
 ## «Юнит бежит, а за 5-10 метров до цели включает "Стену щитов" (+30 % к
 ## скорости) и влетает во врага». В набеге щит поднят с первого шага (см.
@@ -65,20 +84,93 @@ var _rage_step: int = 0
 ## Стенды: сколько ударов серии уже нанесено и сколько из них мощных
 var rage_hits_done: int = 0
 var rage_strong_done: int = 0
+## Рывок начат и его конец ещё не разобран (агро после рывка — один раз)
+var _rush_pending: bool = false
+## Выкрик «Яростной атаки» (ТЗ 19.09.2026 «Audio System Update»): взводится
+## рывком, звучит на ПЕРВОМ состоявшемся ударе мечом, один на отряд в
+## AudioManager.KNIGHT_ANGRY_GAP
+var _angry_pending: bool = false
+var angry_shouts: int = 0
+## Стенды: сколько раз агро после рывка выдало цель
+var rush_aggro_count: int = 0
+
+## ── БОНУСЫ КУЗНИЦЫ МЕЧНИКА, КЭШ ПО ВЕРСИИ ТАБЛИЦЫ ─────────────────────────
+## Читаются на удар и на рывок; словарный поиск на каждый удар в свалке —
+## лишнее, версия таблицы меняется считанные разы за партию
+var _forge_ver: int = -1
+var _rage_bonus_hits: int = 0
+var _cleave_n: int = 0
+var _cleave_frac: float = 0.0
+var _berserk: float = 0.0
+
+func _refresh_forge() -> void:
+	if _forge_ver == GameManager.bonus_version:
+		return
+	_forge_ver = GameManager.bonus_version
+	_rage_bonus_hits = int(round(GameManager.unit_bonus(faction, "warrior", "bonus_rage_hits")))
+	_cleave_n = int(round(GameManager.unit_bonus(faction, "warrior", "bonus_cleave")))
+	_cleave_frac = clampf(GameManager.unit_bonus(faction, "warrior", "bonus_cleave_dmg"), 0.0, 1.0)
+	_berserk = GameManager.unit_bonus(faction, "warrior", "bonus_berserk")
+
+## Сколько ударов в серии «Яростной Атаки» с учётом кузницы (5 → 7 с
+## «Неистовством»)
+func rage_hits_total() -> int:
+	_refresh_forge()
+	return RAGE_HITS + _rage_bonus_hits
+
+## Сколько соседей задевает удар («Рассечение» 2, «Стальной вихрь» +1)
+func cleave_targets() -> int:
+	_refresh_forge()
+	return _cleave_n
+
+func cleave_frac() -> float:
+	_refresh_forge()
+	return _cleave_frac
 
 ## Включить набег. Зовёт SelectionManager по двойному ПКМ, один раз на бойца
 func start_rage_dash() -> void:
+	GameManager.tm_ability("rage_dash", faction)
 	if state == State.DEAD:
 		return
-	_rage_left = RAGE_HITS
+	_rage_left = rage_hits_total()
 	_rage_step = 0
 	_rage_until_ms = Time.get_ticks_msec() + int(RAGE_SEC * 1000.0)
+	_rush_pending = true
+	_angry_pending = true
 	# Щит фиксируется НЕ флагом _guard_active напрямую: его каждый кадр
 	# переписывает _update_guard, и прямая запись погасла бы в тот же тик
 	mark_pose_dirty()
 
 func rage_active() -> bool:
 	return _rage_left > 0 and Time.get_ticks_msec() < _rage_until_ms
+
+## ── КОНЕЦ РЫВКА — В БОЙ С БЛИЖАЙШИМ ───────────────────────────────────────
+## Зовётся по прибытию (бег кончился), по истечении серии или её срока.
+## Боец, уже дерущийся, ничего не меняет; стоящий или идущий берёт ближайшего
+## чужого в RUSH_AGGRO_R. Никого нет — такт агро обнуляется, чтобы штатное
+## авто-агро посмотрело на своём первом же тике
+func _rush_aggro() -> void:
+	if not _rush_pending:
+		return
+	_rush_pending = false
+	if state == State.DEAD or _panicked or retreating:
+		return
+	if state == State.ATTACKING and attack_target != null and is_instance_valid(attack_target):
+		return
+	var foe: Node3D = GameManager.unit_grid.best_enemy(self, RUSH_AGGRO_R, CROWD_PENALTY)
+	if foe != null and is_instance_valid(foe) and foe is Unit and not (foe as Unit).is_dead():
+		rush_aggro_count += 1
+		command_attack(foe, true)
+	else:
+		_aggro_timer = 0.0
+		_wake_process()
+
+## Прибежали — бег выключается сам (Unit._process_move), и это конец рывка
+func _set_sprinting(on: bool) -> void:
+	var was: bool = sprinting
+	super._set_sprinting(on)
+	if was and not on and _rush_pending:
+		_rush_aggro()
 
 func rage_left() -> int:
 	return _rage_left if rage_active() else 0
@@ -99,24 +191,89 @@ func shield_wall_active() -> bool:
 # Каждый 4-й удар — мощный: другой урон и другая анимация.
 # В НАБЕГЕ ротация другая — фиксированная пятёрка (см. RAGE_STRONG)
 func _strike_damage() -> float:
+	# ── КРОВЬ БЕРСЕРКА: ниже половины запаса удар сильнее ─────────────────
+	_refresh_forge()
+	var mult: float = 1.0
+	if _berserk > 0.0 and current_health < max_health * 0.5:
+		mult += _berserk
 	if rage_active():
-		var strong: bool = bool(RAGE_STRONG[_rage_step % RAGE_STRONG.size()])
+		# Чередование «обычный → мощный → …» на любую длину серии: с
+		# «Неистовством» их семь, и таблица из пяти шагов дала бы сбой ритма
+		var strong: bool = (_rage_step % 2) == 1
 		_rage_step += 1
 		_rage_left -= 1
 		rage_hits_done += 1
 		if strong:
 			rage_strong_done += 1
 			_play_attack_anim("attack2", 380)
-			return _attack_2_damage
+			return _attack_2_damage * mult
 		_play_attack_anim("attack1", 300)
-		return attack_damage
+		return attack_damage * mult
 	_combo_step += 1
 	if _combo_step >= 4:
 		_combo_step = 0
 		_play_attack_anim("attack2", 600)
-		return _attack_2_damage
+		return _attack_2_damage * mult
 	_play_attack_anim("attack1", 450)
-	return attack_damage
+	return attack_damage * mult
+
+## Стенды: сколько ударов серии ещё осталось (без учёта срока)
+func rage_hits_left() -> int:
+	return _rage_left
+
+## ── РАССЕЧЕНИЕ — УДАР ПО ПЛОЩАДИ (узел warrior_2d, прокачка warrior_4d) ──
+## После касания по цели тот же взмах задевает до cleave_targets() ЖИВЫХ
+## чужих в досягаемости (attack_range + CLEAVE_PAD) в переднем секторе
+## CLEAVE_ARC_COS от направления удара, ближайших первыми, на cleave_frac()
+## урона. Один скан сетки на удар — событие, не покадровый путь
+const CLEAVE_PAD := 0.8
+const CLEAVE_ARC_COS := 0.15
+## Стенды: сколько соседей задето всего и последним ударом
+var cleave_hits: int = 0
+var cleave_last: int = 0
+
+func _after_melee_hit(tgt: Node3D, dmg: float, dir: Vector3) -> void:
+	if _angry_pending:
+		_angry_pending = false
+		angry_shouts += 1
+		AudioManager.squad_voice("knight_angry", _voice_key(), global_position, 1.0, AudioManager.KNIGHT_ANGRY_GAP)
+	cleave_last = 0
+	var n: int = cleave_targets()
+	if n <= 0:
+		return
+	var frac: float = cleave_frac()
+	if frac <= 0.0:
+		return
+	var mp: Vector3 = position if _local_xform else global_position
+	var look: Vector3 = dir
+	if look.length_squared() < 1e-6:
+		look = _facing
+	var reach: float = attack_range + CLEAVE_PAD
+	var cand: Array = []      # [dist, Unit]
+	for node in GameManager.unit_grid.query_radius(mp, reach):
+		if node == null or not is_instance_valid(node) or node == tgt:
+			continue
+		var v := node as Unit
+		if v == null or v.is_dead() or v.faction == faction or v.garrisoned:
+			continue
+		var off: Vector3 = v.global_position - mp
+		off.y = 0.0
+		var d: float = off.length()
+		if d > reach:
+			continue
+		if d > 0.2 and (off.x * look.x + off.z * look.z) / d < CLEAVE_ARC_COS:
+			continue
+		cand.append([d, v])
+	if cand.is_empty():
+		return
+	cand.sort_custom(func(a, b): return float(a[0]) < float(b[0]))
+	var k: int = mini(cand.size(), n)
+	for i in range(k):
+		var v: Unit = cand[i][1]
+		if is_instance_valid(v) and not v.is_dead():
+			v.take_damage(dmg * frac, self)
+			cleave_hits += 1
+			cleave_last += 1
 
 ## Удары серии быстрые: доля обычной перезарядки
 func _effective_cooldown() -> float:
@@ -191,6 +348,15 @@ var _threat_until_ms: int = 0
 ## Угроза свежая — есть повод держать щит
 func _threatened() -> bool:
 	return Time.get_ticks_msec() < _threat_until_ms
+
+## Щит поднят по угрозе — картинку разбудить, когда угроза истечёт (этап 5);
+## в рывке — на его срок (конец рывка разбирает визуальный тик)
+func _vis_extra_wake_ms() -> int:
+	if _rush_pending and _rage_until_ms > 0:
+		return _rage_until_ms
+	if _guard_active and _threat_until_ms > 0:
+		return _threat_until_ms
+	return 0
 
 func _mark_threat() -> void:
 	_threat_until_ms = Time.get_ticks_msec() + GUARD_HOLD_MS
@@ -290,6 +456,10 @@ func tick_visual(delta: float, frame: int = -1, anim_every: int = ANIM_EVERY,
 ## щит опущен, поднимается на включённый режим или на первый же прилёт.
 ## Реакция на угрозу при этом не изменилась ни на кадр — она в _threatened()
 func _update_guard() -> void:
+	# Конец рывка по СЕРИИ или СРОКУ (прибытие ловит _set_sprinting): рывок
+	# начат, а ярости уже нет — в бой с ближайшим, один раз
+	if _rush_pending and not sprinting and not rage_active():
+		_rush_aggro()
 	var want := false
 	if auto_guard and state != State.DEAD and Time.get_ticks_msec() >= _anim_lock_until_ms:
 		# ЩИТ В НАБЕГЕ ПОДНЯТ БЕЗУСЛОВНО (заказ: «рывок с зафиксированными

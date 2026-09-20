@@ -136,6 +136,10 @@ static func _capture_meta(main: Node) -> Dictionary:
 		# начала матча, и без этого числа загруженная на сороковой минуте
 		# партия начиналась бы с проснувшейся ордой заново
 		"clock": float(main.game_clock()),
+		# Подкрепление ИИ одноразовое (ТЗ 19.09.2026-3): после загрузки не
+		# должно прийти второй раз
+		"ai_reinforced": bool(main.enemy_ai.reinforced) \
+			if (main.enemy_ai != null and is_instance_valid(main.enemy_ai)) else false,
 	}
 
 static func _capture_resources() -> Dictionary:
@@ -242,12 +246,21 @@ static func _capture_buildings(main: Node) -> Array:
 	var out: Array = []
 	for b in _buildings_list(main):
 		var bld := b as Building
-		out.append({
+		var rec: Dictionary = {
 			"id":      String(bld.building_id),
 			"faction": int(bld.faction),
 			"pos":     bld.global_position,
 			"hp":      float(bld.current_health),
-		})
+		}
+		# ПЕНЬ: сторона карты и заморозка с калькулятором (ТЗ 19.09.2026, блок 3.2)
+		if bld.has_method("virt_total"):
+			rec["lair"] = {
+				"side": int(bld.get("side_faction")),
+				"frozen": bool(bld.get("frozen")) or bool(bld.get("thawing")),
+				"vt": int(bld.get("virt_trolls")), "vg": int(bld.get("virt_gnoll_squads")),
+				"vb": int(bld.get("virt_big_squads")), "vs": int(bld.get("virt_sheep")),
+			}
+		out.append(rec)
 	return out
 
 ## УКРЫТЫЕ В ЗДАНИЯХ БОЙЦЫ (15.09.2026). Гарнизон снят с карты и из групп
@@ -418,6 +431,11 @@ static func apply(main: Node, state: Dictionary) -> void:
 	var meta: Dictionary = state.get("meta", {})
 	if main.has_method("set_game_clock"):
 		main.set_game_clock(float(meta.get("clock", 0.0)))
+	if main.enemy_ai != null and is_instance_valid(main.enemy_ai):
+		main.enemy_ai.reinforced = bool(meta.get("ai_reinforced", false))
+		# Часы ИИ едут за часами партии — иначе подкрепление и час штурма
+		# считались бы с нуля после каждой загрузки
+		main.enemy_ai.clock = maxf(float(main.enemy_ai.clock), float(meta.get("clock", 0.0)))
 
 ## СНЕСТИ ВСЁ ЖИВОЕ, ОСТАВИВ КАРТУ. Ресурсные жилы, деревья и рельеф не
 ## трогаются вовсе — они пересеяны зерном и уже правильные.
@@ -530,11 +548,23 @@ static func _restore_buildings(main: Node, src: Array) -> Array:
 			made.append(null)
 			continue
 		b.faction = int(d["faction"])
+		var lair: Dictionary = d.get("lair", {})
+		# Замороженный пень: признак ДО add_child — отложенные спавны _ready
+		# лягут в счётчики; сами счётчики — ПОСЛЕ них (отложенный вызов встаёт
+		# в очередь позже, чем очередь _ready)
+		if not lair.is_empty() and bool(lair.get("frozen", false)) and b.has_method("freeze"):
+			b.call("freeze")
 		main.world_add(b)
 		b.global_position = d["pos"] as Vector3
 		# Запас жизни ставится ПОСЛЕ входа в дерево: _ready() здания сам берёт
 		# максимум из конфига и затёр бы сохранённое число
 		b.current_health = float(d.get("hp", b.max_health))
+		if not lair.is_empty():
+			if int(lair.get("side", -1)) >= 0:
+				b.set("side_faction", int(lair.get("side", -1)))
+			if bool(lair.get("frozen", false)):
+				b.call_deferred("restore_virtual", int(lair.get("vt", 0)), int(lair.get("vg", 0)),
+					int(lair.get("vb", 0)), int(lair.get("vs", 0)))
 		made.append(b)
 	return made
 

@@ -134,6 +134,25 @@ func add_permanent_reveal(pos: Vector3, radius: float) -> void:
 	_stamp(_seen, pos.x, pos.z, radius)
 	_upload()
 
+## ── ОРИЕНТИР: «РАЗВЕДАНО», НО НЕ «ВИДНО» (ТЗ 18.09.2026, п. 10) ──────────
+## Золотые рудники на холмах стоят на карте с начала партии, и игрок обязан
+## их видеть сразу, а не «из воздуха» по приходу. Штамп идёт только в
+## «разведано»: под дымкой виден сам рудник (постройка прячется по is_seen),
+## а бойцы рядом — нет (они гаснут по is_lit). Штамп повторяется в обеих
+## копиях маски — ядро и GDScript, — потому что читают обе
+var explored_marks: Array = []
+
+func add_explored(pos: Vector3, radius: float) -> void:
+	explored_marks.append({"x": pos.x, "z": pos.z, "r": radius})
+	if _Opt.fog_core:
+		GameManager.army.fog_stamp_seen(pos.x, pos.z, radius)
+	if _seen.is_empty():
+		return
+	_stamp(_seen, pos.x, pos.z, radius)
+	_apply_enemy_building_visibility()
+	if not _Opt.fog_core:
+		_upload()
+
 func clear_permanent() -> void:
 	_permanent.clear()
 
@@ -204,6 +223,15 @@ func seen_fraction() -> float:
 # ─────────────────────────────────────────────────────────────────────────────
 
 func _process(delta: float) -> void:
+	# Часы подсистемы (perf_config.sys_meter, qa_bigstand): одна проверка bool
+	if not _Opt.sys_meter:
+		_process_timed(delta)
+		return
+	var _sys_t0: int = Time.get_ticks_usec()
+	_process_timed(delta)
+	_Opt.sys_add("fog", Time.get_ticks_usec() - _sys_t0)
+
+func _process_timed(delta: float) -> void:
 	if not enabled or cols <= 0:
 		return
 	_timer -= delta
@@ -243,13 +271,16 @@ func refresh() -> void:
 			var sa: Array = sources[key]
 			src[w] = float(sa[0]); src[w + 1] = float(sa[1])
 			src[w + 2] = float(sa[2]); w += 3
-		var res: Array = GameManager.army.fog_refresh_rows(
+		# Ответ — три плоских массива порознь, без Godot-обёртки (BigStand-5,
+		# этап 4: финализируемая обёртка раз в 0.15 с ложилась в gen1)
+		GameManager.army.fog_refresh_rows_packed(
 			Constants.FACTION_PLAYER, _UCfg.VISION_MULT, _UCfg.VISION_MIN,
 			SRC_CELL, SRC_CELL * 0.71, src)
-		_lit = res[0]
-		_seen = res[1]
+		_lit = GameManager.army.fog_lit()
+		_seen = GameManager.army.fog_seen()
 		_apply_enemy_building_visibility()
-		_upload_rgba(res[2])
+		GameManager.wake_hidden_sleepers()
+		_upload_rgba(GameManager.army.fog_rgba())
 		return
 	for i in range(_lit.size()):
 		_lit[i] = 0
@@ -267,6 +298,7 @@ func refresh() -> void:
 		if _lit[i] > _seen[i]:
 			_seen[i] = _lit[i]
 	_apply_enemy_building_visibility()
+	GameManager.wake_hidden_sleepers()
 	_upload()
 
 ## ЧУЖИЕ ПОСТРОЙКИ ПРЯЧУТСЯ ПО «РАЗВЕДАНО», А НЕ ПО «ВИДНО СЕЙЧАС».
@@ -284,8 +316,14 @@ func refresh() -> void:
 ## пересчёт маски (UPDATE_INTERVAL), а не в кадре
 func _apply_enemy_building_visibility() -> void:
 	# Чужие здания ВСЕХ сторон: гоблинская хижина обязана прятаться под пеленой
-	# ровно так же, как красный замок
-	for group in ["enemy_buildings", "goblin_buildings", "construction_sites"]:
+	# ровно так же, как красный замок.
+	# ── НИЧЕЙНЫЕ РУДНИКИ — ТОЖЕ (ТЗ-C 19.09.2026) ──────────────────────────
+	# Группа neutral_buildings в этот обход не входила вовсе, и рудники
+	# светились сквозь неразведанную черноту с рождения карты (плюс штамп
+	# «разведано» вокруг них, Main.GOLD_MINE_REVEAL_ENABLED). Правило то же,
+	# что у чужих построек: не разведано — невидим, разведано — силуэт под
+	# дымкой; свой (захваченный) рудник уезжает в player_buildings и виден
+	for group in ["enemy_buildings", "goblin_buildings", "neutral_buildings", "construction_sites"]:
 		for b in GameManager.nodes_in_group_cached(String(group)):
 			# Живость — на СЫРОЙ ссылке, до приведения (правило 5): снесённое
 			# здание в кэше группы уже освобождено, и `as Node3D` бросал
@@ -321,8 +359,12 @@ func _collect_unit_sources(out: Dictionary) -> void:
 func _collect_building_sources(out: Dictionary) -> void:
 	var pad: float = SRC_CELL * 0.71
 	for b in GameManager.nodes_in_group_cached("player_buildings"):
+		# Живость — на СЫРОЙ ссылке, до приведения (правило 5): снесённая
+		# постройка в кэше группы уже освобождена (qa_sel2 D, руины)
+		if b == null or not is_instance_valid(b):
+			continue
 		var bl := b as Node3D
-		if bl == null or not is_instance_valid(bl):
+		if bl == null:
 			continue
 		var gp := bl.global_position
 		# Обзор — у самой постройки (Building.vision_radius): башня видит на

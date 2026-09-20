@@ -73,6 +73,8 @@ func _spawn_squad(kind: String, at: Vector3, n: int) -> Array:
 func _run() -> void:
 	main = load("res://scenes/Main.tscn").instantiate()
 	get_tree().root.add_child(main)
+	# Пень за рекой в партии заморожен (ТЗ 19.09.2026); стенду нужен живой
+	GameManager.call_deferred("thaw_lairs_now")
 	await frames(8)
 	if main.enemy_ai != null:
 		main.enemy_ai.set_process(false)
@@ -231,8 +233,12 @@ func _check_troll() -> void:
 	# Вспышка попадания: стандартный путь take_damage → _push_damage_shade
 	# Обидчик — ЖИВОЙ боец отряда (правило 5: sp[1][0] к этому кадру мог пасть)
 	troll.take_damage(10.0, _alive_of(sp[1]))
-	verdict("B8 вспышка попадания взводится стандартным путём", troll._hit_flash > 0.0,
-		"flash=%.3f" % troll._hit_flash)
+	# BigStand-5, этап 5: у привязанной строки вспышку ведёт ЯДРО (VisHit →
+	# слот буфера, канал 14), поле _hit_flash при этом остаётся нулём —
+	# читаем то, что реально дошло до отрисовки
+	var fl: float = maxf(troll._hit_flash, _flash_in_buffer(troll))
+	verdict("B8 вспышка попадания взводится стандартным путём", fl > 0.0,
+		"flash=%.3f" % fl)
 
 	# ── C. Агро-вызов (10.09.2026): первый удар по стражу при включённом
 	# агро — из дерева СРАЗУ выбегают TROLL_AGGRO_HELPERS; повторный удар
@@ -302,6 +308,14 @@ func _in_horde(u: Unit) -> bool:
 	return false
 
 # ═════════════════════════════════════════════════════════════════════════════
+## Сила вспышки в буфере отрисовки бойца (0 — слота нет или не мигает)
+func _flash_in_buffer(u: Unit) -> float:
+	var sl = GameManager.far_units.slot_of(u)
+	if sl == null or sl.bucket == null:
+		return 0.0
+	var raw: PackedFloat32Array = GameManager.army.rb_slot(sl.bucket.core_id, sl.index)
+	return raw[14] if raw.size() >= 16 else 0.0
+
 func _alive_of(men: Array) -> Unit:
 	for m in men:
 		if is_instance_valid(m) and not (m as Unit).is_dead():

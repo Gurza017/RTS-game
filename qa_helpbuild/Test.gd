@@ -183,8 +183,23 @@ func _run() -> void:
 		site.global_position.y + 0.15, site.global_position.z)
 	var scr2: Vector2 = cam.unproject_position(aim2)
 	var hit2 = sm._pick_at(scr2, mask).get("target")
-	verdict("B2 клик по низу фундамента тоже попадает в стройку",
-		hit2 == site, "под курсором %s" % (
+	# ТЗ 18.09.2026, п. 3: якорь клика пехотинца — середина туловища, и
+	# рабочий, чей спрайт НАРИСОВАН ПОВЕРХ низа фундамента (стоит перед
+	# плоскостью рисунка площадки, голова на высоте точки клика), выигрывает
+	# честно — курсор стоит на его теле. Такой исход законен; чужой рабочий
+	# (за площадкой или сбоку) по-прежнему проиграть обязан
+	var lean2: Vector3 = -cam.global_transform.basis.z
+	lean2.y = 0.0
+	lean2 = lean2.normalized()
+	var front_worker := false
+	if hit2 is Unit and hit2 != site:
+		var rel: Vector3 = (hit2 as Node3D).global_position - site.global_position
+		rel.y = 0.0
+		# Перед плоскостью рисунка (к камере) и не дальше роста фигуры
+		var ahead: float = -rel.dot(lean2)
+		front_worker = ahead > 0.0 and ahead < 2.2 and absf(rel.dot(lean2.cross(Vector3.UP))) < 1.5
+	verdict("B2 клик по низу фундамента попадает в стройку (либо в рабочего, нарисованного поверх её низа)",
+		hit2 == site or front_worker, "под курсором %s" % (
 			"СТРОЙКА" if hit2 == site else ("РАБОЧИЙ" if (hit2 is Unit) else str(hit2))))
 
 	# ═══ БЛОК C: ВЕСЬ ПУТЬ ПРАВОГО КЛИКА ЦЕЛИКОМ ══════════════════════════

@@ -1,4 +1,5 @@
 extends Node
+const _OptSys := preload("res://scripts/perf_config.gd")
 
 ## ═══════════════════════════════════════════════════════════════════════════
 ## КОНТРОЛЛЕР ГНОЛЛОВ: ЗОНА ОТВЕТСТВЕННОСТИ И ОХОТА В ЛЕСАХ (13.09.2026)
@@ -164,6 +165,15 @@ func clamp_to_zone(lair: Node3D, p: Vector3) -> Vector3:
 # ОХОТА НА РАБОЧИХ
 # ═════════════════════════════════════════════════════════════════════════════
 func _process(delta: float) -> void:
+	# Часы подсистемы (perf_config.sys_meter, qa_bigstand): одна проверка bool
+	if not _OptSys.sys_meter:
+		_process_timed(delta)
+		return
+	var _sys_t0: int = Time.get_ticks_usec()
+	_process_timed(delta)
+	_OptSys.sys_add("gnoll_ai", Time.get_ticks_usec() - _sys_t0)
+
+func _process_timed(delta: float) -> void:
 	_t += delta
 	if _t < _GobCfg.GNOLL_HUNT_TICK:
 		return

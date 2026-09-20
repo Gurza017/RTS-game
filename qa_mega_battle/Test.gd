@@ -583,8 +583,11 @@ func _b1_formation() -> void:
 	var chased := 0
 	var watched := 0
 	for u2 in pos_before:
+		# Живость — на СЫРОЙ ссылке, до приведения (правило 5)
+		if u2 == null or not is_instance_valid(u2):
+			continue
 		var uu := u2 as Unit
-		if not is_instance_valid(uu) or uu.is_dead():
+		if uu == null or uu.is_dead():
 			continue
 		watched += 1
 		var d3: Vector3 = uu.global_position - (pos_before[u2] as Vector3)

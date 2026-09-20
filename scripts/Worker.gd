@@ -244,6 +244,15 @@ func _auto_find_resource(res_type: int) -> void:
 	state            = State.IDLE
 
 ## Рабочий — не солдат: ни клича, ни реплик, ни голосового «все» (спринт 19)
+## Рабочий ведёт работу своим автоматом в тике — по физике не спит
+## (BigStand, этап 3)
+func may_sleep_physics() -> bool:
+	return false
+
+## Рабочий — лёгкая добыча конницы (ТЗ 18.09.2026, п. 4)
+func cav_target_weight() -> float:
+	return 1.4
+
 func is_combatant() -> bool:
 	return false
 
@@ -471,6 +480,95 @@ var _sheep_dest_forced: bool = false
 var _sheep_was_owned: bool = false
 ## Стенды: сколько мяса сдано этим рабочим
 var meat_delivered: float = 0.0
+## ── СБОР БЛУЖДАЮЩИХ ОВЕЦ — РЕЖИМ ПАСТУХА (ТЗ 19.09.2026, блок 3) ──────────
+## ПКМ рабочим по БЛУЖДАЮЩЕЙ овце игрока (Sheep.is_stray: хозяйская, но без
+## загона — из снесённого или не поместившаяся в полный) — не нож, а сбор:
+## подойти, взять на голову, отнести в ближайший НЕЗАПОЛНЕННЫЙ загон своей
+## стороны; донёс — сам ищет следующую блуждающую в HERD_SCAN_RANGE и носит
+## по одной, пока не соберёт всех; блуждающих нет — штатная рутина (забой
+## овцы загона на месте, ходки с мясом). Свободных загонов нет — овца
+## остаётся на месте, рабочий встаёт (приказ не принимается)
+const HERD_SCAN_RANGE := 60.0
+var _herding: bool = false
+## Стенды: сколько блуждающих отнесено в загон
+var herd_trips: int = 0
+
+func is_herding() -> bool:
+	return _herding
+
+func _is_stray(s: Node) -> bool:
+	return s != null and is_instance_valid(s) and s.has_method("is_stray") and bool(s.call("is_stray"))
+
+## Ближайший загон своей стороны, где есть место (полные не участвуют — см.
+## _sheep_dest). skip — загон, только что отказавший
+func _pen_with_room(from: Vector3, skip: Node = null) -> Node3D:
+	var best: Node3D = null
+	var bd := INF
+	for p in get_tree().get_nodes_in_group("sheep_pens"):
+		if p == null or not is_instance_valid(p) or p == skip or not p.has_method("accept_sheep"):
+			continue
+		if int(p.get("faction")) != faction:
+			continue
+		if p.has_method("has_room") and not bool(p.call("has_room")):
+			continue
+		var d: float = from.distance_to((p as Node3D).global_position)
+		if d < bd:
+			bd = d
+			best = p
+	return best
+
+## Ближайшая свободная блуждающая овца своей стороны в HERD_SCAN_RANGE
+func _next_stray(from: Vector3, skip: Node = null) -> Node3D:
+	var best: Node3D = null
+	var bd: float = HERD_SCAN_RANGE
+	for s in get_tree().get_nodes_in_group("sheep"):
+		if s == null or not is_instance_valid(s) or s == skip:
+			continue
+		if int(s.get("owner_faction")) != faction:
+			continue
+		if not _is_stray(s) or not bool(s.call("is_free")):
+			continue
+		var d: float = from.distance_to((s as Node3D).global_position)
+		if d < bd:
+			bd = d
+			best = s
+	return best
+
+## Ближайшая своя овца НА ВЫПАСЕ (в загоне или у замка) либо туша с мясом —
+## штатная рутина после сбора. Блуждающих сюда не берём: их путь — сбор
+func _next_owned_sheep(from: Vector3) -> Node3D:
+	var best: Node3D = null
+	var bd: float = SHEEP_NEXT_RANGE
+	for s in get_tree().get_nodes_in_group("sheep"):
+		if s == null or not is_instance_valid(s) or bool(s.get("eaten")):
+			continue
+		if int(s.get("owner_faction")) != faction:
+			continue
+		if bool(s.get("dead")):
+			if int(s.get("meat_left")) <= 0 or not bool(s.call("butcher_has_room")):
+				continue
+		elif not bool(s.call("is_owned")) or not bool(s.call("is_free")):
+			continue
+		var d: float = from.distance_to((s as Node3D).global_position)
+		if d < bd:
+			bd = d
+			best = s
+	return best
+
+## Блуждающая донесена: за следующей; кончились — рутина забоя; и её нет — покой
+func _herd_continue() -> void:
+	var here: Vector3 = global_position
+	_herding = false
+	var nxt: Node3D = _next_stray(here)
+	if nxt != null and _pen_with_room(here) != null:
+		command_steal_sheep(nxt)
+		return
+	var routine: Node3D = _next_owned_sheep(here)
+	if routine != null:
+		command_steal_sheep(routine)
+		return
+	state = State.IDLE
+	_wake_process()
 
 func command_steal_sheep(s: Node3D) -> void:
 	if s == null or not is_instance_valid(s) or not s.has_method("captured_by"):
@@ -485,7 +583,16 @@ func command_steal_sheep(s: Node3D) -> void:
 			return
 	elif not bool(s.call("is_free")):
 		return
+	# ── БЛУЖДАЮЩАЯ — СБОР, А НЕ НОЖ (ТЗ 19.09.2026, блок 3) ─────────────
+	# Свободных загонов нет — овца остаётся, рабочий встаёт: приказ не
+	# принимается вовсе, чтобы не гнать его к овце, которую некуда нести
+	var herd: bool = not dead_body and _is_stray(s)
+	if herd and _pen_with_room(global_position) == null:
+		_drop_sheep_job()
+		_herding = false
+		return
 	_drop_sheep_job()
+	_herding = herd
 	_leave_construction()
 	_free_slot()
 	set_attack_target(null)
@@ -610,12 +717,30 @@ func _keep_flock(keep: Node3D) -> int:
 func _keep_accepts(keep: Node3D) -> bool:
 	if keep == null or not is_instance_valid(keep):
 		return false
+	# Потолок стада игрока (SHEEP_PLAYER_MAX, ТЗ 19.09.2026)
+	if not bool(_SheepS.owned_cap_ok(faction)):
+		return false
 	return _keep_flock(keep) < _UCfgW.CASTLE_GRAZE_LIMIT
 
 func _dest_edge(dest: Node3D, _dir: Vector3) -> float:
 	if dest is Building:
 		return (dest as Building).ring_radius()
 	return 1.0
+
+## Куда идти к складу — ворота (Building.deposit_point), а не центр здания:
+## центр лежит внутри фундамента, и к нему с боков не подойти (ТЗ 19.09.2026)
+func _dest_point(dest: Node3D) -> Vector3:
+	if dest is Building:
+		return (dest as Building).deposit_point()
+	return dest.global_position
+
+## Дошёл ли до места сдачи у склада
+func _at_dest(dest: Node3D) -> bool:
+	if dest is Building:
+		return (dest as Building).at_deposit(global_position)
+	var d: Vector3 = dest.global_position - global_position
+	d.y = 0.0
+	return d.length() < 1.8
 
 ## Бросить овцу (новый приказ, гибель): взятая — снова свободна на месте
 func _drop_sheep_job() -> void:
@@ -627,6 +752,7 @@ func _drop_sheep_job() -> void:
 	_sheep_dest_node = null
 	_sheep_dest_forced = false
 	_sheep_phase = SheepPhase.NONE
+	_herding = false
 	if carrying_amount <= 0.0 and carrying_type == Constants.RESOURCE_FOOD:
 		carrying_type = Constants.RESOURCE_WOOD
 
@@ -697,6 +823,12 @@ func _process_sheep(delta: float) -> void:
 				# два, и различает их ПРИВЯЗКА: дикая у логова крадётся домой,
 				# своя из загона идёт под нож на месте. Тащить свою же овцу к
 				# складу незачем, она и так дома
+				if bool(_sheep.call("is_owned")) and _herding:
+					# Пока шёл — блуждающую уже привязал сосед-пастух: не резать
+					# её, а идти за следующей
+					_drop_sheep_job()
+					_herd_continue()
+					return
 				if bool(_sheep.call("is_owned")):
 					_sheep.call("captured_by", self)
 					_sheep_spot = _sheep.global_position
@@ -708,7 +840,8 @@ func _process_sheep(delta: float) -> void:
 				# Загон, назначенный ПКМ (set_sheep_dest), в силе; иначе —
 				# ближайший с местом, иначе склад
 				if _sheep_dest_node == null or not is_instance_valid(_sheep_dest_node):
-					_sheep_dest_node = _sheep_dest()
+					# Пастух несёт ТОЛЬКО в загон с местом: склад и нож — не его
+					_sheep_dest_node = _pen_with_room(global_position) if _herding else _sheep_dest()
 					_sheep_dest_forced = false
 				if _sheep_dest_node == null:
 					_cancel_sheep_job()
@@ -721,7 +854,7 @@ func _process_sheep(delta: float) -> void:
 				_wake_process()
 				return
 			move_target = _sheep.global_position
-			var nd: Vector3 = d / maxf(dist, 0.001)
+			var nd: Vector3 = _nav_dir(global_position, move_target, delta, d / maxf(dist, 0.001))
 			_facing = nd
 			velocity = nd * move_speed
 			_tick_stuck(delta, dist)
@@ -735,7 +868,7 @@ func _process_sheep(delta: float) -> void:
 			var dist2: float = d2.length()
 			var edge: float = _dest_edge(_sheep_dest_node, d2)
 			_sheep.call("carry_to", global_position + Vector3(0.0, SHEEP_CARRY_Y, 0.0))
-			if dist2 <= edge + SHEEP_STAND_PAD + 0.9:
+			if dist2 <= edge + SHEEP_STAND_PAD + 0.9 or _at_dest(_sheep_dest_node):
 				velocity = Vector3.ZERO
 				var out: Vector3 = -d2 / maxf(dist2, 0.001)
 				var spot: Vector3 = global_position + Vector3(-out.z, 0.0, out.x) * 1.2
@@ -765,7 +898,26 @@ func _process_sheep(delta: float) -> void:
 					carrying_amount = 0.0
 					carrying_type = Constants.RESOURCE_WOOD
 					state = State.IDLE
+					if _herding:
+						# Пастух: следующая блуждающая / рутина забоя / покой
+						herd_trips += 1
+						_herd_continue()
+						return
 					_wake_process()
+					return
+				# ── ПАСТУХ У ПОЛНОГО ЗАГОНА (место заняли, пока нёс) ─────────
+				# Другой загон с местом — туда; нет — овца остаётся здесь
+				# блуждающей, рабочий встаёт (ТЗ 19.09.2026, блок 3)
+				if _herding:
+					var alt_pen: Node3D = _pen_with_room(global_position, _sheep_dest_node)
+					if alt_pen != null:
+						_sheep_dest_node = alt_pen
+						_sheep_dest_forced = false
+						_sheep.call("captured_by", self)
+						state = State.RETURNING
+						_wake_process()
+						return
+					_cancel_sheep_job()
 					return
 				# ── НАЗНАЧЕННЫЙ ЗАГОН ПОЛОН — В БЛИЖАЙШИЙ С МЕСТОМ (письмо 10) ──
 				# Игрок показал загон, а там уже двадцать голов: овцу несём в
@@ -784,7 +936,8 @@ func _process_sheep(delta: float) -> void:
 				state = State.GATHERING
 				_wake_process()
 				return
-			var nd2: Vector3 = d2 / maxf(dist2, 0.001)
+			var nd2: Vector3 = _nav_dir(global_position, _dest_point(_sheep_dest_node),
+				delta, d2 / maxf(dist2, 0.001))
 			_facing = nd2
 			velocity = nd2 * move_speed
 			_tick_stuck(delta, dist2)
@@ -851,7 +1004,7 @@ func _process_sheep(delta: float) -> void:
 			dh.y = 0.0
 			var disth: float = dh.length()
 			var edgeh: float = _dest_edge(_sheep_dest_node, dh)
-			if disth <= edgeh + SHEEP_STAND_PAD:
+			if disth <= edgeh + SHEEP_STAND_PAD or _at_dest(_sheep_dest_node):
 				velocity = Vector3.ZERO
 				ResourceManager.gather_resource(faction, Constants.RESOURCE_FOOD, carrying_amount)
 				meat_delivered += carrying_amount
@@ -872,7 +1025,8 @@ func _process_sheep(delta: float) -> void:
 				state = State.MOVING
 				_wake_process()
 				return
-			var ndh: Vector3 = dh / maxf(disth, 0.001)
+			var ndh: Vector3 = _nav_dir(global_position, _dest_point(_sheep_dest_node),
+				delta, dh / maxf(disth, 0.001))
 			_facing = ndh
 			velocity = ndh * move_speed
 			_tick_stuck(delta, disth)
@@ -892,7 +1046,7 @@ func _process_sheep(delta: float) -> void:
 				state = State.GATHERING
 				_wake_process()
 				return
-			var ndb: Vector3 = db / maxf(distb, 0.001)
+			var ndb: Vector3 = _nav_dir(global_position, _sheep_spot, delta, db / maxf(distb, 0.001))
 			_facing = ndb
 			velocity = ndb * move_speed
 			_tick_stuck(delta, distb)
@@ -941,7 +1095,8 @@ const BUILD_STAND_PAD := 0.25
 
 func _process_build(delta: float) -> void:
 	if build_target == null or not is_instance_valid(build_target) \
-			or build_target.get("_done") == true:
+			or build_target.get("_done") == true \
+			or (build_target.has_method("repair_done") and bool(build_target.call("repair_done"))):
 		# Площадку достроили без нас (артель дошла раньше, а нас в строителях
 		# ещё не было) или снесли — ОЧЕРЕДЬ ПРИ ЭТОМ НЕ ТЕРЯЕТСЯ: следующая
 		# площадка берётся тем же путём, что и по сигналу «достроено».
@@ -984,7 +1139,8 @@ func _process_build(delta: float) -> void:
 		# Ещё идём к стройке
 		if build_target.has_method("remove_builder"):
 			build_target.remove_builder(self)
-		var ndir := dir / maxf(dist, 0.001)
+		# Обход скал на пути к стройке — как у приказа MOVE (ТЗ 18.09.2026, п. 8)
+		var ndir: Vector3 = _nav_dir(global_position, wp, delta, dir / maxf(dist, 0.001))
 		_facing  = ndir
 		velocity = ndir * move_speed
 		# ── ДЕТЕКТОР ЗАЦИКЛИВАНИЯ РАБОТАЕТ И ЗДЕСЬ (см. Unit._tick_stuck) ────
@@ -1119,7 +1275,7 @@ func _update_sprite_anim() -> void:
 		State.MOVING:
 			want = "walk"
 		_:
-			want = "walk" if moved_recently() else "idle"
+			want = "walk" if walk_anim_recently() else "idle"
 	# Через _set_anim: вид бойца живёт числами в Unit, узел спрайта в общей
 	# отрисовке не трогается вовсе (см. Unit._look_bind)
 	if want != _anim_name:
@@ -1188,7 +1344,7 @@ func tick_physics(delta: float, prof: bool = false, bm: bool = true,
 	var _mv_want_w: bool = _mv_now_w < _mv_until_ms
 	if _mv_want_w != _mv_moving:
 		_mv_moving = _mv_want_w
-		_pose_dirty = true
+		mark_pose_dirty()
 	if _sheep_phase != SheepPhase.NONE:
 		_sync_soa_row()
 		_process_sheep(delta)
@@ -1504,7 +1660,7 @@ func _process_gather(delta: float) -> void:
 			carrying_type    = gather_target.resource_type
 		var drop_off := GameManager.get_nearest_dropoff(faction, global_position)
 		if drop_off:
-			move_target = drop_off.global_position
+			move_target = _dest_point(drop_off)
 			state       = State.RETURNING
 		else:
 			_gather_timer = _cycle_time()
@@ -1514,9 +1670,10 @@ func _process_return(delta: float) -> void:
 	if drop_off == null:
 		state = State.IDLE
 		return
-	var dir := drop_off.global_position - global_position
+	# К ВОРОТАМ, А НЕ К ЦЕНТРУ (ТЗ 19.09.2026): центр — внутри фундамента
+	var dir := _dest_point(drop_off) - global_position
 	dir.y   = 0
-	if dir.length() < 1.8:
+	if _at_dest(drop_off):
 		velocity = Vector3.ZERO
 		# gather_resource, а не add_resource: сдача груза — это ДОБЫЧА, и она
 		# обязана попасть в счётчик, по которому HUD считает постоянный приток
@@ -1541,7 +1698,8 @@ func _process_return(delta: float) -> void:
 			gather_target = null
 			_auto_find_resource(next_type)
 	else:
-		var ndir := dir.normalized()
+		# Обход скал и на обратной дороге к складу (ТЗ 18.09.2026, п. 8)
+		var ndir: Vector3 = _nav_dir(global_position, _dest_point(drop_off), delta, dir.normalized())
 		_facing  = ndir
 		velocity = ndir * move_speed
 		# Тот же детектор, что и на пути к стройке: обратная дорога к складу

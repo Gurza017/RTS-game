@@ -191,6 +191,13 @@ func _apply_progress_visual() -> void:
 	_fill_node.scale.y = frac
 	_fill_node.position.y = _fill_full_h * frac * 0.5
 
+## Площадка «достроена» — это _done, а не полный запас: базовый
+## Building.repair_done (ремонт, ТЗ 19.09) отвечал true на свежей площадке
+## с полным запасом, и рабочий бросал стройку на первом же тике
+## (qa_fog E4-E6, qa_ai 3/4/7 в шлюзе gate6)
+func repair_done() -> bool:
+	return _done
+
 func add_builder(w: Node) -> void:
 	if not (w in _builders):
 		_builders.append(w)

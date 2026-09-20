@@ -1,5 +1,6 @@
 extends CanvasLayer
 class_name HUD
+const _OptSys := preload("res://scripts/perf_config.gd")
 
 const _UIAssets := preload("res://scripts/UIAssets.gd")
 const _GSHud := preload("res://scripts/game_settings.gd")
@@ -378,7 +379,9 @@ const PANEL_BORDER_W  := 2
 ## высота содержимого и досчитывается сверху), WORKER_ICON_BOOST — отдельно
 ## иконки построек (тем же приёмом, что и CASTLE_ICON_BOOST — крупнее самой
 ## кнопки, не просто вместе с ней) и главный портрет слева
-const WORKER_PANEL_W_BOOST := 1.2
+## ТЗ 19.09.2026-3 (п. 1): панель рабочего СЖАТА — ширина по содержимому
+## (1.0, было 1.2), иконки построек ×1.25 (было 1.5), ряд центрируется
+const WORKER_PANEL_W_BOOST := 1.0
 ## ── ВЫСОТА ПАНЕЛИ РАБОЧЕГО ВЕРНУЛАСЬ К СТАНДАРТНОЙ (заказ владельца) ─────
 ## Было 2.0 — панель рабочего вдвое выше своего содержимого, «просторно» по
 ## прежнему заказу. Владелец развернул: «верни стандартную компактную
@@ -387,7 +390,7 @@ const WORKER_PANEL_W_BOOST := 1.2
 ## не тронуто: оно про читаемость мелких картинок зданий, а не про рост
 ## панели, и высоту задаёт уже само содержимое
 const WORKER_PANEL_H_BOOST := 1.0
-const WORKER_ICON_BOOST    := 1.5
+const WORKER_ICON_BOOST    := 1.25
 var _worker_boost: bool = false
 
 ## Обёртка портрета — нужна отдельной ссылкой, чтобы менять её размер
@@ -1486,7 +1489,15 @@ func _build_bottom_panel() -> void:
 	pw.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	hbox.add_child(pw)
 	_portrait_wrap = pw
+	# Наведение на портрет открывает таблицу статов (ТЗ 18.09.2026, п. 6)
+	pw.mouse_filter = Control.MOUSE_FILTER_PASS
+	pw.mouse_entered.connect(func(): _set_stat_hover_portrait(true))
+	pw.mouse_exited.connect(func(): _set_stat_hover_portrait(false))
 	portrait = ColorRect.new(); portrait.color = Color(0.10, 0.11, 0.15)
+	# ColorRect по умолчанию ГЛОТАЕТ мышь (MOUSE_FILTER_STOP): над подложкой
+	# портрета mouse_entered рамки не приходил, и таблица статов открывалась
+	# лишь над бейджами (ТЗ-B 19.09.2026, п. 3: «по ВСЕЙ области иконки»)
+	portrait.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	pw.add_child(portrait)
 
 	_portrait_icon = TextureRect.new()
@@ -2138,6 +2149,7 @@ func _refresh_panel() -> void:
 				and not (u is Barracks) and u.faction == Constants.FACTION_PLAYER:
 			portrait.color = Color(0.16, 0.20, 0.30)
 			_show_garrison(u as Castle)
+			_garrison_vet_menu(u as Castle)
 			_castle_boost = true
 			_update_castle_caption(info_label.text)
 			info_label.text = _tower_info_text(u as Castle)
@@ -2159,6 +2171,7 @@ func _refresh_panel() -> void:
 			# рыцарь с лычками, рабочий, монах, а копейщиков не было вовсе
 			portrait.color = Color(0.12, 0.18, 0.30)
 			_show_garrison(u as Castle)
+			_garrison_vet_menu(u as Castle)
 			# ЗАМОК: ТРИ ЮНИТА (Рабочий, Рыцарь/Мечник, Монах) — постройки
 			# зданий убраны навсегда, они делаются Рабочим на карте (см.
 			# _build_worker_menu). Панель и портрет увеличены на +30%
@@ -2226,15 +2239,19 @@ func _refresh_panel() -> void:
 			# БАРАКИ — ПЕХОТА (09.09.2026): копейщики и мечники; лучники в стрелковой
 			_train_cmd(u, "spearman", Color(0.14, 0.18, 0.36), bbig, CASTLE_ICON_BOOST)
 			_train_cmd(u, "warrior",  Color(0.30, 0.14, 0.28), bbig, CASTLE_ICON_BOOST)
-			# ЛУЧНИКИ НА КРЫШЕ (ТЗ 14.09.2026): полоса гарнизона и кнопка выгрузки
+			# ЛУЧНИКИ НА КРЫШЕ (ТЗ 14.09.2026): полоса гарнизона и кнопка выгрузки.
+			# ИКОНКА — НЕ ПОРТРЕТ ЛУЧНИКА (ТЗ 18.09.2026, п. 7): с портретом в
+			# ряду найма кнопка читалась как «нанять лучников в бараках»; теперь
+			# стрелы-вниз, узкая, как кнопка ранга Крепости, — ряд не растёт
 			_show_garrison(u as Castle)
+			_garrison_vet_menu(u as Castle)
 			if (u as Castle).has_roof_garrison():
 				_cmd("Выгрузить", Color(0.20, 0.28, 0.16),
 					func(): _on_tower_release(u as Castle),
-					String(UNIT_ICONS.get("archer", "")), {"title": "Выгрузить лучников",
+					"icon_rain_of_arrows.png", {"title": "Выгрузить лучников с крыши",
 					"lines": ["Отряд сходит с крыши к воротам",
 						"То же делает ПКМ по баракам пустым выделением"]},
-					bbig, CASTLE_ICON_BOOST)
+					bbig, 1.0)
 
 		elif u is Building and u.building_id == "archery" \
 				and u.faction == Constants.FACTION_PLAYER:
@@ -2837,11 +2854,15 @@ func _add_ability_toggle(units: Array, sids: Array, node_id: String,
 		node: Dictionary, on: bool) -> void:
 	var title: String = String(node.get("name", node_id))
 	var col: Color = Color(0.24, 0.40, 0.56) if on else Color(0.13, 0.16, 0.20)
+	# Плашка — описание узла и ЕГО строки режима (forge_config toggle_lines);
+	# общих строк про залп у переключателя больше нет — у «Стены копий» в
+	# плашке стоял текст про лучников (ТЗ 18.09.2026, п. 6)
 	var lines: Array = [String(node.get("desc", "")),
-		"Режим отряда: %s" % ("ВКЛЮЧЁН" if on else "выключен"),
-		"Отряд стреляет разом, а не по мере перезарядки",
-		"Стрелы ложатся кучно в центр вражеского строя",
-		"Выключено — каждый стрелок бьёт сам, с обычным разбросом"]
+		"Режим отряда: %s" % ("ВКЛЮЧЁН" if on else "выключен")]
+	var extra: Variant = node.get("toggle_lines")
+	if extra != null:
+		for ln in (extra as Array):
+			lines.append(String(ln))
 	var btn: Button = _cmd(title, col,
 		func(): _on_ability_toggle(units, sids, node_id, not on),
 		String(node.get("icon", "")), {"title": title, "lines": lines},
@@ -3184,14 +3205,139 @@ func _on_squad_card_pressed(sid: int) -> void:
 # ─────────────────────────────────────────────────────────────────────────────
 const GARRISON_SLOT := 56
 
+## ── ТЗ 20.09.2026 (п. 6.2): ГАРНИЗОН — СЕКЦИЯ ПАНЕЛИ, А НЕ ПЛАШКА НАД НЕЙ ──
+## Прежняя полоса висела ОТДЕЛЬНЫМ узлом над нижней панелью, привязанным к её
+## верхней кромке: панель считает высоту по содержимому и переставляется при
+## каждой пересборке, а полоса пересобиралась своим тактом — на экране это
+## читалось как «большая дёргающаяся плашка» (скриншот 7). Теперь слоты живут
+## В САМОЙ ПАНЕЛИ, последней колонкой ряда кнопок (то есть справа, за монахом):
+## подпись «Гарнизон» и до GARRISON_MINI_SLOTS маленьких иконок. Сетка панели
+## двигает её вместе со всем остальным — дёргаться нечему.
+const GARRISON_MINI := 22          # сторона мелкого слота, px
+const GARRISON_MINI_SLOTS := 7     # сколько слотов показываем (заказ)
+const GARRISON_MINI_COLS := 4      # два ряда: 4 + 3 — колонка не шире кнопки
+
 var _garrison_strip: Control = null
 
 func _hide_garrison() -> void:
 	if _garrison_strip != null and is_instance_valid(_garrison_strip):
+		if _garrison_strip.get_parent() != null:
+			_garrison_strip.get_parent().remove_child(_garrison_strip)
 		_garrison_strip.queue_free()
 	_garrison_strip = null
 
+## Компактная секция в ряду кнопок здания. Зовётся из веток панели ДО кнопок
+## найма, а вправо её переставляет _sync_panel_grid_widths: порядок веток
+## разный (у башни кнопка «Выпустить» идёт после, у замка — три найма), и
+## держать вызов последним в каждой значило бы чинить это в трёх местах
 func _show_garrison(castle: Castle) -> void:
+	_hide_garrison()
+	if castle == null or not is_instance_valid(castle):
+		return
+	if castle.garrison.is_empty() and castle._incoming.is_empty():
+		return
+	if button_container == null or not is_instance_valid(button_container):
+		return
+	var col := VBoxContainer.new()
+	col.name = "GarrisonSection"
+	col.add_theme_constant_override("separation", 2)
+	col.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	col.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	var cap := Label.new()
+	cap.name = "GarrisonCaption"
+	cap.text = "Гарнизон"
+	cap.add_theme_font_size_override("font_size", 11)
+	cap.add_theme_color_override("font_color", Color(0.78, 0.84, 0.68))
+	cap.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	cap.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	col.add_child(cap)
+	var grid := GridContainer.new()
+	grid.name = "GarrisonSlots"
+	grid.columns = GARRISON_MINI_COLS
+	grid.add_theme_constant_override("h_separation", 2)
+	grid.add_theme_constant_override("v_separation", 2)
+	col.add_child(grid)
+	var shown: int = 0
+	var extra: int = 0
+	for g in castle.garrison:
+		var rec: Dictionary = g
+		if shown < GARRISON_MINI_SLOTS:
+			grid.add_child(_garrison_mini(castle, int(rec["sid"]), String(rec["type"]), true))
+			shown += 1
+		else:
+			extra += 1
+	for s in castle._incoming:
+		var sid: int = s
+		if shown < GARRISON_MINI_SLOTS:
+			grid.add_child(_garrison_mini(castle, sid, GameManager.squad_type(sid), false))
+			shown += 1
+		else:
+			extra += 1
+	# Пустые места ряда рисуются тускло: семь слотов, а не «сколько есть», —
+	# игрок видит и занятость, и вместимость одним взглядом
+	var free_n: int = mini(GARRISON_MINI_SLOTS, castle.garrison_limit()) - shown
+	for i in range(maxi(free_n, 0)):
+		grid.add_child(_garrison_mini_empty())
+	if extra > 0:
+		var more := Label.new()
+		more.text = "+%d" % extra
+		more.add_theme_font_size_override("font_size", 10)
+		more.add_theme_color_override("font_color", Color(0.95, 0.85, 0.55))
+		more.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		col.add_child(more)
+	button_container.add_child(col)
+	_garrison_strip = col
+
+## Пустое место гарнизона: рамка без иконки и без клика
+func _garrison_mini_empty() -> Control:
+	var r := PanelContainer.new()
+	r.custom_minimum_size = Vector2(GARRISON_MINI, GARRISON_MINI)
+	r.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var st := StyleBoxFlat.new()
+	st.bg_color = Color(0.10, 0.12, 0.14, 0.55)
+	_borders(st, 1); _corners(st, 3)
+	st.border_color = Color(0.30, 0.34, 0.30, 0.8)
+	r.add_theme_stylebox_override("panel", st)
+	return r
+
+## Мелкий слот: иконка рода войск, клик выпускает отряд, подсказка — состав
+func _garrison_mini(castle: Castle, squad_id: int, unit_type: String, inside: bool) -> Control:
+	var btn := QuietTooltipButton.new()
+	btn.name = "GarrisonSlot_%d" % squad_id
+	btn.custom_minimum_size = Vector2(GARRISON_MINI, GARRISON_MINI)
+	btn.clip_contents = true
+	btn.text = ""
+	var col: Color = Color(0.16, 0.26, 0.18) if inside else Color(0.24, 0.22, 0.12)
+	var sn := StyleBoxFlat.new(); sn.bg_color = col.darkened(0.2)
+	_borders(sn, 1); _corners(sn, 3)
+	sn.border_color = col.lightened(0.3)
+	var sh := StyleBoxFlat.new(); sh.bg_color = col.lightened(0.15)
+	_borders(sh, 1); _corners(sh, 3)
+	sh.border_color = Color(0.95, 0.88, 0.55)
+	btn.add_theme_stylebox_override("normal", sn)
+	btn.add_theme_stylebox_override("hover",  sh)
+	btn.add_theme_stylebox_override("pressed", sn)
+	var ipath: String = String(UNIT_ICONS.get(unit_type, ""))
+	if ipath and ResourceLoader.exists(ipath):
+		var tex := load(ipath) as Texture2D
+		if tex != null:
+			btn.add_child(_stretched_icon(tex, 1.0))
+	var have: int = GameManager.squad_members(squad_id).size()
+	var want: int = _UCfg.squad_size(unit_type)
+	btn.tooltip_text = ("%d/%d" % [have, want]) if inside else "идёт…"
+	if inside:
+		btn.pressed.connect(func(): _on_garrison_release(castle, squad_id))
+		btn.mouse_entered.connect(func(): _show_card(btn,
+			{"title": "Гарнизон: %d/%d" % [have, want],
+			 "lines": ["Клик — выпустить отряд наружу"]}))
+		btn.mouse_exited.connect(_hide_card)
+		btn.tree_exiting.connect(_hide_card)
+	return btn
+
+## Прежняя плавающая полоса (56 px, над панелью). Не зовётся: заменена
+## секцией выше. Оставлена целиком — механизм рабочий, и если крупные слоты
+## понадобятся снова, возвращать их не придётся писать заново
+func _show_garrison_strip_legacy(castle: Castle) -> void:
 	_hide_garrison()
 	if castle == null or not is_instance_valid(castle):
 		return
@@ -3372,7 +3518,15 @@ func _show_squad_stats(squad_id: int, units: Array) -> void:
 ## Ширина 320 → 268, кегль 12 → 11. Меньше нельзя: подпись «Интервал атаки»
 ## самая длинная в таблице, и на 250 она уже переносится на вторую строку, от
 ## чего панель растёт в высоту — то есть «уменьшение» оборачивается ростом
-const STAT_PANEL_W := 268
+## ТЗ 18.09.2026, п. 6: подпись стала «Кулдаун», и 268 больше не нужно —
+## таблица ужата до 232, отступы плашки 10/6 → 6/3, шаг строк 1 → 0
+const STAT_PANEL_W := 232
+## ── КОМПАКТНАЯ ТАБЛИЦА (ТЗ-B 19.09.2026, п. 3) ────────────────────────────
+## Таблица больше НЕ тянется до ширины нижней панели (_panel_w): на экране
+## она выходила во всю ширину плашки отряда с полосками по 350 px. Своя
+## ширина, полоски фиксированной длины BAR_W, стоит НАД нижней панелью у
+## её левого края — меньше самой панели отряда
+const STAT_COMPACT_W := 250
 ## Кегль строк таблицы статов
 const STAT_FONT_PX := 11
 ## Сторона значка стата. Выведена из кегля: значок вровень со строчными
@@ -3442,7 +3596,8 @@ const STAT_ROW_LABELS := {
 	# ПО-РУССКИ намеренно: карточка статов набрана по-английски, но панель под
 	# ней («Отряд опытных копейщиков», «Ранг 1 → 2») и вся остальная игра — по-
 	# русски, так что чужеродна здесь как раз английская строка
-	"range": "Range", "cooldown": "Интервал атаки", "morale": "Morale",
+	# ── «КУЛДАУН» (ТЗ 18.09.2026, п. 6) — четвёртое имя того же числа ──────
+	"range": "Range", "cooldown": "Кулдаун", "morale": "Morale",
 	"spread": "Accuracy", "carry": "Carry", "gather": "Gathering",
 }
 
@@ -3476,9 +3631,11 @@ func _apply_left_column_width() -> void:
 	var c := _stat_panel
 	if c == null or not is_instance_valid(c):
 		return
-	c.custom_minimum_size = Vector2(_panel_w, c.custom_minimum_size.y)
+	# Таблица компактная (STAT_COMPACT_W), к ширине нижней панели больше не
+	# привязана — только к её левому краю (ТЗ-B 19.09.2026, п. 3)
+	c.custom_minimum_size = Vector2(STAT_COMPACT_W, c.custom_minimum_size.y)
 	c.offset_left  = PANEL_LEFT
-	c.offset_right = PANEL_LEFT + _panel_w
+	c.offset_right = PANEL_LEFT + STAT_COMPACT_W
 
 ## ── РЕЕСТР СТРОК ТАБЛИЦЫ: КЛЮЧ СТАТА → САМА СТРОКА ─────────────────────────
 ## Нужен ровно для одного — ПРЕДПРОСМОТРА БУДУЩЕЙ НАГРАДЫ (см. _preview_stats):
@@ -3493,14 +3650,190 @@ func _apply_left_column_width() -> void:
 var _stat_rows: Dictionary = {}      # ключ стата -> RichTextLabel
 var _stat_base: Dictionary = {}      # ключ стата -> текст без предпросмотра
 
+## ── ТАБЛИЦА СТАТОВ — ТОЛЬКО ПО НАВЕДЕНИЮ (ТЗ 18.09.2026, п. 6) ─────────────
+## Панель строится при выделении, как прежде (её размеры нужны нижней панели:
+## общая ширина, PANEL_TOP), но ПОКАЗЫВАЕТСЯ лишь пока курсор стоит на
+## портрете отряда или на карточке награды (там она — экран предпросмотра).
+## Карточка разведки (live_hp) видна всегда: нижней панели у чужого отряда
+## нет, и наводить некуда. ПРЯЧЕТСЯ ПРОЗРАЧНОСТЬЮ, НЕ visible: у скрытой
+## панели контейнеры не раскладывают детей (qa_vetui C3: иконка награды на
+## x = 6 вместо правой колонки), а ширину и позиции читают стенды и нижняя
+## панель. Прозрачная панель клика не держит (point_over_ui спрашивает
+## stat_panel_shown), а ряд наград внутри неё на время прозрачности глушится
+## по mouse_filter (_bonus_holders) — чтобы над пустым местом не всплывала
+## подсказка награды
+var _stat_hover_portrait: bool = false
+var _stat_hover_vet: bool = false
+var _stat_always: bool = false
+
+func stat_panel_shown() -> bool:
+	return _stat_panel != null and is_instance_valid(_stat_panel) \
+		and _stat_panel.visible and _stat_panel.modulate.a > 0.01
+
+## Держатели иконок наград: глушатся по mouse_filter, пока таблица прозрачна
+var _bonus_holders: Array = []
+
+func _stat_panel_wanted() -> bool:
+	return _stat_always or _stat_hover_portrait or _stat_hover_vet or _stat_hover_forge
+
+func _refresh_stat_visibility() -> void:
+	if _stat_panel == null or not is_instance_valid(_stat_panel):
+		return
+	var want: bool = _stat_panel_wanted()
+	_stat_panel.modulate = Color(1.0, 1.0, 1.0, 1.0 if want else 0.0)
+	for h in _bonus_holders:
+		if h != null and is_instance_valid(h):
+			(h as Control).mouse_filter = Control.MOUSE_FILTER_PASS if want \
+				else Control.MOUSE_FILTER_IGNORE
+	if not want:
+		_hide_bonus_tip()
+
+func _set_stat_hover_portrait(on: bool) -> void:
+	_stat_hover_portrait = on
+	_refresh_stat_visibility()
+
 func _hide_stat_panel() -> void:
 	# Подсказка бонуса живёт НАД панелью статов и без неё осиротеет
 	_hide_bonus_tip()
+	_stat_always = false
+	_stat_hover_vet = false
+	_forge_preview_own = false
+	_stat_sid = 0
 	if _stat_panel != null and is_instance_valid(_stat_panel):
 		_stat_panel.queue_free()
 	_stat_panel = null
 	_stat_rows.clear()
 	_stat_base.clear()
+	_stat_bars.clear()
+	_bonus_holders.clear()
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ЭКВАЛАЙЗЕР СТАТОВ (ТЗ 19.09.2026, блок 4.2-4.3)
+# ═════════════════════════════════════════════════════════════════════════════
+# Средняя колонка таблицы статов — не текст «база +кузница +опыт =», а ПОЛОСКА
+# из цветных отрезков: жёлтый — база юнита, зелёный — прирост кузницы,
+# фиолетовый — прирост выбранного ветеранства, красный — отрицательные вклады
+# (минус карточки, дебафф). Итог справа по-прежнему числом (его читают стенды
+# и предпросмотр: _stat_rows[key] — правая ячейка, как и было).
+# Предпросмотр награды (наведение на карточку) ДОРИСОВЫВАЕТ отрезок: плюс —
+# ярко-фиолетовый в конец полоски, минус — красная накладка с конца.
+# Масштаб у каждой полоски свой (сумма вкладов + запас под предпросмотр):
+# полоски разных статов между собой не сравниваются, сравниваются ВКЛАДЫ
+# внутри одной
+const BAR_BASE_COLOR    := Color(0.95, 0.80, 0.22)
+const BAR_FORGE_COLOR   := Color(0.38, 0.80, 0.38)
+const BAR_VET_COLOR     := Color(0.66, 0.42, 0.92)
+const BAR_NEG_COLOR     := Color(0.90, 0.26, 0.26)
+const BAR_PREVIEW_COLOR := Color(0.84, 0.60, 1.00)
+const BAR_BG_COLOR      := Color(0.12, 0.13, 0.18, 0.9)
+const BAR_H := 8.0
+const BAR_MIN_W := 64.0
+## Длина полоски фиксирована (ТЗ-B 19.09.2026: «укоротить полоски»)
+const BAR_W := 64.0
+## Доля ширины под текущие вклады; остаток — под предпросмотр прибавки
+const BAR_FILL_FRAC := 0.78
+
+class StatBar extends Control:
+	var base: float = 0.0
+	var forge: float = 0.0
+	var vet: float = 0.0
+	var preview: float = 0.0
+	var bar_h: float = 10.0
+	var col_base := Color(0.95, 0.80, 0.22)
+	var col_forge := Color(0.38, 0.80, 0.38)
+	var col_vet := Color(0.66, 0.42, 0.92)
+	var col_neg := Color(0.90, 0.26, 0.26)
+	var col_prev := Color(0.84, 0.60, 1.00)
+	var col_bg := Color(0.12, 0.13, 0.18, 0.9)
+	var fill_frac: float = 0.78
+
+	func set_parts(p_base: float, p_forge: float, p_vet: float) -> void:
+		base = p_base
+		forge = p_forge
+		vet = p_vet
+		queue_redraw()
+
+	func set_preview(v: float) -> void:
+		preview = v
+		queue_redraw()
+
+	## Отрезки слева направо: [длина в единицах стата, цвет]; отрицательные
+	## вклады — отдельно, красной накладкой с конца
+	func segments() -> Array:
+		var out: Array = []
+		if base > 0.0:
+			out.append([base, col_base])
+		if forge > 0.0:
+			out.append([forge, col_forge])
+		if vet > 0.0:
+			out.append([vet, col_vet])
+		return out
+
+	func negative_total() -> float:
+		var n := 0.0
+		if forge < 0.0:
+			n += -forge
+		if vet < 0.0:
+			n += -vet
+		return n
+
+	func _draw() -> void:
+		var w: float = size.x
+		var h: float = minf(bar_h, size.y) if size.y > 0.0 else bar_h
+		var y0: float = maxf((size.y - h) * 0.5, 0.0)
+		draw_rect(Rect2(0.0, y0, w, h), col_bg, true)
+		var pos_total: float = 0.0
+		for sg in segments():
+			pos_total += float((sg as Array)[0])
+		var span: float = pos_total + maxf(preview, 0.0)
+		if span <= 0.0:
+			return
+		var k: float = w * fill_frac / maxf(pos_total, 1e-6)
+		# Прибавка предпросмотра может не влезть в запас — ужимаем всё вместе
+		if span * k > w:
+			k = w / span
+		var x: float = 0.0
+		for sg in segments():
+			var len_px: float = float((sg as Array)[0]) * k
+			draw_rect(Rect2(x, y0 + 1.0, len_px, h - 2.0), (sg as Array)[1], true)
+			x += len_px
+		var end_x: float = x
+		var neg: float = negative_total()
+		if neg > 0.0:
+			var nl: float = minf(neg * k, end_x)
+			draw_rect(Rect2(end_x - nl, y0 + 1.0, nl, h - 2.0), col_neg, true)
+		if preview > 0.0:
+			draw_rect(Rect2(end_x, y0 + 1.0, preview * k, h - 2.0), col_prev, true)
+		elif preview < 0.0:
+			var pl: float = minf(-preview * k, end_x)
+			draw_rect(Rect2(end_x - pl, y0 + 1.0, pl, h - 2.0), col_neg, true)
+
+## ключ стата → полоска (см. _show_stat_panel); чистится вместе с панелью
+var _stat_bars: Dictionary = {}
+
+static var _bb_re: RegEx = null
+static func _strip_bbcode(t: String) -> String:
+	if _bb_re == null:
+		_bb_re = RegEx.new()
+		_bb_re.compile("[[]/?[a-z]+(=[^]]*)?[]]")
+	return _bb_re.sub(t, "", true)
+
+func _make_stat_bar(base: float, forge: float, vet: float) -> Control:
+	var bar := StatBar.new()
+	bar.custom_minimum_size = Vector2(BAR_W, BAR_H + 2.0)
+	bar.size_flags_horizontal = Control.SIZE_SHRINK_END
+	bar.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	bar.bar_h = BAR_H
+	bar.col_base = BAR_BASE_COLOR
+	bar.col_forge = BAR_FORGE_COLOR
+	bar.col_vet = BAR_VET_COLOR
+	bar.col_neg = BAR_NEG_COLOR
+	bar.col_prev = BAR_PREVIEW_COLOR
+	bar.col_bg = BAR_BG_COLOR
+	bar.fill_frac = BAR_FILL_FRAC
+	bar.set_parts(base, forge, vet)
+	return bar
 
 ## Формула боевого стата в разметке BBCode: «Attack: 15 +3 +2 = 20» —
 ## база белым, вклад кузницы и вклад опыта зелёным (оба безымянные — только
@@ -3647,15 +3980,36 @@ func _show_stat_panel(squad_id: int, units: Array, live_hp: bool = false) -> voi
 	var cd_forge: float = GameManager.unit_bonus(f, uid, "bonus_cooldown")
 	var mo_vet: float   = GameManager.squad_bonus(squad_id, "morale")
 	var mo_forge: float = GameManager.unit_bonus(f, uid, "bonus_morale")
+	# Ветеранство запаса жизни и напора вписано прямо в поля бойца — вычитаем
+	# обратно, чтобы фиолетовый отрезок полоски показал именно его
+	var hp_vet: float   = GameManager.squad_bonus(squad_id, "health")
+	var pu_vet: float   = GameManager.squad_bonus(squad_id, "push")
+	var def_forge: float = GameManager.get_upgrade(f, "defense")
+	var ar_forge: float = GameManager.unit_bonus(f, uid, "bonus_armor")
+	var pu_forge: float = GameManager.unit_bonus(f, uid, "bonus_push")
+	var sp_forge: float = GameManager.unit_bonus(f, uid, "bonus_speed")
+	# Числа для полосок эквалайзера: ключ → [база, кузница, ветеранство]
+	var nums: Dictionary = {
+		"health":   [sample.max_health - hp_forge - hp_vet, hp_forge, hp_vet],
+		"attack":   [sample.attack_damage, atk_smithy, sample.vet_attack],
+		"defense":  [sample.defense, def_forge, sample.vet_defense],
+		"armor":    [sample.armor, ar_forge, sample.vet_armor],
+		"push":     [sample.push_force - pu_vet, pu_forge, pu_vet],
+		"morale":   [sample.morale - mo_vet, mo_forge, mo_vet],
+		"speed":    [sample.move_speed, sp_forge, sample.vet_speed],
+		# «Меньше — лучше»: жёлтый — то, что осталось, зелёный и фиолетовый —
+		# сколько срезано кузницей и опытом
+		"cooldown": [maxf(sample.attack_cooldown - cd_forge, _UCfg.MIN_COOLDOWN), cd_forge, cd_vet],
+	}
 	var lines: Array = [
-		["health", _stat_parts(String(STAT_ROW_LABELS["health"]),  sample.max_health - hp_forge, hp_forge, 0.0)],
+		["health", _stat_parts(String(STAT_ROW_LABELS["health"]),  sample.max_health - hp_forge - hp_vet, hp_forge, hp_vet)],
 		["attack", _stat_parts(String(STAT_ROW_LABELS["attack"]),  sample.attack_damage, atk_smithy, sample.vet_attack)],
 		["defense", _stat_parts("Defense", sample.defense,
-			GameManager.get_upgrade(f, "defense"), sample.vet_defense)],
+			def_forge, sample.vet_defense)],
 		["armor", _stat_parts(String(STAT_ROW_LABELS["armor"]),   sample.armor,
-			GameManager.unit_bonus(f, uid, "bonus_armor"), sample.vet_armor)],
-		["push", _stat_parts(String(STAT_ROW_LABELS["push"]),    sample.push_force,
-			GameManager.unit_bonus(f, uid, "bonus_push"), 0.0, 1)],
+			ar_forge, sample.vet_armor)],
+		["push", _stat_parts(String(STAT_ROW_LABELS["push"]),    sample.push_force - pu_vet,
+			pu_forge, pu_vet, 1)],
 		["morale", _stat_parts(String(STAT_ROW_LABELS["morale"]),
 			sample.morale - mo_vet, mo_forge, mo_vet)],
 		# ── ШЕСТЬ ГЛАВНЫХ СТРОК ВЫШЕ, ОСТАЛЬНОЕ НИЖЕ (заказ владельца) ────────
@@ -3674,8 +4028,10 @@ func _show_stat_panel(squad_id: int, units: Array, live_hp: bool = false) -> voi
 	# ровно так же, как у лучника
 	if sample.attack_range > MELEE_RANGE_MAX:
 		var rg_vet: float = GameManager.squad_bonus(squad_id, "range")
+		var rg_forge: float = GameManager.unit_bonus(f, uid, "bonus_range")
 		lines.append(["range", _stat_parts(String(STAT_ROW_LABELS["range"]),
-			sample.attack_range - rg_vet, 0.0, rg_vet, 1)])
+			sample.attack_range - rg_vet - rg_forge, rg_forge, rg_vet, 1)])
+		nums["range"] = [sample.attack_range - rg_vet - rg_forge, rg_forge, rg_vet]
 
 	# ЗАРАБОТАННЫЕ БОНУСЫ ОТРЯДА: id наград по уровням, одинаковые повторяются —
 	# из этого ниже собирается ряд иконок со стеком (II, III, IV)
@@ -3686,13 +4042,13 @@ func _show_stat_panel(squad_id: int, units: Array, live_hp: bool = false) -> voi
 	st.bg_color = Color(0.05, 0.06, 0.10, 0.93)
 	_borders(st); _corners(st, 6)
 	st.border_color = Color(0.34, 0.44, 0.58)
-	st.content_margin_left = 10; st.content_margin_right = 10
-	st.content_margin_top  = 6;  st.content_margin_bottom = 6
+	st.content_margin_left = 6; st.content_margin_right = 6
+	st.content_margin_top  = 3;  st.content_margin_bottom = 3
 	panel.add_theme_stylebox_override("panel", st)
-	# ШИРИНА ОБЩАЯ С НИЖНЕЙ ПАНЕЛЬЮ (см. _panel_w). Здесь берётся ПОСЛЕДНЕЕ
-	# известное значение, а точное доедет из _sync_panel_height, который считает
-	# содержимое нижней панели уже после нас
-	panel.custom_minimum_size = Vector2(_panel_w, 0)
+	# ШИРИНА СВОЯ, КОМПАКТНАЯ (ТЗ-B 19.09.2026, п. 3) — не _panel_w: таблица
+	# меньше панели отряда и стоит над её левым краем
+	panel.custom_minimum_size = Vector2(STAT_COMPACT_W, 0)
+	_stat_sid = squad_id
 
 	# ── ДВЕ КОЛОНКИ: ТЕКСТ СЛЕВА, ЗАРАБОТАННЫЕ НАГРАДЫ СПРАВА ──────────────
 	# Заказ владельца: иконку уже выбранного бонуса перенести из нижней панели
@@ -3755,7 +4111,7 @@ func _show_stat_panel(squad_id: int, units: Array, live_hp: bool = false) -> voi
 	head.add_theme_color_override("font_color", Color(0.95, 0.90, 0.70))
 	# Ширина текстовой колонки уменьшена на колонку наград: иначе строки заняли
 	# бы всю панель и вытолкнули иконки за её правый край
-	var text_w: float = _panel_w - 20.0 - BONUS_COL_W
+	var text_w: float = STAT_COMPACT_W - 20.0 - BONUS_COL_W
 	_fix_label(head, int(text_w), 1)
 	if live_hp:
 		vb.add_child(head)
@@ -3772,8 +4128,8 @@ func _show_stat_panel(squad_id: int, units: Array, live_hp: bool = false) -> voi
 	var grid := GridContainer.new()
 	grid.name = "StatGrid"
 	grid.columns = 3
-	grid.add_theme_constant_override("h_separation", 5)
-	grid.add_theme_constant_override("v_separation", 1)
+	grid.add_theme_constant_override("h_separation", 4)
+	grid.add_theme_constant_override("v_separation", 0)
 	grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	vb.add_child(grid)
 	for rec in lines:
@@ -3796,16 +4152,30 @@ func _show_stat_panel(squad_id: int, units: Array, live_hp: bool = false) -> voi
 		# ── СРЕДНЯЯ: БАЗА, ПРИБАВКИ И ЗНАК «=» ─────────────────────────────
 		# Прижата ВПРАВО: тогда «=» всех строк выстраивается в одну вертикаль,
 		# сколько бы прибавок ни было в каждой
-		var mid := RichTextLabel.new()
-		mid.bbcode_enabled = true
-		mid.fit_content    = true
-		mid.scroll_active  = false
-		mid.autowrap_mode  = TextServer.AUTOWRAP_OFF
-		mid.add_theme_font_size_override("normal_font_size", STAT_FONT_PX)
-		mid.add_theme_font_size_override("bold_font_size", STAT_FONT_PX)
-		mid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		mid.text = "[right]%s[/right]" % String(parts[1])
-		grid.add_child(mid)
+		# ── СРЕДНЯЯ КОЛОНКА — ЭКВАЛАЙЗЕР (ТЗ 19.09.2026, блок 4.2) ─────────
+		# Полоска из отрезков: база (жёлтый), кузница (зелёный), ветеранство
+		# (фиолетовый), минусы красным. Прежний текст «база +… =» — в
+		# подсказке строки (tooltip), чтобы число не пропало вовсе
+		if live_hp:
+			# КАРТОЧКА РАЗВЕДКИ — числами: чужой отряд читают «сколько у него
+			# грейдов», и текст «+2 =» там и есть ответ (qa_recon C1)
+			var mid := RichTextLabel.new()
+			mid.bbcode_enabled = true
+			mid.fit_content    = true
+			mid.scroll_active  = false
+			mid.autowrap_mode  = TextServer.AUTOWRAP_OFF
+			mid.add_theme_font_size_override("normal_font_size", STAT_FONT_PX)
+			mid.add_theme_font_size_override("bold_font_size", STAT_FONT_PX)
+			mid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			mid.text = "[right]%s[/right]" % String(parts[1])
+			grid.add_child(mid)
+		else:
+			var nv: Array = nums.get(key, [0.0, 0.0, 0.0])
+			var bar: Control = _make_stat_bar(float(nv[0]), float(nv[1]), float(nv[2]))
+			bar.name = "Bar_" + key
+			bar.tooltip_text = "%s: %s %s" % [String(parts[0]), _strip_bbcode(String(parts[1])), _strip_bbcode(String(parts[2]))]
+			grid.add_child(bar)
+			_stat_bars[key] = bar
 		# ── ПРАВАЯ: ИТОГ ПО ПРАВОМУ КРАЮ ───────────────────────────────────
 		var tot := RichTextLabel.new()
 		tot.bbcode_enabled = true
@@ -3832,10 +4202,13 @@ func _show_stat_panel(squad_id: int, units: Array, live_hp: bool = false) -> voi
 	# не учитывала перенос длинного заголовка на вторую строку, и панель
 	# статов наезжала на командную панель ровно под собой
 	_stat_panel = panel
+	_stat_always = live_hp
+	# Прозрачна до наведения (ТЗ 18.09.2026, п. 6); размеры при этом честные
+	_refresh_stat_visibility()
 	# ЗАЗОРА МЕЖДУ ОКНОМ И ПЛАШКОЙ НЕТ (заказ владельца). Стояло PANEL_TOP − 6:
 	# шесть пикселей пустоты, из-за которых два тёмных блока читались как два
 	# несвязанных окна, а не как одна панель управления отрядом
-	await _pin_floater_above(panel, PANEL_TOP, PANEL_LEFT, _panel_w)
+	await _pin_floater_above(panel, PANEL_TOP, PANEL_LEFT, STAT_COMPACT_W)
 	# ── ВЫСОТА ПАНЕЛИ ПЕРЕСЧИТЫВАЕТСЯ ПОЗЖЕ, ЧЕМ МЫ СЮДА ПОПАЛИ ─────────────
 	# _pin_floater_above ждёт кадр (иначе не знает своей высоты), а
 	# _sync_panel_height успевает отработать в ЭТОМ же вызове show_selection и
@@ -3845,8 +4218,8 @@ func _show_stat_panel(squad_id: int, units: Array, live_hp: bool = false) -> voi
 	# нулевым зазором и шкалой опыта окно статов легло прямо на плашку.
 	# Перепривязываемся к ЖИВОМУ PANEL_TOP
 	if is_instance_valid(panel) and not panel.is_queued_for_deletion():
-		# И ШИРИНУ ТОЖЕ ПЕРЕПРИВЯЗЫВАЕМ: пока корутина спала, _sync_panel_height
-		# успел посчитать содержимое нижней панели и обновить общее число
+		# _pin_floater_above показал панель — прячем до наведения (п. 6)
+		_refresh_stat_visibility()
 		_apply_left_column_width()
 		var hh: float = panel.get_combined_minimum_size().y
 		panel.offset_bottom = float(PANEL_TOP)
@@ -3886,8 +4259,21 @@ func _hide_bonus_tip() -> void:
 ## chosen — id наград ПО ПОРЯДКУ УРОВНЕЙ (см. GameManager.squad_chosen).
 ## unit_type — боевой тип отряда (stat_id), у каждого свой конфиг наград
 ## (см. unit_stats_config.VET_CONFIG)
+## Ряд наград (ТЗ 19.09.2026, блок 4.4): ВСЕ открытые перки — выбранные
+## награды ветеранства (фиолетовый маркер «✓») и изученные узлы кузницы этого
+## рода войск (зелёная рамка); у каждой иконки — плашка с описанием
+## ── ТЗ 20.09.2026 (п. 6.1): В КАРТОЧКЕ ТОЛЬКО ВЕТЕРАНСТВО ─────────────────
+## Заказ: «полностью убрать улучшения из Кузницы, оставить ТОЛЬКО улучшения
+## ветеранства». Узлы кузницы одинаковы у ВСЕХ отрядов рода войск — в карточке
+## конкретного отряда они ничего о нём не сообщают, а места занимали больше,
+## чем сами награды (скриншот 3: две колонки по семь иконок). Смотреть их
+## по-прежнему можно в самой кузнице. Сборщик иконки и плашка оставлены:
+## механизм рабочий, ручка — одна строка
+const BONUS_ROW_SHOWS_FORGE := false
+
 func _build_bonus_row(parent: Control, chosen: Array, unit_type: String) -> void:
-	if chosen.is_empty():
+	var forge_done: Array = _forge_nodes_done(unit_type) if BONUS_ROW_SHOWS_FORGE else []
+	if chosen.is_empty() and forge_done.is_empty():
 		return
 	# Порядок вывода — по первому появлению бонуса, чтобы ряд не прыгал при
 	# каждом новом уровне. Словарь id -> список уровней, на которых он взят
@@ -3919,6 +4305,116 @@ func _build_bonus_row(parent: Control, chosen: Array, unit_type: String) -> void
 		var cid: String = String(cid_v)
 		var lvls: Array = levels[cid]
 		row.add_child(_bonus_icon(cid, lvls, unit_type))
+	for nid_v in forge_done:
+		row.add_child(_forge_perk_icon(String(nid_v), unit_type))
+
+## Изученные узлы кузницы этого рода войск (id вида «archer_2b»), в порядке сетки
+func _forge_nodes_done(unit_type: String) -> Array:
+	var out: Array = []
+	var f: int = Constants.FACTION_PLAYER
+	var main := GameManager.main
+	if main != null and is_instance_valid(main) and main.get("selection_manager") != null:
+		for u in main.selection_manager.selected_units:
+			if is_instance_valid(u) and u is Unit:
+				f = (u as Unit).faction
+				break
+	for cell in _Forge.cells():
+		var nid: String = _Forge.node_id(unit_type, String(cell))
+		if GameManager.is_researched(f, nid):
+			out.append(nid)
+	return out
+
+## Цвета рамок маркеров: ветеранство — фиолетовый, кузница — зелёный
+const PERK_VET_COLOR := Color(0.70, 0.45, 0.95)
+const PERK_FORGE_COLOR := Color(0.40, 0.80, 0.42)
+
+func _perk_frame(holder: Control, color: Color) -> void:
+	var fr := ReferenceRect.new()
+	fr.name = "PerkFrame"
+	fr.editor_only = false
+	fr.border_color = color
+	fr.border_width = 2.0
+	fr.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	fr.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	holder.add_child(fr)
+
+## Иконка изученного узла кузницы в ряду перков; плашка — название и описание
+func _forge_perk_icon(node_id: String, unit_type: String) -> Control:
+	var view: Dictionary = _Forge.node_view(node_id)
+	var holder := QuietTooltipControl.new()
+	holder.name = "Forge_" + node_id
+	holder.custom_minimum_size = Vector2(BONUS_ICON_SIZE, BONUS_ICON_SIZE)
+	holder.mouse_filter = Control.MOUSE_FILTER_STOP
+	var icon_path: String = String(view.get("icon", ""))
+	var tex: Texture2D = null
+	if not icon_path.is_empty() and ResourceLoader.exists(icon_path):
+		tex = load(icon_path) as Texture2D
+	if tex != null:
+		holder.add_child(_stretched_icon(tex, 2.0))
+	else:
+		var fb := Label.new()
+		fb.text = node_id.get_slice("_", 1).to_upper()
+		fb.add_theme_font_size_override("font_size", 11)
+		fb.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		fb.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		fb.vertical_alignment   = VERTICAL_ALIGNMENT_CENTER
+		fb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		holder.add_child(fb)
+	_perk_frame(holder, PERK_FORGE_COLOR)
+	holder.mouse_entered.connect(func(): _show_forge_perk_tip(holder, node_id, unit_type))
+	holder.mouse_exited.connect(_hide_bonus_tip)
+	_bonus_holders.append(holder)
+	if not _stat_panel_wanted():
+		holder.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	holder.tree_exiting.connect(_hide_bonus_tip)
+	holder.tooltip_text = String(view.get("title", node_id))
+	return holder
+
+func _show_forge_perk_tip(anchor: Control, node_id: String, _unit_type: String) -> void:
+	_hide_bonus_tip()
+	if anchor == null or not is_instance_valid(anchor):
+		return
+	var view: Dictionary = _Forge.node_view(node_id)
+	var lines: Array = []
+	var desc: String = String(view.get("description", ""))
+	if not desc.is_empty():
+		lines.append(desc)
+	var sb: Dictionary = view.get("stat_bonus", {})
+	for k in sb:
+		var amt: float = float(sb[k])
+		var lbl: String = String(MOD_SHORT_LABELS.get("bonus_" + String(k), String(k).to_upper()))
+		lines.append("%s %s" % [_mod_amount(amt), lbl])
+	if lines.is_empty():
+		lines.append("Изучено в кузнице")
+	var panel := PanelContainer.new()
+	panel.name = "BonusTip"
+	var st := StyleBoxFlat.new()
+	st.bg_color = Color(0.05, 0.06, 0.10, 0.96)
+	_borders(st); _corners(st, 6)
+	st.border_color = PERK_FORGE_COLOR
+	st.content_margin_left = 10; st.content_margin_right = 10
+	st.content_margin_top  = 8;  st.content_margin_bottom = 8
+	panel.add_theme_stylebox_override("panel", st)
+	panel.custom_minimum_size = Vector2(BONUS_TIP_W, 0)
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 1)
+	panel.add_child(vb)
+	var head := Label.new()
+	head.text = "Кузница: " + String(view.get("title", node_id))
+	head.add_theme_font_size_override("font_size", 13)
+	head.add_theme_color_override("font_color", Color(0.78, 1.0, 0.78))
+	_fix_label(head, BONUS_TIP_W - 20.0, 1)
+	vb.add_child(head)
+	for line in lines:
+		var lb := Label.new()
+		lb.text = String(line)
+		lb.add_theme_font_size_override("font_size", 12)
+		lb.add_theme_color_override("font_color", Color(0.86, 0.88, 0.92))
+		_fix_label(lb, BONUS_TIP_W - 20.0, 2)
+		vb.add_child(lb)
+	var g: Array = _tip_anchor_geometry(anchor, BONUS_TIP_W)
+	_bonus_tip = panel
+	await _pin_floater_above(panel, float(g[1]), float(g[0]), BONUS_TIP_W)
 
 func _bonus_icon(choice_id: String, lvls: Array, unit_type: String) -> Control:
 	var info: Dictionary = _UCfg.veteran_choice_info(unit_type, choice_id)
@@ -3961,8 +4457,26 @@ func _bonus_icon(choice_id: String, lvls: Array, unit_type: String) -> Control:
 		st_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 		holder.add_child(st_lbl)
 
+	# ФИОЛЕТОВЫЙ МАРКЕР ВЫБРАННОЙ НАГРАДЫ (ТЗ 19.09.2026, блок 4.4): рамка и
+	# галочка в углу — «это взято ветеранством», в отличие от узлов кузницы
+	_perk_frame(holder, PERK_VET_COLOR)
+	var mark := Label.new()
+	mark.name = "VetMark"
+	mark.text = "✓"
+	mark.add_theme_font_size_override("font_size", 12)
+	mark.add_theme_color_override("font_color", PERK_VET_COLOR)
+	mark.add_theme_color_override("font_outline_color", Color(0.08, 0.04, 0.12))
+	mark.add_theme_constant_override("outline_size", 4)
+	mark.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	mark.set_anchors_and_offsets_preset(Control.PRESET_TOP_LEFT)
+	mark.offset_left = 1.0
+	mark.offset_top = -3.0
+	holder.add_child(mark)
 	holder.mouse_entered.connect(func(): _show_bonus_tip(holder, choice_id, lvls, unit_type))
 	holder.mouse_exited.connect(_hide_bonus_tip)
+	_bonus_holders.append(holder)
+	if not _stat_panel_wanted():
+		holder.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	holder.tree_exiting.connect(_hide_bonus_tip)
 	# Дублируем краткую суть в штатный tooltip: если окно-подсказка почему-то
 	# не откроется, игрок всё равно узнает, на что смотрит
@@ -4312,12 +4826,17 @@ func _hide_vet_tip() -> void:
 ## Наведение на награду: плашка справа + предпросмотр в таблице статов.
 ## Одно событие — два следствия, и оба снимаются одним _on_vet_unhover
 func _on_vet_hover(squad_id: int, choice: Dictionary) -> void:
+	# Таблица статов — экран предпросмотра: показывается на время наведения
+	_stat_hover_vet = true
+	_refresh_stat_visibility()
 	_show_vet_tip(choice)
 	_preview_stats(choice)
 
 func _on_vet_unhover() -> void:
 	_hide_vet_tip()
 	_clear_stat_preview()
+	_stat_hover_vet = false
+	_refresh_stat_visibility()
 
 ## ПЛАШКА: иконка и список того, что награда реально даёт. Всё содержимое —
 ## ненулевые модификаторы записи, то есть ровно конфиг и ничего кроме
@@ -4405,6 +4924,10 @@ func _clear_stat_preview() -> void:
 		var rt = _stat_rows.get(k)
 		if rt != null and is_instance_valid(rt):
 			rt.text = String(_stat_base[k])
+	for k2 in _stat_bars:
+		var b = _stat_bars[k2]
+		if b != null and is_instance_valid(b):
+			b.set_preview(0.0)
 
 func _preview_stats(choice: Dictionary) -> void:
 	_clear_stat_preview()
@@ -4423,6 +4946,34 @@ func _preview_stats(choice: Dictionary) -> void:
 			amount = -amount
 		rt.text = String(_stat_base.get(stat, rt.text)) + " [color=%s]%s[/color]" % [
 			PREVIEW_COLOR, _mod_amount(amount)]
+		# И полоска: плюс вытягивается фиолетовым, минус подсвечивается красным
+		# (у «меньше — лучше» срез — это плюс к полоске остатка со знаком минус:
+		# полоска остатка укорачивается, то есть красная накладка)
+		var bar = _stat_bars.get(stat)
+		if bar != null and is_instance_valid(bar):
+			bar.set_preview(-amount if NEGATIVE_STATS.has(stat) else amount)
+
+## ── ВЫБОР НАГРАДЫ ИЗ УКРЕПЛЕНИЯ (ТЗ 19.09.2026, блок 4.1) ─────────────────
+## Отряд в башне / бараках / крепости выделить нельзя (укрытые бойцы не
+## попадают в selected_units), и панель награды для него не появлялась,
+## пока он не выйдет. Панель здания показывает её сама: первый отряд
+## гарнизона с невыбранной наградой — таблица статов и карточки выбора,
+## клик применяет награду и пересобирает панель здания (следующий отряд)
+var garrison_vet_menus: int = 0
+func _garrison_vet_menu(c: Castle) -> void:
+	if c == null or not is_instance_valid(c):
+		return
+	for rec in c.garrison:
+		var sid: int = int((rec as Dictionary).get("sid", 0))
+		if sid <= 0 or GameManager.squad_pending(sid) <= 0:
+			continue
+		var men: Array = GameManager.squad_members(sid)
+		if men.is_empty():
+			continue
+		garrison_vet_menus += 1
+		_show_stat_panel(sid, men)
+		_build_veteran_menu(sid, men)
+		return
 
 func _on_veteran_pressed(squad_id: int, choice_index: int) -> void:
 	if not GameManager.apply_veteran_choice(squad_id, choice_index):
@@ -4509,16 +5060,19 @@ func _build_worker_menu(worker: Worker, crew: Array = [], size: float = 0.0,
 		var d: Dictionary = catalog[bid]
 		# У крепости цена прогрессивная (ТЗ 14.09.2026): читаем через GameManager
 		var cost: Dictionary = GameManager.build_cost_for(worker.faction, bid)
-		var col: Color = _WORKER_BUILD_COLORS.get(bid, Color(0.24, 0.22, 0.26))
-		# Не хватает ресурсов — кнопка гаснет, но остаётся нажимаемой:
-		# заказ просто не пройдёт проверку в try_worker_build
-		if not ResourceManager.can_afford(worker.faction, cost):
-			col = col.darkened(0.45)
+		# ── ФОН КНОПКИ — ДОСТУПНОСТЬ, И ЖИВОЙ (ТЗ 19.09.2026-3, п. 1) ────
+		# Зелёный BUILD_OK_BG, если хватает, красный BUILD_LACK_BG, если нет;
+		# перекрашивается по сигналу resources_changed через тот же реестр
+		# _afford_watch, что у кнопок найма (не хватает — заказ всё равно
+		# нажимается и отказывает в try_worker_build с подсказкой)
+		var ok0: bool = ResourceManager.can_afford(worker.faction, cost)
+		var col: Color = _build_bg(ok0)
 		# Иконка берётся из конфига здания; цена и темп стройки — в карточке
 		var icon: String = String(d.get("icon", ""))
-		_cmd(String(d.get("name", bid)), col,
+		var btn: Button = _cmd(String(d.get("name", bid)), col,
 			func(): GameManager.try_worker_build(worker, bid, crew),
 			icon, _building_card(bid), size, icon_boost)
+		_watch_build_afford(btn, cost, worker.faction, bid)
 
 ## Кнопка НАЙМА: цена, время и размер отряда читаются из конфига
 ## (unit_stats_config.TRAINING) — и кнопка, и карточка показывают одни числа
@@ -4542,6 +5096,16 @@ func _afford_color(base: Color, ok: bool) -> Color:
 	if ok:
 		return base.lerp(AFFORD_OK_TINT, AFFORD_OK_MIX)
 	return base.lerp(AFFORD_LACK_TINT, AFFORD_LACK_MIX).darkened(0.15)
+
+## Фон кнопки ПОСТРОЙКИ у рабочего — ровно два цвета заказа (ТЗ 19.09.2026-3):
+## #2D5A27 «хватает», #5A2727 «не хватает». _style_cmd_button темнит заливку
+## на четверть — компенсируем, чтобы на экране стояли числа заказа
+const BUILD_OK_BG   := Color("#2D5A27")
+const BUILD_LACK_BG := Color("#5A2727")
+
+func _build_bg(ok: bool) -> Color:
+	var c: Color = BUILD_OK_BG if ok else BUILD_LACK_BG
+	return Color(c.r / 0.75, c.g / 0.75, c.b / 0.75)
 
 ## ═══════════════════════════════════════════════════════════════════════════
 ## РЫЦАРИ КРЕПОСТИ: ОДНА ИКОНКА С ЛЫЧКАМИ И КНОПКА РАНГА [ I ] ПОД НЕЙ
@@ -5156,7 +5720,12 @@ func _rebuild_forge_grid() -> void:
 		var avail: bool  = GameManager.can_research(f, nid)
 		var qpos: int    = s.queue_position(nid)
 
-		var btn := Button.new()
+		# QuietTooltipButton, а не голый Button (ТЗ-B 19.09.2026, п. 1):
+		# _apply_upgrade_state пишет в tooltip_text «Название — Требуется
+		# предыдущее улучшение», и движок рисовал этот текст СВОИМ пузырём
+		# поверх нашей карточки узла («бегущая строка» со скриншота).
+		# tooltip_text остаётся — по нему узлы ищут стенды, — а пузыря нет
+		var btn := QuietTooltipButton.new()
 		btn.name = "ForgeNode_" + nid
 		btn.position = _forge_cell_pos(cell)
 		btn.size = Vector2(FORGE_CELL, FORGE_CELL)
@@ -5244,6 +5813,22 @@ func _draw_forge_arrows() -> void:
 			var col: Color = FORGE_ARROW_ON \
 				if GameManager.is_researched(f, String(p)) else FORGE_ARROW_OFF
 			_forge_arrow(from, to, col)
+		# ── ВОРОТА РЯДА В КОЛОНКУ D (ТЗ-B 19.09.2026, п. 2) ─────────────────
+		# Узел D открывается рядом A+B+C: рисуем одну стрелку C → D в его
+		# ряду (зелёная, когда ряд изучен целиком). Три косые линии из A, B и
+		# C сюда не возвращаются (заказ 13.09.2026) — связь одна, читается
+		# как «из ряда в D». Вертикаль D1 → D2 → … рисует общий цикл выше:
+		# у колонки D теперь есть предыдущий узел в prerequisites
+		if cell.ends_with(_Forge.ABILITY_COL):
+			var gate_cell: String = cell.substr(0, cell.length() - 1) + "c"
+			var gc: Vector2 = _forge_cell_center(gate_cell)
+			var row_done := true
+			for g in node.get("row_gate", []):
+				if not GameManager.is_researched(f, String(g)):
+					row_done = false
+					break
+			_forge_arrow(Vector2(gc.x + half, gc.y), Vector2(c.x - half, c.y),
+				FORGE_ARROW_ON if row_done else FORGE_ARROW_OFF)
 		# ── Горизонтальные двусторонние связки: ТОЛЬКО ЛИНИЯ, не зависимость
 		# (поле "link" ячейки, forge_config.UNITS). Рисуем один раз на пару — по той
 		# стороне, где ячейка «левее», иначе каждая пара рисуется дважды
@@ -5290,6 +5875,87 @@ func _hide_forge_tip() -> void:
 	if _forge_tip != null and is_instance_valid(_forge_tip):
 		_forge_tip.queue_free()
 	_forge_tip = null
+	_forge_preview_end()
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ПРЕДПРОСМОТР БОНУСА КУЗНИЦЫ НА ПАНЕЛИ ОТРЯДА (ТЗ-B 19.09.2026, п. 3)
+# ═════════════════════════════════════════════════════════════════════════════
+# Наведение на узел древа дорисовывает его прибавки в таблицу статов ТЕМ ЖЕ
+# путём, что предпросмотр награды (_preview_stats): ключи узла — те же
+# bonus_*, что у карточек ветеранства. Чей отряд: выделенный отряд этого рода
+# войск; нет выделенного — первый живой свой отряд того же рода (панель
+# поднимается ради предпросмотра НАД панелью кузницы и гаснет с уходом
+# курсора). Рода войск нет на карте — предпросмотра нет
+var _stat_sid: int = 0
+var _stat_hover_forge: bool = false
+## Панель статов поднята ради предпросмотра кузницы — с ним и уходит
+var _forge_preview_own: bool = false
+## Стенды: сколько раз предпросмотр кузницы дописал прибавку в таблицу
+var forge_previews: int = 0
+
+func _forge_preview_begin(node: Dictionary) -> void:
+	_forge_preview_end()
+	var uid: String = String(node.get("unit", ""))
+	if uid.is_empty() or _UCfg.nonzero_modifiers(node).is_empty():
+		return
+	var sid: int = 0
+	for s in _selected_squad_ids():
+		if GameManager.squad_type(int(s)) == uid:
+			sid = int(s)
+			break
+	if sid <= 0 and _stat_sid > 0 and GameManager.squads.has(_stat_sid) \
+			and GameManager.squad_type(_stat_sid) == uid:
+		sid = _stat_sid
+	if sid <= 0:
+		for key in GameManager.squads:
+			var rec: Dictionary = GameManager.squads[key]
+			if int(rec.get("faction", -1)) != Constants.FACTION_PLAYER:
+				continue
+			if String(rec.get("type", "")) != uid:
+				continue
+			if (rec["members"] as Array).is_empty():
+				continue
+			sid = int(key)
+			break
+	if sid <= 0:
+		return
+	var fresh: bool = _stat_sid != sid or _stat_panel == null or not is_instance_valid(_stat_panel)
+	if fresh:
+		var men: Array = GameManager.squad_members(sid)
+		if men.is_empty():
+			return
+		_show_stat_panel(sid, men)
+		_forge_preview_own = true
+	_stat_hover_forge = true
+	_refresh_stat_visibility()
+	_preview_stats(node)
+	forge_previews += 1
+	if fresh:
+		_lift_stat_panel_over_forge()
+
+## Панель статов, поднятая ради кузницы, встаёт НАД панелью кузницы (та
+## занимает место над нижней панелью, где таблица стоит обычно)
+func _lift_stat_panel_over_forge() -> void:
+	await get_tree().process_frame
+	if not _forge_preview_own or _stat_panel == null or not is_instance_valid(_stat_panel):
+		return
+	if _forge_panel == null or not is_instance_valid(_forge_panel) or not _forge_panel.visible:
+		return
+	var h: float = _stat_panel.get_combined_minimum_size().y
+	var bottom: float = _forge_panel.offset_top - 4.0
+	_stat_panel.offset_bottom = bottom
+	_stat_panel.offset_top = bottom - h
+
+func _forge_preview_end() -> void:
+	if not _stat_hover_forge:
+		return
+	_stat_hover_forge = false
+	_clear_stat_preview()
+	if _forge_preview_own:
+		_forge_preview_own = false
+		_hide_stat_panel()
+	else:
+		_refresh_stat_visibility()
 
 func _show_forge_tip(node_id: String) -> void:
 	_hide_forge_tip()
@@ -5338,69 +6004,64 @@ func _show_forge_tip(node_id: String) -> void:
 	title.custom_minimum_size = Vector2(FORGE_TIP_W - 76, 0)
 	head.add_child(title)
 
-	# ── Эффект
+	# ── ФОРМАТ КАРТОЧКИ (ТЗ-B 19.09.2026, п. 2): иконка + название, описание
+	# человеческим языком, статус, цена. Технических строк («+0.2
+	# bonus_heal_rate», «Исследование: 25 с», «Действует: …», «Способность
+	# отряда») здесь больше нет — числа бонусов живут в описании узла и в
+	# предпросмотре на панели отряда (_forge_preview_begin)
 	_forge_tip_line(box, String(node.get("desc", "")), Color(0.92, 0.92, 0.88), 14)
-	# Числовые бонусы — по тем же ключам, что копит GameManager
-	for key in _UCfg.BONUS_KEYS:
-		var k: String = String(key)
-		var v: float = float(node.get(k, 0.0))
-		if v != 0.0:
-			_forge_tip_line(box, "%s %s" % [
-				("+" if v > 0.0 else ""), "%s %s" % [
-					("%.1f" % v).trim_suffix(".0"), _BONUS_TITLES.get(k, k)]],
-				Color(0.80, 0.90, 0.80), 13)
 
-	_forge_tip_line(box, "Действует: %s" % String(
-		UNIT_TITLES.get(String(node.get("unit", "")), "—")),
-		Color(0.86, 0.86, 0.90), 13)
-
-	# ── Статус: он же объясняет, ПОЧЕМУ узел закрыт
+	# ── Статус: Изучено / Исследуется / Доступно (зелёным) / Недоступно
+	#    (красным); причина закрытия — отдельной серой строкой
 	var nid: String = String(node.get("id", ""))
 	var status := ""
 	var status_col := Color(0.86, 0.86, 0.90)
+	var why := ""
 	if GameManager.is_researched(f, nid):
-		status = "Статус: изучено"
+		status = "Изучено"
 		status_col = UPG_CHECK_COLOR
 	elif GameManager.is_researching(f, nid):
 		var qp: int = _forge_smithy.queue_position(nid)
-		status = "Статус: исследуется" if qp == 0 else "Статус: в очереди (%d)" % qp
+		status = "Исследуется" if qp == 0 else "В очереди (%d)" % qp
 		status_col = Color(0.56, 0.78, 0.98)
 	else:
 		var missing: Array = GameManager.research_blockers(f, node)
 		if missing.is_empty():
-			status = "Статус: доступно"
-			status_col = Color(0.60, 0.90, 0.60)
-		elif not (node.get("row_gate", []) as Array).is_empty() \
-				and _forge_row_locked(f, node):
-			# Колонка D закрыта именно рядом — называем причину прямо, иначе
-			# игрок ищет несуществующую стрелку к этой иконке
-			status = "Закрыто: изучите весь ряд %s (A + B + C)" % str(node.get("row", ""))
-			status_col = Color(0.92, 0.66, 0.40)
+			status = "Доступно"
+			status_col = FORGE_STATUS_OK
 		else:
-			# ДВА ПУТИ ВХОДА — И ОБА НАЗЫВАЕМ. Узел открывается либо сверху (все
-			# prerequisites), либо сбоку (любой сосед по горизонтальной стрелке,
-			# см. GameManager.research_blockers). Показать только вертикаль значило
-			# бы соврать: игрок видит стрелку вбок, а подсказка про неё молчит
-			status = "Закрыто: нужно %s" % _forge_names(missing)
-			var side_ids: Array = node.get("link_ids", [])
-			if not side_ids.is_empty():
-				status += "\nили сбоку по стрелке: %s" % _forge_names(side_ids)
-			status_col = Color(0.92, 0.66, 0.40)
-	_forge_tip_line(box, status, status_col, 13)
+			status = "Недоступно"
+			status_col = FORGE_STATUS_LOCK
+			if not (node.get("row_gate", []) as Array).is_empty() \
+					and _forge_row_locked(f, node):
+				# Колонка D закрыта именно рядом — называем причину прямо,
+				# иначе игрок ищет несуществующую стрелку к этой иконке
+				why = "Нужно изучить ряд %s (A + B + C)" % str(node.get("row", ""))
+				var rest: Array = []
+				for m in missing:
+					if not (String(m) in (node.get("row_gate", []) as Array)):
+						rest.append(m)
+				if not rest.is_empty():
+					why += " и %s" % _forge_names(rest)
+			else:
+				why = "Нужно: %s" % _forge_names(missing)
+				var side_ids: Array = node.get("link_ids", [])
+				if not side_ids.is_empty():
+					why += " (или сбоку: %s)" % _forge_names(side_ids)
+	_forge_tip_line(box, "Статус: %s" % status, status_col, 13)
+	if not why.is_empty():
+		_forge_tip_line(box, why, Color(0.70, 0.70, 0.76), 12)
 
-	_forge_tip_line(box, "Исследование: %d с" % int(_UCfg.upgrade_research_time(node)),
-		Color(0.86, 0.86, 0.90), 13)
 	# ЦЕНА — ИКОНКАМИ РЕСУРСОВ, как в карточке найма (заказ 10.09.2026):
 	# тот же _build_cost_row, число краснеет, когда ресурса не хватает
 	box.add_child(_build_cost_row(_UCfg.upgrade_cost(node)))
 
-	# ── Спец-способность: сколько будет стоить докупить её отряду
-	if bool(node.get("is_unit_ability", false)):
-		_forge_tip_line(box,
-			"Способность отряда: %d з за отряд" % int(_Forge.squad_unlock_cost(node)),
-			Color(0.72, 0.88, 0.98), 13)
-
+	# ── ЖИВОЙ ПРЕДПРОСМОТР НА ПАНЕЛИ ОТРЯДА (ТЗ-B 19.09.2026, п. 3) ────────
+	_forge_preview_begin(node)
 	_pin_forge_tip()
+
+const FORGE_STATUS_OK   := Color(0.45, 0.90, 0.45)
+const FORGE_STATUS_LOCK := Color(0.95, 0.35, 0.35)
 
 ## Заперт ли узел колонки D именно неполным рядом
 func _forge_row_locked(f: int, node: Dictionary) -> bool:
@@ -5977,8 +6638,27 @@ func _on_alert_pressed(sid: int) -> void:
 	# по-прежнему проверяется стендом: он нужен всему остальному, что переводит
 	# камеру мягко, и понадобится, если требование развернут обратно.
 	# pan_to пишет фокус камеры прямо, поэтому работает и на паузе
-	main.focus_camera_on(GameManager.squad_centroid(sid))
+	# ── ОТРЯД В УКРЕПЛЕНИИ: выделяем само здание (ТЗ 19.09.2026, блок 4.1) ──
+	# Укрытых бойцов выделить нельзя, панель награды им показывает панель
+	# здания (_garrison_vet_menu)
+	var host = null
+	for m0 in men:
+		if is_instance_valid(m0) and (m0 as Unit).garrisoned:
+			var h = (m0 as Unit).garrison_host
+			if h != null and is_instance_valid(h):
+				host = h
+			break
 	var sm = main.selection_manager
+	if host != null:
+		main.focus_camera_on((host as Node3D).global_position)
+		if sm != null and is_instance_valid(sm):
+			sm._clear_selection()
+			sm._select(host)
+			GameManager.on_selection_changed(sm.selected_units)
+		else:
+			show_selection([host])
+		return
+	main.focus_camera_on(GameManager.squad_centroid(sid))
 	if sm != null and is_instance_valid(sm):
 		sm._clear_selection()
 		for m in men:
@@ -6024,6 +6704,15 @@ func _update_idle_counter(delta: float) -> void:
 	_apply_idle_state(n)
 
 func _process(_delta: float) -> void:
+	# Часы подсистемы (perf_config.sys_meter, qa_bigstand): одна проверка bool
+	if not _OptSys.sys_meter:
+		_process_timed(_delta)
+		return
+	var _sys_t0: int = Time.get_ticks_usec()
+	_process_timed(_delta)
+	_OptSys.sys_add("hud", Time.get_ticks_usec() - _sys_t0)
+
+func _process_timed(_delta: float) -> void:
 	_update_top_right(_delta)
 	_update_idle_counter(_delta)
 	_update_resource_income(_delta)
@@ -6056,8 +6745,12 @@ func _process(_delta: float) -> void:
 			# стандарт попали и Бараки, и у них подпись замирала бы
 			_update_castle_caption(hp_text)
 			# У башни в info_label живёт гарнизон — он меняется, пока отряд
-			# заходит, и обновляется вместе с HP
-			if _selected_node is Castle and not (_selected_node as Castle).is_stronghold():
+			# заходит, и обновляется вместе с HP. БАРАКИ — НЕ БАШНЯ (ТЗ
+			# 18.09.2026, п. 7): они Castle без крепости, и текст башни
+			# оживлял у них пустую колонку InfoColumn (+132 px) — панель
+			# «разъезжалась» с первого же тика после клика по найму
+			if _selected_node is Castle and not (_selected_node as Castle).is_stronghold() \
+					and not (_selected_node is Barracks):
 				info_label.text = _tower_info_text(_selected_node as Castle)
 		elif _selected_node is Building \
 				and _UCfg.is_house((_selected_node as Building).building_id):
@@ -6499,6 +7192,9 @@ func _focus_panels() -> Array:
 			_forge_tip, _stat_card, _bonus_tip]:
 		var c := n as Control
 		if c != null and is_instance_valid(c) and c.visible:
+			# Прозрачная (спрятанная до наведения) таблица статов клик не держит
+			if c == _stat_panel and not stat_panel_shown():
+				continue
 			out.append(c)
 	return out
 
@@ -6616,6 +7312,14 @@ func _watch_afford(btn: Button, base: Color, cost: Dictionary, faction: int,
 	_afford_watch.append({"btn": btn, "base": base, "cost": cost, "faction": faction,
 		"unit": unit_id, "bld": bld, "ok": _afford_ok(cost, faction, unit_id, bld)})
 
+## Кнопка постройки рабочего: цвет — не подмес к базовому, а два фона заказа
+## (см. _build_bg); цена крепости прогрессивная, поэтому в реестре лежит
+## id постройки и цена перечитывается на каждую проверку
+func _watch_build_afford(btn: Button, cost: Dictionary, faction: int, build_id: String) -> void:
+	_afford_watch.append({"btn": btn, "base": Color.WHITE, "cost": cost, "faction": faction,
+		"unit": "", "bld": null, "build": build_id,
+		"ok": ResourceManager.can_afford(faction, cost)})
+
 func _afford_ok(cost: Dictionary, faction: int, unit_id: String, bld: Building) -> bool:
 	var ok: bool = ResourceManager.can_afford(faction, cost)
 	if ok and unit_id != "" and bld != null and is_instance_valid(bld):
@@ -6638,12 +7342,28 @@ func _refresh_afford() -> void:
 		if braw != null and not is_instance_valid(braw):
 			braw = null
 			d["bld"] = null
-		var ok: bool = _afford_ok(d["cost"], int(d["faction"]), String(d["unit"]), braw)
+		var build_id: String = String(d.get("build", ""))
+		var ok: bool
+		if build_id != "":
+			d["cost"] = GameManager.build_cost_for(int(d["faction"]), build_id)
+			ok = ResourceManager.can_afford(int(d["faction"]), d["cost"])
+		else:
+			ok = _afford_ok(d["cost"], int(d["faction"]), String(d["unit"]), braw)
 		if ok == bool(d["ok"]):
 			continue
 		d["ok"] = ok
-		_style_cmd_button(btn as Button, _afford_color(d["base"], ok), false)
+		if build_id != "":
+			_style_cmd_button(btn as Button, _build_bg(ok), false)
+		else:
+			_style_cmd_button(btn as Button, _afford_color(d["base"], ok), false)
 	_afford_watch = keep
+	# ── КАРТОЧКА ПОД КУРСОРОМ ЖИВАЯ (ТЗ 19.09.2026-3, п. 1) ─────────────────
+	# Красное/белое число цены в открытой карточке считалось при показе; склад
+	# сменился — карточка пересобирается на том же якоре с теми же данными
+	if _stat_card != null and is_instance_valid(_stat_card) \
+			and _card_anchor != null and is_instance_valid(_card_anchor) \
+			and not (_card_data.get("cost", {}) as Dictionary).is_empty():
+		_show_card(_card_anchor, _card_data)
 
 ## Тот же стиль, что кладёт _cmd при сборке; вынесен, чтобы перекраска не
 ## разошлась с первичной покраской
@@ -7215,7 +7935,7 @@ func _tip_anchor_geometry(anchor: Control, width: float) -> Array:
 	# Сдвигаем окно ВПРАВО за панель статов — ровно то «аккуратно справа», что
 	# просили; если правее места нет, упираемся в край экрана и окно всё равно
 	# оказывается настолько правее, насколько экран позволяет
-	if _stat_panel != null and is_instance_valid(_stat_panel) and _stat_panel.visible:
+	if stat_panel_shown():
 		var sp: Rect2 = _stat_panel.get_global_rect()
 		var right_of: float = sp.position.x + sp.size.x + TIP_GAP
 		if px < right_of:
@@ -7239,11 +7959,19 @@ func _hide_card() -> void:
 	if _stat_card != null and is_instance_valid(_stat_card):
 		_stat_card.queue_free()
 	_stat_card = null
+	_card_anchor = null
+	_card_data = {}
+
+## Якорь и данные открытой карточки — для живого пересчёта цены (см. _refresh_afford)
+var _card_anchor: Control = null
+var _card_data: Dictionary = {}
 
 func _show_card(anchor: Control, data: Dictionary) -> void:
 	_hide_card()
 	if data.is_empty() or anchor == null or not is_instance_valid(anchor):
 		return
+	_card_anchor = anchor
+	_card_data = data
 
 	var panel := PanelContainer.new()
 	panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -7436,14 +8164,16 @@ func _building_card(build_id: String) -> Dictionary:
 	# таблица коэффициентов, а не сведения для игрока; «Габарит: 6.0 × 6.0 м»
 	# игрок и так видит призраком постройки при размещении. Осталось одно
 	# число, по которому решение действительно принимают, — сколько строить
-	if bt > 0.0:
+	# Загон — компактно: одна строка сути, цена (ТЗ 19.09.2026-3, п. 1)
+	if build_id == "sheep_pen":
+		lines.append("Ставится сразу. Вмещает до %d овец" % int(_UCfg.SHEEP_PEN_CAPACITY))
+	elif bt > 0.0:
 		lines.append("Стройка: %.0f c одним рабочим" % bt)
 	else:
 		lines.append("Ставится сразу, без стройки")
 	if _UCfg.is_house(build_id):
-		lines.append("Даёт %d еды каждые %d c" % [
-			int(_UCfg.HOUSE_FOOD_INCOME), int(_UCfg.HOUSE_FOOD_INTERVAL)])
-		lines.append("Лимит: +%d рабочих, +%d отряда" % [
+		# Тексты заказа (ТЗ 19.09.2026-3); числа — из конфига
+		lines.append("Генерируют еду, дают +%d слота для рабочих и +%d слота для армии" % [
 			_UCfg.HOUSE_WORKER_SLOTS, _UCfg.HOUSE_SQUAD_SLOTS])
 	elif build_id == "tower":
 		lines.append("Обзор %d м, внутрь — отряд лучников" % int(_UCfg.TOWER_VISION))
@@ -7452,9 +8182,15 @@ func _building_card(build_id: String) -> Dictionary:
 	elif build_id == "barracks":
 		lines.append("Нанимает копейщиков и мечников")
 	if build_id == "castle":
+		# Текст заказа (ТЗ 19.09.2026-3): 40 видимых на крыше из двух отрядов,
+		# остальные — резерв внутри; числа выводятся из раскладки крыш
+		var roof_sq: int = int(_UCfg.ROOF_SQUADS.get("castle", 2))
+		var roof_total: int = roof_sq * _UCfg.squad_size("archer")
+		var roof_vis: int = mini(int(_UCfg.ROOF_VISIBLE.get("castle", roof_total)), roof_total)
+		lines.append("Главное здание. Вмещает гарнизон из %d лучников (%d отряда) на крыше и %d в резерве" % [
+			roof_vis, roof_sq, roof_total - roof_vis])
 		lines.append("Не больше %d крепостей; каждая следующая дороже в %.0f раз" % [
 			_UCfg.CASTLE_MAX_COUNT, _UCfg.CASTLE_COST_MULT])
-		lines.append("На крыше — два отряда лучников: +30 % к дальности и урону")
 	elif build_id == "barracks":
 		lines.append("На крыше — отряд лучников: +30 % к дальности и урону")
 	return {
@@ -7552,6 +8288,13 @@ func _slot_min(sz: Vector2) -> void:
 		_btn_slot.custom_minimum_size = sz
 
 func _sync_panel_grid_widths() -> void:
+	# ── СЕКЦИЯ ГАРНИЗОНА — ПОСЛЕДНЕЙ В РЯДУ (ТЗ 20.09.2026, п. 6.2) ────────
+	# Заказ: «справа, рядом с монахом». Ветки панели зовут _show_garrison до
+	# кнопок найма (у башни после него идёт ещё «Выпустить»), поэтому место в
+	# ряду выправляется здесь — в общем хвосте сборки, один раз на все ветки
+	if _garrison_strip != null and is_instance_valid(_garrison_strip) 			and button_container != null and is_instance_valid(button_container) 			and _garrison_strip.get_parent() == button_container:
+		button_container.move_child(_garrison_strip,
+			button_container.get_child_count() - 1)
 	# ОТСТУП КНОПОК НАЙМА ОТ ПРАВОГО КРАЯ — ТОЛЬКО У ЗАМКА. У остальных панелей
 	# ширина считается ПО СОДЕРЖИМОМУ (_sync_panel_height), и фиксированные 15 px
 	# просто раздули бы каждую из них пустотой справа
@@ -7572,8 +8315,9 @@ func _sync_panel_grid_widths() -> void:
 			- float(PANEL_PAD_X))
 		_btn_right_pad.custom_minimum_size = \
 			Vector2(pad, 0.0) if _castle_boost else Vector2.ZERO
+		# Рабочий: ряд построек тоже отцентрован (ТЗ 19.09.2026-3, п. 1)
 		_btn_right_pad.size_flags_horizontal = Control.SIZE_EXPAND_FILL \
-			if _castle_boost else Control.SIZE_FILL
+			if (_castle_boost or _worker_boost) else Control.SIZE_FILL
 	# КОЛОНКА «ЧТО ВЫБРАНО» СХЛОПЫВАЕТСЯ, КОГДА ПУСТА. У Замка строка
 	# «Замок N/N HP» живёт в шапке панели (см. _update_castle_caption), а
 	# info_label остаётся пустым — но его минимум INFO_W всё равно резервировал

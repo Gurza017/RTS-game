@@ -215,8 +215,11 @@ func _c_archer_no_chase() -> void:
 	var start: Array = []
 	for u in men:
 		start.append((u as Unit).global_position)
-	# Цель убегает далеко за дальность стрельбы (у лучника ~20 м)
-	foe.global_position = Vector3(0.0, GameManager.get_terrain_height(0.0, -250.0), -250.0)
+	# Цель убегает далеко за дальность стрельбы — И ЗА ЗАМОК ПРИКАЗА: с ТЗ
+	# 18.09.2026 замок стрелка живёт до _lock_sight_range() (60 м), и цель в
+	# 50 м держала бы приказ, не пуская новую (C3 «взяли цель 0 из 4»)
+	var flee_z: float = -300.0 + (men[0] as Unit)._lock_sight_range() + 15.0
+	foe.global_position = Vector3(0.0, GameManager.get_terrain_height(0.0, flee_z), flee_z)
 	foe.sync_row()
 	await pframes(300)
 	var chase := 0.0

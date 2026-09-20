@@ -73,6 +73,13 @@ func _ready() -> void:
 	display_name = "Большой гоблин"
 	super._ready()
 	_setup_visual()
+	# Лента ходьбы — по доле СВОЕГО шага (ТЗ 19.09.2026, блок 4)
+	var wmin: float = move_speed * _GobCfgB.BIG_WALK_ANIM_FRAC
+	_walk_min2 = wmin * wmin
+
+## Стендам: подхваты чужой цели у пехоты орды и подходы к своей пехоте
+var escorts_taken: int = 0
+var follows_issued: int = 0
 
 func _setup_visual() -> void:
 	var asp: AnimatedSprite3D = _SSParser.build_sprite_from_map(
@@ -110,6 +117,10 @@ func _apply_big_scale(asp: AnimatedSprite3D) -> void:
 # ─────────────────────────────────────────────────────────────────────────────
 func sep_radius() -> float:
 	return SEP_MIN_DIST * _GobCfgB.BIG_SIZE_SCALE * _GobCfgB.BIG_SEP_MULT / 3.0
+
+## Радар охоты — часы в тике: туша по физике не спит (BigStand, этап 3)
+func may_sleep_physics() -> bool:
+	return false
 
 ## Кликбокс: высота тела и радиус круга у ног. По ним `_pick_at` сдвигает
 ## якорь под середину рисунка и расширяет круг — иначе клик по груди туши
@@ -160,7 +171,14 @@ func ranged_damage_mult() -> float:
 	return 2.0
 
 func _sfx_shout() -> String:
-	return "goblin_attack"
+	return "big_grunt"
+
+## Грюнты пака (ТЗ 19.09.2026): средние рыки — на свип и на урон
+func _sfx_grunt() -> String:
+	return "big_grunt"
+
+func _sfx_hurt() -> String:
+	return "big_grunt"
 
 func _sfx_death() -> String:
 	return "goblin_death"
@@ -218,9 +236,11 @@ func tick_physics(delta: float, prof: bool = false, bm: bool = true,
 			_combo_left = 0.0
 			_sweep_now(false)
 	# ── ТЯЖЁЛЫЙ ШАГ ───────────────────────────────────────────────────────
-	# Редкий низкий удар ноги, пока туша идёт. Своего узла звука не заводим —
-	# это обычный 3D-голос в общем пуле, с отсечкой по расстоянию и туману
-	if state == State.MOVING and moved_recently():
+	# Редкий глухой удар ноги, пока туша ИДЁТ ПО ЛЕНТЕ (и на марше, и на
+	# подходе к цели). Своего узла звука не заводим — это обычный 3D-голос
+	# в общем пуле, с отсечкой по расстоянию и туману; сэмпл — свой thud
+	# (ТЗ 19.09.2026, блок 1: прежний Sword_hit_armor с питчем 0.55 — «ведро»)
+	if walk_anim_recently():
 		_step_t -= delta
 		if _step_t <= 0.0:
 			_step_t = _GobCfgB.BIG_STEP_SEC
@@ -252,23 +272,95 @@ func _engage(foe: Node3D) -> void:
 		_resume_to = move_target if state == State.MOVING else Vector3.INF
 	command_attack(foe, true)
 
-func _hunt_scan(r: float) -> Node3D:
+## Ближайший чужой в r — ПЕХОТА В ПРИОРИТЕТЕ (ТЗ 19.09.2026, блок 2):
+## ближайший боевой; нет боевых — ближайший вообще (рабочий, монах). Скан —
+## один обход сетки раз в BIG_HUNT_TICK, туш на карте единицы
+func _hunt_scan(r: float, combat_only: bool = false) -> Node3D:
+	# Это ТОЖЕ скан сетки — считается тем же счётчиком, что и авто-агро
+	# (qa_big_goblin D: экономию Scan-on-Cooldown стенд меряет по нему)
+	scans_done += 1
 	var mp: Vector3 = position if _local_xform else global_position
 	var best: Node3D = null
 	var bd := INF
-	for f in Constants.other_factions(faction):
-		var cand = GameManager.army.nearest_of_side(mp.x, mp.z, int(f), r)
-		if cand == null or not is_instance_valid(cand):
+	var best_any: Node3D = null
+	var bd_any := INF
+	for n in GameManager.unit_grid.query_radius(mp, r):
+		if n == null or not is_instance_valid(n):
 			continue
-		var u := cand as Unit
-		if u == null or u.is_dead() or u.garrisoned:
+		var u := n as Unit
+		if u == null or u.is_dead() or u.garrisoned or int(u.faction) == int(faction):
 			continue
-		var q: Vector3 = u.global_position
+		var q: Vector3 = u.position if u._local_xform else u.global_position
+		var d2: float = Vector2(q.x - mp.x, q.z - mp.z).length_squared()
+		if u.is_combatant():
+			if d2 < bd:
+				bd = d2
+				best = u
+		elif d2 < bd_any:
+			bd_any = d2
+			best_any = u
+	if combat_only:
+		return best
+	return best if best != null else best_any
+
+## ── СВЯЗКА С ПЕХОТОЙ ОРДЫ (блок 3) ────────────────────────────────────────
+## Цель соседнего отряда обычных гоблинов (живой враг у любого своего
+## боевого не-гиганта в BIG_ESCORT_RADIUS) — подхватить. Свой боевой сосед,
+## ушедший дальше BIG_ESCORT_FOLLOW, — идти к нему (только в покое, без
+## приказа и охоты: марш орды и приказ командира важнее)
+func _escort_target() -> Node3D:
+	var mp: Vector3 = position if _local_xform else global_position
+	var best: Node3D = null
+	var bd := INF
+	for n in GameManager.unit_grid.query_radius(mp, _GobCfgB.BIG_ESCORT_RADIUS):
+		if n == null or not is_instance_valid(n):
+			continue
+		var a := n as Unit
+		if a == null or a == self or a.is_dead() or int(a.faction) != int(faction):
+			continue
+		if a.giant_class() or not a.is_combatant():
+			continue
+		var t = a.attack_target
+		if t == null or not is_instance_valid(t) or not (t is Unit):
+			continue
+		var tu := t as Unit
+		if tu.is_dead() or tu.garrisoned or int(tu.faction) == int(faction):
+			continue
+		var q: Vector3 = tu.position if tu._local_xform else tu.global_position
 		var d2: float = Vector2(q.x - mp.x, q.z - mp.z).length_squared()
 		if d2 < bd:
 			bd = d2
-			best = u
+			best = tu
 	return best
+
+func _escort_follow() -> bool:
+	if state != State.IDLE or hunting or _resume_to.x != INF or target_lock or _move_lock > 0.0:
+		return false
+	var mp: Vector3 = position if _local_xform else global_position
+	var best: Unit = null
+	var bd := INF
+	for n in GameManager.unit_grid.query_radius(mp, _GobCfgB.BIG_ESCORT_RADIUS * 2.0):
+		if n == null or not is_instance_valid(n):
+			continue
+		var a := n as Unit
+		if a == null or a == self or a.is_dead() or int(a.faction) != int(faction):
+			continue
+		if a.giant_class() or not a.is_combatant() or a.squad_id <= 0:
+			continue
+		if not (a.state == State.MOVING or a.state == State.ATTACKING):
+			continue
+		var q: Vector3 = a.position if a._local_xform else a.global_position
+		var d2: float = Vector2(q.x - mp.x, q.z - mp.z).length_squared()
+		if d2 < bd:
+			bd = d2
+			best = a
+	if best == null or bd < _GobCfgB.BIG_ESCORT_FOLLOW * _GobCfgB.BIG_ESCORT_FOLLOW:
+		return false
+	var c: Vector2 = GameManager.squad_centre_xz(best.squad_id)
+	var to: Vector3 = Vector3(c.x, 0.0, c.y) if c.x != INF else best.global_position
+	follows_issued += 1
+	command_move(GameManager.land_target(to))
+	return true
 
 func _tick_hunt(delta: float) -> void:
 	_hunt_t -= delta
@@ -280,17 +372,38 @@ func _tick_hunt(delta: float) -> void:
 	var t := attack_target
 	var alive: bool = t != null and is_instance_valid(t) \
 		and not (t is Unit and (t as Unit).is_dead())
+	# ПЕХОТА ВАЖНЕЕ РАБОЧЕГО (блок 2): цель без оружия (рабочий, монах) —
+	# это авто-агро базы, взявшее ближайшего; боевой чужой в радиусе агро
+	# перебивает её тем же тактом. Под замком приказа — нет
+	if alive and not target_lock and t is Unit and not (t as Unit).is_combatant():
+		var better: Node3D = _hunt_scan(_GobCfgB.BIG_AGGRO_RADIUS, true)
+		if better != null:
+			_engage(better)
+			return
 	if not hunting:
-		# На марше: чужой в радиусе агро — перехват
-		if state == State.MOVING and not alive:
+		# На марше И В ПОКОЕ (ТЗ 19.09.2026, блок 2): чужой в радиусе агро —
+		# перехват тем же тактом, без ожидания такта агро и заморозки скана
+		if (state == State.MOVING or state == State.IDLE) and not alive and not target_lock:
 			var foe: Node3D = _hunt_scan(_GobCfgB.BIG_AGGRO_RADIUS)
+			if foe == null:
+				# Своя пехота рядом уже дерётся — подхватить её цель (блок 3)
+				foe = _escort_target()
+				if foe != null:
+					escorts_taken += 1
 			if foe != null:
 				_engage(foe)
+			elif state == State.IDLE:
+				_escort_follow()
 		return
 	if alive:
 		return
-	# Цель кончилась: следующий чужой рядом, иначе — обратно на марш
+	# Цель кончилась: следующий чужой рядом, потом цель своей пехоты,
+	# иначе — обратно на марш
 	var nxt: Node3D = _hunt_scan(_GobCfgB.BIG_HUNT_RADIUS)
+	if nxt == null:
+		nxt = _escort_target()
+		if nxt != null:
+			escorts_taken += 1
 	if nxt != null:
 		command_attack(nxt, true)
 		return
@@ -397,6 +510,7 @@ func _sweep_now(loud: bool) -> void:
 		swept_total += n_hit
 		if loud:
 			AudioManager.play_3d("big_sweep", mp)
+		_grunt_attack()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # СКАН-ПО-ПЕРЕЗАРЯДКЕ: ГЕЙТ НАД БАЗОВЫМ АВТО-АГРО

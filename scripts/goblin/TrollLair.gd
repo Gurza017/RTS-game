@@ -74,6 +74,125 @@ func on_raid_success() -> void:
 	spawn_guards(_GobCfgL.TROLL_RAID_REWARD)
 var _flock_timer: Timer = null
 
+# ═════════════════════════════════════════════════════════════════════════════
+# ЗАМОРОЖЕННЫЙ ПЕНЬ И ВИРТУАЛЬНЫЙ КАЛЬКУЛЯТОР (ТЗ 19.09.2026, блок 3.2)
+# ═════════════════════════════════════════════════════════════════════════════
+# Пень на чужом берегу (за рекой от базы игрока) НЕ рождает ни одной ноды:
+# стражи, стаи гноллов, туши и отара копятся ЧИСЛАМИ (virt_*), а часы идут
+# как обычно — таймеры-узлы дёргают те же spawn_*, и те при заморозке лишь
+# прибавляют к счётчику (с теми же потолками, что у живого пня). Игрок
+# перешёл брод (GameManager._lair_thaw_check) или ударил по пню — начинается
+# ПОРЦИОННАЯ разморозка: раз в LAIR_THAW_STEP_SEC на карту выходит одна
+# порция (отара разом, дальше по одному троллю / отряду), пока счётчики не
+# опустеют; после этого пень живёт как обычный. Кадр единовременным спавном
+# не проседает по построению
+var frozen: bool = false
+var thawing: bool = false
+var virt_trolls: int = 0
+var virt_gnoll_squads: int = 0
+var virt_big_squads: int = 0
+var virt_sheep: int = 0
+var thaw_steps: int = 0
+var _thaw_timer: Timer = null
+
+## Заморозить (звать ДО add_child: отложенные спавны _ready увидят признак)
+func freeze() -> void:
+	frozen = true
+
+## Счётчики из слепка партии (SaveLoadManager): ставятся ПОСЛЕ отложенных
+## спавнов _ready, которые при заморозке уже прибавили своё
+func restore_virtual(vt: int, vg: int, vb: int, vs: int) -> void:
+	virt_trolls = maxi(vt, 0)
+	virt_gnoll_squads = maxi(vg, 0)
+	virt_big_squads = maxi(vb, 0)
+	virt_sheep = maxi(vs, 0)
+
+## Сколько порций накоплено (стенды, телеметрия)
+func virt_total() -> int:
+	return virt_trolls + virt_gnoll_squads + virt_big_squads + (1 if virt_sheep > 0 else 0)
+
+## Начать порционную разморозку. Повторный вызов ничего не делает
+func begin_thaw() -> void:
+	if not frozen or thawing or is_dead():
+		return
+	thawing = true
+	if _thaw_timer == null:
+		_thaw_timer = Timer.new()
+		_thaw_timer.one_shot = false
+		add_child(_thaw_timer)
+		_thaw_timer.timeout.connect(_thaw_step)
+	_thaw_timer.wait_time = _GobCfgL.LAIR_THAW_STEP_SEC
+	_thaw_timer.start()
+	_thaw_step()
+
+## Одна порция на карту. Порядок: отара (декор, дёшево, разом) → тролли по
+## одному → стаи гноллов по отряду → туши по отряду. Пусто — пень оттаял
+func _thaw_step() -> void:
+	if is_dead():
+		_end_thaw()
+		return
+	thaw_steps += 1
+	var was_frozen: bool = frozen
+	frozen = false
+	if virt_sheep > 0:
+		var n: int = virt_sheep
+		virt_sheep = 0
+		spawn_sheep(n)
+	elif virt_trolls > 0:
+		virt_trolls -= 1
+		spawn_guards(1)
+	elif virt_gnoll_squads > 0:
+		virt_gnoll_squads -= 1
+		spawn_gnoll_squads(1)
+	elif virt_big_squads > 0:
+		virt_big_squads -= 1
+		spawn_big_squads(1)
+	else:
+		_end_thaw()
+		return
+	frozen = was_frozen and virt_total() > 0
+	if not frozen:
+		_end_thaw()
+
+## Разморозить ЦЕЛИКОМ и сразу (стенды, которым нужен живой пень на старте;
+## в партии — только порциями через begin_thaw)
+func thaw_now() -> void:
+	if not frozen and not thawing:
+		return
+	frozen = false
+	thawing = false
+	if _thaw_timer != null and is_instance_valid(_thaw_timer):
+		_thaw_timer.stop()
+	var vs: int = virt_sheep
+	var vt: int = virt_trolls
+	var vg: int = virt_gnoll_squads
+	var vb: int = virt_big_squads
+	virt_sheep = 0
+	virt_trolls = 0
+	virt_gnoll_squads = 0
+	virt_big_squads = 0
+	if vs > 0:
+		spawn_sheep(vs)
+	if vt > 0:
+		spawn_guards(vt)
+	if vg > 0:
+		spawn_gnoll_squads(vg)
+	if vb > 0:
+		spawn_big_squads(vb)
+
+func _end_thaw() -> void:
+	frozen = false
+	thawing = false
+	if _thaw_timer != null and is_instance_valid(_thaw_timer):
+		_thaw_timer.stop()
+
+## Пень — дерево: тела держит только ствол (гноллы прячутся в пне с
+## GNOLL_HIDE_RANGE 4.5 м, тролли выходят из него — коробка 12 м их заперла бы)
+const LAIR_TRUNK_R := 2.2
+
+func block_circles() -> PackedFloat32Array:
+	return PackedFloat32Array([global_position.x, global_position.z, LAIR_TRUNK_R])
+
 func _ready() -> void:
 	building_id  = "troll_lair"
 	sprite_path  = TREE_SPRITE
@@ -146,10 +265,10 @@ func _on_troll_respawn() -> void:
 		if _troll_timer != null:
 			_troll_timer.stop()
 		return
-	if trolls_alive() >= _GobCfgL.TROLL_GUARDS_MAX:
+	if trolls_alive() + virt_trolls >= _GobCfgL.TROLL_GUARDS_MAX:
 		return
 	var fresh: Array = spawn_guards(1)
-	respawned_total += fresh.size()
+	respawned_total += fresh.size() if not frozen else 1
 
 ## Сколько осталось до следующего пополнения (стендам)
 func troll_respawn_left() -> float:
@@ -176,6 +295,7 @@ func troll_respawn_left() -> float:
 ## Второго кода спавна орды заводить нельзя
 var big_squads: Array = []
 var big_squads_total: int = 0
+var gnoll_capped: int = 0      # волн, не вышедших из-за GNOLL_MAX_ALIVE (стенды)
 
 func spawn_big_squads(n: int) -> int:
 	if n <= 0 or is_dead():
@@ -185,6 +305,9 @@ func spawn_big_squads(n: int) -> int:
 			or not main.has_method("spawn_goblin_squad"):
 		return 0
 	var size: int = int(_GobCfgL.SQUAD_SIZE.get("big_goblin", 5))
+	if frozen:
+		virt_big_squads += n
+		return n
 	var made := 0
 	for i in range(n):
 		# Отряды разводятся по кольцу вокруг пня: туши крупные и медленные,
@@ -210,6 +333,16 @@ func spawn_gnoll_squads(n: int) -> int:
 			or not main.has_method("spawn_goblin_squad"):
 		return 0
 	var size: int = int(_GobCfgL.SQUAD_SIZE.get("gnoll", 12))
+	# ПОТОЛОК ЖИВЫХ НА ПЕНЬ (19.09.2026, лог партии: гноллы копились до 312 и
+	# давали половину A*): волна выходит только в свободные места
+	var room: int = _GobCfgL.GNOLL_MAX_ALIVE - gnolls_alive() - virt_gnoll_squads * size
+	n = mini(n, int(floor(float(room) / float(maxi(size, 1)))))
+	gnoll_capped += 1 if n <= 0 else 0
+	if n <= 0:
+		return 0
+	if frozen:
+		virt_gnoll_squads += n
+		return n
 	var made := 0
 	for i in range(n):
 		# Отряды разводятся по кольцу вокруг пня: три отряда, вышедшие в одну
@@ -410,7 +543,7 @@ func _start_flock() -> void:
 
 ## Прирост по таймеру; возвращает, сколько родилось (0 на потолке)
 func breed_sheep() -> int:
-	var room: int = _GobCfgL.SHEEP_MAX - sheep_alive()
+	var room: int = _GobCfgL.SHEEP_MAX - sheep_alive() - virt_sheep
 	return spawn_sheep(mini(_GobCfgL.SHEEP_BREED_COUNT, maxi(room, 0)))
 
 ## ── ОТАРА ЗАНОВО (спринт 18) ─────────────────────────────────────────────
@@ -445,6 +578,11 @@ func flock_respawn_left() -> float:
 	return _respawn_timer.time_left
 
 func spawn_sheep(n: int) -> int:
+	if frozen:
+		var room_v: int = _GobCfgL.SHEEP_MAX - sheep_alive() - virt_sheep
+		var add: int = clampi(n, 0, maxi(room_v, 0))
+		virt_sheep += add
+		return add
 	var parent := get_parent()
 	if parent == null or is_dead():
 		return 0
@@ -587,6 +725,9 @@ func _add_bones(file: String, at: Vector3, rng: RandomNumberGenerator, idx: int)
 ## опыта и панели). Возвращает список выпущенных
 func spawn_guards(n: int) -> Array:
 	var out: Array = []
+	if frozen:
+		virt_trolls += maxi(n, 0)
+		return out
 	var parent := get_parent()
 	if parent == null:
 		return out
@@ -732,6 +873,8 @@ func trolls_alive() -> int:
 func take_damage(amount: float, attacker: Node = null) -> void:
 	super.take_damage(amount, attacker)
 	if not is_dead():
+		if frozen:
+			begin_thaw()
 		on_lair_attacked()
 	else:
 		# ЧАСЫ ВОССТАНОВЛЕНИЯ (спринт 20): пень заново ставится не раньше

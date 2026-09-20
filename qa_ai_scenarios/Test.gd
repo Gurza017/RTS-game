@@ -73,6 +73,8 @@ func _run() -> void:
 	Engine.max_fps = 0
 	main = load("res://scenes/Main.tscn").instantiate()
 	get_tree().root.add_child(main)
+	# Пень за рекой в партии заморожен (ТЗ 19.09.2026); стенду нужен живой
+	GameManager.call_deferred("thaw_lairs_now")
 	for _i in range(10):
 		await get_tree().process_frame
 	if main.enemy_ai != null:
@@ -153,25 +155,31 @@ func _a_reserve() -> void:
 	for k in range(_GobCfg.RESERVE_WAKE_FOES + 2):
 		foes.append(_spawn("res://scenes/units/Spearman.tscn", Constants.FACTION_PLAYER,
 			village + Vector3(float(k) * 0.8 - 3.0, 0.0, 4.0)))
+	# ТЗ 19.09.2026 (блок 3.3): по тревоге просыпается ПЕРВАЯ ВОЛНА
+	# (RESERVE_WAVE_SQUADS отрядов), остальные — через RESERVE_WAVE_GAP_SEC
+	var n_res: int = res.squads.size()
+	var wave1: int = mini(_GobCfg.RESERVE_WAVE_SQUADS, n_res)
 	var woke := false
 	for _f in range(60 * 6):
 		await get_tree().physics_frame
-		if res.alarm and res.asleep_count() == 0:
+		if res.alarm and res.asleep_count() == n_res - wave1:
 			woke = true
 			break
-	verdict("A6 штурм лагеря будит весь резерв", woke,
+	verdict("A6 штурм лагеря будит резерв — первую волну (%d из %d), остальные спят" % [wave1, n_res], woke,
 		"тревога %s, спят %d" % [str(res.alarm), res.asleep_count()])
 	# Проснувшиеся идут в бой: у бойцов есть цель или они в движении
 	await pframes(30)
 	var active := 0
 	var total := 0
 	for s in res.squads:
+		if res.is_asleep(int(s["sid"])):
+			continue
 		for m in res._members(int(s["sid"])):
 			total += 1
 			var u := m as Unit
 			if u.attack_target != null or u.state != Unit.State.IDLE:
 				active += 1
-	verdict("A6б резерв отбивает штурм (бойцы с целью или в движении)",
+	verdict("A6б проснувшаяся волна отбивает штурм (бойцы с целью или в движении)",
 		active * 2 >= total, "%d из %d" % [active, total])
 	# Угроза снята — резерв возвращается и засыпает
 	for f in foes:
