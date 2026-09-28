@@ -822,6 +822,9 @@ func _measure(label: String, secs: float, headless: bool, detail0: bool = false)
 	var gc0_2: int = GameManager.army.gc_count(2)
 	var skipped_sum := 0
 	var listed_sum := 0
+	# Визуальный проход: строк в списке ядра (VisRows, за вызов) и тихих
+	var vlisted_sum := 0
+	var vquiet_sum := 0
 	# ── СБОРКИ GEN2 ПО КАДРАМ (BigStand-5, этап 4) ────────────────────────
 	# Кадр, в котором число сборок gen2 выросло: стена кадра, пауза сборки
 	# (GC.GetGCMemoryInfo), куча до/после, LOH — чтобы назвать причину числом
@@ -876,6 +879,8 @@ func _measure(label: String, secs: float, headless: bool, detail0: bool = false)
 		stuck_max = maxi(stuck_max, GameManager.stuck_arrow_count())
 		skipped_sum += GameManager.army.tick_skipped()
 		listed_sum += GameManager.army.tick_listed()
+		vlisted_sum += GameManager.army.vis_listed()
+		vquiet_sum += GameManager.army.vis_quiet_count()
 		if SEPHIST == 1 and f == frames_total / 2:
 			sephist = _sep_hist()
 		if f % JIT_FRAMES == JIT_FRAMES - 1:
@@ -885,6 +890,8 @@ func _measure(label: String, secs: float, headless: bool, detail0: bool = false)
 	r["frames"] = frames_total
 	r["tick"] = _Opt.tick_ms()
 	r["vis"] = _Opt.vis_ms()
+	r["vis_listed"] = float(vlisted_sum) / float(maxi(frames_total, 1))
+	r["vis_quiet"] = float(vquiet_sum) / float(maxi(frames_total, 1))
 	r["fps_min"] = fps_min if fps_n > 0 else 0.0
 	r["fps_avg"] = (fps_sum / float(fps_n)) if fps_n > 0 else 0.0
 	r["wall_worst"] = _max(walls)
@@ -1047,9 +1054,10 @@ func _summary(rs: Array, headless: bool) -> void:
 			float(j.get("idle_walk", 0)) / ns, float(j.get("moving", 0)) / ns, JIT_MOVING_STUCK, float(j.get("moving_stuck", 0)) / ns,
 			float(j.get("attacking", 0)) / ns, float(j.get("snoozing", 0)) / ns, float(j.get("sleeping", 0)) / ns,
 			float(j.get("draw_off", 0)) / ns, float(j.get("unseen", 0)) / ns, float(j.get("fogged", 0)) / ns, float(j.get("settled", 0)) / ns])
-		print("  ВЕДОМЫЕ ЯДРОМ (ср. по снимкам): автопилот %.0f, тыловой напор %.0f, матрица %.0f, дремлют %.0f, спят по физике %.0f, тик выключен %.0f; ядро оставило себе %.0f строк/кадр, в GDScript-тик ушло %.0f строк/кадр" % [
+		print("  ВЕДОМЫЕ ЯДРОМ (ср. по снимкам): автопилот %.0f, тыловой напор %.0f, матрица %.0f, дремлют %.0f, спят по физике %.0f, тик выключен %.0f; ядро оставило себе %.0f строк/кадр, в GDScript-тик ушло %.0f строк/кадр; КАРТИНКА: в GDScript-тик за вызов %.0f строк, тихих %.0f" % [
 			float(j.get("autop", 0)) / ns, float(j.get("rearp", 0)) / ns, float(j.get("matrixd", 0)) / ns, float(j.get("snoozing", 0)) / ns,
-			float(j.get("physasleep", 0)) / ns, float(j.get("tickoff", 0)) / ns, float(d["core_skipped"]), float(d["core_listed"])])
+			float(j.get("physasleep", 0)) / ns, float(j.get("tickoff", 0)) / ns, float(d["core_skipped"]), float(d["core_listed"]),
+			float(d.get("vis_listed", 0.0)), float(d.get("vis_quiet", 0.0))])
 		# Раскладка кадра: физтик армии + логика армии + всё остальное (хвост
 		# физшага, прочий _process, рендер, движок, а в лёгких фазах headless —
 		# простой до следующего физшага). Мониторы Performance.TIME_* при снятом

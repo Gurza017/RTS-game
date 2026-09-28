@@ -1491,7 +1491,7 @@ func tick_physics(delta: float, prof: bool = false, bm: bool = true,
 	var _mv_want_w: bool = _mv_now_w < _mv_until_ms
 	if _mv_want_w != _mv_moving:
 		_mv_moving = _mv_want_w
-		mark_pose_dirty()
+		mark_pose_dirty(20)
 	if _sheep_phase != SheepPhase.NONE:
 		_sync_soa_row()
 		_process_sheep(delta)

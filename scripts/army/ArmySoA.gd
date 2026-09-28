@@ -590,10 +590,64 @@ func batch_visual(delta: float, lerp_k: float, snap_sq: float,
 		bob_amp: float, bob_sprint: float, anim_core: bool, decal_core: bool,
 		now_ms: int, view_x: float, view_z: float, view_r2: float,
 		fog_watch: bool, player_fac: int, flash_sec: float,
-		walk_min: float, move_min: float, turn_cos2: float) -> void:
+		walk_min: float, move_min: float, turn_cos2: float,
+		look_core: bool = false, cam_right: Vector3 = Vector3.ZERO, cam_ok: bool = false) -> void:
 	_c.BatchVisual(delta, lerp_k, snap_sq, bob_amp, bob_sprint, anim_core, decal_core,
 		now_ms, view_x, view_z, view_r2, fog_watch, player_fac, flash_sec,
-		walk_min, move_min, turn_cos2)
+		walk_min, move_min, turn_cos2, look_core, cam_right.x, cam_right.z, cam_ok)
+
+## ── ВЫБОР ЛЕНТЫ В ЯДРЕ (этап 1, 28.09.2026; perf_config.look_core) ────────
+## Таблица лент вида: по 6 float на ленту [бакет, кадров, к/с, loop, base_y, 0]
+func look_table_add(packed: PackedFloat32Array) -> int:
+	return _c.LookTableAdd(packed)
+
+func row_look_bind(i: int, table: int, idle: int, walk: int, cur: int,
+		walk_min2: float, anim_off: float, mirror: bool) -> void:
+	_c.RowLookBind(i, table, idle, walk, cur, walk_min2, anim_off, mirror)
+
+func row_look_unbind(i: int) -> void:
+	_c.RowLookUnbind(i)
+
+func row_look_bound(i: int) -> bool:
+	return _c.RowLookBound(i)
+
+func row_look_cur(i: int) -> int:
+	return _c.RowLookCur(i)
+
+## Разовая лента (удар) до until_ms; потом ядро само возвращает walk/idle
+func row_look_play(i: int, strip: int, until_ms: int) -> void:
+	_c.RowLookPlay(i, strip, until_ms)
+
+## Принудительная лента подкласса (−1 — снять)
+func row_look_force(i: int, strip: int) -> void:
+	_c.RowLookForce(i, strip)
+
+func row_look_mirror(i: int, mirror: bool) -> void:
+	_c.RowLookMirror(i, mirror)
+
+## Текущий бакет/слот строки (после переезда ядром GDScript-копия устарела)
+func row_rb_b(i: int) -> int:
+	return _c.RowRbB(i)
+
+func row_rb_i(i: int) -> int:
+	return _c.RowRbI(i)
+
+## Бакеты, которым не хватило слотов под переезд, — растить (обнуляет)
+func look_grow_take() -> PackedInt32Array:
+	return _c.LookGrowTake()
+
+func set_idle_state(s: int) -> void:
+	_c.SetIdleState(s)
+
+## Все слоты бакета — снова свободны (сброс партии)
+func rb_reset_free(b: int) -> void:
+	_c.RbResetFree(b)
+
+func look_migrations() -> int:
+	return _c.LookMigrations
+
+func look_decisions() -> int:
+	return _c.LookDecisions
 
 ## ── ТИХИЕ СТРОКИ (BigStand-5, этап 5) ─────────────────────────────────────
 ## Боец объявляет себя тихим: GDScript-тик картинки не идёт, пока ядро не
@@ -621,6 +675,18 @@ func vis_listed() -> int:
 
 func vis_quiet_count() -> int:
 	return _c.VisQuietN
+
+## Разлёт в ядре (perf_config.fling_core): таймер секунд, догон без порога
+func fling_set(i: int, sec: float) -> void:
+	_c.FlingSet(i, sec)
+
+func fling_left(i: int) -> float:
+	return _c.FlingLeft(i)
+
+## Поводы пробуждения тихих строк ядром с прошлого вызова (обнуляет):
+## [срок, туман, LOD, ход↔стоп лента, ход↔стоп факт, разворот, взгляд ведомого]
+func vis_wake_why() -> PackedInt32Array:
+	return _c.VisWakeWhyTake()
 
 ## ── ДЕКЛАРАТИВНЫЕ СТРЕЛЫ (хак физтика №1) ─────────────────────────────────
 ## Измерительная ручка: проверка чужих тел на шаге выключена (потолок хака №2)

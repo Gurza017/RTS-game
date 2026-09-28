@@ -790,7 +790,7 @@ func _sync_soa_row() -> void:
 	# анимацию только на общем такте — топор в руках по дороге к замку
 	var st_changed: bool = state != _sent_st
 	if st_changed:
-		_wake_process()
+		_wake_process(9)
 	if _soa < 0:
 		# Зеркало состояния ведём в любом случае: без строки в ядре армии
 		# публиковать нечего, но «уже разбудили» помнить надо
@@ -1221,7 +1221,7 @@ func _hunt_arrival() -> bool:
 	move_target = GameManager.land_target(sp)
 	_march_target = move_target
 	post_pos = move_target
-	_wake_process()
+	_wake_process(15)
 	return true
 
 ## Замах по овце: у кого какая лента удара есть. Копейщик переопределяет
@@ -1658,8 +1658,8 @@ func _set_sprinting(on: bool) -> void:
 		_player_run = false
 	if on:
 		_wall_struck = false     # новый забег — новая встреча со стеной копий
-	mark_pose_dirty()
-	_wake_process()
+	mark_pose_dirty(14)
+	_wake_process(14)
 
 # ── ВЕТЕРАНСКИЕ БОНУСЫ ОТРЯДА ────────────────────────────────────────────────
 # Выбранные игроком улучшения (см. unit_stats_config.VET_CONFIG)
@@ -2144,7 +2144,7 @@ func _route_advance() -> void:
 	_route_i += 1
 	move_target = _route[_route_i] if _route_i < _route.size() else _route_goal
 	_reset_stuck()
-	_wake_process()
+	_wake_process(15)
 
 ## Точка обхода на подходе к цели атаки; Vector3.INF — идти прямо.
 ## Раз в NAV_RECHECK_SEC спрашивается, упирается ли прямая в скалу/воду;
@@ -2259,8 +2259,8 @@ func command_move(target_pos: Vector3, slow_march: bool = false, face_dir: Vecto
 	if _stance_locks_position():
 		if face_dir.length_squared() > 1e-6:
 			_facing = face_dir.normalized()
-			mark_pose_dirty()
-		_wake_process()
+			mark_pose_dirty(11)
+		_wake_process(11)
 		return
 	# РАЗМЕТКА ЛИНИИ УСТАРЕЛА. Она описывает, где был фронт ПРЕЖНЕГО боя; после
 	# нового приказа и курс, и глубина уже ничего не значат. Срок разметки 120 мс,
@@ -2439,7 +2439,7 @@ func command_move(target_pos: Vector3, slow_march: bool = false, face_dir: Vecto
 	if face_on_arrive.length_squared() > 1e-6:
 		face_on_arrive.y = 0.0
 		face_on_arrive = face_on_arrive.normalized()
-	_wake_process()
+	_wake_process(11)
 	if _Opt.sys_meter:
 		_Opt.sys_add("cm_tail", Time.get_ticks_usec() - _cm_t)
 
@@ -2466,7 +2466,7 @@ func set_stance(new_stance: String) -> void:
 	# весь отряд стоит с рядом от прошлой жизни — и щетина вылезала кусками.
 	# Взводим таймер в ноль: ряд пересчитается в ближайшем же тике
 	_rank_timer = 0.0
-	_wake_process()
+	_wake_process(14)
 
 ## ЗАПОМНЕННЫЙ ОТВЕТ ПО ТЕКУЩЕЙ СТОЙКЕ. Сам разбор — обращение в таблицу стоек
 ## плюс два поиска по словарю, а зовётся он до ЧЕТЫРЁХ раз на бойца в кадре
@@ -2527,7 +2527,7 @@ func hold_post(p: Vector3, face_dir: Vector3 = Vector3.ZERO) -> void:
 		var dd: float = _facing.dot(fd)
 		if dd <= 0.0 or dd * dd < POSE_TURN_COS2:
 			_facing = fd
-			mark_pose_dirty()
+			mark_pose_dirty(15)
 
 func allow_reform_move(secs: float = REFORM_PERMIT_SEC) -> void:
 	wake_physics()
@@ -2689,7 +2689,7 @@ func command_attack(target: Node3D, forced: bool = true, charge: bool = false,
 	_atk_route = PackedVector3Array()
 	_atk_route_i = 0
 	_nav_t = 0.0
-	_wake_process()
+	_wake_process(12)
 	_reset_stuck()
 	# ── МГНОВЕННЫЙ ОТКЛИК СТРЕЛКА НА ПРИКАЗ (спринт 20, модуль 3.2) ────────
 	# Явный клик игрока: лучник разворачивается на цель тем же кадром (поза
@@ -2702,7 +2702,7 @@ func command_attack(target: Node3D, forced: bool = true, charge: bool = false,
 		tv.y = 0.0
 		if tv.length_squared() > 1e-4:
 			_facing = tv.normalized()
-			mark_pose_dirty()
+			mark_pose_dirty(12)
 		_aggro_timer = 0.0
 		if squad_id > 0:
 			GameManager.squad_volley_prime(squad_id, target)
@@ -2926,8 +2926,12 @@ func set_attack_target(target: Node3D) -> void:
 			# обращения через Variant на каждого кандидата скана
 			GameManager.army.set_attackers(prev._soa, prev.attackers)
 	attack_target = target
-	# Смена цели — смена направления и рода позы (атака/оборона): событие
-	mark_pose_dirty()
+	# Смена цели — смена направления и рода позы (атака/оборона): событие.
+	# У базовой ленты (walk/idle по факту хода) цель на позу не влияет —
+	# метят только те, у кого лента от цели зависит (Spearman: направленные
+	# листы, «копьё на цель»); см. perf_config.vis_wake_lite
+	if not _Opt.vis_wake_lite or _pose_depends_on_target():
+		mark_pose_dirty(6)
 	# Ожидание такта агро кончается любой сменой цели (BigStand-5, этап 1б):
 	# иначе строка с уже другим состоянием ждала бы в ядре до истечения
 	if _idle_wait:
@@ -3039,16 +3043,32 @@ const ANIM_EVERY := 3
 ## через три кадра после выстрела» игрок читает как «щит не работает»
 var _pose_dirty: bool = false
 
-func mark_pose_dirty() -> void:
+func mark_pose_dirty(reason: int = 1) -> void:
 	_pose_dirty = true
 	if _vis_quiet:
-		_vis_wake()
+		_vis_wake(reason)
+
+## Зависит ли лента бойца от его ЦЕЛИ (а не только от хода и состояния).
+## База — нет; Spearman переопределяет (сектор взгляда на цель, копьё)
+func _pose_depends_on_target() -> bool:
+	return false
+
+## Зависит ли лента от ЖИВОГО РЯДА (первый ряд — копьё вниз). База — нет
+func _pose_depends_on_rank() -> bool:
+	return false
+
+## ── ЗАМОРОЗКА ПОТЕРЬ (стенды A/B) ───────────────────────────────────────────
+## Урон считается и отмечается (вспышка, «били недавно», ответ на удар), но
+## запас жизни не убывает: свалка стационарна, и стороны A/B сравниваются на
+## одной сцене. Прежний приём стендов (max_health = 1e7) не держал долевой
+## урон конницы (take_frac_damage — доля от МАКСИМУМА)
+static var losses_frozen: bool = false
 
 ## Зеркало спрайта сменилось — тот же повод разбудить картинку
 func mark_flip_dirty() -> void:
 	_flip_dirty = true
 	if _vis_quiet:
-		_vis_wake()
+		_vis_wake(2)
 
 ## ── РАЗБОР SpriteFrames В ЧИСЛА, ОДИН РАЗ НА РЕСУРС ─────────────────────────
 ## SpriteFrames общий у всех бойцов одного вида (SpriteSheetParser его кэширует),
@@ -3161,6 +3181,12 @@ func _look_bind() -> void:
 		# (как правило "idle"). Все прочие позы выравниваются по ней
 		var ref_row: Variant = _look_table.get(asp.animation)
 		_look_base_bottom = int((ref_row as Array)[4]) if ref_row != null else 0
+		# ── ТАБЛИЦА ЛЕНТ ДЛЯ ЯДРА (look_core): один раз на вид ─────────────
+		if _Opt.look_core and _lk_table < 0 and GameManager.main != null:
+			var rec: Dictionary = GameManager.far_units.look_table_for(self, GameManager.main.world_root())
+			if not rec.is_empty():
+				_lk_table = int(rec["id"])
+				_lk_names = rec["names"]
 		_set_anim(asp.animation)
 		return
 	var s3 := spr as Sprite3D
@@ -3181,6 +3207,31 @@ func _look_detach_node() -> void:
 	if asp != null:
 		asp.pause()
 
+## ── ЛЕНТУ ВЫБИРАЕТ ЯДРО (perf_config.look_core, этап 1 28.09.2026) ──────────
+## Таблица лент вида зарегистрирована в ядре (FarUnitRenderer.look_table_for),
+## имена → номера лент. Привязана ли СТРОКА — решает регистрация в общей
+## отрисовке (row_look_bind в FarUnitRenderer.register); пока привязана,
+## walk/idle, замок удара и зеркало идущего ведёт ArmyCore.LookPass, а
+## GDScript лишь сообщает события: разовую ленту (_play_attack_anim →
+## row_look_play) и принуждение подкласса (_set_anim не-walk/idle →
+## row_look_force). Копейщик с направленными листами таблицы не имеет
+var _lk_table: int = -1
+var _lk_names: Dictionary = {}
+
+func _look_bound() -> bool:
+	return _lk_table >= 0 and _rb_bound and _soa >= 0 and _Opt.look_core and _Opt.vis_core_path
+
+## ЧТО НАРИСОВАНО СЕЙЧАС (имя ленты). У привязанной строки ленту выбирает
+## ядро, и _anim_name — устаревшая копия: стенды и логика, которым нужна
+## фактическая лента, спрашивают здесь (qa_big_goblin_pair C5 читал поле)
+func anim_shown() -> StringName:
+	if _look_bound():
+		var cur: int = GameManager.army.row_look_cur(_soa)
+		for k in _lk_names:
+			if int(_lk_names[k]) == cur:
+				return k
+	return _anim_name
+
 ## Переключение анимации ПО ИМЕНИ — единственная точка входа для подклассов.
 ## Возвращает false, если такой анимации в наборе нет (вызов не состоялся)
 func _set_anim(want: StringName) -> bool:
@@ -3188,6 +3239,16 @@ func _set_anim(want: StringName) -> bool:
 		return true
 	if not _look_table.has(want):
 		return false
+	# Привязанной строке ленту ставит ядро: walk/idle — снять принуждение,
+	# прочее (щит, работа, охота) — принудить. Поля ниже остаются как зеркало
+	# для логики (сон, sheet_frame при перерегистрации)
+	if _look_bound():
+		var strip: int = int(_lk_names.get(want, -1))
+		if strip >= 0:
+			if want == &"idle" or want == &"walk":
+				GameManager.army.row_look_force(_soa, -1)
+			else:
+				GameManager.army.row_look_force(_soa, strip)
 	var row: Array = _look_table[want]
 	_anim_name   = want
 	_look_tex    = row[0]
@@ -3223,7 +3284,10 @@ func _set_anim(want: StringName) -> bool:
 		var asp := _active_sprite as AnimatedSprite3D
 		if asp != null:
 			asp.play(want)
-	_push_row_anim()
+	# Параметры ленты привязанной строки пишет ядро при переезде (LookApply):
+	# GDScript-копия могла бы перекрыть их параметрами ДРУГОЙ ленты
+	if not _look_bound():
+		_push_row_anim()
 	return true
 
 ## Лента — в строку ядра (этап E1). БЕЗУСЛОВНО, а не по ручке anim_core:
@@ -3301,10 +3365,12 @@ var _pose_look: Vector3 = Vector3.ZERO
 ## тихая — в список GameManager (ArmyCore.VisRows) не попадает
 var _vis_quiet: bool = false
 
-func _vis_wake() -> void:
+func _vis_wake(reason: int = 0) -> void:
 	if not _vis_quiet:
 		return
 	_vis_quiet = false
+	if _Opt.vis_meter and reason < _Opt.vis_why.size():
+		_Opt.vis_why[reason] += 1
 	if _soa >= 0:
 		GameManager.army.vis_wake(_soa)
 
@@ -3458,6 +3524,10 @@ func _sync_far_render(seen: bool, look_changed: bool, gp := Vector3.INF,
 		# БЫСТРЫЙ (update_pos) в остальные кадры кладёт в буфер три float
 		# позиции — и ничего больше. Неподвижного он отсекает сам
 		var p := Vector3(gp.x, gp.y + _bob, gp.z)
+		# Привязанной строке бакет и слот держит ядро (look_core): refresh по
+		# устаревшей GDScript-копии ленты переселил бы её обратно
+		if _look_bound():
+			return
 		if look_changed or _far_slot == null:
 			# Слот передаётся ЯВНО: у нас он и так под рукой, а искать его по
 			# словарю с объектом-ключом на каждом обновлении незачем
@@ -3818,13 +3888,31 @@ func tick_visual(delta: float, frame: int = -1, anim_every: int = ANIM_EVERY,
 	# Условия: строка привязана и ведома ядром (позиция, кадр, урон), не
 	# летит, поза свежая. Срок пробуждения — замок анимации удара / таймеры
 	# подкласса, и страховочный пересчёт позы по прежнему расписанию
+	# Измеритель (vis_meter): почему строка НЕ объявила тишину — по воротам
+	if _Opt.vis_meter and _Opt.vis_noq.size() >= 10:
+		if not core_dmg: _Opt.vis_noq[0] += 1
+		elif not (_Opt.anim_core and mm_all and _soa >= 0): _Opt.vis_noq[1] += 1
+		elif state == State.DEAD or _fling_left > 0.0: _Opt.vis_noq[2] += 1
+		elif _pose_dirty: _Opt.vis_noq[9 if not seen else 3] += 1
+		elif _flip_dirty: _Opt.vis_noq[4] += 1
+		elif _dmg_dirty: _Opt.vis_noq[5] += 1
+		elif not (_far_registered and _far_slot != null): _Opt.vis_noq[6] += 1
+		elif _vis_quiet: _Opt.vis_noq[7] += 1
+		elif not (not fog_on or faction == Constants.FACTION_PLAYER or _Opt.fog_core): _Opt.vis_noq[8] += 1
+	# ВНЕ LOD поза откладывается (vis_lod_quiet): тишина объявляется с
+	# seen = false, и надзор ядра будит строку на входе в поле зрения — тогда
+	# seen_now и посчитает позу. Иначе невидимый с грязной позой тикал вечно
+	var pose_ok: bool = (not _pose_dirty and not _flip_dirty) \
+		or (_Opt.vis_lod_quiet and not seen)
 	if core_dmg and _Opt.anim_core and mm_all and _soa >= 0 \
 			and state != State.DEAD and _fling_left <= 0.0 \
-			and not _pose_dirty and not _flip_dirty and not _dmg_dirty \
+			and pose_ok and not _dmg_dirty \
 			and _far_registered and _far_slot != null and not _vis_quiet \
 			and (not fog_on or faction == Constants.FACTION_PLAYER or _Opt.fog_core):
 		var wake_at: int = now_ms + int(float(anim_every) * delta * 1000.0)
-		if _lock_pending and _anim_lock_until_ms > now_ms:
+		# Замок удара у привязанной строки снимает ядро (look_core) — GDScript
+		# к его сроку будить незачем
+		if _lock_pending and _anim_lock_until_ms > now_ms and not _look_bound():
 			wake_at = mini(wake_at, _anim_lock_until_ms)
 		var extra: int = _vis_extra_wake_ms()
 		if extra > now_ms:
@@ -3907,7 +3995,13 @@ var _fling_left: float = 0.0
 
 ## Пометить бойца летящим: следующие FLING_SEC его картинка догоняет тело
 ## плавно и не перескакивает. Зовёт apply_knockback
-func fling_visual() -> void:
+## Возвращает true, если разлёт ведёт ЯДРО (perf_config.fling_core): картинку
+## будить незачем — BatchVisual догоняет и спящую по картинке строку
+func fling_visual() -> bool:
+	# ── РАЗЛЁТ В ЯДРЕ: таймер — колонка, догон без порога телепорта ─────────
+	if _Opt.fling_core and _Opt.vis_core_path and _rb_bound and _soa >= 0:
+		GameManager.army.fling_set(_soa, FLING_SEC)
+		return true
 	_fling_left = FLING_SEC
 	# На время разлёта картинку ведёт сам боец (свой обход предохранителя
 	# телепорта): строка выходит из пакетного догона ядра, а нарисованная
@@ -3919,10 +4013,13 @@ func fling_visual() -> void:
 	# Разлёт обязан быть виден и у того, кто спал по картинке: стоящий боец
 	# гасит свой визуальный тик сам (_proc_sleeping)
 	_wake_process()
+	return false
 
 ## Летит ли прямо сейчас (нужно стенду)
 func is_flinging() -> bool:
-	return _fling_left > 0.0
+	if _fling_left > 0.0:
+		return true
+	return _Opt.fling_core and _soa >= 0 and GameManager.army.fling_left(_soa) > 0.0
 
 var _draw_pos: Vector3 = Vector3.ZERO
 var _draw_init: bool = false
@@ -4057,6 +4154,12 @@ func is_drawn() -> bool:
 
 # Подклассы с направленными спрайтами добавляют свои условия (см. Spearman)
 func _process_can_sleep() -> bool:
+	# Ленту привязанной строки ведёт ядро: спать можно, когда оно показывает
+	# покой и замок удара истёк (GDScript-копия _anim_name после удара устарела)
+	if _look_bound():
+		if now_ms < _anim_lock_until_ms:
+			return false
+		return GameManager.army.row_look_cur(_soa) == int(_lk_names.get(&"idle", -2))
 	if _anim_name != &"" and _anim_name != &"idle":
 		return false
 	# МНОГОКАДРОВЫЙ ПОКОЙ НЕ УСЫПЛЯЕМ. В общей отрисовке узел спрайта стоит на
@@ -4213,8 +4316,8 @@ func _sample_movement() -> int:
 				var mlen: float = sqrt(mdx * mdx + mdz * mdz)
 				var ndx: float = mdx / mlen
 				var ndz: float = mdz / mlen
-				if _mv_dir.x * ndx + _mv_dir.z * ndz < 0.0:
-					mark_pose_dirty()
+				if _mv_dir.x * ndx + _mv_dir.z * ndz < 0.0 and not _look_bound():
+					mark_pose_dirty(5)
 				_mv_dir = Vector3(ndx, 0.0, ndz)
 			_mv_prev = position
 			_mv_sample_ms = _mv_now
@@ -4237,9 +4340,11 @@ func _mv_tick() -> int:
 	var _mv_want: bool = _mv_now < _mv_until_ms
 	if _mv_want != _mv_moving:
 		_mv_moving = _mv_want
-		mark_pose_dirty()
+		# Ход↔стоп у привязанной строки ленту не меняет — её ведёт ядро
+		if not _look_bound():
+			mark_pose_dirty(4)
 		if _proc_sleeping:
-			_wake_process()
+			_wake_process(4)
 	return _mv_now
 
 ## Признак для ЛЕНТЫ ходьбы: скорость выше WALK_ANIM_MIN_SPEED за окно замера.
@@ -4255,6 +4360,9 @@ func walk_anim_recently() -> bool:
 
 func _update_sprite_anim() -> void:
 	if now_ms < _anim_lock_until_ms:
+		return
+	# walk/idle у привязанной строки решает ядро (LookPass, look_core)
+	if _look_bound():
 		return
 	# ── В ПОКОЕ НОГАМИ НЕ ПЕРЕБИРАЮТ (заказ спринта 15) ────────────────────
 	# Признак ходьбы считается по ФАКТУ смещения, и это правильно: намерение
@@ -4321,11 +4429,16 @@ func _update_sprite_flip() -> void:
 		return
 	var side := GameManager.camera_right().dot(look.normalized())
 	# Переключаем ТОЛЬКО при выходе за мёртвую зону в противоположную сторону
+	var prev_flip: bool = _flip_h_state
 	if _flip_h_state and side > FLIP_DEADZONE:
 		_flip_h_state = false
 	elif not _flip_h_state and side < -FLIP_DEADZONE:
 		_flip_h_state = true
 	_apply_flip_to_node()
+	# Зеркало идущего у привязанной строки ведёт ядро (LookPass); стоящему —
+	# доворот в курс строя — сообщаем сами (без refresh через словари)
+	if prev_flip != _flip_h_state and not _mv_moving and _look_bound():
+		GameManager.army.row_look_mirror(_soa, _flip_h_state)
 
 ## ЗЕРКАЛО — ЧИСЛО (_flip_h_state), а в общей отрисовке оно уезжает в MultiMesh
 ## каналом цвета. Узел трогаем только в запасном режиме и только при РЕАЛЬНОЙ
@@ -4345,6 +4458,15 @@ func _play_attack_anim(anim: String, dur_ms: int = 500) -> void:
 	_anim_lock_until_ms = Time.get_ticks_msec() + dur_ms
 	# По истечении замка поза обязана вернуться сама (этап E3)
 	_lock_pending = true
+	# ── ПРИВЯЗАННОЙ СТРОКЕ УДАР СТАВИТ ЯДРО (look_core) ──────────────────
+	# Один вызов: лента с нулевого кадра, замок до срока; по истечении ядро
+	# само вернёт walk/idle — ни пробуждения, ни GDScript-тика не нужно
+	if _look_bound():
+		var strip: int = int(_lk_names.get(StringName(anim), -1))
+		if strip >= 0:
+			GameManager.army.row_look_play(_soa, strip, _anim_lock_until_ms)
+			_anim_name = StringName(anim)
+			return
 	# ── ТА ЖЕ ЛЕНТА УЖЕ СТОИТ — ПЕРЕЗАПУСК С НУЛЕВОГО КАДРА (ТЗ 19.09.2026-2,
 	# п. 4). _set_anim на прежней ленте выходит раньше и кадр не трогает:
 	# у тяжёлых (туша, тролль) следующий удар приходил ДО истечения замка
@@ -4362,7 +4484,7 @@ func _play_attack_anim(anim: String, dur_ms: int = 500) -> void:
 	else:
 		_set_anim(anim)
 	# Тихая строка обязана узнать о новом замке (срок пробуждения)
-	_vis_wake()
+	_vis_wake(7)
 
 ## Единственная внешняя точка пробуждения (см. GameManager._wake_returned_far_units
 ## и ArmyCore.BatchSeparation).
@@ -4386,7 +4508,7 @@ func _play_attack_anim(anim: String, dur_ms: int = 500) -> void:
 func wake_for_lod() -> void:
 	if _proc_sleeping:
 		# Из СНА выходим с пересчётом позы: пока боец спал, поза могла устареть
-		mark_pose_dirty()
+		mark_pose_dirty(13)
 		_proc_sleeping = false
 		GameManager.note_sleep(self, false)
 		if _soa >= 0:
@@ -4416,13 +4538,13 @@ func leave_render() -> void:
 ## Вернуть на поле: слот выдаётся заново ближайшим визуальным тиком
 ## (_sync_far_render сам увидит, что регистрации нет), надо лишь разбудить
 func enter_render() -> void:
-	mark_pose_dirty()
-	_wake_process()
+	mark_pose_dirty(13)
+	_wake_process(13)
 
-func _wake_process() -> void:
+func _wake_process(reason: int = 3) -> void:
 	# Разбудили — значит, что-то изменилось: поза пересчитывается сразу
-	mark_pose_dirty()
-	_vis_wake()
+	mark_pose_dirty(reason)
+	_vis_wake(reason)
 	if _proc_sleeping:
 		_proc_sleeping = false
 		GameManager.note_sleep(self, false)
@@ -4632,7 +4754,7 @@ func tick_physics(delta: float, prof: bool = false, bm: bool = true,
 		var qn2: float = (qlk.x * qlk.x + qlk.z * qlk.z) \
 			* (_pose_look.x * _pose_look.x + _pose_look.z * _pose_look.z)
 		if qn2 > 1e-8 and (qdd <= 0.0 or qdd * qdd < POSE_TURN_COS2 * qn2):
-			mark_pose_dirty()
+			mark_pose_dirty(16)
 	if _pose_force or state != _sent_st 			or absf(gp.x - _sent_x) > POSE_EPS or absf(gp.z - _sent_z) > POSE_EPS 			or absf(velocity.x - _sent_vx) > POSE_EPS 			or absf(velocity.z - _sent_vz) > POSE_EPS:
 		_pose_force = false
 		# ── СМЕНА СОСТОЯНИЯ = СМЕНА ВНЕШНОСТИ, И ОНА СРОЧНАЯ ────────────────
@@ -4644,7 +4766,7 @@ func tick_physics(delta: float, prof: bool = false, bm: bool = true,
 		# позже. Признак состояния — единственное, что тут сравнивается, и оно
 		# уже сравнивается строкой ниже: стоимость проверки нулевая
 		if state != _sent_st:
-			_wake_process()
+			_wake_process(9)
 		_sent_x = gp.x
 		_sent_z = gp.z
 		_sent_vx = velocity.x
@@ -7508,11 +7630,13 @@ func apply_knockback(dirn: Vector3, dist: float, from: Vector3) -> void:
 	_fling_vel = away * (dist / maxf(reach, 0.001))
 	# Разлёт интегрирует тик — ведомый ядром обязан снова тикать сам
 	_core_release()
-	fling_visual()
+	var core_fling: bool = fling_visual()
 	# Отброшенный больше не «дошёл до места»: якорь снимается, иначе он
 	# считался бы стоящим на посту там, где его уже нет
 	_settled = false
-	_wake_process()
+	# Картинку разлёта в ядре будить незачем: поза от толчка не меняется
+	if not core_fling:
+		_wake_process()
 	if squad_id > 0:
 		# Вмятину в разметке гнём СРАЗУ по расчётной точке: она описывает, куда
 		# бойца унесёт, и ждать конца полёта незачем — разметка не картинка
@@ -7544,9 +7668,10 @@ func push_smooth(dirn: Vector3, dist: float, solid: bool = false) -> void:
 	var sp: float = _fling_vel.length()
 	if sp > PUSH_MAX_SPEED:
 		_fling_vel *= PUSH_MAX_SPEED / sp
-	fling_visual()
+	var core_fling: bool = fling_visual()
 	_settled = false
-	_wake_process()
+	if not core_fling:
+		_wake_process()
 
 ## ── ТАКТ РАЗЛЁТА: ЕДИНСТВЕННОЕ ПОЛЕ СКОРОСТИ В ПРОЕКТЕ ─────────────────────
 ## Зовётся из tick_physics каждый кадр. Пока скорость не выдохлась, боец едет
@@ -8169,7 +8294,7 @@ func _update_live_rank() -> void:
 	_live_rank = GameManager.unit_grid.allies_ahead(
 		self, dir, FILE_LOOK_AHEAD, FILE_HALF_WIDTH)
 	if _live_rank != prev_rank and _vis_quiet:
-		mark_pose_dirty()
+		mark_pose_dirty(8)
 	if _rp: _Opt.prof_add("rank_allies", Time.get_ticks_usec() - _rt)
 
 ## ЗАКРЫТЬ БРЕШЬ В СТРОЮ — и только это.
@@ -8482,7 +8607,7 @@ func face_towards(p: Vector3) -> void:
 	if v.length_squared() < 1e-4:
 		return
 	_facing = v.normalized()
-	mark_pose_dirty()
+	mark_pose_dirty(17)
 
 ## ── СКАН ПО ЗАКАЗУ ЦЕНТРОВОГО НОДА ОТРЯДА ─────────────────────────────────
 ## Публичная обёртка над единственным сканом в проекте: её зовёт
@@ -8606,7 +8731,12 @@ func take_damage(amount: float, attacker: Node3D = null) -> void:
 	# а не проверяем перед каждым обращением
 	if attacker != null and not is_instance_valid(attacker):
 		attacker = null
-	_wake_process()
+	# ── УДАР САМ ПО СЕБЕ ПОЗУ НЕ МЕНЯЕТ (perf_config.vis_wake_lite) ─────────
+	# Вспышку и долю жизни привязанной строки пишет ядро (vis_hit ниже), а
+	# ответ на удар (command_attack), смена цели и смерть метят позу сами.
+	# Без ручки или без ядра — прежнее полное пробуждение
+	if not (_Opt.vis_wake_lite and _rb_bound and _Opt.vis_core_path and _Opt.vis_quiet_rows):
+		_wake_process(10)
 	# Отряд отмечает "меня недавно задели" — держит squad_in_combat() истинным
 	# даже когда враг бьёт издали и никто в отряде не вступает в ближний бой
 	if squad_id > 0:
@@ -8657,6 +8787,8 @@ func take_damage(amount: float, attacker: Node3D = null) -> void:
 	if _true_hit_once:
 		_true_hit_once = false
 		actual = amount
+	if losses_frozen:
+		actual = 0.0
 	current_health -= actual
 	if _Opt.telemetry:
 		GameManager.tm_damage(self, attacker, actual)

@@ -1153,6 +1153,8 @@ public partial class ArmyCore : RefCounted
         Array.Resize(ref _vqMs, cap); Array.Resize(ref _vqWake, cap);
         Array.Resize(ref _vqMv2, cap);
         Array.Resize(ref _vFlash, cap); Array.Resize(ref _vPeak, cap);
+        Array.Resize(ref _flingLeft, cap);
+        LkResize(cap);
         Array.Resize(ref _ringB, cap); Array.Resize(ref _shB, cap);
         Array.Resize(ref _decI, cap); Array.Resize(ref _hpB, cap); Array.Resize(ref _hpI, cap);
         // Новые ячейки привязки к отрисовке обязаны быть «не привязан»
@@ -1207,7 +1209,8 @@ public partial class ArmyCore : RefCounted
         _hp[i] = 0; _hpMax[i] = 0;
         _atkCd[i] = 0; _aggroT[i] = 0; _atkReach[i] = 0;
         _rbB[i] = -1; _bobPhase[i] = 0;
-        _vFlash[i] = 0; _vPeak[i] = 0; _vqWake[i] = 0;
+        _vFlash[i] = 0; _vPeak[i] = 0; _vqWake[i] = 0; _flingLeft[i] = 0;
+        LkClear(i);
         _atkDmg[i] = 0; _atkRange[i] = 0; _speed[i] = 0; _tgtW[i] = 1.0f; _tgtWc[i] = 1.0f;
         // Фаза разбора наложения разводится по номеру строки: иначе весь отряд,
         // вышедший из барака одним заказом, разбирается в один и тот же кадр
@@ -1226,6 +1229,7 @@ public partial class ArmyCore : RefCounted
         _flags[i] = 0;
         _anFrames[i] = 0; _anFrame[i] = -1;
         _ringB[i] = -1; _shB[i] = -1; _hpB[i] = -1;
+        LkClear(i);
         _st[i] = 0;
         _fac[i] = -1;
         _sq[i] = 0;
@@ -4047,8 +4051,27 @@ public partial class ArmyCore : RefCounted
     // Вспышка попадания и доля жизни у привязанной строки ведёт ядро:
     // остаток вспышки в секундах и её пик (свойство ленты: тролль тусклее)
     private float[] _vFlash = Array.Empty<float>(), _vPeak = Array.Empty<float>();
+    // ── РАЗЛЁТ ВЕДЁТ ЯДРО (этап 1, 28.09.2026) ──────────────────────────────
+    // Секунды разлёта после толчка: пока > 0, догон нарисованной точки идёт
+    // без порога телепорта (тело едет плавно само, см. Unit._tick_fling, а
+    // порог рвал бы картинку на рывке разбора наложения). Прежде на это
+    // время строка выходила из пакетного догона (FVisSelf) и не могла быть
+    // тихой — в свалке с конницей это тысячи GDScript-тиков в секунду
+    private float[] _flingLeft = Array.Empty<float>();
+    public void FlingSet(int i, float sec) { if (i >= 0 && i < _capacity) _flingLeft[i] = sec; }
+    public float FlingLeft(int i) => i >= 0 && i < _capacity ? _flingLeft[i] : 0.0f;
     private int[] _visOut = new int[1024];
     public int VisListed, VisQuietN;
+    // Поводы пробуждения тихой строки ядром (измеритель): 0 срок, 1 туман,
+    // 2 LOD, 3 ход↔стоп (лента), 4 ход↔стоп (факт), 5 разворот хода, 6 взгляд ведомого
+    private int[] _visWhy = new int[8];
+    public int[] VisWakeWhyTake()
+    {
+        var res = new int[_visWhy.Length];
+        for (int k = 0; k < _visWhy.Length; k++)
+            res[k] = System.Threading.Interlocked.Exchange(ref _visWhy[k], 0);
+        return res;
+    }
 
     // ── КОЛЬЦА ВЫДЕЛЕНИЯ, ТЕНИ И ПОЛОСКИ ЗДОРОВЬЯ — ТОЖЕ СЛОТЫ, ВЕДОМЫЕ ЯДРОМ ─
     // Слои колец/теней (SelectionDecalRenderer) и полосок (HpBarRenderer)
@@ -4888,7 +4911,7 @@ public partial class ArmyCore : RefCounted
     public void VisHit(int i, float peak, float sec)
     {
         if (i < 0 || i >= _capacity) return;
-        _vFlash[i] = sec; _vPeak[i] = peak;
+        _vFlash[i] = sec; _vPeak[i] = peak; _vFlashSec[i] = sec;
         // Пик и доля жизни — В ТОТ ЖЕ КАДР, как прежний Slot.set_damage из
         // take_damage: вспышка в 0.07 с не вправе ждать кадра отрисовки
         int b = _rbB[i];
@@ -4923,9 +4946,268 @@ public partial class ArmyCore : RefCounted
         return res;
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // ВЫБОР ЛЕНТЫ И ПЕРЕЕЗД МЕЖДУ БАКЕТАМИ — В ЯДРЕ (этап 1 плана 28.09.2026)
+    // ═══════════════════════════════════════════════════════════════════════
+    // Замер VisAb на 4000 (свалка, потери заморожены): 7-8 тысяч пробуждений
+    // GDScript-тика картинки в секунду, и почти все — ради СМЕНЫ ЛЕНТЫ:
+    // конец замка анимации удара (~2000/с), сам удар (~1300/с), ход↔стоп
+    // (2-4 тыс./с), разворот хода (300-600/с). Каждое — полный tick_visual с
+    // разбором позы и переездом между бакетами через словари FarUnitRenderer.
+    // Теперь у строки есть ТАБЛИЦА ЛЕНТ (одна на вид бойца: бакет, кадров,
+    // темп, зацикленность, высота центра) и ядро само решает walk/idle по
+    // своему окну хода, держит замок анимации удара (RowLookPlay), принуждение
+    // подкласса (RowLookForce: щит мечника, работа рабочего) и зеркало идущего
+    // по оси камеры; переезд — RbRelease/RbAcquire/RowBind/RowAnim здесь же.
+    // Копейщик с направленными листами (Sprite3D) в таблицу не входит.
+    // Проход LookPass ПОСЛЕДОВАТЕЛЬНЫЙ (до Parallel.For VisRange): он трогает
+    // списки свободных слотов бакетов, а это общие данные.
+    private readonly System.Collections.Generic.List<float[]> _lkTables = new System.Collections.Generic.List<float[]>();
+    private const int LkStride = 6;   // [бакет, кадров, к/с, loop, baseY, резерв]
+    private int[] _lkTable = Array.Empty<int>(), _lkIdle = Array.Empty<int>(), _lkWalk = Array.Empty<int>();
+    private int[] _lkCur = Array.Empty<int>(), _lkForce = Array.Empty<int>(), _lkPending = Array.Empty<int>();
+    private int[] _lkLock = Array.Empty<int>(), _lkWalkUntil = Array.Empty<int>(), _lkMs = Array.Empty<int>();
+    private float[] _lkPx = Array.Empty<float>(), _lkPz = Array.Empty<float>();
+    private float[] _lkDx = Array.Empty<float>(), _lkDz = Array.Empty<float>();
+    private float[] _lkWalkMin2 = Array.Empty<float>(), _lkAnimOff = Array.Empty<float>();
+    private float[] _vFlashSec = Array.Empty<float>();
+    private byte[] _lkMirror = Array.Empty<byte>();
+    private int[] _lkGrowReq = new int[16];
+    private int _lkGrowN;
+    private bool[] _rbGrowFlag = Array.Empty<bool>();
+    private int IdleState = 0;
+    public void SetIdleState(int s) { IdleState = s; }
+    /// Окно замера хода и удержание ленты шага — те же числа, что
+    /// Unit.MOVE_ANIM_SAMPLE_MS / MOVE_ANIM_HOLD_MS
+    public int LookSampleMs = 200, LookHoldMs = 320;
+    /// Мёртвая зона зеркала — Unit.FLIP_DEADZONE (sin 15°)
+    public float LookFlipDeadzone = 0.259f;
+    /// Счётчики (стенды): переездов и решений ядра за прогон
+    public int LookMigrations, LookDecisions, LookPendingN;
+
+    private void LkResize(int cap)
+    {
+        int old = _lkTable.Length;
+        Array.Resize(ref _lkTable, cap); Array.Resize(ref _lkIdle, cap); Array.Resize(ref _lkWalk, cap);
+        Array.Resize(ref _lkCur, cap); Array.Resize(ref _lkForce, cap); Array.Resize(ref _lkPending, cap);
+        Array.Resize(ref _lkLock, cap); Array.Resize(ref _lkWalkUntil, cap); Array.Resize(ref _lkMs, cap);
+        Array.Resize(ref _lkPx, cap); Array.Resize(ref _lkPz, cap);
+        Array.Resize(ref _lkDx, cap); Array.Resize(ref _lkDz, cap);
+        Array.Resize(ref _lkWalkMin2, cap); Array.Resize(ref _lkAnimOff, cap);
+        Array.Resize(ref _vFlashSec, cap); Array.Resize(ref _lkMirror, cap);
+        for (int i = old; i < cap; i++) { _lkTable[i] = -1; _lkForce[i] = -1; _lkPending[i] = -1; }
+    }
+
+    private void LkClear(int i)
+    {
+        _lkTable[i] = -1; _lkForce[i] = -1; _lkPending[i] = -1;
+        _lkLock[i] = 0; _lkWalkUntil[i] = 0; _lkMs[i] = 0; _lkMirror[i] = 0; _lkCur[i] = -1;
+    }
+
+    /// Таблица лент вида бойца: packed — по LkStride float на ленту. Возвращает id
+    public int LookTableAdd(float[] packed)
+    {
+        _lkTables.Add((float[])packed.Clone());
+        return _lkTables.Count - 1;
+    }
+
+    public int LookTableCount() => _lkTables.Count;
+
+    /// Привязать строку к таблице: покой, ходьба, ТЕКУЩАЯ лента (та, в чей
+    /// бакет строку уже поставил GDScript), личный порог ленты шага (0 — общий),
+    /// фаза зацикленных лент (0..1), зеркало
+    public void RowLookBind(int i, int table, int idle, int walk, int cur,
+        float walkMin2, float animOff, bool mirror)
+    {
+        if (i < 0 || i >= _capacity || table < 0 || table >= _lkTables.Count) return;
+        _lkTable[i] = table; _lkIdle[i] = idle; _lkWalk[i] = walk; _lkCur[i] = cur;
+        _lkWalkMin2[i] = walkMin2; _lkAnimOff[i] = animOff;
+        _lkMirror[i] = (byte)(mirror ? 1 : 0);
+        _lkPending[i] = -1;
+        _lkPx[i] = _px[i]; _lkPz[i] = _pz[i]; _lkMs[i] = 0;
+    }
+
+    public void RowLookUnbind(int i)
+    {
+        if (i >= 0 && i < _capacity) LkClear(i);
+    }
+
+    public bool RowLookBound(int i) => i >= 0 && i < _capacity && _lkTable[i] >= 0;
+    public int RowLookCur(int i) => i >= 0 && i < _capacity ? _lkCur[i] : -1;
+    public int RowRbB(int i) => i >= 0 && i < _capacity ? _rbB[i] : -1;
+    public int RowRbI(int i) => i >= 0 && i < _capacity ? _rbI[i] : -1;
+
+    /// Разовая лента (удар): ставится сейчас с нулевого кадра и держится до
+    /// untilMs, потом ядро само возвращает walk/idle
+    public void RowLookPlay(int i, int strip, int untilMs)
+    {
+        if (i < 0 || i >= _capacity || _lkTable[i] < 0 || _rbB[i] < 0) return;
+        _lkLock[i] = untilMs;
+        LookApply(i, strip, true);
+    }
+
+    /// Принудительная лента подкласса (щит, работа); −1 — снять, ядро решает само
+    public void RowLookForce(int i, int strip)
+    {
+        if (i < 0 || i >= _capacity || _lkTable[i] < 0) return;
+        _lkForce[i] = strip;
+        if (strip >= 0 && _rbB[i] >= 0 && _lkLock[i] == 0) LookApply(i, strip, strip != _lkCur[i]);
+    }
+
+    /// Зеркало от GDScript (доворот стоящего в курс строя)
+    public void RowLookMirror(int i, bool mirror)
+    {
+        if (i < 0 || i >= _capacity) return;
+        byte m = (byte)(mirror ? 1 : 0);
+        if (_lkMirror[i] == m) return;
+        _lkMirror[i] = m;
+        int b = _rbB[i];
+        if (b < 0) return;
+        var r = _rb[b];
+        r.Buf[_rbI[i] * RbStride + 13] = mirror ? 1.0f : 0.0f;
+        r.Dirty = true;
+    }
+
+    /// Бакеты, которым не хватило слотов под переезд: GDScript растит их
+    /// (instance_count — ресурс сцены) и ядро доделывает переезд следующим кадром
+    public int[] LookGrowTake()
+    {
+        var res = new int[_lkGrowN];
+        for (int k = 0; k < _lkGrowN; k++) { res[k] = _lkGrowReq[k]; _rbGrowFlag[_lkGrowReq[k]] = false; }
+        _lkGrowN = 0;
+        return res;
+    }
+
+    private void LookGrowReq(int b)
+    {
+        if (b >= _rbGrowFlag.Length) Array.Resize(ref _rbGrowFlag, Math.Max(b + 1, _rb.Count));
+        if (_rbGrowFlag[b]) return;
+        _rbGrowFlag[b] = true;
+        if (_lkGrowN >= _lkGrowReq.Length) Array.Resize(ref _lkGrowReq, _lkGrowReq.Length * 2);
+        _lkGrowReq[_lkGrowN++] = b;
+    }
+
+    /// Переезд строки на ленту strip: другой бакет — снять слот, взять новый,
+    /// полная запись (нарисованная точка сохраняется), привязка, параметры ленты
+    private void LookApply(int i, int strip, bool restart)
+    {
+        var t = _lkTables[_lkTable[i]];
+        int o = strip * LkStride;
+        if (strip < 0 || o + LkStride > t.Length) return;
+        int b = (int)t[o];
+        int frames = (int)t[o + 1];
+        float fps = t[o + 2];
+        bool loop = t[o + 3] > 0.5f;
+        float baseY = t[o + 4];
+        int ob = _rbB[i];
+        if (b != ob)
+        {
+            if (b < 0 || b >= _rb.Count) return;
+            int idx = RbAcquire(b);
+            if (idx < 0)
+            {
+                _lkPending[i] = strip;
+                LookGrowReq(b);
+                LookPendingN++;
+                return;
+            }
+            if (ob >= 0) RbRelease(ob, _rbI[i]);
+            bool init = (_flags[i] & FDrawInit) != 0;
+            float dx = init ? _drawX[i] : _px[i];
+            float dy = init ? _drawY[i] : _py[i];
+            float dz = init ? _drawZ[i] : _pz[i];
+            float hf = _hpMax[i] > 0.0f ? Mathf.Clamp(_hp[i] / _hpMax[i], 0.0f, 1.0f) : 1.0f;
+            float vf = _vFlash[i], fs = _vFlashSec[i];
+            float lvl = (vf > 0.0f && fs > 0.0f) ? _vPeak[i] * Math.Min(vf / fs, 1.0f) : 0.0f;
+            RbWriteFull(b, idx, dx, dy + baseY, dz, 0, _lkMirror[i] != 0, lvl, hf);
+            RowBind(i, b, idx, baseY, dx, dy, dz, true);
+            LookMigrations++;
+        }
+        else
+        {
+            _rbBaseY[i] = baseY;
+        }
+        bool changed = strip != _lkCur[i];
+        _lkCur[i] = strip;
+        _lkPending[i] = -1;
+        if (changed || restart)
+            RowAnim(i, frames, fps, loop, loop ? _lkAnimOff[i] * frames : 0.0f);
+    }
+
+    /// Решения ленты и зеркала для привязанных к таблице строк — один
+    /// последовательный проход в кадре отрисовки (до параллельного VisRange)
+    private void LookPass(int nowMs, float walkMin2Def, float camRx, float camRz, bool camOk)
+    {
+        int dead = DeadState, idleSt = IdleState;
+        for (int k = 0; k < _liveCount; k++)
+        {
+            int i = _liveRows[k];
+            if (_lkTable[i] < 0) continue;
+            if (_lkPending[i] >= 0)
+            {
+                // Прошлый переезд ждал роста бакета — пробуем снова
+                LookApply(i, _lkPending[i], true);
+                if (_lkPending[i] >= 0) continue;
+            }
+            if (_rbB[i] < 0 || _st[i] == dead) continue;
+            // ── ОКНО ХОДА: тот же замер, что Unit._sample_movement ─────────
+            float px = _px[i], pz = _pz[i];
+            int ms = _lkMs[i];
+            if (ms == 0) { _lkPx[i] = px; _lkPz[i] = pz; _lkMs[i] = nowMs; }
+            else
+            {
+                int win = nowMs - ms;
+                if (win >= LookSampleMs)
+                {
+                    float mdx = px - _lkPx[i], mdz = pz - _lkPz[i];
+                    float wsec = win * 0.001f;
+                    float d2 = mdx * mdx + mdz * mdz;
+                    float wm2 = _lkWalkMin2[i] > 0.0f ? _lkWalkMin2[i] : walkMin2Def;
+                    if (d2 > wm2 * wsec * wsec)
+                    {
+                        _lkWalkUntil[i] = nowMs + LookHoldMs;
+                        float ml = Mathf.Sqrt(d2);
+                        _lkDx[i] = mdx / ml; _lkDz[i] = mdz / ml;
+                    }
+                    _lkPx[i] = px; _lkPz[i] = pz; _lkMs[i] = nowMs;
+                }
+            }
+            bool walking = nowMs < _lkWalkUntil[i];
+            // ── ЗЕРКАЛО ИДУЩЕГО — ПО ОСИ КАМЕРЫ, С ГИСТЕРЕЗИСОМ (Unit.FLIP_DEADZONE)
+            if (walking && camOk)
+            {
+                float side = camRx * _lkDx[i] + camRz * _lkDz[i];
+                bool m = _lkMirror[i] != 0;
+                bool nm = m;
+                if (m && side > LookFlipDeadzone) nm = false;
+                else if (!m && side < -LookFlipDeadzone) nm = true;
+                if (nm != m)
+                {
+                    _lkMirror[i] = (byte)(nm ? 1 : 0);
+                    var r = _rb[_rbB[i]];
+                    r.Buf[_rbI[i] * RbStride + 13] = nm ? 1.0f : 0.0f;
+                    r.Dirty = true;
+                }
+            }
+            // ── ЛЕНТА: принуждение > замок удара > ходьба/покой ─────────────
+            int lk = _lkLock[i];
+            if (lk > 0 && nowMs >= lk) { _lkLock[i] = 0; lk = 0; }
+            int want;
+            if (_lkForce[i] >= 0) want = _lkForce[i];
+            else if (lk > 0) want = _lkCur[i];
+            else want = (walking && _st[i] != idleSt) ? _lkWalk[i] : _lkIdle[i];
+            if (want != _lkCur[i])
+            {
+                LookDecisions++;
+                LookApply(i, want, false);
+            }
+        }
+    }
+
     public int RbCreate(Rid multimesh)
     {
         _rb.Add(new Rb { Multimesh = multimesh });
+        if (_rbGrowFlag.Length < _rb.Count) Array.Resize(ref _rbGrowFlag, _rb.Count + 16);
         return _rb.Count - 1;
     }
 
@@ -4972,6 +5254,15 @@ public partial class ArmyCore : RefCounted
     }
 
     public int RbFreeCount(int b) => _rb[b].FreeN;
+
+    /// Все слоты бакета снова свободны (сброс партии: FarUnitRenderer.clear_bookkeeping)
+    public void RbResetFree(int b)
+    {
+        var r = _rb[b];
+        if (r.Free.Length < r.Capacity) Array.Resize(ref r.Free, Math.Max(64, r.Capacity));
+        r.FreeN = 0;
+        for (int i = r.Capacity - 1; i >= 0; i--) r.Free[r.FreeN++] = i;
+    }
 
     public void RbWriteFull(int b, int idx, float x, float y, float z,
         int frame, bool mirror, float flash, float hp)
@@ -5123,13 +5414,17 @@ public partial class ArmyCore : RefCounted
     public void BatchVisual(float delta, float lerpK, float snapSq,
         float bobAmp, float bobSprintMult, bool animCore, bool decalCore,
         int nowMs, float viewX, float viewZ, float viewR2, bool fogWatch, int playerFac,
-        float flashSec, float walkMin, float moveMin, float turnCos2)
+        float flashSec, float walkMin, float moveMin, float turnCos2,
+        bool lookCore, float camRx, float camRz, bool camOk)
     {
         const float MoveEpsSq = 1e-6f;
         float ringY = _ringY, shadowY = _shadowY, hpBarY = _hpBarY;
         int ledMask = FAutopilot | FRearPress | FMatrixLed | FAtkSnooze;
         float walkMin2 = walkMin * walkMin, moveMin2 = moveMin * moveMin;
         bool fogOk = fogWatch && _fogCols > 0;
+        // Лента и зеркало привязанных к таблице строк — последовательно, до
+        // параллельного прохода: переезд трогает списки свободных слотов
+        if (lookCore) LookPass(nowMs, walkMin2, camRx, camRz, camOk);
         // Проход целиком из чистой математики по колонкам и буферам (записи —
         // только в СВОЮ строку и в СВОЙ слот бакета), поэтому параллелится
         // диапазонами без локов; флаг Dirty — благоприятная гонка (все пишут
@@ -5145,8 +5440,9 @@ public partial class ArmyCore : RefCounted
             if ((fl & FVisQuiet) != 0)
             {
                 bool wake = false;
+                int why = 0;
                 float qx = _px[i], qz = _pz[i];
-                if (_vqWake[i] > 0 && nowMs >= _vqWake[i]) wake = true;
+                if (_vqWake[i] > 0 && nowMs >= _vqWake[i]) { wake = true; why = 0; }
                 // Туман: лит по маске ядра (та же, что копия GDScript)
                 if (!wake && fogOk && _fac[i] != playerFac)
                 {
@@ -5154,46 +5450,55 @@ public partial class ArmyCore : RefCounted
                     int cz = (int)((qz + _fogHalfZ) / _fogCell);
                     bool lit = cx >= 0 && cz >= 0 && cx < _fogCols && cz < _fogRows
                         && _fogLit[cz * _fogCols + cx] != 0;
-                    if (lit != ((fl & FVisLit) != 0)) wake = true;
+                    if (lit != ((fl & FVisLit) != 0)) { wake = true; why = 1; }
                 }
                 if (!wake && b >= 0)
                 {
                     // LOD: вошёл в поле зрения / вышел из него
                     float vdx = qx - viewX, vdz = qz - viewZ;
                     bool seen = vdx * vdx + vdz * vdz <= viewR2;
-                    if (seen != ((fl & FVisSeen) != 0)) wake = true;
-                    // Ходьба: тот же замер окном, что Unit._sample_movement
+                    if (seen != ((fl & FVisSeen) != 0)) { wake = true; why = 2; }
+                    // Ходьба: тот же замер окном, что Unit._sample_movement.
+                    // У строки с таблицей лент ходьбу, разворот и зеркало ведёт
+                    // LookPass — GDScript будить незачем
+                    bool lkRow = lookCore && _lkTable[i] >= 0;
                     int win = nowMs - _vqMs[i];
-                    if (!wake && win >= 200)
+                    if (!wake && !lkRow && win >= 200)
                     {
                         float mdx = qx - _vqPx[i], mdz = qz - _vqPz[i];
                         float wsec = win * 0.001f;
                         float d2 = mdx * mdx + mdz * mdz;
                         bool moving = d2 > walkMin2 * wsec * wsec;
                         bool moving2 = d2 > moveMin2 * wsec * wsec;
-                        if (moving != ((fl & FVisMoving) != 0)) wake = true;
-                        else if (moving2 != (_vqMv2[i] != 0)) wake = true;
+                        if (moving != ((fl & FVisMoving) != 0)) { wake = true; why = 3; }
+                        else if (moving2 != (_vqMv2[i] != 0)) { wake = true; why = 4; }
                         else if (moving2)
                         {
                             // Идёт: направление хода против взгляда позы
                             float lx = _vqLx[i], lz = _vqLz[i];
                             float dd = mdx * lx + mdz * lz;
-                            if (dd <= 0.0f || dd * dd < turnCos2 * d2 * (lx * lx + lz * lz)) wake = true;
+                            if (dd <= 0.0f || dd * dd < turnCos2 * d2 * (lx * lx + lz * lz)) { wake = true; why = 5; }
                         }
                         _vqPx[i] = qx; _vqPz[i] = qz; _vqMs[i] = nowMs;
                     }
                     // Взгляд ведомого ядром: его пишет только ядро, GDScript
                     // своё сравнивает сам в физтике
-                    if (!wake && (fl & ledMask) != 0 && _vqMv2[i] == 0)
+                    if (!wake && !lkRow && (fl & ledMask) != 0 && _vqMv2[i] == 0)
                     {
                         float fx = _fx[i], fz = _fz[i];
                         float lx = _vqLx[i], lz = _vqLz[i];
                         float dd = fx * lx + fz * lz;
                         float n2 = (fx * fx + fz * fz) * (lx * lx + lz * lz);
-                        if (n2 > 1e-8f && (dd <= 0.0f || dd * dd < turnCos2 * n2)) wake = true;
+                        if (n2 > 1e-8f && (dd <= 0.0f || dd * dd < turnCos2 * n2)) { wake = true; why = 6; }
                     }
                 }
-                if (wake) { fl &= ~FVisQuiet; _flags[i] = fl; }
+                if (wake)
+                {
+                    fl &= ~FVisQuiet; _flags[i] = fl;
+                    // Счётчик поводов (измеритель стендов): пробуждения редки,
+                    // атомарный инкремент из потоков дешевле спора о точности
+                    System.Threading.Interlocked.Increment(ref _visWhy[why]);
+                }
             }
             if (b < 0) continue;
             // ── КАДР ЛЕНТЫ: ДО ветки разлёта, боец в полёте тоже листает ────
@@ -5241,7 +5546,14 @@ public partial class ArmyCore : RefCounted
             {
                 float ddx = px - _drawX[i];
                 float ddz = pz - _drawZ[i];
-                if (ddx * ddx + ddz * ddz > snapSq)
+                // Разлёт: таймер тикает здесь, порог телепорта на его время снят
+                float flg = _flingLeft[i];
+                if (flg > 0.0f)
+                {
+                    flg -= delta;
+                    _flingLeft[i] = flg > 0.0f ? flg : 0.0f;
+                }
+                if (flg <= 0.0f && ddx * ddx + ddz * ddz > snapSq)
                 {
                     sx = px; sz = pz;
                 }

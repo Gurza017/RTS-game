@@ -47,6 +47,7 @@ extends RefCounted
 ## обновляются отдельным, более редким вызовом refresh().
 
 const GROW_STEP := 128
+const _Opt := preload("res://scripts/perf_config.gd")
 const _SHADER := preload("res://shaders/mm_unit_sprite.gdshader")
 const _BB     := preload("res://scripts/BillboardUtil.gd")
 
@@ -58,6 +59,11 @@ class Bucket:
 	var mm: MultiMesh
 	var free: Array = []
 	var capacity: int = 0
+	## Из чего сложен бакет (лента, кадров, пиксель): по ним ядро, переселив
+	## строку (look_core), даёт GDScript восстановить её слот
+	var sheet: Texture2D = null
+	var frames: int = 1
+	var px: float = 0.0
 	## Материал бакета — только ради привязки ног (см. set_foot). Лента у бакета
 	## одна, значит и привязка одна
 	var mat: ShaderMaterial = null
@@ -74,12 +80,22 @@ class Bucket:
 
 	func grow(step: int) -> void:
 		var new_cap: int = capacity + step
-		# Новые ячейки — нули: нулевая матрица и есть «спрятанный слот»
-		GameManager.army.rb_ensure(core_id, new_cap)
-		for i in range(capacity, new_cap):
-			free.append(i)
+		# Новые ячейки — нули: нулевая матрица и есть «спрятанный слот».
+		# СПИСОК СВОБОДНЫХ СЛОТОВ ЖИВЁТ В ЯДРЕ (rb_grow → Rb.Free): переезд
+		# между бакетами при смене ленты делает ядро (look_core), и владелец
+		# списка обязан быть один. GDScript берёт и возвращает слоты через
+		# rb_acquire / rb_release
+		GameManager.army.rb_grow(core_id, new_cap)
 		mm.instance_count = new_cap
 		capacity = new_cap
+
+	## Взять слот (растит бакет, если свободных нет)
+	func acquire() -> int:
+		var idx: int = GameManager.army.rb_acquire(core_id)
+		if idx < 0:
+			grow(GROW_STEP)
+			idx = GameManager.army.rb_acquire(core_id)
+		return idx
 
 	## ── ПРИВЯЗКА НОГ ЭТОЙ ЛЕНТЫ — В ШЕЙДЕР ─────────────────────────────────
 	## Сколько от начала координат слота ВНИЗ до грунта. Шейдер берёт отсюда
@@ -233,6 +249,11 @@ class Slot:
 
 var _buckets: Dictionary = {}      # ключ ленты -> Bucket
 var _slot: Dictionary = {}         # Unit -> Slot
+## Бакет по номеру в ядре (core_id): ядро отвечает номерами, не ключами
+var _bucket_by_core: Array = []
+## Таблицы лент видов бойцов, зарегистрированные в ядре (look_core):
+## ключ вида → {"id": int, "names": {StringName → номер ленты}}
+var _look_tables: Dictionary = {}
 
 ## Ключ бакета — лента плюс размер пикселя: один и тот же PNG, показанный в
 ## разном масштабе, обязан попасть в разные бакеты, потому что размер квада
@@ -293,9 +314,15 @@ func _get_or_make_bucket(key: String, sheet: Texture2D, frames: int,
 	b.mm.use_colors = true
 	b.mm.mesh = quad
 	b.mm.instance_count = 0
+	b.sheet = sheet
+	b.frames = maxi(frames, 1)
+	b.px = pixel_size
 	# Буфер бакета заводится в ядре (см. шапку класса Bucket): подача в
 	# RenderingServer и покадровый догон позиций идут оттуда
 	b.core_id = GameManager.army.rb_create(b.mm.get_rid())
+	while _bucket_by_core.size() <= b.core_id:
+		_bucket_by_core.append(null)
+	_bucket_by_core[b.core_id] = b
 
 	b.mmi = MultiMeshInstance3D.new()
 	b.mmi.multimesh = b.mm
@@ -340,12 +367,10 @@ func register(unit: Unit, world_root: Node3D, mirror: bool) -> Slot:
 	var base_y: float    = sf[4]
 	var key: String = _bucket_key(sheet, frames, px)
 	var b := _get_or_make_bucket(key, sheet, frames, px, world_root)
-	if b.free.is_empty():
-		b.grow(GROW_STEP)
 	var s := Slot.new()
 	s.key    = key
 	s.bucket = b
-	s.index  = b.free.pop_back()
+	s.index  = b.acquire()
 	s.tex    = sheet
 	s.frames = frames
 	s.px     = px
@@ -379,7 +404,72 @@ func register(unit: Unit, world_root: Node3D, mirror: bool) -> Slot:
 		unit._rb_bound = true
 		# Лента — в строку СРАЗУ: _set_anim мог пройти до привязки (этап E1)
 		unit._push_row_anim()
+		# ── ТАБЛИЦА ЛЕНТ — В ЯДРО (look_core): дальше walk/idle, замок удара
+		# и зеркало идущего решает LookPass, текущая лента — та, в чей бакет
+		# строку только что поставили
+		if _Opt.look_core and unit._lk_table >= 0:
+			var cur: int = int(unit._lk_names.get(unit._anim_name, -1))
+			GameManager.army.row_look_bind(unit._soa, unit._lk_table,
+				int(unit._lk_names.get(&"idle", -1)), int(unit._lk_names.get(&"walk", -1)),
+				cur, unit._walk_min2, unit._anim_offset, mirror)
 	return s
+
+## ── ТАБЛИЦА ЛЕНТ ВИДА БОЙЦА ДЛЯ ЯДРА (look_core) ────────────────────────────
+## Одна на (набор кадров × пиксель × эталонная привязка): на каждую ленту —
+## бакет (создаётся здесь же, с привязкой ног и цветом вспышки этого вида),
+## кадров, темп, зацикленность и ИТОГОВАЯ высота центра (та же арифметика,
+## что Unit._set_anim: низ рисунка приводится к эталонной ленте, зажим в
+## пикселях, растяжение V_STRETCH). Возвращает {"id", "names"} или пустой
+## словарь, если рисовать нечего
+func look_table_for(unit: Unit, world_root: Node3D) -> Dictionary:
+	var table: Dictionary = unit._look_table
+	if table.is_empty() or unit._look_px <= 0.0:
+		return {}
+	var sf_id: int = 0
+	var asp := unit._active_sprite as AnimatedSprite3D
+	if asp != null and asp.sprite_frames != null:
+		sf_id = asp.sprite_frames.get_instance_id()
+	var key: String = "%d|%.5f|%d|%s" % [sf_id, unit._look_px, unit._look_base_bottom, unit.stat_id]
+	var cached: Variant = _look_tables.get(key)
+	if cached != null:
+		return cached
+	var names: Dictionary = {}
+	var packed := PackedFloat32Array()
+	var keys: Array = table.keys()
+	keys.sort()
+	var cap: float = Unit.BASE_Y_FIX_MAX * maxf(unit._look_px / Unit.BASE_Y_FIX_PX, 1.0)
+	for k in keys:
+		var row: Array = table[k]
+		var tex: Texture2D = row[0]
+		if tex == null:
+			continue
+		var frames: int = int(row[1])
+		var bkey: String = _bucket_key(tex, frames, unit._look_px)
+		var b := _get_or_make_bucket(bkey, tex, frames, unit._look_px, world_root)
+		var shift: float = float(unit._look_base_bottom - int(row[4])) * unit._look_px
+		var base_y: float = (unit._look_base_y + clampf(shift, -cap, cap)) * _BB.V_STRETCH
+		b.set_foot(base_y)
+		b.set_blood(unit.blood_spots())
+		b.set_flash(unit.hit_flash_color())
+		names[k] = packed.size() / 6
+		packed.append(float(b.core_id))
+		packed.append(float(frames))
+		packed.append(float(row[2]))
+		packed.append(1.0 if bool(row[3]) else 0.0)
+		packed.append(base_y)
+		packed.append(0.0)
+	if packed.is_empty():
+		return {}
+	var rec := {"id": GameManager.army.look_table_add(packed), "names": names}
+	_look_tables[key] = rec
+	return rec
+
+## Рост бакетов по заявкам ядра (переезд не нашёл свободного слота)
+func apply_grow_requests() -> void:
+	var req: PackedInt32Array = GameManager.army.look_grow_take()
+	for b in req:
+		if b >= 0 and b < _bucket_by_core.size() and _bucket_by_core[b] != null:
+			(_bucket_by_core[b] as Bucket).grow(GROW_STEP)
 
 ## Слот бойца или null (для тех, кто держит на него прямую ссылку)
 func slot_of(unit: Unit) -> Slot:
@@ -391,14 +481,24 @@ func unregister(unit: Unit) -> void:
 	if not _slot.has(unit):
 		return
 	var s: Slot = _slot[unit]
-	if s.bucket != null and s.bucket.mm != null:
-		s.bucket.hide_slot(s.index)
-		s.bucket.free.append(s.index)
-	# Отвязать строку от слота: догон ядра не должен писать в отданное место.
+	var b: Bucket = s.bucket
+	var idx: int = s.index
+	# ── СЛОТ БЕРЁТСЯ У ЯДРА: после переезда ядром (look_core) GDScript-копия
+	# бакета и номера устарела, и освобождение по ней спрятало бы ЧУЖОЙ слот.
 	# Живость — на сырой ссылке (правило 5): сюда приходят и из _exit_tree
+	if is_instance_valid(unit) and unit._soa >= 0:
+		var cb: int = GameManager.army.row_rb_b(unit._soa)
+		if cb >= 0 and cb < _bucket_by_core.size() and _bucket_by_core[cb] != null:
+			b = _bucket_by_core[cb]
+			idx = GameManager.army.row_rb_i(unit._soa)
+	if b != null and b.mm != null and idx >= 0:
+		# rb_release прячет слот и кладёт номер в свободные ядра
+		GameManager.army.rb_release(b.core_id, idx)
+	# Отвязать строку от слота: догон ядра не должен писать в отданное место
 	if is_instance_valid(unit):
 		if unit._soa >= 0:
 			GameManager.army.row_unbind(unit._soa)
+			GameManager.army.row_look_unbind(unit._soa)
 		unit._rb_bound = false
 	_slot.erase(unit)
 
@@ -507,6 +607,6 @@ func clear_bookkeeping() -> void:
 		var b: Bucket = _buckets[key]
 		if b.mm != null:
 			b.hide_all()
-			b.free = range(b.capacity)
+			GameManager.army.rb_reset_free(b.core_id)
 	GameManager.army.rb_flush()
 	_slot.clear()

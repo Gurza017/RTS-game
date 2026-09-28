@@ -293,7 +293,9 @@ func _c_pair() -> void:
 					# В headless визуальный тик не идёт (боец вне кадра) —
 					# разбор позы зовётся сам, тем же кодом
 					b._update_sprite_anim()
-					var walking: bool = String(b._anim_name) == "walk"
+					# Ленту привязанной строки держит ядро (look_core): читать
+					# фактическую, а не GDScript-копию _anim_name
+					var walking: bool = String(b.anim_shown()) == "walk"
 					if v >= 0.5 or walking:
 						anim_samples += 1
 						if (v >= 0.5) != walking and not (v < 0.5 and b.walk_anim_recently()):

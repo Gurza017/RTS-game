@@ -30,7 +30,42 @@ func _ready() -> void:
 			HORDE = maxi(int(s.substr(6)), 10)
 	super._ready()
 
+## Пень партии после постановки сцены (нужен фазе CLASH и наследникам)
+var _four_lair = null
+
 func _run() -> void:
+	if not await _setup():
+		get_tree().quit()
+		return
+	var headless: bool = DisplayServer.get_name() == "headless"
+	await pframes(WARM)
+	var r_idle: Dictionary = await _measure("A IDLE (4000 стоят)", IDLE_SEC, headless, true)
+	var leg: float = MARCH_SEC / 2.0
+	_march(_p_all, Vector3(-25.0, 0.0, 0.0), true)
+	await pframes(WARM / 2)
+	var r_m1: Dictionary = await _measure("B MARCH (строем 25 м)", leg, headless, true)
+	_march(_p_all, Vector3(25.0, 0.0, 0.0), true)
+	await pframes(WARM / 2)
+	var r_m2: Dictionary = await _measure("B MARCH (обратно)", leg, headless, false)
+	_stop_all(_p_all)
+	await pframes(WARM / 2)
+	_start_clash()
+	await pframes(WARM)
+	var r_clash: Dictionary = await _measure("C CLASH (2500 на 1500)", CLASH_SEC, headless, true)
+	_summary([r_idle, r_m1, r_m2, r_clash], headless)
+	get_tree().quit()
+
+## Стенка на стенку: армия на орду, туши и стаю пня; орда и туши — на армию
+func _start_clash() -> void:
+	var foes: Array = _g_all.duplicate()
+	for g in _four_lair.get("gnolls"):
+		if g != null and is_instance_valid(g):
+			foes.append(g)
+	_order_attack(_p_sq, foes)
+	_order_attack(_own_horde + _own_big, _p_all)
+
+## Постановка сцены: живая партия, армия у пня, орда напротив. false — пня нет
+func _setup() -> bool:
 	seed(7)
 	Engine.max_fps = CAP_FPS
 	if not DisplayServer.get_name().begins_with("headless"):
@@ -56,12 +91,11 @@ func _run() -> void:
 	GameManager.call_deferred("thaw_lairs_now")
 	await frames(8)
 	await pframes(6)
-	var headless: bool = DisplayServer.get_name() == "headless"
 	var lair = GameManager.troll_lair
 	if lair == null or not is_instance_valid(lair):
 		print("  пня партии нет — сценарий не поставить")
-		get_tree().quit()
-		return
+		return false
+	_four_lair = lair
 	var lp: Vector3 = lair.global_position
 	# Армия — к западу от пня, орда — к югу; площадка чистится от леса
 	var centre := Vector3(lp.x - OWN_D - 20.0, 0.0, lp.z)
@@ -145,24 +179,4 @@ func _run() -> void:
 	print("  сцена 4000: своих %d (отрядов %d: коп %d, меч %d, лук %d, монахов %d), орды %d (гоб %d×%d, всадн %d×%d, туш %d, гноллов %d×%d, троллей %d), всего бойцов на карте %d; ИИ и туман включены" % [
 		_alive(_p_all), _p_sq.size(), k_sp, k_wr, k_ar, k_mk, _alive(_g_all),
 		k_gsp, g_sp, k_grd, g_rd, k_gbg, k_ggn, g_gn, _trolls.size(), total])
-	await pframes(WARM)
-	var r_idle: Dictionary = await _measure("A IDLE (4000 стоят)", IDLE_SEC, headless, true)
-	var leg: float = MARCH_SEC / 2.0
-	_march(_p_all, Vector3(-25.0, 0.0, 0.0), true)
-	await pframes(WARM / 2)
-	var r_m1: Dictionary = await _measure("B MARCH (строем 25 м)", leg, headless, true)
-	_march(_p_all, Vector3(25.0, 0.0, 0.0), true)
-	await pframes(WARM / 2)
-	var r_m2: Dictionary = await _measure("B MARCH (обратно)", leg, headless, false)
-	_stop_all(_p_all)
-	await pframes(WARM / 2)
-	var foes: Array = _g_all.duplicate()
-	for g in lair.get("gnolls"):
-		if g != null and is_instance_valid(g):
-			foes.append(g)
-	_order_attack(_p_sq, foes)
-	_order_attack(_own_horde + _own_big, _p_all)
-	await pframes(WARM)
-	var r_clash: Dictionary = await _measure("C CLASH (2500 на 1500)", CLASH_SEC, headless, true)
-	_summary([r_idle, r_m1, r_m2, r_clash], headless)
-	get_tree().quit()
+	return true

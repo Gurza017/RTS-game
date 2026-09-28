@@ -152,7 +152,7 @@ func start_rage_dash() -> void:
 	_angry_pending = true
 	# Щит фиксируется НЕ флагом _guard_active напрямую: его каждый кадр
 	# переписывает _update_guard, и прямая запись погасла бы в тот же тик
-	mark_pose_dirty()
+	mark_pose_dirty(19)
 
 func rage_active() -> bool:
 	return _rage_left > 0 and Time.get_ticks_msec() < _rage_until_ms
@@ -491,7 +491,7 @@ func _update_guard() -> void:
 		# Щит поднялся или опустился — поза обязана смениться В ЭТОМ ЖЕ КАДРЕ.
 		# Обычный пересчёт идёт раз в ANIM_EVERY кадров, и стрела вполне
 		# успевает долететь за эту паузу: со стороны щит «не срабатывает»
-		mark_pose_dirty()
+		mark_pose_dirty(19)
 	_guard_active = want
 
 # Анимация щита важнее walk/idle, но НЕ важнее анимации удара: пока идёт замах,
@@ -541,6 +541,10 @@ func _process_can_sleep() -> bool:
 		return false
 	if _threatened() or rage_active():
 		return false
+	# Ленту привязанной строки ведёт ядро (look_core): спрашиваем базу —
+	# она сверяет текущую ленту ядра с покоем; щит — принуждение, не покой
+	if _look_bound():
+		return not _guard_active and super._process_can_sleep()
 	if _anim_name != &"" and _anim_name != &"idle" and _anim_name != GUARD_ANIM:
 		return false
 	return not (_look_loop and _look_frames > 1)

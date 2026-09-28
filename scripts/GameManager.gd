@@ -146,6 +146,7 @@ func _ready() -> void:
 	# соседей он сравнивается с каждым кандидатом, а обращение к константе
 	# чужого скрипта в таком цикле стоит дороже самого сравнения
 	army.dead_state = Unit.State.DEAD
+	army.set_idle_state(Unit.State.IDLE)   # LookPass: покой ↔ ходьба (look_core)
 
 func _process(_delta: float) -> void:
 	# Часы подсистемы (perf_config.sys_meter, qa_bigstand): одна проверка bool
@@ -234,11 +235,17 @@ func _process_timed(_delta: float) -> void:
 		var d: float = _delta * float(vshards)
 		var vrows: PackedInt32Array = army.vis_rows(vshards, frame % vshards)
 		var vcap: int = _row_units.size()
+		# Строка из списка ядра по построению НЕ тихая (VisRows отбирает без
+		# FVisQuiet): зеркало поля обязано совпасть, иначе ворота тишины в
+		# конце tick_visual закрыты навсегда (см. perf_config.vis_quiet_sync)
+		var vsync: bool = _Opt.vis_quiet_sync
 		for vr in vrows:
 			if vr >= vcap:
 				continue
 			var vu = _row_units[vr]
 			if vu != null and is_instance_valid(vu) and vu.draw_on:
+				if vsync:
+					vu._vis_quiet = false
 				vu.tick_visual(d, frame, anim_every, vx0, vz0, vr2,
 					lerpk, mm_all, vprof, fog_on, cam_ep)
 	else:
@@ -292,12 +299,20 @@ func _process_timed(_delta: float) -> void:
 		# Надзор за тихими строками (этап 5) — тем же проходом: срок, туман
 		# по маске ядра (только при fog_core — иначе маска ядра не ведётся),
 		# LOD, ходьба, взгляд ведомого
+		# Лента и зеркало привязанных к таблице строк решает ядро (look_core):
+		# ось камеры — из кэша кадра, состояния — ядру сообщены при старте
+		var look_on: bool = _Opt.look_core and _Opt.vis_core_path
 		army.batch_visual(_delta, core_k, Unit.VIS_SNAP_SQ,
 			Unit.BOB_AMPLITUDE * Unit.UNIT_SCALE, Unit.BOB_SPRINT_MULT,
 			_Opt.anim_core, _Opt.decal_core,
 			Time.get_ticks_msec(), vx0, vz0, vr2,
 			fog_on and _Opt.fog_core, Constants.FACTION_PLAYER, Unit.HIT_FLASH_SEC,
-			Unit.WALK_ANIM_MIN_SPEED, Unit.MOVE_ANIM_MIN_SPEED, Unit.POSE_TURN_COS2)
+			Unit.WALK_ANIM_MIN_SPEED, Unit.MOVE_ANIM_MIN_SPEED, Unit.POSE_TURN_COS2,
+			look_on, camera_right() if look_on else Vector3.ZERO, camera_axes_valid() if look_on else false)
+		# Бакетам, которым ядро не нашло слот под переезд, — рост (instance_count
+		# — ресурс сцены, его ставит GDScript); ядро доделает переезд следующим кадром
+		if look_on:
+			far_units.apply_grow_requests()
 	if vprof: _Opt.prof_add("vis_core", Time.get_ticks_usec() - _t1)
 	# ── ПОЛЁТ СТРЕЛ — ОДИН ПРОХОД ЯДРА (хак физтика №1) ────────────────────
 	# В кадре отрисовки, как и прежний Arrow._process: на паузе стрелы стоят
@@ -408,7 +423,32 @@ func register_unit(u: Unit) -> void:
 
 ## Ручки perf_config из аргументов запуска: `knob=имя:значение` (bool — 1/0,
 ## int, float, иначе строка). Неизвестная ручка печатается и пропускается
+## ── ОКНО СТЕНДА НЕ ЛЕЗЕТ НА ЭКРАН (требование владельца 28.09.2026) ─────────
+## `-- bg=1` — окно без фокуса (WINDOW_FLAG_NO_FOCUS) и за пределами экрана:
+## рендер идёт честно, а на монитор и клавиатуру пользователя не претендует;
+## `-- bg=min` — свёрнутое (FPS тогда врёт — только для логики/A/B по
+## tick_meter/vis_meter). Вместе с CLI `--windowed --position -5000,-5000`
+## окно и рождается за экраном, а не на весь экран. Headless — без окна вовсе
+func _apply_background_window() -> void:
+	if DisplayServer.get_name() == "headless":
+		return
+	for a in OS.get_cmdline_user_args():
+		var s := String(a)
+		if not s.begins_with("bg="):
+			continue
+		var mode: String = s.substr(3)
+		DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_NO_FOCUS, true, 0)
+		if mode == "min":
+			DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_MINIMIZED, 0)
+		else:
+			if DisplayServer.window_get_mode(0) != DisplayServer.WINDOW_MODE_WINDOWED:
+				DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED, 0)
+			DisplayServer.window_set_position(Vector2i(-5000, -5000), 0)
+		print("  окно стенда в фоне (bg=%s): без фокуса, %s" % [mode, "свёрнуто" if mode == "min" else "за экраном"])
+		return
+
 func _apply_cmdline_knobs() -> void:
+	_apply_background_window()
 	var opt_inst = _Opt.new()
 	for a in OS.get_cmdline_user_args():
 		var kv: PackedStringArray = String(a).split("=")
@@ -1461,8 +1501,10 @@ func _push_squad_ranks(sid: int, live: Array, dead_st: int,
 		var u3: Unit = subu[i]
 		if u3._live_rank != ranks[i]:
 			u3._live_rank = ranks[i]
-			if u3._vis_quiet:
-				u3.mark_pose_dirty()
+			# Ряд меняет ленту только у копейщика (копьё в первом ряду) — см.
+			# perf_config.vis_wake_lite: замер VisAb 750-1130 пробуждений/с
+			if u3._vis_quiet and (not _Opt.vis_wake_lite or u3._pose_depends_on_rank()):
+				u3.mark_pose_dirty(8)
 		u3._rank_fresh = true
 
 ## ── ЖЁСТКАЯ СПЛОЧЁННОСТЬ ОТРЯДА ─────────────────────────────────────────────

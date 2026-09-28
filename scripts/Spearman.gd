@@ -330,7 +330,7 @@ func _hunt_strike_anim() -> void:
 	_set_dir_flip(SECTOR_MIRROR[sec])
 	_anim_lock_until_ms = Time.get_ticks_msec() + 450
 	_lock_pending = true
-	mark_pose_dirty()
+	mark_pose_dirty(18)
 
 # Зеркалом направленных поз (attack_*/defence_*) управляет _update_dir_sprite:
 # он сам считает 8 направлений из одного набора шитов. Базовый разворот по
@@ -341,6 +341,13 @@ func _update_sprite_flip() -> void:
 	# может бежать к далёкой цели с обычным листом "run", и его зеркало обязан
 	# считать базовый механизм — иначе бегущий на врага копейщик едет спиной
 	if _cur_kind != KIND_PLAIN:
+		# ── МЕТКА СНИМАЕТСЯ И ЗДЕСЬ (этап 1, 28.09.2026) ────────────────────
+		# Зеркало направленной позы уже поставил _update_dir_sprite, а
+		# _flip_dirty оставалась взведённой — ворота тишины (Unit.tick_visual)
+		# были закрыты у каждого копейщика в бою навсегда: ~340 строк и
+		# ~1250 полных GDScript-тиков картинки в секунду на VisAb
+		if _Opt.vis_dir_flip_clear:
+			_flip_dirty = false
 		return
 	super._update_sprite_flip()
 
@@ -570,6 +577,14 @@ func _standing_key() -> String:
 ## Порядок условий выбран так, чтобы обращение к часам стояло ПОСЛЕДНИМ: у
 ## бойца задней шеренги ветка обрывается на сравнении полей, а у переднего —
 ## сразу после того, как копьё опущено (см. _spear_down)
+## Лента копейщика зависит от ЦЕЛИ (сектор взгляда на неё, «копьё в упор»):
+## смена цели обязана метить позу (см. Unit.set_attack_target, vis_wake_lite)
+func _pose_depends_on_target() -> bool:
+	return true
+
+func _pose_depends_on_rank() -> bool:
+	return true
+
 ## Копьё опускается по личной задержке — картинку разбудить к её сроку (этап 5)
 func _vis_extra_wake_ms() -> int:
 	if _spear_ready_ms > 0 and not _spear_down:
