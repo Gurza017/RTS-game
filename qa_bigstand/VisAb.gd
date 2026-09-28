@@ -99,14 +99,15 @@ func _ab_avg(rs: Array, key: String) -> float:
 	return s / float(rs.size())
 
 func _ab_summary(res_a: Array, res_b: Array) -> void:
-	print("\n  | сторона | кадр логики, мс | физтик, мс | FPS ср | картинка: строк/вызов | тихих | живых в конце |")
+	print("\n  | сторона | кадр логики, мс | физтик, мс | стена ср / p95 / p99 / худший, мс | картинка: строк/вызов | тихих | живых в конце |")
 	print("  | :--- | ---: | ---: | ---: | ---: | ---: | ---: |")
 	for pair in [["A ВЫКЛ", res_a], ["B ВКЛ", res_b]]:
 		var rs: Array = pair[1]
 		for r in rs:
 			var d: Dictionary = r
-			print("  | %s %s | %.2f | %.2f | %.1f | %.0f | %.0f | %d |" % [String(pair[0]), String(d["label"]),
-				float(d["vis"]), float(d["tick"]), float(d.get("fps_avg", 0.0)), float(d.get("vis_listed", 0.0)),
+			print("  | %s %s | %.2f | %.2f | %.1f / %.1f / %.1f / %.1f | %.0f | %.0f | %d |" % [String(pair[0]), String(d["label"]),
+				float(d["vis"]), float(d["tick"]), float(d.get("wall_avg", 0.0)), float(d.get("wall_p95", 0.0)),
+				float(d.get("wall_p99", 0.0)), float(d.get("wall_worst", 0.0)), float(d.get("vis_listed", 0.0)),
 				float(d.get("vis_quiet", 0.0)), int(d.get("alive1", 0))])
 	# Разность по ПАРАМ внутри раунда — устойчивее к дрейфу, чем средние
 	var pairs := ""
@@ -119,3 +120,7 @@ func _ab_summary(res_a: Array, res_b: Array) -> void:
 	var la: float = _ab_avg(res_a, "vis_listed"); var lb: float = _ab_avg(res_b, "vis_listed")
 	print("  ИТОГ %s: кадр логики %.2f → %.2f мс (%+.2f), физтик %.2f → %.2f (%+.2f), FPS %.1f → %.1f (%+.1f), строк в GDScript-тике картинки %.0f → %.0f" % [
 		AB_KNOB, va, vb, vb - va, ta, tb, tb - ta, fa, fb, fb - fa, la, lb])
+	# Пики: средние по окнам p95 / p99 / худшего — для правок этапа 3
+	print("  ПИКИ %s: стена ср %.1f → %.1f, p95 %.1f → %.1f, p99 %.1f → %.1f, худший %.1f → %.1f мс" % [
+		AB_KNOB, _ab_avg(res_a, "wall_avg"), _ab_avg(res_b, "wall_avg"), _ab_avg(res_a, "wall_p95"), _ab_avg(res_b, "wall_p95"),
+		_ab_avg(res_a, "wall_p99"), _ab_avg(res_b, "wall_p99"), _ab_avg(res_a, "wall_worst"), _ab_avg(res_b, "wall_worst")])

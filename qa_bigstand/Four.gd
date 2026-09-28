@@ -20,6 +20,15 @@ var PLAYER := 2500
 var HORDE := 1500
 var _own_big: Array = []
 var _own_horde: Array = []
+## ЭКСПЕРИМЕНТЫ РАСКЛАДКИ «ПРОЧЕГО» (этап 3): xphys=1 — PhysicsServer3D
+## выключен (клики по пластинам не работают — стенду не нужны), xnode=1 —
+## _process снят у всех узлов мира, кроме бойцов (деревья, постройки, овцы)
+var XPHYS := 0
+var XNODE := 0
+## xtop=1 — невидимые дочерние Node3D бойцов переводятся в top_level: шаг
+## родителя им не рассылается (гипотеза: flush_transform_notifications в
+## конце физшага — это и есть «физколбэк вне тика»)
+var XTOP := 0
 
 func _ready() -> void:
 	for a in OS.get_cmdline_user_args():
@@ -28,7 +37,59 @@ func _ready() -> void:
 			PLAYER = maxi(int(s.substr(7)), 10)
 		elif s.begins_with("horde="):
 			HORDE = maxi(int(s.substr(6)), 10)
+		elif s.begins_with("xphys="):
+			XPHYS = int(s.substr(6))
+		elif s.begins_with("xnode="):
+			XNODE = int(s.substr(6))
+		elif s.begins_with("xtop="):
+			XTOP = int(s.substr(5))
 	super._ready()
+
+## Применить эксперименты после постановки сцены; печатает, что снято
+func _apply_experiments() -> void:
+	if XPHYS == 1:
+		PhysicsServer3D.set_active(false)
+		print("  ЭКСПЕРИМЕНТ: PhysicsServer3D выключен")
+	if XTOP == 1:
+		var n_top := 0
+		var n_units := 0
+		for n in get_tree().get_nodes_in_group("all_units"):
+			if not (n is Unit):
+				continue
+			n_units += 1
+			for c in (n as Node).get_children():
+				var c3 := c as Node3D
+				if c3 != null and not c3.visible:
+					c3.top_level = true
+					n_top += 1
+		print("  ЭКСПЕРИМЕНТ: top_level у %d невидимых дочерних Node3D (%d бойцов)" % [n_top, n_units])
+	if XNODE == 1:
+		var n_off := 0
+		var stack: Array = [main]
+		while not stack.is_empty():
+			var node: Node = stack.pop_back()
+			for c in node.get_children():
+				if c is Unit:
+					continue
+				stack.append(c)
+				if c.is_processing() and c != main and c != main.get("hud") and c != main.get("_camera") \
+						and c != main.get("enemy_ai") and c != main.get("goblin_ai") and c != main.get("selection_manager"):
+					c.set_process(false)
+					n_off += 1
+		print("  ЭКСПЕРИМЕНТ: _process снят у %d узлов (кроме бойцов, HUD, камеры, ИИ, выделения)" % n_off)
+	var on := 0
+	var total := 0
+	var stack2: Array = [main]
+	while not stack2.is_empty():
+		var node: Node = stack2.pop_back()
+		for c in node.get_children():
+			stack2.append(c)
+			total += 1
+			if c.is_processing():
+				on += 1
+	print("  узлов в дереве %d, с _process %d; физ. объектов активных %d, пар %d" % [total, on,
+		int(Performance.get_monitor(Performance.PHYSICS_3D_ACTIVE_OBJECTS)),
+		int(Performance.get_monitor(Performance.PHYSICS_3D_COLLISION_PAIRS))])
 
 ## Пень партии после постановки сцены (нужен фазе CLASH и наследникам)
 var _four_lair = null
@@ -179,4 +240,5 @@ func _setup() -> bool:
 	print("  сцена 4000: своих %d (отрядов %d: коп %d, меч %d, лук %d, монахов %d), орды %d (гоб %d×%d, всадн %d×%d, туш %d, гноллов %d×%d, троллей %d), всего бойцов на карте %d; ИИ и туман включены" % [
 		_alive(_p_all), _p_sq.size(), k_sp, k_wr, k_ar, k_mk, _alive(_g_all),
 		k_gsp, g_sp, k_grd, g_rd, k_gbg, k_ggn, g_gn, _trolls.size(), total])
+	_apply_experiments()
 	return true

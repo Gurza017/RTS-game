@@ -522,7 +522,18 @@ var _army_phase: int = 0
 ## «сдвинулись 300, остались 300» — ровно половина)
 var army_ticks: int = 0
 
+## Весь физический колбэк GameManager под часами подсистем (perf_config.sys_meter,
+## ведро «gm_physics»): разложить «прочее» кадра — что в физшаге лежит вне
+## тика армии (tick_meter меряет только обход бойцов). Этап 3, 28.09.2026
 func _physics_process(delta: float) -> void:
+	if not _Opt.sys_meter:
+		_physics_process_timed(delta)
+		return
+	var _sys_t0: int = Time.get_ticks_usec()
+	_physics_process_timed(delta)
+	_Opt.sys_add("gm_physics", Time.get_ticks_usec() - _sys_t0)
+
+func _physics_process_timed(delta: float) -> void:
 	if _forest_nav_dirty:
 		_forest_nav_rebuild()
 	# ── ТИК АРМИИ НА ПОЛОВИННОЙ ЧАСТОТЕ (этап C.2) ──────────────────────────
@@ -1354,11 +1365,15 @@ func _recalc_corridor(sid: int, now: int) -> void:
 	# 67 мкс пять раз в секунду впустую
 	if clear_enemy and bool(sq.get("phys_sleepers", false)):
 		ttl *= CORRIDOR_SLEEP_TTL_MULT
+	var prev_dl: int = 0
 	if not _corridors.has(sid):
 		ttl = 1 + (sid * 37) % ttl
+	else:
+		prev_dl = int((_corridors[sid] as Array)[0])
 	# Своя добавка к сроку у каждого отряда: периоды разные, и отряды, чьи
-	# сроки однажды совпали (лаг, спавн волны), расходятся по фазе сами
-	_corridors[sid] = [now + ttl + (sid * 7) % CORRIDOR_TTL_JITTER_MS, clear_trunk, clear_enemy]
+	# сроки однажды совпали (лаг, спавн волны), расходятся по фазе сами.
+	# Срок — от ПРОШЛОГО срока (см. _deadline_next): провал кадра фазы не сжимает
+	_corridors[sid] = [_deadline_next(prev_dl, now, ttl, sid, 7), clear_trunk, clear_enemy]
 	if _cp: _ct = Time.get_ticks_usec()
 	# Ответ раздаётся составу только когда он сменился или сменился состав
 	# (BigStand-5, этап 4): два поля у каждого бойца каждый пересчёт при
@@ -2031,7 +2046,7 @@ func _recalc_melee(sid: int, now: int) -> void:
 			if not u._march_pending and not u._disengaging \
 					and not u.retreating and not u.sprinting:
 				free_list.append(u)
-	_melee[sid] = {"t": now + ttl + (sid * 11) % CORRIDOR_TTL_JITTER_MS, "foe": foe, "engaged": engaged, "free": free}
+	_melee[sid] = {"t": _deadline_next(int((_melee[sid] as Dictionary).get("t", 0)) if _melee.has(sid) else 0, now, ttl, sid, 11), "foe": foe, "engaged": engaged, "free": free}
 	# ── РАЗМЕТКА ТЫЛА ИДЁТ ТЕМ ЖЕ ПРОХОДОМ ──────────────────────────────────
 	# Раньше это был отдельный обход состава со своим сроком; ничего, кроме
 	# второго прохода по тем же бойцам, он не давал. Кандидаты уже отобраны
@@ -2120,7 +2135,7 @@ func _recalc_melee_legacy(sid: int, now: int, sq: Variant, ttl: int) -> void:
 		if v > best:
 			best = v
 			foe = int(k)
-	_melee[sid] = {"t": now + ttl + (sid * 11) % CORRIDOR_TTL_JITTER_MS, "foe": foe, "engaged": engaged, "free": free}
+	_melee[sid] = {"t": _deadline_next(int((_melee[sid] as Dictionary).get("t", 0)) if _melee.has(sid) else 0, now, ttl, sid, 11), "foe": foe, "engaged": engaged, "free": free}
 	if _Opt.battle_lines and live.size() >= 2 and have_tgt:
 		_assign_rear(sid, live, free_list, tgt, apx, apz)
 
@@ -3680,108 +3695,137 @@ func _reform_drain() -> void:
 func _sweep_reform(delta: float) -> void:
 	_reform_drain()
 	_reform_sweep_t -= delta
+	if _Opt.phase_keep:
+		# ── ОБХОД ПОРЦИЯМИ (этап 3, 28.09.2026): срез отрядов за кадр, полный
+		# круг за REFORM_SWEEP_SEC. Прежде все отряды судились одним кадром раз
+		# в 0.3 с (squad_members + обход состава у каждого) — tail_reform пиком
+		if _reform_cursor >= _reform_keys.size():
+			if _reform_sweep_t > 0.0:
+				return
+			_reform_sweep_t = REFORM_SWEEP_SEC
+			_reform_keys = squads.keys()
+			_reform_cursor = 0
+			if _reform_keys.is_empty():
+				return
+		var per: int = maxi(int(ceil(float(_reform_keys.size()) / maxf(REFORM_SWEEP_SEC * 60.0, 1.0))), 1)
+		var now_p: int = Time.get_ticks_msec()
+		var end_i: int = mini(_reform_cursor + per, _reform_keys.size())
+		for k in range(_reform_cursor, end_i):
+			var sid_k: int = int(_reform_keys[k])
+			if squads.has(sid_k):
+				_reform_check_squad(sid_k, now_p)
+		_reform_cursor = end_i
+		return
 	if _reform_sweep_t > 0.0:
 		return
 	_reform_sweep_t = REFORM_SWEEP_SEC
 	var now: int = Time.get_ticks_msec()
 	for key in squads.keys():
-		var sid: int = int(key)
-		var sq: Dictionary = squads[key]
-		var slots: Array = sq.get("slots", [])
-		if slots.is_empty():
+		_reform_check_squad(int(key), now)
+
+## Срез отрядов порционного обхода смыкания (phase_keep)
+var _reform_keys: Array = []
+var _reform_cursor: int = 0
+
+## Одна проверка дрейфа отряда (тело прежнего обхода _sweep_reform): в бою —
+## часы покоя, на марше — пропуск, дрейф без успеха — откат, иначе в очередь
+func _reform_check_squad(sid: int, now: int) -> void:
+	var sq: Dictionary = squads[sid]
+	var slots: Array = sq.get("slots", [])
+	if slots.is_empty():
+		return
+	# ── РАБОЧИХ НЕ СТРОИМ НИКОГДА ──────────────────────────────────────
+	# Рабочий числится отрядом из одного человека, и разметка у такого
+	# отряда завестись МОЖЕТ (её достраивает squad_close_ranks). Дальше
+	# смыкание слало бы ему command_move — а тот сбрасывает и рубку, и
+	# стройку, и добычу. Ровно это владелец и видел: «рабочие доходят до
+	# объекта, делают пару процентов и бросают команду». У рабочего своя
+	# работа и свой автомат состояний, и строй к нему отношения не имеет
+	if String(sq.get("type", "")) == "worker":
+		return
+	# ── В БОЮ НЕ СТРОИМСЯ, И ПОСЛЕ БОЯ — НЕ СРАЗУ ──────────────────────
+	# Часы «когда нас перестали трогать» взводятся ЗДЕСЬ и только здесь.
+	# Бой — это и есть внешнее воздействие; пока он идёт, отряду не до
+	# строя, а сразу после него бойцы ещё расходятся с мест
+	if squad_in_combat(sid):
+		sq["calm_ms"] = now
+		sq.erase("reform_settled")
+		return
+	# ── ОТРЯД, ВСТАВШИЙ МЁРТВО, БОЛЬШЕ НЕ ТРОГАЕМ (ТЗ 20.09.2026, п. 3)
+	# Признак ставит _formation_settle после нескольких безуспешных
+	# смыканий: места заняты стволами или чужими телами, и каждое
+	# следующее смыкание только гоняет строй туда-сюда (скриншоты
+	# 13-15 — один отряд, три секунды, бойцы колышутся на месте).
+	# Снимают его бой (выше) и любая новая разметка (squad_set_formation)
+	if bool(sq.get("reform_settled", false)):
+		return
+	if now - int(sq.get("calm_ms", 0)) < int(REFORM_SETTLE_SEC * 1000.0):
+		return
+	var men := squad_members(sid)
+	if men.is_empty():
+		return
+	var live := 0
+	var moving := 0
+	var busy := false
+	var drift := 0
+	for m in men:
+		var u := m as Unit
+		if u == null or u.is_dead():
 			continue
-		# ── РАБОЧИХ НЕ СТРОИМ НИКОГДА ──────────────────────────────────────
-		# Рабочий числится отрядом из одного человека, и разметка у такого
-		# отряда завестись МОЖЕТ (её достраивает squad_close_ranks). Дальше
-		# смыкание слало бы ему command_move — а тот сбрасывает и рубку, и
-		# стройку, и добычу. Ровно это владелец и видел: «рабочие доходят до
-		# объекта, делают пару процентов и бросают команду». У рабочего своя
-		# работа и свой автомат состояний, и строй к нему отношения не имеет
-		if String(sq.get("type", "")) == "worker":
+		live += 1
+		# Идущий не судится: идут и по приказу, и возвращаясь из этого же
+		# смыкания. Отряд НА МАРШЕ (большинство в движении) пропускаем —
+		# его посты уже переставлены в новые слоты
+		if u.state == Unit.State.MOVING:
+			moving += 1
 			continue
-		# ── В БОЮ НЕ СТРОИМСЯ, И ПОСЛЕ БОЯ — НЕ СРАЗУ ──────────────────────
-		# Часы «когда нас перестали трогать» взводятся ЗДЕСЬ и только здесь.
-		# Бой — это и есть внешнее воздействие; пока он идёт, отряду не до
-		# строя, а сразу после него бойцы ещё расходятся с мест
-		if squad_in_combat(sid):
-			sq["calm_ms"] = now
-			sq.erase("reform_settled")
+		# Любой занятый боем отменяет смыкание для ВСЕГО отряда: строй —
+		# дело мирное, а command_move снял бы бойцу цель
+		if u.state == Unit.State.ATTACKING or u.attack_target != null \
+				or u.target_lock or u.retreating:
+			busy = true
+			break
+		if not u._post_valid:
 			continue
-		# ── ОТРЯД, ВСТАВШИЙ МЁРТВО, БОЛЬШЕ НЕ ТРОГАЕМ (ТЗ 20.09.2026, п. 3)
-		# Признак ставит _formation_settle после нескольких безуспешных
-		# смыканий: места заняты стволами или чужими телами, и каждое
-		# следующее смыкание только гоняет строй туда-сюда (скриншоты
-		# 13-15 — один отряд, три секунды, бойцы колышутся на месте).
-		# Снимают его бой (выше) и любая новая разметка (squad_set_formation)
-		if bool(sq.get("reform_settled", false)):
-			continue
-		if now - int(sq.get("calm_ms", 0)) < int(REFORM_SETTLE_SEC * 1000.0):
-			continue
-		var men := squad_members(sid)
-		if men.is_empty():
-			continue
-		var live := 0
-		var moving := 0
-		var busy := false
-		var drift := 0
-		for m in men:
-			var u := m as Unit
-			if u == null or u.is_dead():
-				continue
-			live += 1
-			# Идущий не судится: идут и по приказу, и возвращаясь из этого же
-			# смыкания. Отряд НА МАРШЕ (большинство в движении) пропускаем —
-			# его посты уже переставлены в новые слоты
-			if u.state == Unit.State.MOVING:
-				moving += 1
-				continue
-			# Любой занятый боем отменяет смыкание для ВСЕГО отряда: строй —
-			# дело мирное, а command_move снял бы бойцу цель
-			if u.state == Unit.State.ATTACKING or u.attack_target != null \
-					or u.target_lock or u.retreating:
-				busy = true
-				break
-			if not u._post_valid:
-				continue
-			# Точка бойца — ОДНИМ чтением и по дешёвому пути (правило 2).
-			# Здесь стояли ДВА обращения к global_position подряд, а свойство
-			# это, а не поле: каждое проверяет мировую матрицу. Обход идёт по
-			# ВСЕМУ составу всех отрядов трижды в секунду
-			var up: Vector3 = u.position if u._local_xform else u.global_position
-			var dx: float = up.x - u.post_pos.x
-			var dz: float = up.z - u.post_pos.z
-			if dx * dx + dz * dz > REFORM_DRIFT * REFORM_DRIFT:
-				drift += 1
-		if busy or live == 0 or moving * 2 > live:
-			continue
-		if drift == 0:
-			sq["reform_fails"] = 0
-			continue
-		if now < int(sq.get("reform_next_ms", 0)):
-			continue
-		# Смыкание выдавалось недавно, а дрейф на месте — оно не помогло:
-		# ячейки заняты чужими телами или строй некуда собрать. Откат ×2
-		var fails: int = int(sq.get("reform_fails", 0))
-		if now - int(sq.get("reform_at", -100000)) < REFORM_FAIL_WINDOW_MS:
-			fails += 1
-			sq["reform_fails"] = fails
-			sq["reform_next_ms"] = now + mini(REFORM_BACKOFF_MAX_MS,
-				REFORM_BACKOFF_BASE_MS << mini(fails - 1, 4))
-			# Откат ×2 растягивал дёрганье, но не прекращал его никогда:
-			# через восемь секунд отряд снова переступал. После
-			# REFORM_GIVEUP неудач подряд строй принимается КАК ЕСТЬ —
-			# разметка переносится на текущие точки, и отряд стоит мёртво
-			if fails >= REFORM_GIVEUP:
-				_formation_settle(sid)
-				continue
-		if _reform_queue.has(sid):
-			continue
-		# ВСЁ. Одно действие на отряд, и оно уже написано: squad_close_ranks
-		# рассаживает выживших по СВОЕЙ ЖЕ разметке (см. _slots_recentered) —
-		# то есть отряд возвращается в свою форму, а не идёт куда-то ещё.
-		# Своих остываний и своих проверок у неё достаточно. Раздаётся по
-		# одному отряду в кадр (см. _reform_drain)
-		_reform_queue.append(sid)
+		# Точка бойца — ОДНИМ чтением и по дешёвому пути (правило 2).
+		# Здесь стояли ДВА обращения к global_position подряд, а свойство
+		# это, а не поле: каждое проверяет мировую матрицу. Обход идёт по
+		# ВСЕМУ составу всех отрядов трижды в секунду
+		var up: Vector3 = u.position if u._local_xform else u.global_position
+		var dx: float = up.x - u.post_pos.x
+		var dz: float = up.z - u.post_pos.z
+		if dx * dx + dz * dz > REFORM_DRIFT * REFORM_DRIFT:
+			drift += 1
+	if busy or live == 0 or moving * 2 > live:
+		return
+	if drift == 0:
+		sq["reform_fails"] = 0
+		return
+	if now < int(sq.get("reform_next_ms", 0)):
+		return
+	# Смыкание выдавалось недавно, а дрейф на месте — оно не помогло:
+	# ячейки заняты чужими телами или строй некуда собрать. Откат ×2
+	var fails: int = int(sq.get("reform_fails", 0))
+	if now - int(sq.get("reform_at", -100000)) < REFORM_FAIL_WINDOW_MS:
+		fails += 1
+		sq["reform_fails"] = fails
+		sq["reform_next_ms"] = now + mini(REFORM_BACKOFF_MAX_MS,
+			REFORM_BACKOFF_BASE_MS << mini(fails - 1, 4))
+		# Откат ×2 растягивал дёрганье, но не прекращал его никогда:
+		# через восемь секунд отряд снова переступал. После
+		# REFORM_GIVEUP неудач подряд строй принимается КАК ЕСТЬ —
+		# разметка переносится на текущие точки, и отряд стоит мёртво
+		if fails >= REFORM_GIVEUP:
+			_formation_settle(sid)
+			return
+	if _reform_queue.has(sid):
+		return
+	# ВСЁ. Одно действие на отряд, и оно уже написано: squad_close_ranks
+	# рассаживает выживших по СВОЕЙ ЖЕ разметке (см. _slots_recentered) —
+	# то есть отряд возвращается в свою форму, а не идёт куда-то ещё.
+	# Своих остываний и своих проверок у неё достаточно. Раздаётся по
+	# одному отряду в кадр (см. _reform_drain)
+	_reform_queue.append(sid)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -5700,7 +5744,7 @@ func _sweep_march_radar() -> void:
 			continue
 		if now < int(due):
 			continue
-		sq["mradar_next"] = now + step
+		sq["mradar_next"] = _deadline_next(int(due), now, step, sid, 0)
 		_march_radar_scan(sid, sq)
 
 ## Три точки фронта: левый фланг, центр, правый фланг
@@ -5833,7 +5877,7 @@ func _sweep_squad_radar() -> void:
 			continue
 		if now < int(due):
 			continue
-		sq["radar_next"] = now + RADAR_INTERVAL_MS
+		sq["radar_next"] = _deadline_next(int(due), now, RADAR_INTERVAL_MS, sid, 0)
 		_radar_scan(sid, sq)
 
 func _radar_scan(sid: int, sq: Dictionary) -> void:
@@ -8049,11 +8093,28 @@ func squad_armor_pierce(attacker: Node) -> float:
 #
 # ЦЕНА: один обход отрядов (их десятки, не тысячи) и одно чтение точки на отряд.
 # Прежний вариант обходил ВЕСЬ СОСТАВ каждого отряда ради центра масс.
+## ── СЛЕДУЮЩИЙ СРОК ОТРЯДНОГО ПРОХОДА ДЕРЖИТ ФАЗУ (этап 3, 28.09.2026) ───────
+## prev — прошлый срок (0 — первый), ttl — период, jit_k — множитель добавки по
+## номеру отряда (0 — без добавки). Срок отсчитывается от прошлого, а не от
+## now: после провала кадра отряды не слипаются в одно окно. Отстали больше
+## чем на период (первый срок, долгий провал) — фаза заново по номеру отряда
+## на ВЕСЬ период. perf_config.phase_keep = false — прежний отсчёт от now
+func _deadline_next(prev: int, now: int, ttl: int, sid: int, jit_k: int) -> int:
+	var jit: int = (sid * jit_k) % CORRIDOR_TTL_JITTER_MS if jit_k > 0 else 0
+	if not _Opt.phase_keep:
+		return now + ttl + jit
+	var nxt: int = prev + ttl
+	if nxt <= now:
+		nxt = now + 1 + (sid * 37) % maxi(ttl, 1)
+	return nxt + jit
+
 ## Как часто проверять, что знамя всё ещё стоит в переднем левом углу.
 ## Проверка — это обход состава ОДНОГО отряда, и делать её каждый кадр незачем:
 ## строй сам собой в порядок не приходит, а после смыкания рядов знаменосца и
 ## так переназначают событием
 const BEARER_RECHECK_SEC := 1.0
+## Период сверки в кадрах отрисовки при фазе по отряду (phase_keep): ~1 с на 60 FPS
+const BEARER_RECHECK_FRAMES := 60
 var _bearer_recheck_at: float = 0.0
 
 func _update_squad_banners() -> void:
@@ -8065,15 +8126,22 @@ func _update_squad_banners() -> void:
 	# переназначаем. В БОЮ не трогаем: там знамя переходит по гибели, и дёргать
 	# его посреди рубки означало бы гонять флаг сквозь свалку
 	var now_s: float = float(Time.get_ticks_msec()) * 0.001
-	var recheck: bool = now_s >= _bearer_recheck_at
-	if recheck:
+	var recheck_all: bool = now_s >= _bearer_recheck_at
+	if recheck_all:
 		_bearer_recheck_at = now_s + BEARER_RECHECK_SEC
+	# ФАЗА СВЕРКИ — ПО НОМЕРУ ОТРЯДА (perf_config.phase_keep): все
+	# переназначения знаменосцев ложились в один кадр раз в секунду
+	# (draw_banners 2.0 мс в пиковом кадре). Раз в BEARER_RECHECK_FRAMES
+	# кадров у каждого отряда свой кадр
+	var phase_keep: bool = _Opt.phase_keep
+	var pframe: int = Engine.get_process_frames()
 	for key in squads.keys():
 		var sid: int = int(key)
 		var sq: Dictionary = squads[key]
 		var banner = sq.get("banner", null)
 		if banner == null or not is_instance_valid(banner):
 			continue
+		var recheck: bool = ((pframe + sid) % BEARER_RECHECK_FRAMES == 0) if phase_keep else recheck_all
 		# СВЕРКА ИДЁТ И БЕЗ РАЗМЕТКИ, если знамя носят В СЕРЕДИНЕ (толпа орды,
 		# паникующий отряд): у них угол строя не при чём, а середина кучи
 		# уезжает на каждом шаге — без сверки флаг остался бы на том, кто был

@@ -3125,7 +3125,10 @@ func _block_half(n: int, cols: int, spacing: float) -> float:
 func _home_ring_post(cpos: Vector3, k: int, n: int, half: float) -> Array:
 	var blockers: Array = []
 	for b in get_tree().get_nodes_in_group(Constants.building_group(Constants.FACTION_ENEMY)):
-		if not is_instance_valid(b) or (b as Building).is_stronghold():
+		if not is_instance_valid(b):
+			continue
+		# В группе построек есть и рудник (StaticBody3D без is_stronghold — qa_squad)
+		if b.has_method("is_stronghold") and b.is_stronghold():
 			continue
 		var bp: Vector3 = (b as Node3D).global_position
 		if Vector2(bp.x - cpos.x, bp.z - cpos.z).length() < _AICfg.HOME_RING_DIST * 2.0:

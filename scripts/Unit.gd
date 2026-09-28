@@ -2985,6 +2985,13 @@ func _on_attack_target_died(who: Node) -> void:
 		u.attackers = maxi(0, u.attackers - 1)
 		GameManager.army.set_attackers(u._soa, u.attackers)
 	attack_target = null
+	# ── ПЕРЕНАЦЕЛИВАНИЕ ПОСЛЕ ГИБЕЛИ ЦЕЛИ — ПО ФАЗЕ, А НЕ ВСЕМ РАЗОМ (этап 3)
+	# Гибель цели будит всех её атакующих (TickSnooze), и с _retarget_timer ≤ 0
+	# они в следующем же тике идут в _lock_next_victim / поиск замены —
+	# волна гибели даёт process_attack 13-17 мс одним кадром. Фаза по номеру
+	# строки размазывает волну на ~5 кадров (perf_config.phase_keep)
+	if _Opt.phase_keep and _retarget_timer <= 0.0:
+		_retarget_timer = float((_soa if _soa >= 0 else get_instance_id()) % 6) * 0.033
 	# ── СТРОКУ ЦЕЛИ В КОЛОНКЕ ТОЖЕ ОБЯЗАНЫ ОБНУЛИТЬ ────────────────────────
 	# Здесь стояло голое `attack_target = null`, минуя set_attack_target, — и
 	# колонка `_tgt` в ядре армии продолжала указывать на СТРОКУ ПАВШЕГО. Строки

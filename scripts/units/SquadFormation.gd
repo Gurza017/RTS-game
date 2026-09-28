@@ -82,6 +82,29 @@ static func close_ranks(members: Array, slots: Array,
 	if free_men.is_empty():
 		return 0
 	var moved := 0
+	# ── ПОЗИЦИИ И ШИРИНА ШЕРЕНГИ — ОДИН РАЗ (этап 3, 28.09.2026) ────────────
+	# Обе жадные раздачи ниже на каждую ячейку обходили ВСЕХ свободных с
+	# чтением global_position (свойство), а _per_row (обход разметки) считался
+	# на каждое назначение: отряд в 100 человек — 10⁴ чтений свойства и 10⁴
+	# обходов разметки одним кадром (tail_reform худший 9.9 мс). Точки
+	# снимаются один раз в PackedVector3Array, ширина шеренги — один раз;
+	# выбывший помечается, а не удаляется из массива, чтобы номера не ехали.
+	# Порядок разбора и правила ничьих — дословно прежние: результат тот же
+	var per_row: int = maxi(_per_row(slots, course), 1)
+	var nm: int = free_men.size()
+	var pxs := PackedFloat32Array()
+	var pzs := PackedFloat32Array()
+	var idle := PackedByteArray()
+	pxs.resize(nm); pzs.resize(nm); idle.resize(nm)
+	for i in range(nm):
+		var um = free_men[i]
+		var p: Vector3 = (um as Node3D).global_position
+		pxs[i] = p.x
+		pzs[i] = p.z
+		idle[i] = 1 if um.state == Unit.State.IDLE else 0
+	var taken := PackedByteArray()    # 1 — боец уже получил место
+	taken.resize(nm)
+	var left: int = nm
 	# ── КТО УЖЕ СТОИТ В ЯЧЕЙКЕ — ОСТАЁТСЯ В НЕЙ (ТЗ 17.09.2026) ─────────────
 	# Жадный разбор «ближайший к месту» с одного прохода на строе, где все
 	# стоят на своих местах с погрешностью разведения, сажал в ячейку СОСЕДА
@@ -89,10 +112,8 @@ static func close_ranks(members: Array, slots: Array,
 	# каждой стычки 3-5 лучников уходили на 1-3 м «переставиться»
 	# (qa_archer_fix A4). Первый проход закрепляет стоящих в своей ячейке,
 	# жадный разбор — только для остальных мест и остальных людей
-	var free_slots: Array = []
-	for si in range(slots.size()):
-		free_slots.append(si)
-	var kept: Array = []          # индексы ячеек, занятых на месте
+	var slot_taken := PackedByteArray()   # 1 — ячейка занята стоящим на месте
+	slot_taken.resize(slots.size())
 	# ЗАКРЕПЛЯЮТСЯ ТОЛЬКО ПЕРВЫЕ alive_n ЯЧЕЕК (19.09.2026): места разметки
 	# идут спереди назад, и выбитая первая шеренга обязана закрыться
 	# задними (qa_spear E2 — «дыры уезжают в хвост»); стоящий в хвостовой
@@ -102,13 +123,11 @@ static func close_ranks(members: Array, slots: Array,
 		var slot: Vector3 = slots[si]
 		var near := -1
 		var near_d := HOLD_NEAR_SQ
-		for i in range(free_men.size()):
-			var um = free_men[i]
-			if um.state != Unit.State.IDLE:
+		for i in range(nm):
+			if taken[i] == 1 or idle[i] == 0:
 				continue
-			var p: Vector3 = (um as Node3D).global_position
-			var dx: float = p.x - slot.x
-			var dz: float = p.z - slot.z
+			var dx: float = pxs[i] - slot.x
+			var dz: float = pzs[i] - slot.z
 			var d: float = dx * dx + dz * dz
 			if d <= near_d:
 				near_d = d
@@ -116,22 +135,24 @@ static func close_ranks(members: Array, slots: Array,
 		if near < 0:
 			continue
 		var uk = free_men[near]
-		free_men.remove_at(near)
-		uk.formation_row = si / maxi(_per_row(slots, course), 1)
+		taken[near] = 1
+		left -= 1
+		uk.formation_row = si / per_row
 		uk.hold_post(slot, course)
-		kept.append(si)
-	for si in kept:
-		free_slots.erase(si)
-	var n: int = mini(free_men.size(), free_slots.size())
-	for k in range(n):
-		var si: int = int(free_slots[k])
+		slot_taken[si] = 1
+	for si in range(slots.size()):
+		if left <= 0:
+			break
+		if slot_taken[si] == 1:
+			continue
 		var slot: Vector3 = slots[si]
 		var best := -1
 		var best_d := INF
-		for i in range(free_men.size()):
-			var p: Vector3 = (free_men[i] as Node3D).global_position
-			var dx: float = p.x - slot.x
-			var dz: float = p.z - slot.z
+		for i in range(nm):
+			if taken[i] == 1:
+				continue
+			var dx: float = pxs[i] - slot.x
+			var dz: float = pzs[i] - slot.z
 			var d: float = dx * dx + dz * dz
 			if d < best_d:
 				best_d = d
@@ -139,10 +160,11 @@ static func close_ranks(members: Array, slots: Array,
 		if best < 0:
 			break
 		var u = free_men[best]
-		free_men.remove_at(best)
+		taken[best] = 1
+		left -= 1
 		# Ряд пересчитывается вместе с местом: перешедший вперёд боец обязан
 		# опустить копьё, а ушедший назад — поднять (см. Spearman._spear_leveled)
-		u.formation_row = si / maxi(_per_row(slots, course), 1)
+		u.formation_row = si / per_row
 		# ── КТО УЖЕ В СВОЕЙ ЯЧЕЙКЕ, ПРИКАЗА НЕ ПОЛУЧАЕТ (BigStand, этап 1) ──
 		# `command_move` в точку под ногами — это пробуждение, грязная поза,
 		# снятый якорь и ноль метров пути. Стоящему бойцу ближе допуска
@@ -163,8 +185,11 @@ static func close_ranks(members: Array, slots: Array,
 		moved += 1
 	# Бойцы, которым места не хватило (пополнение из замка встало в хвост),
 	# просто идут за строем — отдельного места для них в разметке нет
-	for extra in free_men:
-		if slots.size() > 0:
+	if left > 0 and slots.size() > 0:
+		for i in range(nm):
+			if taken[i] == 1:
+				continue
+			var extra = free_men[i]
 			extra.allow_reform_move()
 			extra.command_move(slots[slots.size() - 1] - course * 1.2, slow, course)
 	return moved

@@ -86,6 +86,12 @@ func _ready() -> void:
 	# ФАЗА ТАКТА СВОЯ У КАЖДОГО МОНАХА (qa_melee_bench, 14.09.2026): три монаха
 	# одного заказа пульсировали в один кадр — три поиска раненых и тел разом
 	_heal_t = float(get_instance_id() % 97) / 97.0 * _MCfg.MONK_HEAL_TICK
+	# ФАЗА СКАНА ТОЖЕ СВОЯ (этап 3, 28.09.2026): _scan_t стартовал с нуля у всех,
+	# и сорок монахов одного заказа сканировали в один кадр каждые 1.2 с —
+	# monk_pulse 2-4.6 мс одним кадром (Four detail=1). Доля 0..1 от номера
+	# узла: первый такт, разброс периода и задержка после общего приказа
+	_scan_phase = float(get_instance_id() % 89) / 89.0
+	_scan_t = _scan_phase * _MCfg.MONK_SCAN_SEC
 	_apply_config_stats("monk")
 	display_name = "Монах"
 	super._ready()
@@ -299,8 +305,17 @@ func _setup_monk_visual() -> void:
 ## (лечение 0.5 с, ауры 1 с, расстановка 1 с) сняты — их работу делает один
 ## скан
 var _scan_t: float = 0.0
+## Доля 0..1 от номера узла — разнос фаз скана между монахами (perf_config.phase_keep)
+var _scan_phase: float = 0.0
 ## Такт дремоты (некого лечить и не к кому идти), с
 const MONK_IDLE_SCAN_SEC := 1.5
+
+## Период такта с личным разбросом ±15 % (phase_keep): периоды разные — отряды
+## монахов, чьи фазы совпали по приказу, расходятся сами
+func _scan_period(base: float) -> float:
+	if not _Opt.phase_keep:
+		return base
+	return base * (0.85 + 0.3 * _scan_phase)
 ## Отряд-пациент (0 — нет); ставится сканом или приказом ПКМ
 var patient_sid: int = 0
 ## Цели лечения последнего такта (для стендов и VFX)
@@ -335,7 +350,7 @@ func tick_physics(delta: float, prof: bool = false, bm: bool = true,
 	_scan_t -= delta
 	if _scan_t > 0.0:
 		return
-	_scan_t = heal_tick_sec()
+	_scan_t = _scan_period(heal_tick_sec())
 	if _pm: _tm = Time.get_ticks_usec()
 	_monk_step()
 
@@ -343,7 +358,9 @@ func tick_physics(delta: float, prof: bool = false, bm: bool = true,
 
 ## Событие, требующее немедленного пересмотра (приказ, удар, конец лечения)
 func _monk_wake() -> void:
-	_scan_t = 0.0
+	# Общий приказ будит всех монахов разом — задержка до 0.3 с по фазе,
+	# иначе они снова сканируют в один кадр (phase_keep)
+	_scan_t = 0.3 * _scan_phase if _Opt.phase_keep else 0.0
 	wake_physics()
 
 ## Один шаг автомата монаха. Порядок: отход в силе — ничего; приказ игрока —
@@ -393,7 +410,7 @@ func _monk_step() -> void:
 	# таймера в тике и один обход реестра отрядов раз в несколько секунд
 	if state == State.IDLE and not moved_recently() and may_sleep_now():
 		sleeps += 1
-		_scan_t = MONK_IDLE_SCAN_SEC
+		_scan_t = _scan_period(MONK_IDLE_SCAN_SEC)
 
 func may_sleep_now() -> bool:
 	return _res_target == null and _retreat_goal.x == INF and not player_order_active()

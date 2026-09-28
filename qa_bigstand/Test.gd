@@ -825,6 +825,12 @@ func _measure(label: String, secs: float, headless: bool, detail0: bool = false)
 	# Визуальный проход: строк в списке ядра (VisRows, за вызов) и тихих
 	var vlisted_sum := 0
 	var vquiet_sum := 0
+	# Время рендера по RenderingServer (CPU-подача и GPU), мс/кадр — чтобы
+	# отличить «ждём GPU» от логики (этап 3, 28.09.2026)
+	var vp_rid: RID = get_viewport().get_viewport_rid()
+	RenderingServer.viewport_set_measure_render_time(vp_rid, true)
+	var rcpu_sum := 0.0
+	var rgpu_sum := 0.0
 	# ── СБОРКИ GEN2 ПО КАДРАМ (BigStand-5, этап 4) ────────────────────────
 	# Кадр, в котором число сборок gen2 выросло: стена кадра, пауза сборки
 	# (GC.GetGCMemoryInfo), куча до/после, LOH — чтобы назвать причину числом
@@ -881,6 +887,8 @@ func _measure(label: String, secs: float, headless: bool, detail0: bool = false)
 		listed_sum += GameManager.army.tick_listed()
 		vlisted_sum += GameManager.army.vis_listed()
 		vquiet_sum += GameManager.army.vis_quiet_count()
+		rcpu_sum += RenderingServer.viewport_get_measured_render_time_cpu(vp_rid)
+		rgpu_sum += RenderingServer.viewport_get_measured_render_time_gpu(vp_rid)
 		if SEPHIST == 1 and f == frames_total / 2:
 			sephist = _sep_hist()
 		if f % JIT_FRAMES == JIT_FRAMES - 1:
@@ -899,8 +907,12 @@ func _measure(label: String, secs: float, headless: bool, detail0: bool = false)
 	r["wall_avg"] = _avg(walls)
 	r["phys_p95"] = _pct(phys_all, 0.95)
 	r["proc_p95"] = _pct(proc_all, 0.95)
+	# Средние по мониторам движка — чтобы разложить «прочее» кадра: физколбэк
+	# вне тика армии и _process вне логики армии (этап 3, 28.09.2026)
 	r["phys_avg"] = _avg(phys_all)
 	r["proc_avg"] = _avg(proc_all)
+	r["render_cpu"] = rcpu_sum / float(maxi(frames_total, 1))
+	r["render_gpu"] = rgpu_sum / float(maxi(frames_total, 1))
 	r["wall_p50"] = _pct(walls, 0.50)
 	r["wall_p99"] = _pct(walls, 0.99)
 	var b16 := 0
@@ -1066,6 +1078,17 @@ func _summary(rs: Array, headless: bool) -> void:
 		var wall: float = float(d["wall_avg"])
 		var tick: float = float(d["tick"])
 		var vis: float = float(d["vis"])
+		# Раскладка «прочего» по мониторам движка (средние за фазу, этап 3):
+		# физколбэк целиком против тика армии, _process целиком против логики
+		# армии; остаток стены — рендер/движок вне колбэков
+		var pha: float = float(d.get("phys_avg", 0.0))
+		var pra: float = float(d.get("proc_avg", 0.0))
+		# TIME_PROCESS движка ВКЛЮЧАЕТ RenderingServer.draw (Main::iteration), а
+		# TIME_PHYSICS_PROCESS — рассылку отложенных уведомлений трансформа в
+		# конце физшага; складывать их с стеной нельзя, читать как подсказку
+		print("  ПРОЧЕЕ: физколбэк движка ср. %.2f мс (тик армии %.2f → вне тика %.2f); _process движка ср. %.2f (логика армии %.2f → вне логики %.2f, в т.ч. рендер: подача CPU %.2f, GPU %.2f мс/кадр)" % [
+			pha, tick, maxf(pha - tick, 0.0), pra, vis, maxf(pra - vis, 0.0),
+			float(d.get("render_cpu", 0.0)), float(d.get("render_gpu", 0.0))])
 		print("  КАДР: стена ср. %.2f мс (p50 %.1f, p95 %.1f, p99 %.1f, худший %.1f) = физтик армии %.2f + логика армии %.2f + рендер/движок/прочее %.2f; кадров <=16.7 мс %d, <=33.4 мс %d, дольше %d" % [
 			wall, float(d["wall_p50"]), float(d["wall_p95"]), float(d["wall_p99"]), float(d["wall_worst"]),
 			tick, vis, maxf(wall - tick - vis, 0.0),
