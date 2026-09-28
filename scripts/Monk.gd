@@ -422,7 +422,11 @@ func _squad_needs_care(sid: int) -> bool:
 	var raw: Variant = GameManager.squads.get(sid)
 	if raw == null:
 		return false
-	var members: Array = (raw as Dictionary).get("members", [])
+	# Умолчание get вычисляется всегда (правило 13) — без него
+	var mv: Variant = (raw as Dictionary).get("members")
+	if mv == null:
+		return false
+	var members: Array = mv
 	var alive := 0
 	for m in members:
 		if m == null or not is_instance_valid(m):
@@ -463,7 +467,10 @@ func _pick_patient_squad() -> int:
 		var hp := 0.0
 		var hpmax := 0.0
 		var alive := 0
-		for m in sq.get("members", []):
+		var mv2: Variant = sq.get("members")
+		if mv2 == null:
+			continue
+		for m in (mv2 as Array):
 			if m == null or not is_instance_valid(m):
 				continue
 			var u := m as Unit

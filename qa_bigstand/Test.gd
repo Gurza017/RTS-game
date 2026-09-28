@@ -822,6 +822,8 @@ func _measure(label: String, secs: float, headless: bool, detail0: bool = false)
 	var gc0_2: int = GameManager.army.gc_count(2)
 	var skipped_sum := 0
 	var listed_sum := 0
+	var halved_sum := 0
+	var lstat_sum: PackedInt64Array = PackedInt64Array([0, 0, 0, 0, 0])
 	# Визуальный проход: строк в списке ядра (VisRows, за вызов) и тихих
 	var vlisted_sum := 0
 	var vquiet_sum := 0
@@ -885,6 +887,9 @@ func _measure(label: String, secs: float, headless: bool, detail0: bool = false)
 		stuck_max = maxi(stuck_max, GameManager.stuck_arrow_count())
 		skipped_sum += GameManager.army.tick_skipped()
 		listed_sum += GameManager.army.tick_listed()
+		halved_sum += GameManager.army.tick_halved()
+		for q in range(5):
+			lstat_sum[q] += GameManager.army.tick_lstat(q)
 		vlisted_sum += GameManager.army.vis_listed()
 		vquiet_sum += GameManager.army.vis_quiet_count()
 		rcpu_sum += RenderingServer.viewport_get_measured_render_time_cpu(vp_rid)
@@ -930,6 +935,10 @@ func _measure(label: String, secs: float, headless: bool, detail0: bool = false)
 	r["gc"] = [GameManager.army.gc_count(0) - gc0_0, GameManager.army.gc_count(1) - gc0_1, GameManager.army.gc_count(2) - gc0_2]
 	r["core_skipped"] = float(skipped_sum) / float(frames_total)
 	r["core_listed"] = float(listed_sum) / float(frames_total)
+	r["core_halved"] = float(halved_sum) / float(frames_total)
+	r["lstat"] = "удар %d / контакт %d / подход %d / покой %d / прочее %d" % [
+		lstat_sum[0] / frames_total, lstat_sum[1] / frames_total, lstat_sum[2] / frames_total,
+		lstat_sum[3] / frames_total, lstat_sum[4] / frames_total]
 	r["draw"] = draw_peak
 	r["gc_kb_frame"] = float(GameManager.army.gc_allocated() - gc_alloc0) / 1024.0 / float(frames_total)
 	r["gc_frames"] = gc_frames
@@ -970,6 +979,7 @@ func _measure(label: String, secs: float, headless: bool, detail0: bool = false)
 	_Opt.scan_meter = false
 	print("  [%s] физтик %.2f мс, кадр логики %.2f мс, физкадр p95 %.1f / худший %.1f мс, живых %d → %d, расталк. %.0f тел/кадр, приказов %.0f/с, сканов %.0f/с, шардов %d  (стенные часы %d с)" % [
 		label, r["tick"], r["vis"], r["wall_p95"], r["wall_worst"], alive0, r["alive1"], r["sep_per_frame"], r["cmd_per_sec"], r["scan_per_sec"], r["shards"], Time.get_ticks_msec() / 1000])
+	print("       в GDScript-тике строк/кадр: %s; полутактом %.0f" % [String(r["lstat"]), float(r["core_halved"])])
 	return r
 
 func _max(a: PackedFloat32Array) -> float:

@@ -730,21 +730,36 @@ const AUTOPILOT_ARM_SLACK := 0.05
 ## подход. Стрелки (pursues_target false), конница с разгона, стойка
 ## «оборона», сцепка, отход, бег, выход из боя, тыловой напор и обход по
 ## навигации остаются в GDScript
+## ── КОННИЦА: АВТОПИЛОТ ДО РУБЕЖА РАЗГОНА (аудит 28.09, пакет 2) ─────────
+## Свиноконница — самый дорогой род во всех фазах (3.0 мс/кадр, 28 мкс/тик,
+## Four detail=1): «конница с разгона не взводится» держало ВЕСЬ её подход
+## в GDScript. Разгон меряет пробег по тикам только ближе charge_range — а
+## дальше рубежа charge_range + RIDER_AUTOPILOT_MARGIN шаг однороден, и его
+## ведёт ядро; стоп автопилота ставится на рубеж, после пробуждения автомат
+## штатно взводит _charge_ready (dist > charge_range) и разгоняется.
+## Подтягивания рядов у конницы нет (pull_lim −1). Ручка perf_config.rider_autopilot
+const RIDER_AUTOPILOT_MARGIN := 3.0
+
 func _arm_autopilot(tu: Unit, rng: float, dist: float) -> void:
 	if not _Opt.approach_autopilot or _soa < 0 or tu == null or tu._soa < 0:
 		return
-	if dist <= rng + AUTOPILOT_ARM_SLACK:
+	var cav: bool = charge_range > 0.0
+	var stop: float = (charge_range + RIDER_AUTOPILOT_MARGIN) if cav else rng
+	if dist <= stop + AUTOPILOT_ARM_SLACK:
 		return
-	if _stance_holds_ground() or charge_range > 0.0 \
-			or retreating or sprinting or _disengaging or _rear_press:
+	if _stance_holds_ground() or retreating or sprinting or _disengaging or _rear_press:
+		return
+	if cav and (not _Opt.rider_autopilot or is_charging):
 		return
 	_auto_pilot = true
 	var eff: float = _effective_speed()
 	# Подтягивание — только у отряда и не под замком цели: ровно те условия,
 	# при которых ветка _should_pull_up вообще выбирается в GDScript
-	GameManager.army.autopilot_arm(_soa, eff, eff * PULL_UP_SPEED, rng,
-		(rng + PULL_UP_MAX) if (squad_id > 0 and not target_lock) else -1.0,
-		AGGRO_INTERVAL_HOT, _side_sign)
+	var pull_lim: float = -1.0
+	if not cav and squad_id > 0 and not target_lock:
+		pull_lim = rng + PULL_UP_MAX
+	GameManager.army.autopilot_arm(_soa, eff, eff * PULL_UP_SPEED, stop,
+		pull_lim, AGGRO_INTERVAL_HOT, _side_sign)
 
 ## Стойка «оборона» на дистанции: шага нет, боец смотрит на цель и ждёт —
 ## ждать можно и в ядре (скорость 0 = режим «стоять»)
@@ -834,6 +849,24 @@ var _sent_st: int = -1
 ## разойтись с узлом помимо обычного тика: рождение, телепорт, выход из
 ## гарнизона (там же гасится и возвращается признак «координата настоящая»)
 var _pose_force: bool = true
+## ── ПОЛУТАКТ РЕШЕНИЙ БОЯ В КОНТАКТЕ (этап 4, perf_config.atk_half_contact) ──
+## Признак «стою в свалке у цели» — ядро отдаёт такого через один личный тик.
+## Зона контакта: цель дальше досягаемости, но не дальше этого запаса, м
+const ATK_HALF_ZONE := 3.0
+var _atk_half: bool = false
+## Номер такта армии на прошлом СВОЁМ тике — по нему добирается дельта
+## пропущенного полутакта (см. tick_physics)
+var _last_pf: int = 0
+## Дельта одного такта армии (ставит GameManager раз в такт)
+static var tick_delta: float = 1.0 / 60.0
+
+func _atk_half_set(on: bool) -> void:
+	if on == _atk_half:
+		return
+	_atk_half = on
+	if _soa >= 0:
+		GameManager.army.atk_half_set(_soa, on)
+
 
 func sync_row() -> void:
 	if _soa < 0:
@@ -999,6 +1032,10 @@ var _rear_hold: bool = false
 ## Защёлка смыкания: боец начал закрывать брешь и идёт до упора
 ## (см. _phalanx_advance — пороги начала и конца намеренно разные)
 var _closing_gap: bool = false
+## Такт проверки бреши в строю, пока её не закрываем (аудит 28.09): три
+## скана сетки на каждый тик стоящего копейщика с виденным врагом
+const PHALANX_ADVANCE_SCAN_MS := 200
+var _adv_scan_ms: int = 0
 var _rank_timer: float = 0.0
 # Последний замеченный враг: направление и дистанция (обновляет _check_auto_aggro)
 var _enemy_seen_dir:  Vector3 = Vector3.ZERO
@@ -2958,6 +2995,8 @@ func set_attack_target(target: Node3D) -> void:
 	# Габарит цели — сюда же, по тому же поводу: смена цели редка, а читают
 	# поправку каждый кадр (см. _target_pad)
 	_target_pad = _pad_of(target)
+	# Полутакт живёт ровно один контакт с одной целью (этап 4)
+	_atk_half_set(false)
 	# Строка цели — в колонку: по ней пакетный бой считает дистанцию, не
 	# заглядывая в объект. Пишется ПО СОБЫТИЮ, смена цели редка
 	if _soa >= 0:
@@ -4676,6 +4715,17 @@ func tick_physics(delta: float, prof: bool = false, bm: bool = true,
 	# Считается ПЕРВЫМ делом, до всей логики движения: сравниваем, где боец
 	# оказался, с тем, где он был на прошлом своём тике. Сюда попадает ВСЁ, что
 	# его двигало, — и шаг, и расталкивание, и толчок конницы
+	# ── ДЕЛЬТА ПРОПУЩЕННОГО ПОЛУТАКТА (этап 4) ─────────────────────────────
+	# Ядро отдало строку через один личный тик: таймеры и шаг обязаны получить
+	# время за оба. Потолок — два тика: после дрёмы или сна разрыв больше, и
+	# добирать его нельзя (прежнее поведение — дельта одного тика)
+	if _atk_half:
+		var gap: int = phys_frame - _last_pf
+		if _last_pf > 0 and gap > 0:
+			var base: float = tick_delta * float(gap)
+			if base > delta and base <= delta * 2.0 + 1e-6:
+				delta = base
+	_last_pf = phys_frame
 	var _mv_now: int = _mv_tick()
 	# ── ОТЛОЖЕННОЕ КАСАНИЕ (см. _release_hit) ──────────────────────────────
 	if _hit_pend_ms > 0 and _mv_now >= _hit_pend_ms:
@@ -6185,6 +6235,19 @@ func _process_attack(delta: float) -> void:
 	# считаем до СТЕНЫ, иначе пехота лезет внутрь коробки, а стрелок жмётся
 	# к ней вплотную
 	var rng: float = attack_range + _target_pad
+	# ── ПОЛУТАКТ В КОНТАКТЕ (этап 4, perf_config.atk_half_contact) ──────────
+	# Боец в зоне контакта (цель за досягаемостью, но не дальше ATK_HALF_ZONE;
+	# не конница) решает вдвое реже: TickRows отдаёт его автомату через один
+	# личный тик, дельту добирает tick_physics — шаг за два тика тот же, а
+	# лишний заход блокируют тела (ScanBlock). Условие «стоит по факту»
+	# пробовано и снято: в свалке разведение шевелит всех, под него попадали
+	# 40-95 строк из 160-210 в зоне (VisAb 28.09). Стоящий в упор — не здесь:
+	# его ведёт дрёма, а удар после пробуждения ждать не вправе. Переход
+	# границы — только на смене признака
+	if _Opt.atk_half_contact:
+		_atk_half_set(charge_range <= 0.0 and dist > rng and dist <= rng + ATK_HALF_ZONE)
+	elif _atk_half:
+		_atk_half_set(false)   # ручку выключили на живой сцене (A/B)
 	# ── РАЗГОН УДАРНОЙ КОННИЦЫ (см. поля charge_*) ──────────────────────────
 	# Одно сравнение с нулём для всей пехоты: у неё charge_range = 0, и дальше
 	# этой строки ветка не идёт. Флаг взводится ровно на подходе к БОЙЦУ:
@@ -6670,6 +6733,7 @@ func _process_attack(delta: float) -> void:
 		# (GameManager._sweep_volleys)
 		if _attack_timer <= 0.0 and not _may_strike_now():
 			_attack_timer = 0.0
+			if _Opt.tick_meter: _Opt.atk_why[4] += 1
 		elif _attack_timer <= 0.0 and _hit_pend_ms == 0:
 			# Счётчик atk_strike — САМ УДАР без списания урона: кулдаун, расчёт
 			# силы, два звука, толчок шеренги, отметка на снаряде. Списание урона
@@ -6730,6 +6794,7 @@ func _process_attack(delta: float) -> void:
 		if _Opt.atk_snooze and _attack_timer > ATK_SNOOZE_SPARE \
 				and not is_charging and _soa >= 0:
 			_atk_snooze = true
+			if _Opt.tick_meter: _Opt.atk_why[0] += 1
 			# ЛЮФТ ДОСЯГАЕМОСТИ ОБЯЗАТЕЛЕН. Свалка качает пары на ±полметра
 			# каждую пару кадров, и стража по ГОЛОЙ дальности будила дремлющих
 			# почти сразу — замер qa_mass3k: с люфтом 0 выигрыша нет вовсе,
@@ -6741,6 +6806,8 @@ func _process_attack(delta: float) -> void:
 				arm_cd = minf(arm_cd, float(_hit_pend_ms - now_ms) * 0.001 + ATK_SNOOZE_SPARE + 0.02)
 			GameManager.army.atk_snooze_arm(_soa, arm_cd,
 				attack_range + _target_pad + ATK_SNOOZE_REACH_SLACK)
+		elif _Opt.tick_meter and _attack_timer > 0.0:
+			_Opt.atk_why[1 if _attack_timer <= ATK_SNOOZE_SPARE else (2 if is_charging else 3)] += 1
 
 ## ── ПОГОНЯ ЗА ЦЕЛЬЮ, ВЫШЕДШЕЙ ИЗ ЗОНЫ ПОРАЖЕНИЯ ─────────────────────────────
 ## Ближний бой — да: без погони мечник вообще не может драться, его дистанция
@@ -8330,6 +8397,13 @@ const PHALANX_ADVANCE_ON_ENEMY := false
 func _phalanx_advance(delta: float) -> void:
 	if _enemy_seen_dist == INF:
 		return                       # врага вокруг нет — стоим
+	# ── СКАН БРЕШИ РАЗ В PHALANX_ADVANCE_SCAN_MS, ПОКА НЕ ЗАКРЫВАЕМ ────────
+	# (аудит 28.09, perf_config.audit_pack). Защёлка _closing_gap ведёт шаг
+	# каждый тик, как и раньше; редеет только вопрос «а нет ли бреши»
+	if _Opt.audit_pack and not _closing_gap:
+		if now_ms < _adv_scan_ms:
+			return
+		_adv_scan_ms = now_ms + PHALANX_ADVANCE_SCAN_MS + (get_instance_id() % 7) * 10
 	var dir := _phalanx_dir()
 	if dir.length_squared() < 1e-6:
 		return

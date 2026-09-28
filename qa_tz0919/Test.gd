@@ -321,7 +321,7 @@ func _g_spawn(base: Vector3) -> void:
 	var c1: Vector3 = GameManager.squad_centroid(sid)
 	verdict("G4 отряд стоит, где появился: центр сдвинулся < 1 м, идущих нет",
 		c0.distance_to(c1) < 1.0 and moved <= 2,
-		"сдвиг центра %.2f м, идущих %d, приказов за 6 с %d" % [c0.distance_to(c1), moved, _Opt.cmd_total - cmd0])
+		"сдвиг центра %.2f м, идущих %d, приказов за 6 с %d; источники: %s" % [c0.distance_to(c1), moved, _Opt.cmd_total - cmd0, str(_Opt.cmd_report())])
 	_kill_all(men)
 	br.take_damage(1e12)
 	await pframes(4)

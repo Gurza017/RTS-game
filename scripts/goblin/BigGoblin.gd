@@ -64,6 +64,10 @@ var _step_t: float = 0.0
 var _resume_to: Vector3 = Vector3.INF
 var hunting: bool = false
 var _hunt_t: float = 0.0
+## Пауза связки с пехотой после пустого ответа (аудит 28.09): в пустом
+## покое два query_radius (30/60 м) с Godot-массивами шли раз в 0.5 с
+const BIG_ESCORT_BACKOFF := 2.0
+var _escort_t: float = 0.0
 ## Стенды: сколько раз марш прерван боем и сколько раз возобновлён
 var hunts_started: int = 0
 var marches_resumed: int = 0
@@ -280,6 +284,11 @@ func _hunt_scan(r: float, combat_only: bool = false) -> Node3D:
 	# (qa_big_goblin D: экономию Scan-on-Cooldown стенд меряет по нему)
 	scans_done += 1
 	var mp: Vector3 = position if _local_xform else global_position
+	# ── ПУСТОЙ ПОКОЙ — ОДИН ВЫЗОВ ЯДРА (аудит 28.09, perf_config.audit_pack) ──
+	# Грубая сетка ядра отвечает «чужих в квадрате нет» без единого узла;
+	# ответ консервативный (квадрат шире круга), ложного «нет» не бывает
+	if _Opt.audit_pack and not GameManager.army.enemy_near(mp.x, mp.z, int(faction), r):
+		return null
 	var best: Node3D = null
 	var bd := INF
 	var best_any: Node3D = null
@@ -364,6 +373,8 @@ func _escort_follow() -> bool:
 
 func _tick_hunt(delta: float) -> void:
 	_hunt_t -= delta
+	if _escort_t > 0.0:
+		_escort_t -= delta
 	if _hunt_t > 0.0:
 		return
 	_hunt_t = _GobCfgB.BIG_HUNT_TICK
@@ -385,15 +396,17 @@ func _tick_hunt(delta: float) -> void:
 		# перехват тем же тактом, без ожидания такта агро и заморозки скана
 		if (state == State.MOVING or state == State.IDLE) and not alive and not target_lock:
 			var foe: Node3D = _hunt_scan(_GobCfgB.BIG_AGGRO_RADIUS)
-			if foe == null:
-				# Своя пехота рядом уже дерётся — подхватить её цель (блок 3)
+			if foe == null and _escort_t <= 0.0:
+				# Своя пехота рядом уже дерётся — подхватить её цель (блок 3).
+				# Пустой ответ (некого подхватить, не за кем идти) — пауза
+				# BIG_ESCORT_BACKOFF: оба скана — Godot-массивы на 30/60 м
 				foe = _escort_target()
 				if foe != null:
 					escorts_taken += 1
+				elif not (state == State.IDLE and _escort_follow()):
+					_escort_t = BIG_ESCORT_BACKOFF if _Opt.audit_pack else 0.0
 			if foe != null:
 				_engage(foe)
-			elif state == State.IDLE:
-				_escort_follow()
 		return
 	if alive:
 		return

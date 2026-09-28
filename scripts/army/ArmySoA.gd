@@ -552,6 +552,17 @@ func tick_skipped() -> int:
 func tick_listed() -> int:
 	return int(_c.TickListed)
 
+## Полутакт решений боя (этап 4): признак строки и счётчик пропущенных
+func atk_half_set(i: int, on: bool) -> void:
+	_c.AtkHalfSet(i, on)
+
+func tick_halved() -> int:
+	return int(_c.TickHalved)
+
+## Состав списка на тик: [удар, контакт, подход, покой, прочее]
+func tick_lstat(k: int) -> int:
+	return int(_c.TickLStat(k))
+
 
 func rb_create(mm_rid: RID) -> int:
 	return _c.RbCreate(mm_rid)

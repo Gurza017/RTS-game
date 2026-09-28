@@ -568,6 +568,7 @@ func _physics_process_timed(delta: float) -> void:
 	army.set_threads(_Opt.core_threads)
 	Unit.now_ms = Time.get_ticks_msec()
 	Unit.phys_frame = army_ticks
+	Unit.tick_delta = delta
 	Unit.nav_active = nav_on()
 	# Зонд BigStand: метка источника приказа, поставленная ИИ в _process,
 	# внутри тика не действует

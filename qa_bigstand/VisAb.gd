@@ -89,6 +89,11 @@ func _print_why(secs: float) -> void:
 		if _Opt.vis_noq[k] > 0:
 			s += "%s %.0f; " % [_Opt.VIS_NOQ_NAMES[k], float(_Opt.vis_noq[k]) / secs]
 	print(s)
+	s = "    В ДОСЯГАЕМОСТИ, тиков/с: "
+	for k in range(_Opt.atk_why.size()):
+		if _Opt.atk_why[k] > 0:
+			s += "%s %.0f; " % [_Opt.ATK_WHY_NAMES[k], float(_Opt.atk_why[k]) / secs]
+	print(s)
 
 func _ab_avg(rs: Array, key: String) -> float:
 	if rs.is_empty():
@@ -118,8 +123,10 @@ func _ab_summary(res_a: Array, res_b: Array) -> void:
 	var ta: float = _ab_avg(res_a, "tick"); var tb: float = _ab_avg(res_b, "tick")
 	var fa: float = _ab_avg(res_a, "fps_avg"); var fb: float = _ab_avg(res_b, "fps_avg")
 	var la: float = _ab_avg(res_a, "vis_listed"); var lb: float = _ab_avg(res_b, "vis_listed")
-	print("  ИТОГ %s: кадр логики %.2f → %.2f мс (%+.2f), физтик %.2f → %.2f (%+.2f), FPS %.1f → %.1f (%+.1f), строк в GDScript-тике картинки %.0f → %.0f" % [
-		AB_KNOB, va, vb, vb - va, ta, tb, tb - ta, fa, fb, fb - fa, la, lb])
+	print("  ИТОГ %s: кадр логики %.2f → %.2f мс (%+.2f), физтик %.2f → %.2f (%+.2f), FPS %.1f → %.1f (%+.1f), строк в GDScript-тике картинки %.0f → %.0f, в тике %.0f → %.0f, полутактом %.0f → %.0f" % [
+		AB_KNOB, va, vb, vb - va, ta, tb, tb - ta, fa, fb, fb - fa, la, lb,
+		_ab_avg(res_a, "core_listed"), _ab_avg(res_b, "core_listed"),
+		_ab_avg(res_a, "core_halved"), _ab_avg(res_b, "core_halved")])
 	# Пики: средние по окнам p95 / p99 / худшего — для правок этапа 3
 	print("  ПИКИ %s: стена ср %.1f → %.1f, p95 %.1f → %.1f, p99 %.1f → %.1f, худший %.1f → %.1f мс" % [
 		AB_KNOB, _ab_avg(res_a, "wall_avg"), _ab_avg(res_b, "wall_avg"), _ab_avg(res_a, "wall_p95"), _ab_avg(res_b, "wall_p95"),

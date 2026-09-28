@@ -49,6 +49,11 @@ var hunts_started: int = 0
 var hunt_swaps: int = 0
 var marches_resumed: int = 0
 var _hunt_t: float = 0.0
+## Скан «слабой цели рядом» у всадника, упёршегося в фалангу, — каждый
+## RIDER_SWAP_EVERY-й такт охоты (аудит 28.09): best_enemy на 30 м у
+## сотен всадников дважды в секунду — крупнейший скан партии (rider_hunt)
+const RIDER_SWAP_EVERY := 4
+var _swap_skip: int = 0
 var _resume_to: Vector3 = Vector3.INF
 
 ## Тик идёт всегда (часы охоты): по физике конница не спит
@@ -108,6 +113,9 @@ func _tick_hunt(delta: float) -> void:
 			return
 		var tu := attack_target as Unit
 		if tu == null or tu.cav_target_weight() >= 1.0:
+			return
+		_swap_skip += 1
+		if _Opt.audit_pack and _swap_skip % RIDER_SWAP_EVERY != 0:
 			return
 		var better: Node3D = _hunt_scan(_GobCfgV.RIDER_HUNT_RADIUS)
 		if better != null and better != attack_target and better is Unit \

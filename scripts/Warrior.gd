@@ -482,7 +482,8 @@ func _update_guard() -> void:
 	if _rush_pending and not sprinting and not rage_active():
 		_rush_aggro()
 	var want := false
-	if auto_guard and state != State.DEAD and Time.get_ticks_msec() >= _anim_lock_until_ms:
+	# Часы армии (now_ms), а не движка: тик картинки идёт у тысяч мечников
+	if auto_guard and state != State.DEAD and now_ms >= _anim_lock_until_ms:
 		# ЩИТ В НАБЕГЕ ПОДНЯТ БЕЗУСЛОВНО (заказ: «рывок с зафиксированными
 		# щитами»), и требование auto_guard тут не при чём — режим включил сам
 		# игрок двойным ПКМ

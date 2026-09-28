@@ -1173,6 +1173,7 @@ public partial class ArmyCore : RefCounted
         Array.Resize(ref _thX, cap); Array.Resize(ref _thZ, cap); Array.Resize(ref _thY, cap);
         Array.Resize(ref _st, cap); Array.Resize(ref _fac, cap); Array.Resize(ref _sq, cap);
         Array.Resize(ref _sqNext, cap); Array.Resize(ref _sqPrev, cap); Array.Resize(ref _rank, cap);
+        Array.Resize(ref _atkHalf, cap);
         Array.Resize(ref _flags, cap); Array.Resize(ref _attackers, cap);
         Array.Resize(ref _tgt, cap); Array.Resize(ref _effSpeed, cap);
         Array.Resize(ref _fx, cap); Array.Resize(ref _fz, cap);
@@ -1220,7 +1221,7 @@ public partial class ArmyCore : RefCounted
         _stpX[i] = 0; _stpZ[i] = 0;
         _thX[i] = 1e9f; _thZ[i] = 1e9f; _thY[i] = 0;
         _st[i] = 0; _fac[i] = -1; _sq[i] = 0; _flags[i] = 0; _attackers[i] = 0;
-        _sqNext[i] = -1; _sqPrev[i] = -1; _rank[i] = 0;
+        _sqNext[i] = -1; _sqPrev[i] = -1; _rank[i] = 0; _atkHalf[i] = 0;
         _tgt[i] = -1; _effSpeed[i] = 0.0f;
         return i;
     }
@@ -1235,7 +1236,7 @@ public partial class ArmyCore : RefCounted
         _st[i] = 0;
         _fac[i] = -1;
         if (_sq[i] > 0) SqUnlink(i, _sq[i]);
-        _sq[i] = 0; _rank[i] = 0;
+        _sq[i] = 0; _rank[i] = 0; _atkHalf[i] = 0;
         _sepAccX[i] = 0.0f; _sepAccZ[i] = 0.0f;
         if (_bodyR[i] > 0.0f) SetBodyRadius(i, 0.0f);
         _attackers[i] = 0;
@@ -1297,6 +1298,18 @@ public partial class ArmyCore : RefCounted
     // состав по списку, а не по массиву строк, собранному в GDScript обходом
     // members с is_instance_valid и приведением типа (cor_harvest 0.3-0.4 мс/кадр)
     private int[] _sqNext = Array.Empty<int>(), _sqPrev = Array.Empty<int>();
+    // ── ПОЛУТАКТ РЕШЕНИЙ БОЯ В КОНТАКТЕ (этап 4, 28.09.2026) ─────────────
+    // 1 — боец стоит в свалке у цели (GDScript решил: не идёт, цель в зоне
+    // контакта, не конница), и TickRows отдаёт его GDScript-автомату через
+    // один личный тик; дельту пропущенного тика боец добирает сам
+    // (Unit._last_pf). Байт, а не бит флагов: свободных бит в _flags нет
+    private byte[] _atkHalf = Array.Empty<byte>();
+    public void AtkHalfSet(int i, bool on) { if (i >= 0 && i < _capacity) _atkHalf[i] = (byte)(on ? 1 : 0); }
+    public int TickHalved;   // сколько строк пропущено полутактом последним TickRows
+    // Состав списка на тик (стендам): ATTACKING в досягаемости / в зоне контакта
+    // (до +3 м) / дальше; IDLE; прочие (MOVING и т.п.)
+    private readonly int[] _tickLStat = new int[5];
+    public int TickLStat(int k) => (k >= 0 && k < 5) ? _tickLStat[k] : 0;
     private readonly System.Collections.Generic.Dictionary<int, int> _sqHead = new();
     // Ряд бойца (сколько своих впереди вдоль курса), считает SquadRecalc;
     // GDScript-поле _live_rank пишется только изменившимся
@@ -4887,12 +4900,18 @@ public partial class ArmyCore : RefCounted
         int armyTicks, int playerFac, int fogSlowDiv)
     {
         int n = 0;
-        int skipped = 0;
+        int skipped = 0, halved = 0;
+        for (int q = 0; q < 5; q++) _tickLStat[q] = 0;
         int slowed = 0, hidden = 0;
         int dead = DeadState;
         int led = FAutopilot | FRearPress | FAtkSnooze;
         bool fogOk = fogSlowDiv > 1 && _fogCols > 0 && _fogLit.Length == _fogCols * _fogRows;
         int sh = Math.Max(shards, 1);
+        // Полутакт: личный тик строки идёт раз в sh тактов, значит armyTicks / sh
+        // растёт на единицу на каждый личный тик; чётность его против чётности
+        // строки (i / sh — соседние строки одного шарда чередуются) даёт
+        // ровно каждый второй личный тик
+        int halfPh = (armyTicks / sh) & 1;
         int slowPhase = (armyTicks / sh) % Math.Max(fogSlowDiv, 1);
         for (int k = 0; k < _liveCount; k++)
         {
@@ -4906,6 +4925,7 @@ public partial class ArmyCore : RefCounted
             {
                 if ((fl & FMatrixLed) != 0) { skipped++; continue; }
                 if ((fl & led) != 0 && st == attackingState) { skipped++; continue; }
+                if (_atkHalf[i] != 0 && st == attackingState && ((i / sh) & 1) != halfPh) { halved++; continue; }
                 if ((fl & FIdleWait) != 0 && st == idleState)
                 {
                     float t = _aggroT[i] - delta;
@@ -4930,9 +4950,26 @@ public partial class ArmyCore : RefCounted
             }
             if (n >= _tickOut.Length) Array.Resize(ref _tickOut, _tickOut.Length * 2);
             _tickOut[n++] = slow ? -(i + 1) : i;
+            if (st == attackingState)
+            {
+                int tg = _tgt[i];
+                if (tg >= 0 && tg < _capacity)
+                {
+                    float ddx = _px[tg] - _px[i], ddz = _pz[tg] - _pz[i];
+                    float d2 = ddx * ddx + ddz * ddz;
+                    float rr = _atkRange[i] + 0.6f;
+                    if (d2 <= rr * rr) _tickLStat[0]++;
+                    else if (d2 <= (rr + 3.0f) * (rr + 3.0f)) _tickLStat[1]++;
+                    else _tickLStat[2]++;
+                }
+                else _tickLStat[2]++;
+            }
+            else if (st == idleState) _tickLStat[3]++;
+            else _tickLStat[4]++;
         }
         TickListed = n;
         TickSkipped = skipped;
+        TickHalved = halved;
         TickSlowed = slowed;
         TickHidden = hidden;
         var res = new int[n];
