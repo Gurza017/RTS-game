@@ -1172,6 +1172,7 @@ public partial class ArmyCore : RefCounted
         Array.Resize(ref _stpX, cap); Array.Resize(ref _stpZ, cap);
         Array.Resize(ref _thX, cap); Array.Resize(ref _thZ, cap); Array.Resize(ref _thY, cap);
         Array.Resize(ref _st, cap); Array.Resize(ref _fac, cap); Array.Resize(ref _sq, cap);
+        Array.Resize(ref _sqNext, cap); Array.Resize(ref _sqPrev, cap); Array.Resize(ref _rank, cap);
         Array.Resize(ref _flags, cap); Array.Resize(ref _attackers, cap);
         Array.Resize(ref _tgt, cap); Array.Resize(ref _effSpeed, cap);
         Array.Resize(ref _fx, cap); Array.Resize(ref _fz, cap);
@@ -1219,6 +1220,7 @@ public partial class ArmyCore : RefCounted
         _stpX[i] = 0; _stpZ[i] = 0;
         _thX[i] = 1e9f; _thZ[i] = 1e9f; _thY[i] = 0;
         _st[i] = 0; _fac[i] = -1; _sq[i] = 0; _flags[i] = 0; _attackers[i] = 0;
+        _sqNext[i] = -1; _sqPrev[i] = -1; _rank[i] = 0;
         _tgt[i] = -1; _effSpeed[i] = 0.0f;
         return i;
     }
@@ -1232,7 +1234,8 @@ public partial class ArmyCore : RefCounted
         LkClear(i);
         _st[i] = 0;
         _fac[i] = -1;
-        _sq[i] = 0;
+        if (_sq[i] > 0) SqUnlink(i, _sq[i]);
+        _sq[i] = 0; _rank[i] = 0;
         _sepAccX[i] = 0.0f; _sepAccZ[i] = 0.0f;
         if (_bodyR[i] > 0.0f) SetBodyRadius(i, 0.0f);
         _attackers[i] = 0;
@@ -1288,7 +1291,63 @@ public partial class ArmyCore : RefCounted
     public void SetHp(int i, float cur, float mx) { _hp[i] = cur; _hpMax[i] = mx; }
     public void SetState(int i, int s) { _st[i] = s; }
     public void SetFaction(int i, int f) { _fac[i] = f; }
-    public void SetSquad(int i, int s) { _sq[i] = s; }
+    // ── ИНДЕКС СТРОК ОТРЯДА В ЯДРЕ (этап 2 плана 28.09.2026) ───────────────
+    // Интрузивный двусвязный список строк по номеру отряда: SetSquad привязывает
+    // и отвязывает, Release отвязывает. Коридор отряда (SquadRecalc) обходит
+    // состав по списку, а не по массиву строк, собранному в GDScript обходом
+    // members с is_instance_valid и приведением типа (cor_harvest 0.3-0.4 мс/кадр)
+    private int[] _sqNext = Array.Empty<int>(), _sqPrev = Array.Empty<int>();
+    private readonly System.Collections.Generic.Dictionary<int, int> _sqHead = new();
+    // Ряд бойца (сколько своих впереди вдоль курса), считает SquadRecalc;
+    // GDScript-поле _live_rank пишется только изменившимся
+    private int[] _rank = Array.Empty<int>();
+
+    private void SqLink(int i, int s)
+    {
+        int h;
+        if (!_sqHead.TryGetValue(s, out h)) h = -1;
+        _sqPrev[i] = -1; _sqNext[i] = h;
+        if (h >= 0) _sqPrev[h] = i;
+        _sqHead[s] = i;
+    }
+
+    private void SqUnlink(int i, int s)
+    {
+        int p = _sqPrev[i], nx = _sqNext[i];
+        if (p >= 0) _sqNext[p] = nx;
+        else
+        {
+            int h;
+            if (_sqHead.TryGetValue(s, out h) && h == i)
+            {
+                if (nx >= 0) _sqHead[s] = nx; else _sqHead.Remove(s);
+            }
+        }
+        if (nx >= 0) _sqPrev[nx] = p;
+        _sqNext[i] = -1; _sqPrev[i] = -1;
+    }
+
+    public void SetSquad(int i, int s)
+    {
+        if (i < 0 || i >= _capacity) return;
+        int old = _sq[i];
+        if (old == s) return;
+        if (old > 0) SqUnlink(i, old);
+        _sq[i] = s;
+        if (s > 0) SqLink(i, s);
+    }
+
+    /// Строк в списке отряда (стендам)
+    public int SquadRows(int sid)
+    {
+        int h, n = 0;
+        if (!_sqHead.TryGetValue(sid, out h)) return 0;
+        for (int i = h; i >= 0; i = _sqNext[i]) n++;
+        return n;
+    }
+
+    public int Rank(int i) => (i >= 0 && i < _capacity) ? _rank[i] : 0;
+    public void SetRank(int i, int r) { if (i >= 0 && i < _capacity) _rank[i] = r; }
     public void SetCombat(int i, float dmg, float rng, float spd)
     { _atkDmg[i] = dmg; _atkRange[i] = rng; _speed[i] = spd; }
     public void SetTargetWeight(int i, float w) { if (i >= 0 && i < _capacity) _tgtW[i] = w > 0.01f ? w : 1.0f; }
@@ -5780,6 +5839,156 @@ public partial class ArmyCore : RefCounted
         res[6] = (TrunkNear(cx, cz, radius) || BldNear(cx, cz, radius)) ? 0.0f : 1.0f;
         res[7] = EnemyNear(cx, cz, fc, radius + watch) ? 0.0f : 1.0f;
         return res;
+    }
+
+    // ── ПЕРЕСЧЁТ ОТРЯДА ОДНИМ ВЫЗОВОМ (этап 2 плана 28.09.2026) ─────────────
+    // Состав — по списку строк отряда (без GDScript-обхода members), габариты,
+    // стволы и чужие — как SquadCorridor, ряды — как SquadRanks, но в колонку
+    // _rank с ответом «кто изменился», сон — предотбор спящих и кандидатов.
+    // Ответ плоский, в скрэтче: заголовок SqrHead float, дальше строки
+    // (номера строк точно представимы во float до 2^24):
+    //   [0] n, [1] cx, [2] cz, [3] far, [4] watch, [5] fac, [6] clearTrunk, [7] clearEnemy,
+    //   [8] nRows, [9] nRankChg, [10] nAsleep, [11] nCand,
+    //   затем nRows строк, nRankChg пар (строка, ряд), nAsleep строк, nCand строк
+    public const int SqrHead = 12;
+    private float[] _sqrOut = new float[512];
+    private void SqrPush(ref int n, float v)
+    {
+        if (n >= _sqrOut.Length) Array.Resize(ref _sqrOut, _sqrOut.Length * 2);
+        _sqrOut[n++] = v;
+    }
+
+    public float[] SquadRecalc(int sid, int dead, int idleState,
+        float aggroR, float intercept, float margin,
+        float dirX, float dirZ, float look, float halfW, bool doRanks, bool doSleep)
+    {
+        int h;
+        if (!_sqHead.TryGetValue(sid, out h)) h = -1;
+        float sx = 0.0f, sz = 0.0f;
+        int n = 0, fc = -1;
+        float watch = aggroR;
+        int on = SqrHead;
+        for (int i = h; i >= 0; i = _sqNext[i])
+        {
+            if ((_flags[i] & FPosValid) == 0 || _st[i] == dead) continue;
+            if (fc < 0) fc = _fac[i];
+            sx += _px[i]; sz += _pz[i];
+            float ar = _atkRange[i] + intercept;
+            if (ar > watch) watch = ar;
+            SqrPush(ref on, i);
+            n++;
+        }
+        var res = _sqrOut;
+        for (int k = 0; k < SqrHead; k++) res[k] = 0.0f;
+        res[4] = watch; res[5] = fc;
+        if (n == 0)
+        {
+            var r0 = new float[SqrHead];
+            Array.Copy(res, r0, SqrHead);
+            return r0;
+        }
+        float invN = 1.0f / n;
+        float cx = sx * invN, cz = sz * invN;
+        float rad = 0.0f;
+        for (int k = SqrHead; k < SqrHead + n; k++)
+        {
+            int i = (int)res[k];
+            float dx = _px[i] - cx, dz = _pz[i] - cz;
+            float d2 = dx * dx + dz * dz;
+            if (d2 > rad) rad = d2;
+        }
+        rad = Mathf.Sqrt(rad);
+        float radius = rad + margin;
+        res[0] = n; res[1] = cx; res[2] = cz; res[3] = rad; res[8] = n;
+        res[6] = (TrunkNear(cx, cz, radius) || BldNear(cx, cz, radius)) ? 0.0f : 1.0f;
+        res[7] = EnemyNear(cx, cz, fc, radius + watch) ? 0.0f : 1.0f;
+        // ── РЯДЫ: тот же скан, что SquadRanks, в колонку; наружу — изменившиеся
+        int nChg = 0;
+        if (doRanks && _gw > 0 && (dirX * dirX + dirZ * dirZ) > 1e-6f)
+        {
+            int rowsEnd = SqrHead + n;
+            for (int k = SqrHead; k < rowsEnd; k++)
+            {
+                int row = (int)res[k];
+                float x = _px[row], z = _pz[row];
+                float mx = x + dirX * look * 0.5f;
+                float mz = z + dirZ * look * 0.5f;
+                float r = look * 0.5f + halfW + _gcell;
+                int cx0 = (int)((mx - r - _gx0) * _ginv);
+                int cz0 = (int)((mz - r - _gz0) * _ginv);
+                int cx1 = (int)((mx + r - _gx0) * _ginv);
+                int cz1 = (int)((mz + r - _gz0) * _ginv);
+                int count = 0;
+                if (!(cx1 < 0 || cz1 < 0 || cx0 >= _gw || cz0 >= _gh))
+                {
+                    if (cx0 < 0) cx0 = 0;
+                    if (cz0 < 0) cz0 = 0;
+                    if (cx1 >= _gw) cx1 = _gw - 1;
+                    if (cz1 >= _gh) cz1 = _gh - 1;
+                    int myside = FacSlot(_fac[row]);
+                    for (int gz = cz0; gz <= cz1; gz++)
+                    {
+                        int b = gz * _gw;
+                        for (int gx = cx0; gx <= cx1; gx++)
+                        {
+                            int j = _head[(b + gx) * Factions + myside];
+                            while (j != -1)
+                            {
+                                if (j == row || _st[j] == dead) { j = _next[j]; continue; }
+                                float dx = _px[j] - x;
+                                float dz = _pz[j] - z;
+                                float along = dx * dirX + dz * dirZ;
+                                if (along <= 0.12f || along > look) { j = _next[j]; continue; }
+                                float lat = Mathf.Abs(dx * -dirZ + dz * dirX);
+                                if (lat <= halfW) count++;
+                                j = _next[j];
+                            }
+                        }
+                    }
+                }
+                if (count != _rank[row])
+                {
+                    _rank[row] = count;
+                    SqrPush(ref on, row);
+                    SqrPush(ref on, count);
+                    nChg++;
+                }
+            }
+        }
+        res = _sqrOut;
+        res[9] = nChg;
+        // ── СОН ФИЗИКИ: спящие (будить) и кандидаты (усыпить — решает GDScript)
+        int nAsleep = 0, nCand = 0;
+        if (doSleep)
+        {
+            int rowsEnd = SqrHead + n;
+            for (int k = SqrHead; k < rowsEnd; k++)
+            {
+                int row = (int)_sqrOut[k];
+                int fl = _flags[row];
+                if ((fl & FTickOn) == 0 && (fl & FDormant) == 0 && (fl & FGarrisoned) == 0)
+                {
+                    SqrPush(ref on, row);
+                    nAsleep++;
+                }
+            }
+            for (int k = SqrHead; k < rowsEnd; k++)
+            {
+                int row = (int)_sqrOut[k];
+                int fl = _flags[row];
+                if ((fl & FTickOn) != 0 && (fl & FTickAlways) == 0 && (fl & FDormant) == 0
+                    && _st[row] == idleState && _tgt[row] < 0)
+                {
+                    SqrPush(ref on, row);
+                    nCand++;
+                }
+            }
+        }
+        res = _sqrOut;
+        res[10] = nAsleep; res[11] = nCand;
+        var outp = new float[on];
+        Array.Copy(res, outp, on);
+        return outp;
     }
 
     // Скрэтч голосования: ключи в порядке появления (первый максимум — как у

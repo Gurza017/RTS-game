@@ -8292,6 +8292,10 @@ func _update_live_rank() -> void:
 	if _rank_fresh:
 		_rank_fresh = false
 		return
+	# Ряды отряда считает ядро (SquadRecalc, этап 2): пока метка отряда свежа,
+	# личный скан не нужен — ряд уже в _live_rank
+	if _Opt.squad_index_core and GameManager.squad_rank_fresh(squad_id):
+		return
 	var dir := _phalanx_dir()
 	if dir.length_squared() < 1e-6:
 		_live_rank = 0
@@ -8302,6 +8306,10 @@ func _update_live_rank() -> void:
 		self, dir, FILE_LOOK_AHEAD, FILE_HALF_WIDTH)
 	if _live_rank != prev_rank and _vis_quiet:
 		mark_pose_dirty(8)
+	# Колонка ряда ядра — в ногу с полем: SquadRecalc отдаёт наружу только
+	# изменившиеся против колонки, и расхождение оставило бы поле устаревшим
+	if _live_rank != prev_rank and _Opt.squad_index_core and _soa >= 0:
+		GameManager.army.set_rank(_soa, _live_rank)
 	if _rp: _Opt.prof_add("rank_allies", Time.get_ticks_usec() - _rt)
 
 ## ЗАКРЫТЬ БРЕШЬ В СТРОЮ — и только это.

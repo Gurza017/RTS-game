@@ -1289,6 +1289,10 @@ func _recalc_corridor(sid: int, now: int) -> void:
 	var _cp: bool = _Opt.profile_physics
 	var _ct: int
 	if _cp: _ct = Time.get_ticks_usec()
+	# ── ХВОСТ КОРИДОРА В ЯДРЕ (этап 2, 28.09.2026; perf_config.squad_index_core)
+	if _Opt.squad_index_core:
+		_recalc_corridor_core(sid, sq, members, now, _cp, _ct)
+		return
 	# ── СПИСОК ЖИВЫХ ПЕРЕИСПОЛЬЗУЕТСЯ, А НЕ СОБИРАЕТСЯ ЗАНОВО ──────────────
 	# Два массива на отряд каждые 200 мс — это две аллокации и обход состава;
 	# замер (qa_fps, 4000 юнитов) дал 29 мкс на отряд, 0.33 мс кадра только на
@@ -1411,6 +1415,144 @@ func _recalc_corridor(sid: int, now: int) -> void:
 		if _cp: _ct = Time.get_ticks_usec()
 		_squad_sleep_decide(sid, live, clear_enemy)
 		if _cp: _Opt.prof_add("cor_sleep", Time.get_ticks_usec() - _ct)
+
+## ── ПЕРЕСЧЁТ КОРИДОРА ПО ИНДЕКСУ ЯДРА (этап 2, 28.09.2026) ───────────────────
+## Один вызов SquadRecalc: состав по списку строк отряда, габариты, стволы,
+## чужие, ряды в колонку (наружу — изменившиеся), спящие и кандидаты на сон.
+## В GDScript остаются: направление рядов (словари отряда), раздача
+## `_clear_*` при смене ответа, запись `_live_rank` изменившимся, подзыв
+## сплочённости (приказы) и само решение о сне (поля бойца)
+func _recalc_corridor_core(sid: int, sq: Dictionary, members: Array, now: int,
+		_cp: bool, _ct: int) -> void:
+	var dead_st: int = Unit.State.DEAD
+	# Направление рядов — как в _push_squad_ranks: враг отряда в бою, иначе курс
+	var dir: Vector3 = squad_enemy_dir(sid)
+	if not (dir.length_squared() > 1e-6 and squad_in_combat(sid)):
+		var course: Vector3 = squad_course(sid)
+		if course.length_squared() > 1e-6:
+			dir = course
+	var do_ranks: bool = dir.length_squared() >= 1e-6
+	if _cp: _Opt.prof_add("cor_harvest", Time.get_ticks_usec() - _ct)
+	if _cp: _ct = Time.get_ticks_usec()
+	var box: PackedFloat32Array = army.squad_recalc(sid, dead_st, Unit.State.IDLE,
+		Unit.AGGRO_RADIUS, Unit.INTERCEPT_MARGIN, CORRIDOR_MARGIN,
+		dir, Unit.FILE_LOOK_AHEAD, Unit.FILE_HALF_WIDTH, do_ranks, _Opt.squad_phys_sleep)
+	if _cp: _Opt.prof_add("cor_core", Time.get_ticks_usec() - _ct)
+	var n: int = int(box[0])
+	if n == 0:
+		_corridors.erase(sid)
+		return
+	var cx: float = box[1]
+	var cz: float = box[2]
+	var far: float = box[3]
+	var clear_trunk: bool = box[6] > 0.5
+	var clear_enemy: bool = box[7] > 0.5
+	var n_rows: int = int(box[8])
+	var n_chg: int = int(box[9])
+	var n_asleep: int = int(box[10])
+	var n_cand: int = int(box[11])
+	var o_rows: int = _Army.SQR_HEAD
+	var o_chg: int = o_rows + n_rows
+	var o_asleep: int = o_chg + n_chg * 2
+	var o_cand: int = o_asleep + n_asleep
+	# Боец без строки ещё не в индексе — раздача ответа ему отложена (cor_dirty)
+	var pending: bool = members.size() > n_rows
+	var ttl: int = int(CORRIDOR_TTL_MS * _ttl_scale)
+	if clear_enemy and bool(sq.get("phys_sleepers", false)):
+		ttl *= CORRIDOR_SLEEP_TTL_MULT
+	var prev_dl: int = 0
+	if not _corridors.has(sid):
+		ttl = 1 + (sid * 37) % ttl
+	else:
+		prev_dl = int((_corridors[sid] as Array)[0])
+	_corridors[sid] = [_deadline_next(prev_dl, now, ttl, sid, 7), clear_trunk, clear_enemy]
+	if _cp: _ct = Time.get_ticks_usec()
+	var cap: int = _row_units.size()
+	if bool(sq.get("cor_dirty", true)) or bool(sq.get("cor_ct", false)) != clear_trunk \
+			or bool(sq.get("cor_ce", false)) != clear_enemy:
+		for k in range(o_rows, o_rows + n_rows):
+			var r: int = int(box[k])
+			if r < cap:
+				var u = _row_units[r]
+				if u != null:
+					u._clear_trunk = clear_trunk
+					u._clear_enemy = clear_enemy
+		sq["cor_ct"] = clear_trunk
+		sq["cor_ce"] = clear_enemy
+		sq["cor_dirty"] = pending
+	if _cp: _Opt.prof_add("cor_push", Time.get_ticks_usec() - _ct)
+	# ── РЯДЫ: поле пишется только изменившимся, отряд помечен «ряд свежий» ──
+	if _cp: _ct = Time.get_ticks_usec()
+	if do_ranks:
+		sq["rank_ms"] = now
+		for k in range(n_chg):
+			var r2: int = int(box[o_chg + k * 2])
+			if r2 >= cap:
+				continue
+			var u3 = _row_units[r2]
+			if u3 == null:
+				continue
+			u3._live_rank = int(box[o_chg + k * 2 + 1])
+			if u3._vis_quiet and (not _Opt.vis_wake_lite or u3._pose_depends_on_rank()):
+				u3.mark_pose_dirty(8)
+	if _cp: _Opt.prof_add("cor_ranks", Time.get_ticks_usec() - _ct)
+	if _cp: _ct = Time.get_ticks_usec()
+	_squad_centre[sid] = Vector2(cx, cz)
+	if far > _cohesion_limit(sid):
+		# Подзыв — редкий; список узлов собирается только здесь
+		var live: Array = []
+		for k in range(o_rows, o_rows + n_rows):
+			var r3: int = int(box[k])
+			if r3 < cap and _row_units[r3] != null:
+				live.append(_row_units[r3])
+		_cohesion_guard(sid, live, cx, cz, now)
+	if _cp: _Opt.prof_add("cor_cohesion", Time.get_ticks_usec() - _ct)
+	if _Opt.squad_phys_sleep:
+		if _cp: _ct = Time.get_ticks_usec()
+		_squad_sleep_decide_rows(sid, sq, box, o_asleep, n_asleep, o_cand, n_cand, clear_enemy)
+		if _cp: _Opt.prof_add("cor_sleep", Time.get_ticks_usec() - _ct)
+
+## Сон физики по предотбору ядра: будить только спящих, усыплять только
+## кандидатов (покой, без цели, тик включён, род вправе спать); остальные
+## условия — поля бойца (паника, приказ, ход, ожидание марша) — проверяются здесь
+func _squad_sleep_decide_rows(sid: int, sq: Dictionary, box: PackedFloat32Array,
+		o_asleep: int, n_asleep: int, o_cand: int, n_cand: int, clear_enemy: bool) -> void:
+	var cap: int = _row_units.size()
+	if not clear_enemy or squad_in_combat(sid) or squad_panicked(sid):
+		if n_asleep > 0 or bool(sq.get("phys_sleepers", false)):
+			for k in range(o_asleep, o_asleep + n_asleep):
+				var r: int = int(box[k])
+				if r < cap and _row_units[r] != null:
+					(_row_units[r] as Unit).wake_physics()
+			sq["phys_sleepers"] = false
+		return
+	var any_slept: bool = n_asleep > 0
+	for k in range(o_cand, o_cand + n_cand):
+		var r2: int = int(box[k])
+		if r2 >= cap:
+			continue
+		var u = _row_units[r2]
+		if u == null:
+			continue
+		if u._phys_asleep or not u.tick_on:
+			continue
+		if u.attack_target != null or u.retreating or u._panicked or u.player_order_active() \
+				or u.moved_recently() or u._march_pending or not u.may_sleep_physics():
+			continue
+		u.sleep_physics()
+		any_slept = any_slept or u._phys_asleep
+	if any_slept:
+		sq["phys_sleepers"] = true
+
+## Отряду недавно посчитали ряды пакетом (SquadRecalc): личный скан не нужен
+func squad_rank_fresh(sid: int) -> bool:
+	if sid <= 0:
+		return false
+	var sq: Variant = squads.get(sid)
+	if sq == null:
+		return false
+	var ms: Variant = (sq as Dictionary).get("rank_ms")
+	return ms != null and Unit.now_ms - int(ms) < CORRIDOR_TTL_MS * 2
 
 ## ── СОН СТОЯЩЕГО ОТРЯДА ПО ФИЗИКЕ (BigStand, этап 3; разбор — Unit) ────────
 ## Зовётся из пересчёта коридора (раз в CORRIDOR_TTL_MS на отряд): состав и
@@ -2259,6 +2401,9 @@ func _assign_rear(sid: int, live: Array, free_list: Array, tgt: Vector3,
 		u._line_gap = gap
 		u._line_course = course
 		u._live_rank = rank_of[k]
+		# Колонка ряда ядра — тоже (иначе SquadRecalc считал бы смену снова)
+		if _Opt.squad_index_core and u._soa >= 0:
+			army.set_rank(u._soa, int(rank_of[k]))
 		# Мой файл уже упёрся во врага — держу строй; иначе иду вместе с ним.
 		# Без этого различия тыл вставал там, где его застала разметка: отряд,
 		# ещё не дошедший до противника, растворялся в струйку

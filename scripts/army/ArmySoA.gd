@@ -500,6 +500,27 @@ func squad_corridor(rows: PackedInt32Array, dead: int, aggro_r: float,
 		intercept: float, margin: float) -> PackedFloat32Array:
 	return _c.SquadCorridor(rows, dead, aggro_r, intercept, margin)
 
+## ── ПЕРЕСЧЁТ ОТРЯДА ОДНИМ ВЫЗОВОМ ПО ИНДЕКСУ СТРОК ЯДРА (этап 2, 28.09.2026) ──
+## Ответ: [n, cx, cz, far, watch, fac, clearTrunk, clearEnemy, nRows, nRankChg,
+## nAsleep, nCand, строки…, пары (строка, ряд)…, спящие…, кандидаты на сон…]
+const SQR_HEAD := 12
+func squad_recalc(sid: int, dead: int, idle: int, aggro_r: float, intercept: float,
+		margin: float, dir: Vector3, look: float, half_w: float,
+		do_ranks: bool, do_sleep: bool) -> PackedFloat32Array:
+	return _c.SquadRecalc(sid, dead, idle, aggro_r, intercept, margin,
+		dir.x, dir.z, look, half_w, do_ranks, do_sleep)
+
+## Строк в списке отряда ядра (стендам)
+func squad_rows(sid: int) -> int:
+	return _c.SquadRows(sid)
+
+func rank_of(i: int) -> int:
+	return _c.Rank(i)
+
+## Ряд, назначенный разметкой линии, — в колонку, чтобы SquadRecalc видел его
+func set_rank(i: int, r: int) -> void:
+	_c.SetRank(i, r)
+
 ## Бухгалтерия боя отряда по колонкам (см. ArmyCore.SquadMelee): снимков
 ## px/pz больше нет — они стоили 32 КБ управляемых аллокаций на пересчёт
 func squad_melee(rows: PackedInt32Array, attacking_state: int) -> PackedInt32Array:
