@@ -509,14 +509,27 @@ func _h_sleep() -> void:
 		if mw.is_guarding():
 			guarding += 1
 	print("  из 20: не спит %d, щит поднят %d" % [awake, guarding])
-	verdict("H1 стоящие мечники дышат (визуальный тик не спит)", awake >= 18,
-		"не спит %d из 20" % awake)
+	# РАЗВОРОТ (этап 1, 28.09.2026): у привязанной к ядру строки ленту покоя
+	# листает BatchVisual, и стоящий мечник СПИТ по картинке — дышит за него
+	# ядро. Без look_core действует прежнее правило (не спит)
+	var core_look: bool = bool(preload("res://scripts/perf_config.gd").look_core) and (men[0] as Warrior)._look_bound()
+	if core_look:
+		verdict("H1 стоящие мечники спят по картинке (дышит за них ядро, look_core)", awake <= 2,
+			"не спит %d из 20" % awake)
+	else:
+		verdict("H1 стоящие мечники дышат (визуальный тик не спит)", awake >= 18,
+			"не спит %d из 20" % awake)
 	# Право на сон: у ленты покоя мечника больше одного кадра — спать нельзя.
 	# Свойство, а не наблюдение: не зависит ни от LOD, ни от случайного тайминга
 	var w0 := men[0] as Warrior
-	verdict("H2 многокадровый покой не даёт права на сон",
-		not w0._process_can_sleep() and w0._look_frames > 1,
-		"can_sleep=%s кадров в ленте=%d" % [w0._process_can_sleep(), w0._look_frames])
+	if core_look:
+		verdict("H2 многокадровый покой под ядром даёт право на сон (лента идёт в ядре)",
+			w0._process_can_sleep() and w0._look_frames > 1,
+			"can_sleep=%s кадров в ленте=%d" % [w0._process_can_sleep(), w0._look_frames])
+	else:
+		verdict("H2 многокадровый покой не даёт права на сон",
+			not w0._process_can_sleep() and w0._look_frames > 1,
+			"can_sleep=%s кадров в ленте=%d" % [w0._process_can_sleep(), w0._look_frames])
 
 	for m in men:
 		(m as Node).queue_free()
@@ -611,8 +624,13 @@ func _j_wake_speed() -> void:
 		await get_tree().process_frame
 	var slept: bool = not w.is_processing()
 	var guarded: bool = w.is_guarding()
-	verdict("J1 стоящий мечник не спит (дышит, а щит не залипает)", not slept,
-		"спит=%s щит=%s" % [slept, guarded])
+	if bool(preload("res://scripts/perf_config.gd").look_core) and w._look_bound():
+		# Разворот этапа 1: спит по картинке, щит при этом не залипает
+		verdict("J1 стоящий мечник спит по картинке, а щит не залипает (look_core)", slept and not guarded,
+			"спит=%s щит=%s" % [slept, guarded])
+	else:
+		verdict("J1 стоящий мечник не спит (дышит, а щит не залипает)", not slept,
+			"спит=%s щит=%s" % [slept, guarded])
 
 	# Приказ идти. Проверяем СЛЕДУЮЩИЙ же кадр: если _process не проснулся,
 	# _guard_active останется true и скорость не восстановится

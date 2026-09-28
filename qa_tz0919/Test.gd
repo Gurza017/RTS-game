@@ -258,6 +258,23 @@ func _f_rings(base: Vector3) -> void:
 func _g_spawn(base: Vector3) -> void:
 	print("\n═════ G. ЗАКАЗ ИЗ БАРАКОВ — СРАЗУ СТРОЕМ ═════")
 	main._clear_area_of_resources(base, 50.0)
+	# ОКРУЖЕНИЕ СТАВИТ СТЕНД (28.09.2026): гноллы предыдущих блоков забредали
+	# к баракам, новобранцы брали их авто-агро и «уезжали» на 5 м — G4 краснел
+	# от чужих, а не от спавна. Чужих у базы — вон
+	var g_gone := 0
+	for gu in GameManager._live_units.duplicate():
+		if gu == null or not is_instance_valid(gu):
+			continue
+		var gg := gu as Unit
+		if gg == null or int(gg.faction) == F or gg.is_dead():
+			continue
+		if gg.global_position.distance_to(base) > 90.0:
+			continue
+		gg.set_tick(false)
+		gg.queue_free()
+		g_gone += 1
+	await pframes(3)
+	print("  чужих у базы убрано: %d" % g_gone)
 	var br: Building = _BarracksS.new()
 	_place(br, F, base)
 	await pframes(6)
@@ -319,6 +336,25 @@ func _g_spawn(base: Vector3) -> void:
 		if is_instance_valid(m) and (m as Unit).moved_recently():
 			moved += 1
 	var c1: Vector3 = GameManager.squad_centroid(sid)
+	# Диагностика G4 (28.09): куда и почему идут
+	var g4sq: Dictionary = GameManager.squads.get(sid, {})
+	var g4slots: Array = g4sq.get("slots", [])
+	var g4st: Dictionary = {}
+	for m in men:
+		if is_instance_valid(m):
+			var k0: int = int((m as Unit).state)
+			g4st[k0] = int(g4st.get(k0, 0)) + 1
+	print("    G4-диаг: состояния %s, разметка %d, курс %s, reform_settled=%s, phys_sleepers=%s" % [
+		str(g4st), g4slots.size(), str(g4sq.get("course", Vector3.ZERO)), str(g4sq.get("reform_settled", "-")), str(g4sq.get("phys_sleepers", "-"))])
+	for k in range(mini(4, men.size())):
+		var mu := men[k] as Unit
+		if mu == null or not is_instance_valid(mu):
+			continue
+		var gp: Vector3 = mu.global_position
+		var sl: Vector3 = g4slots[k] if k < g4slots.size() else Vector3.INF
+		print("      #%d st=%d pos=(%.1f,%.1f) move_target=(%.1f,%.1f) post=(%.1f,%.1f) valid=%s slot=(%.1f,%.1f) moving=%s reform=%.2f target=%s" % [
+			k, int(mu.state), gp.x, gp.z, mu.move_target.x, mu.move_target.z, mu.post_pos.x, mu.post_pos.z, str(mu._post_valid), sl.x, sl.z,
+			str(mu.moved_recently()), mu._reform_permit, str(mu.attack_target)])
 	verdict("G4 отряд стоит, где появился: центр сдвинулся < 1 м, идущих нет",
 		c0.distance_to(c1) < 1.0 and moved <= 2,
 		"сдвиг центра %.2f м, идущих %d, приказов за 6 с %d; источники: %s" % [c0.distance_to(c1), moved, _Opt.cmd_total - cmd0, str(_Opt.cmd_report())])
@@ -362,6 +398,8 @@ func _h_focus(base: Vector3) -> void:
 	for k2 in spread:
 		front[k2] = spread[k2]
 	for u in sm.selected_units:
+		if u == null or not is_instance_valid(u):
+			continue   # павший в выделении (правило 5)
 		var sid: int = (u as Unit).squad_id
 		var mine_t = troll
 		if sid > 0 and front.has(sid):
@@ -419,6 +457,16 @@ func _h_focus(base: Vector3) -> void:
 # ═════════════════════════════════════════════════════════════════════════════
 # I. АНИМАЦИЯ УДАРА ТУШИ
 # ═════════════════════════════════════════════════════════════════════════════
+## Текущий кадр ленты строки: из слота буфера бакета (frame / 255 в float 12),
+## а без привязки — GDScript-копия
+func _core_frame(u: Unit) -> int:
+	var army = GameManager.army
+	if u._soa >= 0 and army.row_rb_b(u._soa) >= 0:
+		var sl: PackedFloat32Array = army.rb_slot(army.row_rb_b(u._soa), army.row_rb_i(u._soa))
+		if sl.size() >= 13:
+			return int(round(sl[12] * 255.0))
+	return int(u.get("_look_frame"))
+
 func _i_big_anim(base: Vector3) -> void:
 	print("\n═════ I. ТУША: ЛЕНТА УДАРА ПЕРЕЗАПУСКАЕТСЯ НА КАЖДОМ ВЗМАХЕ ═════")
 	main._clear_area_of_resources(base, 40.0)
@@ -446,9 +494,12 @@ func _i_big_anim(base: Vector3) -> void:
 			prev_lock = lk
 			var an: String = String(big.get("_anim_name"))
 			if an.begins_with("attack"):
-				frames_at_lock.append(int(big.get("_look_frame")))
-				var ph: float = float(big.get("_anim_phase"))
-				if ph < 0.01:
+				# Кадр ленты у привязанной строки ведёт ядро (look_core, этап 1):
+				# читать слот общего буфера ПОСЛЕ кадра отрисовки, а не GDScript-копию
+				await get_tree().process_frame
+				var fr: int = _core_frame(big)
+				frames_at_lock.append(fr)
+				if fr <= 1:
 					restarts += 1
 	var swings: int = int(big.get("_swings")) - swings0
 	verdict("I1 туша бьёт (взмахов %d за %.1f с — три кулдауна по конфигу)" % [swings, win_sec], swings >= 3)
@@ -585,6 +636,8 @@ func _c_archers(base: Vector3) -> void:
 	GameManager.on_selection_changed(sm.selected_units, true)
 	var front: Dictionary = sm._ring_squads_around(c)
 	for u in sm.selected_units:
+		if u == null or not is_instance_valid(u):
+			continue   # павший в выделении (правило 5)
 		var sid: int = (u as Unit).squad_id
 		var t = c
 		if front.has(sid):
