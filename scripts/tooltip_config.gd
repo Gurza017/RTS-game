@@ -108,7 +108,7 @@ static var TOOLTIPS: Dictionary = {
 	"spearman": {
 		"display_name": "Копейщик",
 		"icon": "res://assets/factions/humans/icons/units/Lancer.png",
-		"description": "Основа строя. Держит линию плечом к плечу. Может строиться фалангами.",
+		"description": "Основа строя. Могут строиться в фалангу и делать стену копий. Эффективен против конницы и крупных целей (троллей, гоблинов). Сдерживающий мясной щит.",
 		# ── НИ «ДАЛЬНОСТИ», НИ «УДАР РАЗ В N С» (заказ владельца) ────────────
 		# Обе строки — техническая отладка, а не сведения для игрока. У
 		# копейщика «дальность» это длина копья (2 м): число ничего не
@@ -124,7 +124,7 @@ static var TOOLTIPS: Dictionary = {
 	"warrior": {
 		"display_name": "Мечник",
 		"icon": "res://assets/factions/humans/icons/units/Warrior.png",
-		"description": "Тяжёлая пехота. Сильнее всех в прямой рубке и продавливает чужой строй при столкновении.",
+		"description": "Штурмовая пехота. Строится в стену щитов. Эффективен для быстрых атак с флангов, отлично режет копейщиков и стрелков.",
 		"visible_stats": [
 			{"key": "hp"}, {"key": "attack"}, {"key": "armor"},
 			{"key": "move_speed"}, {"key": "range"}, {"key": "cooldown"},
@@ -134,7 +134,7 @@ static var TOOLTIPS: Dictionary = {
 	"archer": {
 		"display_name": "Лучник",
 		"icon": "res://assets/factions/humans/icons/units/Archer.png",
-		"description": "Стрелок. Бьёт далеко и ходит быстро, но в ближнем бою гибнет мгновенно.",
+		"description": "Дальнобойный юнит. Может стрелять залпом по скоплениям врагов. Способен занимать башни, крепости и бараки для стрельбы с укрытия (+дальность и урон).",
 		"visible_stats": [
 			{"key": "hp"}, {"key": "attack"}, {"key": "armor"},
 			{"key": "move_speed"}, {"key": "range"}, {"key": "cooldown"},
@@ -148,7 +148,7 @@ static var TOOLTIPS: Dictionary = {
 		# ровно тот же путь и тот же приём, что и у кнопки найма в Замке
 		# (HUD.UNIT_ICONS + FRAME_SHEET_ICONS обрезают кадр по силуэту)
 		"icon": "res://assets/factions/humans/units/Blue Units/Monk/Idle.png",
-		"description": "Вспомогательный юнит. В бою слаб — держите его за строем.",
+		"description": "Вспомогательный юнит. Исцеляет раненых бойцов и воскрешает павших прямо на поле боя. Эффективность сильно возрастает с улучшениями в Кузнице.",
 		# Брони у монаха нет по конфигу — строки в списке тоже нет
 		"visible_stats": [
 			{"key": "hp"}, {"key": "attack"},

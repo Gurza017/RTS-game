@@ -142,6 +142,16 @@ const HOME_GUARD_HOME_RETRY_SEC := _Spawn.AI_HOME_GUARD_HOME_RETRY_SEC
 const HOME_GUARD_HEAL_FRAC := _Spawn.AI_HOME_GUARD_HEAL_FRAC
 const HOME_GUARD_WAVE_SQUADS := _Spawn.AI_HOME_GUARD_WAVE_SQUADS
 const HOME_GUARD_WAVE_GAP_SEC := _Spawn.AI_HOME_GUARD_WAVE_GAP_SEC
+# ── ОБОРОНА БАЗЫ В ТРИ УРОВНЯ (ТЗ 25.09.2026, см. spawn_config) ────────────
+const HOME_RING_DIST := _Spawn.AI_HOME_RING_DIST
+const HOME_RING_CLEAR := _Spawn.AI_HOME_RING_CLEAR
+const HOME_LINE_DIST := _Spawn.AI_HOME_LINE_DIST
+const HOME_LINE_SQUADS := _Spawn.AI_HOME_LINE_SQUADS
+const HOME_LINE_ROWS := _Spawn.AI_HOME_LINE_ROWS
+const HOME_LINE_GAP := _Spawn.AI_HOME_LINE_GAP
+const HOME_LINE_ROW_GAP := _Spawn.AI_HOME_LINE_ROW_GAP
+const HOME_TOWER_POST_DIST := _Spawn.AI_HOME_TOWER_POST_DIST
+const HOME_GUARD_POST_ZONE := _Spawn.AI_HOME_GUARD_POST_ZONE
 # ── ОТВЕТНЫЙ УДАР И ПОДКРЕПЛЕНИЕ (ТЗ 19.09.2026-3, см. spawn_config) ───────
 const RETALIATION_LOSSES := _Spawn.AI_RETALIATION_LOSSES
 const RETALIATION_SEC := _Spawn.AI_RETALIATION_SEC
@@ -248,6 +258,11 @@ const AI_FORGE_WEIGHTS := {
 	"bonus_carry":  2.0,
 	"bonus_gather": 25.0,
 	"bonus_build":  6.0,
+	# ТЗ 24.09.2026: доли промыслов и груза (вес — за 0.10 узла)
+	"bonus_gather_wood": 25.0, "bonus_gather_stone": 22.0,
+	"bonus_gather_gold": 22.0, "bonus_gather_food": 18.0,
+	"bonus_carry_pct": 20.0, "bonus_walk_pct": 20.0,
+	"bonus_walk_loaded_pct": 18.0,
 }
 
 const AI_FORGE_EXTRA_BRANCHES := ["worker"]

@@ -397,21 +397,44 @@ func _recolor_worker(u: Unit, f: int) -> void:
 		w._setup_worker_visual()
 		w._look_ok = false
 
-## ── ГИБЕЛЬ: РАБОЧИЕ ВЫБЕГАЮТ, ОСТАЁТСЯ ОБЩАЯ РУИНА ─────────────────────────
+## ── «ГИБЕЛЬ» РУДНИКА: ХОЗЯИН ТЕРЯЕТСЯ, РУДНИК ОСТАЁТСЯ (ТЗ 25.09.2026, п. 6) ──
+## Рудник — ПОСТОЯННЫЙ ОБЪЕКТ КАРТЫ: он меняет владельца, но не исчезает.
+## Прежде он умирал как обычное здание (Building._die: руина + queue_free),
+## а руины с ТЗ 24.09 растворяются через RUIN_LIFETIME_SEC. Игроку рудник
+## сам не восстанавливался, и через десять минут вместе с руиной с карты
+## уходило и место рудника — «верхний рудник самопроизвольно пропал, на нём
+## нельзя ничего построить». Теперь снос рудника = СБРОС ВЛАДЕЛЬЦА: рабочие
+## выбегают, рудник становится НИЧЕЙНЫМ с полным запасом прочности, и
+## вернуть его можно тем же захватом пехотой, что и любой ничейный.
+## ИИ и орда, как и прежде (спринт 18), возвращают себе свой рудник через
+## MINE_RESTORE_SEC, если никто не захватил его раньше, — теперь это тот же
+## узел, а не новый рудник на месте руины. queue_free у рудника не зовётся
+## НИГДЕ, и _dead у него не взводится никогда
+const MINE_RESTORE_SEC := 60.0
+## Стендам: сколько раз рудник был «снесён» (сброшен в ничейный)
+var razed: int = 0
+
 func _die() -> void:
 	if _dead:
 		return
 	release_all()
 	var f: int = faction
-	var at: Vector3 = global_position
-	super._die()
-	# ── АВТО-ВОССТАНОВЛЕНИЕ У ИИ И ОРДЫ (спринт 18): через MINE_RESTORE_SEC
-	# руина сама становится рудником прежнего владельца, если её не отстроил
-	# кто-то раньше. Игроку — нет: он отстраивает рабочим сам
+	razed += 1
+	current_health = max_health
+	_update_hp_bar()
+	if f != Constants.FACTION_NEUTRAL:
+		_capture(Constants.FACTION_NEUTRAL)
 	if f == Constants.FACTION_ENEMY or f == Constants.FACTION_GOBLIN:
-		GameManager.schedule_mine_restore(at, f, MINE_RESTORE_SEC)
+		GameManager.mine_restore_pending += 1
+		get_tree().create_timer(MINE_RESTORE_SEC).timeout.connect(_restore_owner.bind(f))
 
-const MINE_RESTORE_SEC := 60.0
+## Возврат ИИ/орде по таймеру: только если за это время рудник никто не взял
+func _restore_owner(f: int) -> void:
+	GameManager.mine_restore_pending = maxi(GameManager.mine_restore_pending - 1, 0)
+	if not is_inside_tree() or not is_neutral():
+		return
+	set_owner_faction(f)
+	GameManager.mine_restores += 1
 
 func ruin_sprite_override() -> String:
 	return SPRITE_DESTROYED

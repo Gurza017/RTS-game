@@ -9,6 +9,24 @@ const _BBUtil := preload("res://scripts/BillboardUtil.gd")
 # Для деревьев: 1-4 соответствует Tree1.png / Stump 1.png.
 # Устанавливается снаружи ДО add_child(), 0 = случайный.
 var tree_variant: int = 0
+## ── ВИД ЛЕСА (ТЗ 24.09.2026, п. 13) ─────────────────────────────────────────
+## FOREST_NORMAL — прежнее дерево (ствол в реестре обхода, по нему скользят);
+## FOREST_WALL — лес-стена: круг FOREST_WALL_R в маске скал ядра, сквозь него
+## не пройти (рабочий рубит кромку); FOREST_DECOR — редкая роща-декор: ствола
+## в реестре нет вовсе, отряды проходят насквозь
+const FOREST_NORMAL := 0
+const FOREST_WALL := 1
+const FOREST_DECOR := 2
+var forest_kind: int = FOREST_NORMAL
+## Круг дерева стены в маске (м): при шаге посадки ~1.9 м круги перекрываются
+## и полоса выходит сплошной
+const FOREST_WALL_R := 1.25
+## Доля срубленных деревьев стены, оставляющих пень: «пеньки появляются
+## медленно и символично» — просека не превращается в поле пней
+const WALL_STUMP_CHANCE := 0.3
+## Масштаб дерева (большие/средние в лесу-стене); 1.0 — прежний TREE_HEIGHT
+var tree_scale: float = 1.0
+var _forest_registered: bool = false
 # Для золота/камня: вариант спрайта (золото 1-6 → «Gold Stone N.png»,
 # камень 1-4 → «RockN.png»). 0 = случайный. Ставится ДО add_child().
 var res_variant: int = 0
@@ -95,6 +113,8 @@ const ORE_OBSTACLE_MIN_SCALE := 1.3
 
 func _register_trunk() -> void:
 	if resource_type == Constants.RESOURCE_WOOD:
+		if forest_kind == FOREST_DECOR:
+			return          # декор проходим: ствола в реестре нет
 		call_deferred("_register_trunk_now")
 		return
 	if resource_type != Constants.RESOURCE_GOLD and resource_type != Constants.RESOURCE_STONE:
@@ -109,6 +129,9 @@ func _register_trunk_now() -> void:
 	GameManager.register_trunk(global_position, _obstacle_radius())
 	_trunk_pos = global_position
 	_trunk_registered = true
+	if forest_kind == FOREST_WALL and not _forest_registered:
+		GameManager.forest_wall_add(global_position, FOREST_WALL_R * clampf(tree_scale, 0.8, 1.3))
+		_forest_registered = true
 
 ## Радиус препятствия. У золота/камня заметно меньше кольца добычи
 ## (slot_radius = 1.0×size_scale + SLOT_GAP), поэтому рабочий на своём месте
@@ -120,6 +143,9 @@ func _obstacle_radius() -> float:
 	return ORE_OBSTACLE_RADIUS * size_scale
 
 func _drop_trunk() -> void:
+	if _forest_registered:
+		_forest_registered = false
+		GameManager.forest_wall_remove(_trunk_pos)
 	if not _trunk_registered:
 		return
 	GameManager.unregister_trunk(_trunk_pos)
@@ -532,7 +558,7 @@ func _plant_tree_now() -> void:
 	if root == null:
 		return
 	_veg_base = global_position
-	_veg_slot = GameManager.veg.plant(_veg_tex, _veg_base, TREE_HEIGHT, root)
+	_veg_slot = GameManager.veg.plant(_veg_tex, _veg_base, TREE_HEIGHT * tree_scale, root)
 
 ## Снять дерево с общей отрисовки (срубили, выгрузили карту). Идемпотентно
 ## ── ПОДСВЕТКА ПРИ НАВЕДЕНИИ ─────────────────────────────────────────────────
@@ -647,6 +673,20 @@ func _show_stump() -> void:
 	# по исчерпанному дереву раньше пересоздавали узел — отсюда мигание
 	if _stump_node != null:
 		return
+	# ── ЛЕС-СТЕНА: ПЕНЬ ЛИШЬ У КАЖДОГО ТРЕТЬЕГО (ТЗ 24.09.2026, п. 13) ──────
+	# Жребий по точке, а не randf(): общий поток партии сеян, и два прогона
+	# одной карты обязаны дать одну просеку
+	if forest_kind == FOREST_WALL:
+		var h: float = fposmod(sin(global_position.x * 12.9898 + global_position.z * 78.233) * 43758.5453, 1.0)
+		if h >= WALL_STUMP_CHANCE:
+			_shake_power = 0.0
+			set_process(false)
+			if _visual_root:
+				_visual_root.visible = false
+			_drop_veg()
+			_stump_node = MeshInstance3D.new()   # пустой: «пень поставлен»
+			add_child(_stump_node)
+			return
 
 	# Сбросить дрожание рубки, иначе пень унаследует смещение ствола
 	_shake_power = 0.0

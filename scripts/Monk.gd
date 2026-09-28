@@ -226,7 +226,7 @@ func _order_corpse():
 	if _order_sid <= 0 or GameManager.corpses == null or not can_resurrect():
 		return null
 	return GameManager.corpses.find_raisable_of_squad(faction, _order_sid,
-		global_position, _MCfg.MONK_RES_SEARCH_RADIUS * 2.0)
+		global_position, _MCfg.MONK_RES_SEARCH_RADIUS * 2.0, get_instance_id())
 
 ## Общий сон по коридору (BigStand, этап 3) монаху не нужен: он засыпает САМ
 ## из _monk_step, когда некого лечить и не к кому идти (ТЗ 16.09.2026), и
@@ -493,6 +493,7 @@ func _care_squad(sid: int, may_walk: bool = true) -> bool:
 		var c = _squad_corpse(sid)
 		if c != null:
 			_res_target = c
+			c.claimed_by = get_instance_id()
 			_res_spot = Vector3.INF
 			_res_left = res_sec()
 			_res_cool = res_cooldown()
@@ -641,7 +642,7 @@ func _squad_corpse(sid: int):
 	var r: float = maxf(heal_radius(), _MCfg.MONK_RES_SEARCH_RADIUS)
 	if _order_alive() and _order_sid == sid:
 		r = maxf(r, _MCfg.MONK_RES_SEARCH_RADIUS * 2.0)
-	return GameManager.corpses.find_raisable_of_squad(faction, sid, global_position, r)
+	return GameManager.corpses.find_raisable_of_squad(faction, sid, global_position, r, get_instance_id())
 
 ## Отряд НЕ УКОМПЛЕКТОВАН и есть кого поднять: живых меньше штата и в
 ## радиусе поиска лежит его тело. По этому признаку монах держит отряд
@@ -884,6 +885,7 @@ func _try_resurrect() -> bool:
 		and _squad_alive(csid) == 0:
 		return false
 	_res_target = c
+	c.claimed_by = get_instance_id()
 	_res_spot = Vector3.INF
 	_res_left = res_sec()
 	_res_cool = res_cooldown()
@@ -1053,6 +1055,8 @@ func command_move(target_pos: Vector3, slow_march: bool = false, face_dir: Vecto
 	super.command_move(target_pos, slow_march, face_dir, keep_retreat, player_order, run)
 
 func _stop_res() -> void:
+	if _res_target != null and int(_res_target.get("claimed_by")) == get_instance_id():
+		_res_target.claimed_by = 0
 	_res_target = null
 	_res_left = 0.0
 	_res_spot = Vector3.INF
@@ -1124,16 +1128,35 @@ func _tick_res(delta: float) -> void:
 	if _res_left > 0.0:
 		return
 	var _tr: int = Time.get_ticks_usec() if _prof_on else 0
+	var sid_c: int = int(c.get("squad_id"))
 	var u: Unit = GameManager.raise_fallen(c, self)
-	if _prof_on: _Opt.prof_add("monk_raise", Time.get_ticks_usec() - _tr)
 	_stop_res()
 	_res_cool = res_cooldown()
 	if u != null:
-		resurrected_total += 1
-		heal_target = u
-		if squad_id > 0:
-			heal_xp_kills += _MCfg.MONK_RES_XP_KILLS
-			GameManager.credit_kills(squad_id, _MCfg.MONK_RES_XP_KILLS)
+		_on_raised(u)
+		# ── ОДИН КАНАЛ ПОДНИМАЕТ max_resurrect_count() ТЕЛ (ТЗ 24.09.2026) ─
+		# Число было в ветке кузницы (4d — двое, 5d — четверо), но нигде не
+		# читалось: канал всегда кончался одним бойцом. Остальные — тела ТОГО
+		# ЖЕ отряда у точки подъёма, не занятые другими монахами
+		var extra: int = max_resurrect_count() - 1
+		while extra > 0 and sid_c > 0 and GameManager.corpses != null:
+			var c2 = GameManager.corpses.find_raisable_of_squad(faction, sid_c, cp,
+				_MCfg.MONK_RES_SEARCH_RADIUS, get_instance_id())
+			if c2 == null:
+				break
+			var u2: Unit = GameManager.raise_fallen(c2, self)
+			if u2 == null:
+				break
+			_on_raised(u2)
+			extra -= 1
+	if _prof_on: _Opt.prof_add("monk_raise", Time.get_ticks_usec() - _tr)
+
+func _on_raised(u: Unit) -> void:
+	resurrected_total += 1
+	heal_target = u
+	if squad_id > 0:
+		heal_xp_kills += _MCfg.MONK_RES_XP_KILLS
+		GameManager.credit_kills(squad_id, _MCfg.MONK_RES_XP_KILLS)
 
 ## Вспышка «пуф»: квад ауры вырастает и гаснет за RES_FLASH_SEC над точкой
 ## воскрешения. Свой узел на вспышку, гаснет твином и освобождается сам

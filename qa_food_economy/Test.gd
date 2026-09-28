@@ -86,10 +86,26 @@ func _run() -> void:
 
 	# ── A. Баланс из констант ──────────────────────────────────────────────
 	print("\n═════ A. БАЛАНС ═════")
-	var houses10: float = 10.0 * _UCfg.HOUSE_FOOD_INCOME / _UCfg.HOUSE_FOOD_INTERVAL
-	var need: float = 30.0 * _UCfg.FOOD_UPKEEP_WORKER_PER_SEC + 15.0 * _UCfg.FOOD_UPKEEP_SQUAD_PER_SEC
-	verdict("A1 десять домов кормят ровно 30 рабочих и 15 отрядов (±2 %)",
-		absf(houses10 - need) <= need * 0.02, "дома %.3f еды/с, нужно %.3f" % [houses10, need])
+	# ── ТРЕБОВАНИЕ РАЗВЁРНУТО (ТЗ 23.09.2026, третье письмо) ──────────────
+	# Было «десять домов кормят ровно 30 рабочих и 15 отрядов»: дом закрывал
+	# расход целиком, и ферма не была нужна вовсе. Заказ просит обратного —
+	# сделать загон «бесконечным источником еды», а дому оставить «небольшую
+	# пассивную генерацию». Проверяем ДОЛЮ: сорок домов дают около двух
+	# третей расхода полной армии, остальное — фермы
+	var houses40: float = 40.0 * _UCfg.HOUSE_FOOD_INCOME / _UCfg.HOUSE_FOOD_INTERVAL
+	var full_need: float = 100.0 * _UCfg.FOOD_UPKEEP_WORKER_PER_SEC \
+		+ float(_UCfg.FARM_SQUADS_SUPPORTED) * _UCfg.FOOD_UPKEEP_SQUAD_PER_SEC
+	var share: float = houses40 / maxf(full_need, 0.001)
+	verdict("A1 сорок домов дают половину-две трети расхода полной армии",
+		share >= 0.45 and share <= 0.75,
+		"дома %.2f еды/с из %.2f нужных (%.0f %%)" % [houses40, full_need, share * 100.0])
+	# ── ФЕРМЫ ЗАКРЫВАЮТ ОСТАТОК, И ЭТО ГЛАВНОЕ ЧИСЛО ЗАКАЗА ───────────────
+	# «15 рабочих на 3 загонах кормят 40-45 отрядов плюс небольшой прирост»
+	var farms: float = float(_UCfg.FARM_WORKERS_REFERENCE) * _UCfg.MEAT_PER_SEC_TARGET
+	verdict("A1б дома плюс пятнадцать фермеров дают чуть больше расхода",
+		houses40 + farms >= full_need and houses40 + farms <= full_need * 1.6,
+		"приход %.2f (дома %.2f + фермы %.2f), расход %.2f еды/с" % [
+			houses40 + farms, houses40, farms, full_need])
 	verdict("A2 отряд копейщиков ест около 60 еды за 10 минут",
 		absf(_UCfg.FOOD_UPKEEP_SQUAD_PER_SEC * 600.0 - 60.0) <= 6.0,
 		"%.0f за 10 мин" % (_UCfg.FOOD_UPKEEP_SQUAD_PER_SEC * 600.0))
@@ -100,11 +116,13 @@ func _run() -> void:
 	var has_build := false
 	var has_gather := false
 	var food_priced := false
-	for node in _Forge.tree("worker"):
+	for node in _Forge.tree("worker") + _Forge.tree("economy"):
 		var nd: Dictionary = node
 		if float(nd.get("bonus_build", 0.0)) > 0.0:
 			has_build = true
-		if float(nd.get("bonus_gather", 0.0)) > 0.0:
+		# ТЗ 24.09.2026, п. 11: секунды «bonus_gather» сняты, темп добычи —
+		# доли по ресурсам (вкладка «economy») и доля груза (вкладка рабочего)
+		if float(nd.get("bonus_gather", 0.0)) > 0.0 or float(nd.get("bonus_carry_pct", 0.0)) > 0.0:
 			has_gather = true
 		if _UCfg.upgrade_cost(nd).has(Constants.RESOURCE_FOOD):
 			food_priced = true
@@ -144,7 +162,9 @@ func _run() -> void:
 		"расход %.3f/с, рабочих %d, отрядов %d" % [ResourceManager.upkeep_rate(Constants.FACTION_PLAYER, Constants.RESOURCE_FOOD),
 			int(GameManager.food_upkeep_workers.get(Constants.FACTION_PLAYER, 0)), int(GameManager.food_upkeep_squads.get(Constants.FACTION_PLAYER, 0))])
 	var hud = main.hud
-	var lbl: Label = hud._res_income_labels.get(Constants.RESOURCE_FOOD)
+	# ТЗ 24.09.2026, п. 5: расход еды — ОТДЕЛЬНАЯ красная подпись рядом с
+	# зелёным притоком (_food_upkeep_label), а не «+N −N» одной строкой
+	var lbl: Label = hud._food_upkeep_label
 	await frames(3)
 	verdict("B3 в панели ресурсов у еды виден расход «−N»",
 		lbl != null and lbl.visible and lbl.text.contains("−"), "текст «%s»" % (lbl.text if lbl else "нет"))

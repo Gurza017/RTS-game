@@ -12,6 +12,8 @@ extends Node
 ##   C ОТМЕНА — новый приказ бросает овцу, она снова свободна.
 ##   D КАМЕНЬ — лист Pawn_Run_Stone у чёрного рабочего того же размера и
 ##     на те же шесть кадров, что остальные ленты бега.
+##   E ЗАГОН-КОЛОДЕЦ (ТЗ 23.09.2026, третье письмо) — пять мест, авто-спавн
+##     взамен выбывшей, потолок рабочих и прогрессия цены.
 ## Запуск: godot --headless --path . res://qa_worker_sheep/Test.tscn
 
 const _CSite := preload("res://scripts/ConstructionSite.gd")
@@ -290,8 +292,13 @@ func _run() -> void:
 	# — с поправкой на содержание
 	verdict("B6 мясо сдано: %.0f (%d ходок по %.0f)" % [want_meat,
 			Worker.SHEEP_MEAT_TRIPS, Worker.MEAT_PER_TRIP],
+		# ДОЛЯ СНИЖЕНА С 0.8 ДО 0.4 (ТЗ 23.09.2026, третье письмо): кусок мяса
+		# урезан с 15 до 3 (см. Worker.MEAT_PER_TRIP), и за те же сорок секунд
+		# разделки содержание армии съедает уже не пятую часть выручки, а
+		# больше половины. Точным числом здесь судится СДАННОЕ мясо; склад —
+		# лишь страховка от «сдал, но никуда не зачислилось»
 		is_equal_approx(thief.meat_delivered, want_meat)
-			and _food() - food0 >= want_meat * 0.8,
+			and _food() - food0 >= want_meat * 0.4,
 		"сдано %.0f, склад +%.1f (остальное съело содержание)" % [
 			thief.meat_delivered, _food() - food0])
 	# СТАДО ЛОГОВА ЗДЕСЬ УЖЕ НЕ ПРИ ЧЁМ: украденная овца привязана к ЗАМКУ
@@ -364,4 +371,118 @@ func _run() -> void:
 				if c.a > 0.5 and c.r > 0.8 and c.g > 0.8 and c.b < 0.5:
 					yellow += 1
 	verdict("D2 в листе камня не осталось золотой краски", img != null and yellow == 0, "жёлтых пикселей %d" % yellow)
+	await _e_pen_well()
 	_finish()
+
+# ═════════════════════════════════════════════════════════════════════════════
+# E. ЗАГОН КАК «КОЛОДЕЦ РЕСУРСОВ» (ТЗ 23.09.2026, третье письмо)
+# ═════════════════════════════════════════════════════════════════════════════
+## Проверяются четыре обещания заказа разом: пять мест, авто-спавн взамен
+## выбывшей, «один рабочий на овцу» и прогрессия цены загонов.
+##
+## ВРЕМЯ НЕ ЖДЁМ, А ПОДКРУЧИВАЕМ. Респавн идёт раз в SHEEP_PEN_RESPAWN_SEC
+## (12 с), и честное ожидание стоило бы стенду полминуты на пустом месте.
+## Такт восполнения вынесен отдельным методом (_tick_restock) ровно затем,
+## чтобы его можно было позвать с большой дельтой — это не «обход механики»,
+## а тот же самый код, только без часов
+const _PenE := preload("res://scripts/SheepPen.gd")
+const _SheepE := preload("res://scripts/goblin/Sheep.gd")
+
+func _e_pen_well() -> void:
+	print("\n═════ E. ЗАГОН — КОЛОДЕЦ РЕСУРСОВ ═════")
+	var base: Vector3 = main.PLAYER_BASE_ANCHOR + Vector3(60.0, 0.0, -60.0)
+	main._clear_area_of_resources(base, 26.0)
+	var pen: Building = _PenE.new()
+	pen.faction = Constants.FACTION_PLAYER
+	main.world_add(pen)
+	pen.global_position = Vector3(base.x, GameManager.get_terrain_height(base.x, base.z), base.z)
+	await pframes(4)
+
+	verdict("E1 в загоне ровно %d мест" % _UCfg.SHEEP_PEN_CAPACITY,
+		pen.capacity() == _UCfg.SHEEP_PEN_CAPACITY and _UCfg.SHEEP_PEN_CAPACITY == 5,
+		"мест %d" % pen.capacity())
+
+	# ── ЗАГОН НАПОЛНЯЕТСЯ САМ ────────────────────────────────────────────
+	for _i in range(_UCfg.SHEEP_PEN_CAPACITY + 3):
+		pen._tick_restock(_UCfg.SHEEP_PEN_RESPAWN_SEC + 0.1)
+		await pframes(2)
+	var n_full: int = pen.sheep_count()
+	verdict("E2 загон наполнился сам и остановился на потолке",
+		n_full == _UCfg.SHEEP_PEN_CAPACITY,
+		"овец %d из %d, восполнено %d" % [n_full, pen.capacity(), pen.sheep_respawned])
+
+	# ── ПОЛНЫЙ ЗАГОН НОВЫХ НЕ ПЛОДИТ ─────────────────────────────────────
+	var was: int = pen.sheep_respawned
+	for _j in range(3):
+		pen._tick_restock(_UCfg.SHEEP_PEN_RESPAWN_SEC + 0.1)
+		await pframes(2)
+	verdict("E3 полный загон новых овец не спавнит",
+		pen.sheep_respawned == was and pen.sheep_count() == _UCfg.SHEEP_PEN_CAPACITY,
+		"овец %d, восполнений +%d" % [pen.sheep_count(), pen.sheep_respawned - was])
+
+	# ── ВЫБЫЛА ОДНА — ЧЕРЕЗ ПАУЗУ ПОЯВИЛАСЬ НОВАЯ ────────────────────────
+	var victim: Node = null
+	for sh in get_tree().get_nodes_in_group("sheep"):
+		if sh != null and is_instance_valid(sh) and sh.get("pen") == pen:
+			victim = sh
+			break
+	if victim != null:
+		victim.call("eat")          # тот же путь, что у доеденной туши
+	await pframes(3)
+	var after_loss: int = pen.sheep_count()
+	# Полтакта паузы: новая овца ещё НЕ должна появиться
+	pen._tick_restock(_UCfg.SHEEP_PEN_RESPAWN_SEC * 0.4)
+	await pframes(2)
+	var mid: int = pen.sheep_count()
+	pen._tick_restock(_UCfg.SHEEP_PEN_RESPAWN_SEC)
+	await pframes(2)
+	var back: int = pen.sheep_count()
+	verdict("E4 выбывшую заменяет новая, но НЕ мгновенно",
+		after_loss == _UCfg.SHEEP_PEN_CAPACITY - 1 and mid == after_loss
+		and back == _UCfg.SHEEP_PEN_CAPACITY,
+		"после потери %d, через полпаузы %d, через паузу %d" % [after_loss, mid, back])
+
+	# ── ОВЦЫ НЕ ВЫХОДЯТ ЗА ОГРАДУ ────────────────────────────────────────
+	var half: float = minf(pen.build_size.x, pen.build_size.z) * 0.5
+	verdict("E5 выпас не выходит за ограду",
+		pen.graze_radius() <= half + 0.01,
+		"радиус выпаса %.2f м при полуширине ограды %.2f м" % [pen.graze_radius(), half])
+
+	# ── ОДИН РАБОЧИЙ НА ОВЦУ ─────────────────────────────────────────────
+	verdict("E6 рабочих на загон — по числу мест",
+		_UCfg.SHEEP_PEN_WORKERS == _UCfg.SHEEP_PEN_CAPACITY,
+		"рабочих %d, мест %d" % [_UCfg.SHEEP_PEN_WORKERS, _UCfg.SHEEP_PEN_CAPACITY])
+	verdict("E6б на одну тушу — один разделщик",
+		_SheepE.MAX_BUTCHERS == 1, "потолок артели %d" % _SheepE.MAX_BUTCHERS)
+
+	# ── ПРОГРЕССИЯ ЦЕНЫ ──────────────────────────────────────────────────
+	var c1: float = _UCfg.building_cost_mult("sheep_pen", 0)
+	var c2: float = _UCfg.building_cost_mult("sheep_pen", 1)
+	var c3: float = _UCfg.building_cost_mult("sheep_pen", 2)
+	verdict("E7 каждый следующий загон дороже (×1 → ×1.5 → ×2)",
+		is_equal_approx(c1, 1.0) and c2 > c1 and c3 > c2
+		and is_equal_approx(c2, 1.0 + _UCfg.SHEEP_PEN_COST_STEP),
+		"множители: %.2f / %.2f / %.2f" % [c1, c2, c3])
+
+	# ── МАТЕМАТИКА ЗАКАЗА: 15 ФЕРМЕРОВ КОРМЯТ 45 ОТРЯДОВ ─────────────────
+	# Судим СВОЙСТВО, а не круглое число: приход (дома + фермеры) обязан
+	# покрывать расход и оставлять небольшой плюс
+	var houses: float = 40.0 * _UCfg.HOUSE_FOOD_INCOME / _UCfg.HOUSE_FOOD_INTERVAL
+	var farms: float = float(_UCfg.FARM_WORKERS_REFERENCE) * _UCfg.MEAT_PER_SEC_TARGET
+	var need: float = float(_UCfg.FARM_SQUADS_SUPPORTED) * _UCfg.FOOD_UPKEEP_SQUAD_PER_SEC \
+		+ 100.0 * _UCfg.FOOD_UPKEEP_WORKER_PER_SEC
+	verdict("E8 пятнадцать фермеров и сорок домов кормят %d отрядов с запасом"
+			% _UCfg.FARM_SQUADS_SUPPORTED,
+		houses + farms >= need and houses + farms <= need * 1.6,
+		"приход %.2f (дома %.2f + фермы %.2f) против расхода %.2f еды/с" % [
+			houses + farms, houses, farms, need])
+	# ФАКТИЧЕСКАЯ выработка сверяется с целью: цель — это ЗАПИСЬ замысла, а
+	# темп складывается из размера куска, ударов и длины ходки
+	var haul: float = 12.0 / float(_UCfg.stat("worker", "walk_speed_empty", 3.2)) \
+		+ 12.0 / float(_UCfg.stat("worker", "walk_speed_loaded", 2.2))
+	var cyc: float = float(Worker.SHEEP_CUTS_PER_MEAT) * Worker.SHEEP_CUT_SEC + haul
+	var real: float = Worker.MEAT_PER_TRIP / maxf(cyc, 0.01)
+	verdict("E8б фактическая выработка фермера близка к расчётной цели",
+		absf(real - _UCfg.MEAT_PER_SEC_TARGET) <= _UCfg.MEAT_PER_SEC_TARGET * 0.25,
+		"факт %.3f еды/с против цели %.3f (ходка %.1f с)" % [
+			real, _UCfg.MEAT_PER_SEC_TARGET, cyc])

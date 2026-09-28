@@ -184,13 +184,20 @@ func _a_config() -> void:
 		"цена доступа %.0f" % _Forge.squad_unlock_cost(
 			_Forge.get_node(_Forge.node_id("archer", "1d"))))
 
-	# A7 — бонусы копятся ТОЛЬКО своему роду войск
+	# A7 — бонусы копятся ТОЛЬКО своему роду войск.
+	# ИСКЛЮЧЕНИЕ НАЗВАНО ПОИМЁННО, А НЕ ПРОЩЕНО МОЛЧА (ТЗ 23.09.2026):
+	# у вкладки «economy» рода войск нет вовсе — её узлы читают и рабочий
+	# (добыча), и здания (найм, стройка). Проверка сверяется с ТОЙ ЖЕ
+	# таблицей, из которой строится дерево (forge_config.tab_applies_to):
+	# впиши владелец вторую такую вкладку — стенд подхватит её сам, а
+	# случайное «all» у боевой ветки по-прежнему покраснеет
 	var cross: Array = []
 	for u in _Forge.UNIT_TABS:
+		var want_apply: Array = _Forge.tab_applies_to(String(u))
 		for n in _Forge.tree(String(u)):
 			var d: Dictionary = n
 			var app: Array = d.get("applies_to", [])
-			if app.size() != 1 or String(app[0]) != String(u):
+			if app != want_apply:
 				cross.append(String(d.get("id", "")))
 	verdict("A7 узел вкладки усиливает только свой род войск", cross.is_empty(),
 		"чужих applies_to: %d" % cross.size())

@@ -215,6 +215,10 @@ class Bucket:
 	var capacity: int = 0
 	var buf: PackedFloat32Array = PackedFloat32Array()
 	var dirty: bool = false
+	## Мокрый бакет настроен (полоса фигуры и доля погружения в материале)
+	var wet_ready: bool = false
+	## Мягкость ступени затемнения кучи (см. _tone_k), считается при создании
+	var tone_k: float = 1.0
 
 	## ВСЕ ЗАПИСИ В БУФЕР — ТОЛЬКО ЗДЕСЬ. Packed-массивы в GDScript копируются
 	## при записи снаружи владельца (та же оговорка и с тем же обоснованием
@@ -334,6 +338,10 @@ class Corpse:
 	var unit_id: String = ""
 	var squad_id: int = 0
 	var raisable: bool = false
+	## Какой монах ведёт канал над телом (instance id, 0 — никто). ТЗ
+	## 24.09.2026, п. 12: три монаха брали ОДНО тело — поднимал первый, двое
+	## тратили канал и откат впустую, и подъём «останавливался»
+	var claimed_by: int = 0
 
 
 ## ── СЛОЙ ТЕНЕЙ: ОДИН НА ВСЕ ТЕЛА ───────────────────────────────────────────
@@ -437,6 +445,58 @@ var _layer: int = 0
 
 ## Ключ бакета — ровно тот же, что у живых: одна и та же лента в разном
 ## масштабе обязана попасть в разные бакеты, потому что размер квада вшит в меш
+## Доля фигуры под водой: пехота наполовину, великаны (тролль, туша) на треть
+const WET_FRAC := 0.50
+const WET_FRAC_BIG := 0.32
+func _wet_frac(unit: Unit, at: Vector3, ground_y: float) -> float:
+	var m = GameManager.main
+	if m == null or not m.has_method("water_surface_y") or not m.has_method("in_water_mesh"):
+		return 0.0
+	if not bool(m.call("in_water_mesh", at.x, at.z)):
+		return 0.0
+	if float(m.call("water_surface_y", at.x, at.z)) <= ground_y + 0.03:
+		return 0.0
+	return WET_FRAC_BIG if unit.nav_clearance() >= 3.5 else WET_FRAC
+
+## Полоса фигуры в кадре (доли высоты) — один раз на мокрый бакет
+func _setup_wet(b, sheet: Texture2D, frames: int, wet: float) -> void:
+	b.wet_ready = true
+	var top := 0.0
+	var bot := 1.0
+	var left := 0.0
+	var right := 1.0
+	var img: Image = sheet.get_image()
+	if img != null:
+		if img.is_compressed():
+			img.decompress()
+		var fw: int = img.get_width() / maxi(frames, 1)
+		var h: int = img.get_height()
+		var y0 := h
+		var y1 := -1
+		# Полоса по ШИРИНЕ кадра — по ней теперь идёт линия воды (ТЗ 25.09,
+		# п. 2): тело погружается боком вдоль всего туловища
+		var x0 := fw
+		var x1 := -1
+		for y in range(0, h, 2):
+			for x in range(0, fw, 2):
+				if img.get_pixel(x, y).a > 0.3:
+					y0 = mini(y0, y)
+					y1 = maxi(y1, y)
+					x0 = mini(x0, x)
+					x1 = maxi(x1, x)
+		if y1 > y0:
+			top = float(y0) / float(h)
+			bot = float(y1 + 1) / float(h)
+		if x1 > x0:
+			left = float(x0) / float(fw)
+			right = float(x1 + 1) / float(fw)
+	var mat := (b.mm.mesh as QuadMesh).material as ShaderMaterial
+	mat.set_shader_parameter("submerge", wet)
+	mat.set_shader_parameter("fig_top", top)
+	mat.set_shader_parameter("fig_bot", bot)
+	mat.set_shader_parameter("fig_left", left)
+	mat.set_shader_parameter("fig_right", right)
+
 static func _bucket_key(sheet: Texture2D, frames: int, pixel_size: float) -> String:
 	return "%d|%d|%.5f" % [sheet.get_rid().get_id(), frames, pixel_size]
 
@@ -470,6 +530,7 @@ func _get_or_make_bucket(key: String, sheet: Texture2D, frames: int,
 	if _buckets.has(key):
 		return _buckets[key]
 	var b := Bucket.new()
+	b.tone_k = _tone_k(sheet, frames)
 	var sz := sheet.get_size()
 	var fw: float = sz.x / float(maxi(frames, 1))
 
@@ -519,7 +580,81 @@ func _get_or_make_bucket(key: String, sheet: Texture2D, frames: int,
 ## Возвращает ЛЕЖАЩЕЕ ТЕЛО (его держит у себя стрела, которая в нём осталась)
 ## или null, если рисовать нечего — так бывает у бойца, погибшего в первый же
 ## свой кадр, когда спрайт ещё не построен
-func spawn(unit: Unit, world_root: Node3D, ground_y: float) -> Corpse:
+## ── ЗАТЕМНЕНИЕ ПО КУЧЕ, А НЕ ПО СЧЁТЧИКУ (ТЗ 24.09.2026, второе письмо) ────
+## «Затемняются ТОЛЬКО убитые, слоями: нижние в куче темнее, верхние — чуть
+## темнее живых; золотая середина, без черноты». Прежний тон брался от
+## кругового счётчика слоёв (TINT_DARKEST..1) и к куче отношения не имел:
+## одиночное тело бывало самым тёмным, а сбитый с ног ЖИВОЙ (knock_down тоже
+## кладёт тело) темнел наравне с мёртвыми.
+## Теперь: новое тело кладётся на верх кучи с тоном PILE_TOP_TINT; тела, на
+## которые оно легло (та же клетка PILE_CELL), темнеют на ступень, но не ниже
+## PILE_FLOOR_TINT. Ступень МЯГЧЕ у тёмных спрайтов (зелёные гоблины, тёмная
+## броня): по средней яркости ленты, один раз на бакет — тёмное, притенённое
+## наравне со светлым, уходило бы в кляксу
+const PILE_TOP_TINT := 0.92
+const PILE_STEP := 0.07
+const PILE_FLOOR_TINT := 0.70
+const PILE_CELL := 0.9
+var _piles: Dictionary = {}          # ключ клетки → Array[Corpse]
+
+func _pile_key(p: Vector3) -> int:
+	return (int(floor(p.x / PILE_CELL)) << 20) ^ (int(floor(p.z / PILE_CELL)) & 0xFFFFF)
+
+## Стендам: сколько тел легло в воду вторым слоем (сухим, поверх лежащего)
+var wet_layer2: int = 0
+
+## Лежит ли уже в клетке кучи хоть одно тело (живой слот)
+func _pile_occupied(p: Vector3) -> bool:
+	var arr: Variant = _piles.get(_pile_key(p))
+	if arr == null:
+		return false
+	for o in arr:
+		var c := o as Corpse
+		if c != null and c.index >= 0:
+			return true
+	return false
+
+func _pile_push(c) -> void:
+	var k: int = _pile_key(c.pos)
+	var arr: Variant = _piles.get(k)
+	if arr == null:
+		_piles[k] = [c]
+		return
+	var lst: Array = arr
+	var i: int = lst.size() - 1
+	while i >= 0:
+		var o := lst[i] as Corpse
+		if o == null or o.index < 0:
+			lst.remove_at(i)
+		else:
+			var step: float = PILE_STEP * float(o.bucket.tone_k)
+			o.tint = maxf(PILE_FLOOR_TINT, o.tint - step)
+			o.bucket.write(o.index, o.pos, o.yaw, o.frame, o.mirror, o.sent, o.tint, o.scl)
+		i -= 1
+	lst.append(c)
+
+## Мягкость ступени по яркости ленты: 1.0 у светлых, до 0.55 у тёмных
+static func _tone_k(sheet: Texture2D, frames: int) -> float:
+	var img: Image = sheet.get_image()
+	if img == null:
+		return 1.0
+	if img.is_compressed():
+		img.decompress()
+	var fw: int = img.get_width() / maxi(frames, 1)
+	var h: int = img.get_height()
+	var sum := 0.0
+	var n := 0
+	for y in range(0, h, 4):
+		for x in range(0, fw, 4):
+			var px: Color = img.get_pixel(x, y)
+			if px.a > 0.5:
+				sum += px.r * 0.299 + px.g * 0.587 + px.b * 0.114
+				n += 1
+	if n == 0:
+		return 1.0
+	return clampf((sum / float(n)) / 0.5, 0.55, 1.0)
+
+func spawn(unit: Unit, world_root: Node3D, ground_y: float, live: bool = false) -> Corpse:
 	if unit == null or not is_instance_valid(unit):
 		return null
 	# ПОЗА ПАВШЕГО, А НЕ ТЕКУЩАЯ. sheet_frame() отдал бы ту ленту и тот кадр,
@@ -537,7 +672,29 @@ func spawn(unit: Unit, world_root: Node3D, ground_y: float) -> Corpse:
 	if sheet == null:
 		return null
 	var key: String = _bucket_key(sheet, frames, px)
+	# ── ТЕЛО В ВОДЕ ПОГРУЖЕНО ЧАСТЬЮ (ТЗ 24.09.2026, п. 10) ────────────────
+	# В броду и на мелком откосе грунт ниже зеркала: тело на грунте целиком
+	# пряталось под непрозрачной водой. Теперь оно ложится на ЗЕРКАЛО, а
+	# нижняя доля фигуры (WET_FRAC у пехоты, WET_FRAC_BIG у великанов)
+	# подкрашивается водой в шейдере — «наполовину под водой». Отдельный бакет
+	# на долю: uniform'ом, а не каналом экземпляра — все четыре заняты
+	var wet: float = _wet_frac(unit, unit.global_position, ground_y)
+	if wet > 0.0:
+		var m = GameManager.main
+		ground_y = maxf(ground_y, float(m.call("water_surface_y", unit.global_position.x, unit.global_position.z)))
+		# ── ВТОРОЙ СЛОЙ: ТЕЛО НА ТЕЛЕ НЕ ТОНЕТ (ТЗ 25.09.2026, п. 2) ───────
+		# Упавший поверх того, кто уже лежит в воде, лежит НА НЁМ, а не в
+		# воде: сухой бакет на том же зеркале. Слой кучи — та же клетка
+		# PILE_CELL, по которой темнеет завал (_pile_push), второго реестра
+		# «кто где лежит» не заводится
+		if _pile_occupied(unit.global_position):
+			wet = 0.0
+			wet_layer2 += 1
+		else:
+			key += "|wet%.2f" % wet
 	var b := _get_or_make_bucket(key, sheet, frames, px, world_root)
+	if wet > 0.0 and not b.wet_ready:
+		_setup_wet(b, sheet, frames, wet)
 	if b.free.is_empty():
 		b.grow(GROW_STEP)
 
@@ -576,8 +733,8 @@ func spawn(unit: Unit, world_root: Node3D, ground_y: float) -> Corpse:
 	c.mirror = mirror
 	# Своя ступенька высоты — навсегда (см. LAYER_STEP)
 	c.lift = GROUND_LIFT + float(_layer) * LAYER_STEP
-	# Яркость по той же ступеньке: нижние в обороте счётчика темнее верхних
-	c.tint = TINT_DARKEST + (1.0 - TINT_DARKEST) 		* (float(_layer) / float(maxi(LAYER_WRAP - 1, 1)))
+	# Яркость: живой (сбит с ног) — как живой; мёртвый — верх кучи
+	c.tint = 1.0 if live else PILE_TOP_TINT
 	_layer = (_layer + 1) % LAYER_WRAP
 	var at := Vector3(gp.x, ground_y + c.lift, gp.z)
 	c.pos = at
@@ -585,6 +742,8 @@ func spawn(unit: Unit, world_root: Node3D, ground_y: float) -> Corpse:
 	# обязаны дать одно поле
 	c.scl = 1.0 + (fposmod(float(id) * 0.31830988618, 1.0) - 0.5) * 2.0 * SIZE_JITTER
 	c.frame = int(sf[1])
+	if not live:
+		_pile_push(c)
 	b.write(c.index, at, yaw, int(sf[1]), mirror, 1.0, c.tint, c.scl)
 
 	# ── ТЕНЬ ПОД ТУЛОВИЩЕМ ─────────────────────────────────────────────────
@@ -1019,12 +1178,25 @@ func find_raisable_priority(fac: int, at: Vector3, radius: float,
 ## стороны, а потом сверить отряд» нельзя: в замесе ближайшим почти всегда
 ## лежит чужой по отряду павший, сверка отвечает «нет», и подъём кончался на
 ## первом теле — отряд оставался с 31 из 60
-func find_raisable_of_squad(fac: int, sid: int, at: Vector3, radius: float):
+## Тело занято ДРУГИМ живым монахом (захват снимается сам, если монах пал)
+static func claimed_by_other(cc, me: int) -> bool:
+	var cb: int = int(cc.claimed_by)
+	if cb == 0 or cb == me:
+		return false
+	var o: Object = instance_from_id(cb)
+	if o == null or not is_instance_valid(o) or o.get("_res_target") != cc:
+		cc.claimed_by = 0
+		return false
+	return true
+
+func find_raisable_of_squad(fac: int, sid: int, at: Vector3, radius: float, me: int = 0):
 	var best: Corpse = null
 	var bd: float = radius * radius
 	for c in _raisable_list(fac):
 		var cc := c as Corpse
 		if cc.squad_id != sid:
+			continue
+		if me != 0 and claimed_by_other(cc, me):
 			continue
 		var dx: float = cc.pos.x - at.x
 		var dz: float = cc.pos.z - at.z
@@ -1128,6 +1300,7 @@ func age_shift(secs: float) -> void:
 ## уходят вместе со старым World — здесь снимаются только ссылки, иначе реестр
 ## пережил бы сцену и держал освобождённые узлы (та же оговорка у far_units)
 func clear() -> void:
+	_piles.clear()
 	_list.clear()
 	_fading.clear()
 	_buckets.clear()

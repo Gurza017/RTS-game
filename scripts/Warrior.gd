@@ -19,6 +19,14 @@ func _ready() -> void:
 const WARRIOR_AGGRO_RADIUS := 5.0
 
 func aggro_radius() -> float:
+	# ── ГОРЯЧКА ПОСЛЕ РЫВКА (ТЗ 25.09.2026, п. 5) ─────────────────────────
+	# Конец рывка берёт ближайшего в RUSH_AGGRO_R (_rush_aggro). Но если в
+	# тот миг никого не было (враг ещё подходит, первую цель убили соседи),
+	# мечник вставал в покой, где его инициатива — 5 м, и «замирал» в поле
+	# в десяти метрах от свалки. RUSH_HOT_SEC после рывка он подхватывает
+	# врага в радиусе рывка тем же штатным авто-агро — второй ветки боя нет
+	if Time.get_ticks_msec() < _rush_hot_until_ms:
+		return RUSH_AGGRO_R
 	return WARRIOR_AGGRO_RADIUS
 
 ## Мечник — желанная цель конницы (ТЗ 18.09.2026, п. 4)
@@ -55,6 +63,11 @@ const RAGE_SPEED_MULT := 1.45
 ## в RUSH_AGGRO_R берётся целью тем же тиком (command_attack с forced, без
 ## замка — авто-агро дальше ведёт бой как обычно)
 const RUSH_AGGRO_R := 14.0
+## Окно «горячки» после конца рывка: авто-агро видит RUSH_AGGRO_R, а не 5 м
+const RUSH_HOT_SEC := 6.0
+var _rush_hot_until_ms: int = 0
+## Стендам: сколько раз конец рывка не нашёл цели и открыл окно горячки
+var rush_hot_count: int = 0
 ## ── СТЕНА ЩИТОВ НА ПОСЛЕДНИХ МЕТРАХ РАЗГОНА (заказ владельца, спринт 15) ────
 ## «Юнит бежит, а за 5-10 метров до цели включает "Стену щитов" (+30 % к
 ## скорости) и влетает во врага». В набеге щит поднят с первого шага (см.
@@ -162,6 +175,8 @@ func _rush_aggro() -> void:
 		rush_aggro_count += 1
 		command_attack(foe, true)
 	else:
+		rush_hot_count += 1
+		_rush_hot_until_ms = Time.get_ticks_msec() + int(RUSH_HOT_SEC * 1000.0)
 		_aggro_timer = 0.0
 		_wake_process()
 
@@ -275,11 +290,17 @@ func _after_melee_hit(tgt: Node3D, dmg: float, dir: Vector3) -> void:
 			cleave_hits += 1
 			cleave_last += 1
 
-## Удары серии быстрые: доля обычной перезарядки
+## Удары серии быстрые: доля обычной перезарядки.
+## ВЕТЕРАНСТВО СРЕЗАЕТ ЕЁ ЕЩЁ (ТЗ 23.09.2026): каждая ступень отнимает
+## vet_rage_cd от множителя, но не ниже RAGE_CD_FLOOR — иначе седьмая ступень
+## превратила бы серию в сплошную полосу урона, а заказ просил «ощутимо, но
+## строго сбалансированно»
+const RAGE_CD_FLOOR := 0.26
+
 func _effective_cooldown() -> float:
 	var c: float = super._effective_cooldown()
 	if rage_active():
-		c *= RAGE_COOLDOWN_MULT
+		c *= maxf(RAGE_COOLDOWN_MULT - vet_rage_cd, RAGE_CD_FLOOR)
 	return c
 
 ## ── НАПОР В НАБЕГЕ ────────────────────────────────────────────────────────

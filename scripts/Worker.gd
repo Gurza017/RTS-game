@@ -452,7 +452,16 @@ const SHEEP_CUTS_PER_MEAT := 10
 ## по нему считают стенды
 const _SheepS := preload("res://scripts/goblin/Sheep.gd")
 const SHEEP_MEAT_TRIPS: int = _SheepS.MEAT_TRIPS
-const MEAT_PER_TRIP := 15.0
+## ── РАЗМЕР КУСКА ВЫВЕДЕН ИЗ ЦЕЛИ БАЛАНСА (ТЗ 23.09.2026, третье письмо) ──
+## Ходка фермера — это 10 ударов × SHEEP_CUT_SEC (4.5 с) плюс дорога до склада
+## (около 9.2 с при плече 12 м), итого 13.7 с. Чтобы пятнадцать фермеров
+## давали заказанные ~3 еды/с, кусок обязан быть 3.0: 3.0 / 13.7 = 0.22 еды/с
+## с рабочего (unit_stats_config.MEAT_PER_SEC_TARGET), × 15 = 3.3 еды/с.
+## ПРЕЖНИЕ 15.0 ДАВАЛИ 16.4 еды/с с тех же пятнадцати — вшестеро больше
+## расхода полной армии, то есть еда не была ресурсом вовсе.
+## Туша при этом «подешевела» с 300 еды до 60, и это то же решение с другой
+## стороны: ферма — ПОТОК, а не клад
+const MEAT_PER_TRIP := 6.0     # ТЗ 24.09.2026-2: мясо вдвое быстрее (было 3.0)
 ## Удар ножом чаще прежнего: десять ударов по 1.2 с — это двенадцать
 ## секунд стояния на одну ходку, а таких ходок пять
 const SHEEP_CUT_SEC := 0.45
@@ -462,8 +471,97 @@ const SHEEP_BACK_PAD := 0.6
 ## GO — идёт к овце, CARRY — несёт её на голове (дикую — домой, в загон),
 ## KILL — пять ударов ножом до смерти, BUTCHER — десять ударов на кусок,
 ## HAUL — несёт кусок на склад, BACK — возвращается к туше
-enum SheepPhase { NONE, GO, CARRY, KILL, BUTCHER, HAUL, BACK }
+enum SheepPhase { NONE, GO, CARRY, KILL, BUTCHER, HAUL, BACK, WAIT }
+## ── ФЕРМЕР ЗАГОНА (ТЗ 24.09.2026, п. 1) ──────────────────────────────────
+## ПКМ рабочими по СВОЕМУ ЗАГОНУ ставит их на загон, как на рудник: рабочий
+## режет овцу, выносит мясо и берёт СЛЕДУЮЩУЮ ОВЦУ ЭТОГО ЖЕ ЗАГОНА
+## (SheepPen.pick_sheep_for); овец нет — ждёт у ограды (фаза WAIT) и
+## переспрашивает раз в FARM_POLL_SEC, пока загон не народит новую.
+## Любой другой приказ снимает привязку (_drop_sheep_job)
+const FARM_POLL_SEC := 0.8
+var _farm_pen: Node3D = null
+var _farm_poll_t: float = 0.0
+
+func farm_pen() -> Node3D:
+	return _farm_pen if _farm_pen != null and is_instance_valid(_farm_pen) else null
+
+func command_farm_pen(p: Node3D) -> void:
+	if p == null or not is_instance_valid(p) or not p.has_method("pick_sheep_for"):
+		return
+	_drop_sheep_job()
+	_leave_construction()
+	_free_slot()
+	_build_queue.clear()
+	set_attack_target(null)
+	gather_target = null
+	_gather_res_type = -1
+	_gather_cluster = 0
+	build_target = null
+	GameManager.squad_clear_order(squad_id)
+	_farm_pen = p
+	_farm_next()
+
+## Следующая работа на загоне: овца — к ней; нет — ждать у ограды
+func _farm_next() -> void:
+	var pen: Node3D = farm_pen()
+	if pen == null:
+		_farm_pen = null
+		state = State.IDLE
+		_wake_process()
+		return
+	var sh: Node3D = pen.call("pick_sheep_for", self) as Node3D
+	if sh != null:
+		command_steal_sheep(sh)
+		if _sheep == sh:
+			_farm_pen = pen
+			return
+	# Ждём у проёма ограды
+	_sheep = null
+	_farm_pen = pen
+	_sheep_phase = SheepPhase.WAIT
+	_farm_poll_t = FARM_POLL_SEC
+	move_target = pen.call("farm_wait_point", self)
+	state = State.MOVING
+	_wake_process()
+
+func _process_farm_wait(delta: float) -> void:
+	var pen: Node3D = farm_pen()
+	if pen == null:
+		_sheep_phase = SheepPhase.NONE
+		_farm_pen = null
+		state = State.IDLE
+		velocity = Vector3.ZERO
+		_wake_process()
+		return
+	var d: Vector3 = move_target - global_position
+	d.y = 0.0
+	var dist: float = d.length()
+	if dist > 0.8:
+		var nd: Vector3 = _nav_dir(global_position, move_target, delta, d / maxf(dist, 0.001))
+		_facing = nd
+		velocity = nd * move_speed
+		_tick_stuck(delta, dist)
+		_move_blocked(velocity * delta)
+	else:
+		velocity = Vector3.ZERO
+		if state != State.IDLE:
+			state = State.IDLE
+			_wake_process()
+	_farm_poll_t -= delta
+	if _farm_poll_t > 0.0:
+		return
+	_farm_poll_t = FARM_POLL_SEC
+	var sh: Node3D = pen.call("pick_sheep_for", self) as Node3D
+	if sh != null:
+		command_steal_sheep(sh)
+		_farm_pen = pen
 var _sheep: Node3D = null
+
+## На какую овцу рабочий сейчас нацелен (null — ни на какую). Публичный
+## читатель: по нему загон считает своих рабочих (SheepPen.workers_here) —
+## иначе ему пришлось бы лезть в приватное поле чужого класса
+func sheep_target() -> Node3D:
+	return _sheep if _sheep != null and is_instance_valid(_sheep) else null
 var _sheep_phase: int = SheepPhase.NONE
 var _sheep_dest_node: Node3D = null
 var _sheep_cuts: int = 0
@@ -591,6 +689,21 @@ func command_steal_sheep(s: Node3D) -> void:
 		_drop_sheep_job()
 		_herding = false
 		return
+	# ── НА ЗАГОНЕ НЕ БОЛЬШЕ SHEEP_PEN_WORKERS ЧЕЛОВЕК (ТЗ 23.09.2026) ────
+	# Заказ: «на 1 овцу строго 1 рабочий, максимум 5 на загон». Потолок
+	# артели у самой туши (Sheep.MAX_BUTCHERS = 1) отсекает второго на ТУ ЖЕ
+	# овцу, но не шестого на загон: пять овец — пять занятых, а шестой пришёл
+	# бы к той, которую только что доели, и ждал бы респавна внутри ограды.
+	# Проверка стоит ЗДЕСЬ, в приказе, а не в тике: приказ либо принят, либо
+	# нет, и «принят, но не исполняется» — худшее из состояний
+	var pen_of = s.get("pen")
+	if pen_of != null and is_instance_valid(pen_of) and pen_of.has_method("worker_slot_free"):
+		if not bool(pen_of.call("worker_slot_free")) and _farm_pen != pen_of \
+				and (_sheep == null or not is_instance_valid(_sheep)
+					or _sheep.get("pen") != pen_of):
+			_drop_sheep_job()
+			_herding = false
+			return
 	_drop_sheep_job()
 	_herding = herd
 	_leave_construction()
@@ -749,6 +862,7 @@ func _drop_sheep_job() -> void:
 		if _sheep.has_method("butcher_leave"):
 			_sheep.call("butcher_leave", self)
 	_sheep = null
+	_farm_pen = null
 	_sheep_dest_node = null
 	_sheep_dest_forced = false
 	_sheep_phase = SheepPhase.NONE
@@ -757,8 +871,14 @@ func _drop_sheep_job() -> void:
 		carrying_type = Constants.RESOURCE_WOOD
 
 func _cancel_sheep_job() -> void:
+	var fp: Node3D = farm_pen()
 	_drop_sheep_job()
 	state = State.IDLE
+	# Фермер загона не бросает работу: ждёт следующую овцу у ограды
+	if fp != null:
+		_farm_pen = fp
+		_farm_next()
+		return
 	_wake_process()
 
 ## Туша кончилась: бросить её и СРАЗУ ЗА СЛЕДУЮЩУЮ. Приказ «режь овец» не
@@ -767,10 +887,16 @@ func _cancel_sheep_job() -> void:
 ## и вся бригада копилась там толпой (заказ спринта 14)
 func _finish_sheep_job(done_at: Vector3) -> void:
 	var was_owned: bool = _sheep_was_owned
+	var fp: Node3D = farm_pen()
 	_drop_sheep_job()
 	carrying_amount = 0.0
 	carrying_type = Constants.RESOURCE_WOOD
 	state = State.IDLE
+	# Фермер загона берёт следующую овцу ЭТОГО загона (или ждёт у ограды)
+	if fp != null:
+		_farm_pen = fp
+		_farm_next()
+		return
 	var nxt: Node3D = _next_sheep(done_at, was_owned)
 	if nxt != null:
 		command_steal_sheep(nxt)
@@ -784,6 +910,9 @@ func _face_spot(p: Vector3) -> void:
 		_facing = to.normalized()
 
 func _process_sheep(delta: float) -> void:
+	if _sheep_phase == SheepPhase.WAIT:
+		_process_farm_wait(delta)
+		return
 	if _sheep == null or not is_instance_valid(_sheep) or bool(_sheep.get("eaten")):
 		# Тушу доели соседи по артели (или она истлела): берёмся за следующую
 		# ближайшую — ровно как после своей последней ходки
@@ -814,7 +943,7 @@ func _process_sheep(delta: float) -> void:
 					_sheep_spot = _sheep.global_position
 					_face_spot(_sheep_spot)
 					_sheep_phase = SheepPhase.BUTCHER
-					_sheep_cut_t = SHEEP_CUT_SEC
+					_sheep_cut_t = _sheep_cut_sec()
 					state = State.GATHERING
 					_wake_process()
 					return
@@ -833,7 +962,7 @@ func _process_sheep(delta: float) -> void:
 					_sheep.call("captured_by", self)
 					_sheep_spot = _sheep.global_position
 					_sheep_phase = SheepPhase.KILL
-					_sheep_cut_t = SHEEP_CUT_SEC
+					_sheep_cut_t = _sheep_cut_sec()
 					state = State.GATHERING
 					_wake_process()
 					return
@@ -932,7 +1061,7 @@ func _process_sheep(delta: float) -> void:
 						_wake_process()
 						return
 				_sheep_phase = SheepPhase.KILL
-				_sheep_cut_t = SHEEP_CUT_SEC
+				_sheep_cut_t = _sheep_cut_sec()
 				state = State.GATHERING
 				_wake_process()
 				return
@@ -950,7 +1079,7 @@ func _process_sheep(delta: float) -> void:
 			_sheep_cut_t -= delta
 			if _sheep_cut_t > 0.0:
 				return
-			_sheep_cut_t = SHEEP_CUT_SEC
+			_sheep_cut_t = _sheep_cut_sec()
 			_sheep_cuts += 1
 			_sheep_cuts_total += 1
 			_sheep.call("wound_flash")
@@ -969,7 +1098,7 @@ func _process_sheep(delta: float) -> void:
 			_sheep_cut_t -= delta
 			if _sheep_cut_t > 0.0:
 				return
-			_sheep_cut_t = SHEEP_CUT_SEC
+			_sheep_cut_t = _sheep_cut_sec()
 			_sheep_cuts += 1
 			_sheep_cuts_total += 1
 			_sheep.call("wound_flash")
@@ -998,7 +1127,11 @@ func _process_sheep(delta: float) -> void:
 					or _sheep_dest_node.has_method("accept_sheep"):
 				_sheep_dest_node = GameManager.get_nearest_dropoff(faction, global_position)
 			if _sheep_dest_node == null or not is_instance_valid(_sheep_dest_node):
-				_cancel_sheep_job()
+				# СКЛАДА НЕТ — ЖДЁМ С КУСКОМ В РУКАХ (ТЗ 24.09.2026, второе
+				# письмо). Прежде работа отменялась, и фермер загона шёл резать
+				# ТУ ЖЕ тушу заново: кусок пропадал, туша таяла без единой
+				# ходки, а со стороны это выглядело как стоящие у загона рабочие
+				velocity = Vector3.ZERO
 				return
 			var dh: Vector3 = _sheep_dest_node.global_position - global_position
 			dh.y = 0.0
@@ -1042,7 +1175,7 @@ func _process_sheep(delta: float) -> void:
 				if to_body.length() > 0.01:
 					_facing = to_body.normalized()
 				_sheep_phase = SheepPhase.BUTCHER
-				_sheep_cut_t = SHEEP_CUT_SEC
+				_sheep_cut_t = _sheep_cut_sec()
 				state = State.GATHERING
 				_wake_process()
 				return
@@ -1206,6 +1339,9 @@ func active_resource_type() -> int:
 ## бригада из пяти человек выглядела то занятой, то пустой (см. HUD-приток).
 ## -1 — не добытчик: получил прямой приказ, строит, дерётся
 func assigned_resource_type() -> int:
+	# Фермер (овца, туша, ожидание у загона) — на мясе во всех фазах
+	if _sheep_phase != SheepPhase.NONE:
+		return Constants.RESOURCE_FOOD
 	if _gather_res_type >= 0:
 		return _gather_res_type
 	if carrying_amount > 0.0:
@@ -1286,7 +1422,13 @@ func _update_sprite_anim() -> void:
 func tick_physics(delta: float, prof: bool = false, bm: bool = true,
 		bonus_ver: int = -1) -> void:
 	# С грузом рабочий идёт медленнее (walk_speed_loaded из конфига)
-	move_speed = walk_speed_loaded if state == State.RETURNING else walk_speed_empty
+	# Ветка «груз и шаг» (bonus_walk_pct, ТЗ 24.09.2026): прежний bonus_speed
+	# сюда не доезжал вовсе — поле скорости рабочий переписывает каждый тик
+	var walk_k: float = 1.0 + GameManager.unit_bonus(faction, stat_id, "bonus_walk_pct")
+	# Ход С ГРУЗОМ — своя ветка (bonus_walk_loaded_pct, ТЗ 24.09.2026-2)
+	if state == State.RETURNING:
+		walk_k += GameManager.unit_bonus(faction, stat_id, "bonus_walk_loaded_pct")
+	move_speed = (walk_speed_loaded if state == State.RETURNING else walk_speed_empty) * walk_k
 	var wt := _work_res_type()
 	if _axe:
 		_axe.visible = (state == State.GATHERING and wt == Constants.RESOURCE_WOOD)
@@ -1322,7 +1464,12 @@ func tick_physics(delta: float, prof: bool = false, bm: bool = true,
 	# читатель. Пишется признак ЗДЕСЬ, в одном месте на все состояния, — иначе
 	# его пришлось бы снимать в каждом приказе, и один забытый путь оставил бы
 	# бойца «работающим» навсегда
-	var working: bool = state == State.GATHERING or state == State.BUILDING
+	# ЛЕС-СТЕНА (ТЗ 24.09.2026, п. 13): тот же признак пропускает рабочего в
+	# маску леса — он идёт к дереву кромки и выносит дерево, стоя внутри
+	# полосы. Поэтому признак горит и на всём рейсе лесоруба, а не только у
+	# ствола: иначе к внутренней стороне дерева он бы не подошёл никогда
+	var lumber: bool = _gather_res_type == Constants.RESOURCE_WOOD and gather_target != null
+	var working: bool = state == State.GATHERING or state == State.BUILDING or lumber
 	if working != _soa_working and _soa >= 0:
 		_soa_working = working
 		GameManager.army.set_flag(_soa, _Army.F_WORKING, working)
@@ -1449,12 +1596,13 @@ func tick_physics(delta: float, prof: bool = false, bm: bool = true,
 						command_gather(gather_target)
 
 # ── СКОРОСТЬ ДОБЫЧИ ПО ТИПУ РЕСУРСА ──────────────────────────────────────────
-## РУБКА ЛЕСА БЫСТРЕЕ НА 15%. Дерево — самый ходовой ресурс: он уходит и на
-## войска, и на постройки, и на улучшения, поэтому лесопилка узким местом быть
-## не должна. Камень и золото добываются в прежнем темпе — их ценность как раз
-## в том, что достаются они медленнее.
-## Пень при этом остаётся на карте, как и раньше (см. ResourceNode._show_stump)
-const WOOD_SPEEDUP := 0.85
+## ТЕМП ПО РЕСУРСАМ ПЕРЕЕХАЛ В КОНФИГ (ТЗ 23.09.2026):
+## unit_stats_config.GATHER_TIME_MULT. Здесь стояла одна константа на дерево
+## (0.85), а камень с золотом делили общий цикл — раздельных веток кузницы
+## на таком не построить: они обязаны крутить ТРИ разных числа, и лежать эти
+## числа обязаны там же, где вся прочая добыча, то есть у владельца в конфиге.
+## Прежнее имя оставлено ссылкой на конфиг: его читают стенды
+const WOOD_SPEEDUP := 0.80
 
 ## НИЖЕ ЭТОГО ЦИКЛ НЕ ОПУСКАЕТСЯ НИКАКИМИ УЛУЧШЕНИЯМИ. Цикл — это ещё и время
 ## между взмахами инструмента: на десятых долях секунды рабочий перестаёт рубить
@@ -1468,18 +1616,86 @@ const MIN_CYCLE_TIME := 1.10
 ## записан положительным, как и все прочие бонусы, а вычитается здесь. Множитель
 ## леса применяется ДО вычитания — иначе одна и та же ветка давала бы на дереве
 ## меньше секунд, чем на камне, хотя в описании узла написано одно число
+## ДВА БОНУСА КУЗНИЦЫ ПРИМЕНЯЮТСЯ В РАЗНЫХ ЕДИНИЦАХ, И ПОРЯДОК ЗДЕСЬ ВАЖЕН.
+## Общий bonus_gather снимает СЕКУНДЫ (так он и записан в конфиге), раздельная
+## ветка ресурса — ДОЛЮ. Доля берётся от цикла ЭТОГО ресурса, то есть ПОСЛЕ
+## множителя, но ДО вычитания секунд: примени её последней — и «−25 % на
+## золоте» значило бы разное у того, кто изучил общую ветку, и у того, кто нет,
+## хотя в подписи узла у обоих написано одно число
 func _cycle_time() -> float:
-	var t: float = gather_time
-	if _work_res_type() == Constants.RESOURCE_WOOD:
-		t *= WOOD_SPEEDUP
+	var res: int = _work_res_type()
+	var t: float = gather_time * _UCfgW.gather_time_mult(res)
+	var pct_key: Variant = _UCfgW.GATHER_BONUS_KEY.get(res)
+	if pct_key != null:
+		var pct: float = GameManager.unit_bonus(faction, stat_id, String(pct_key))
+		if pct > 0.0:
+			t *= 1.0 - minf(pct, _UCfgW.GATHER_PCT_CAP)
 	t -= GameManager.unit_bonus(faction, stat_id, "bonus_gather") + vet_gather
 	return maxf(t, MIN_CYCLE_TIME)
+
+## ── ЛЕСОРУБ СТЕНЫ ИДЁТ НАПРЯМИК (ТЗ 24.09.2026, п. 13) ─────────────────────
+## Дерево леса-стены лежит в заблокированной ячейке сетки обхода, и A* честно
+## отвечал «дороги нет» — рабочий вставал у кромки («тупик» _nav_dead_end).
+## Рабочего лес не держит (признак FWorking в ядре), значит и сетка ему здесь
+## не нужна: к дереву стены и из самой полосы — по прямой
+func _nav_dir(mp: Vector3, tp: Vector3, delta: float, straight: Vector3) -> Vector3:
+	if _skip_nav_detour():
+		_nav_dead_end = false
+		return straight
+	return super._nav_dir(mp, tp, delta, straight)
+
+func _skip_nav_detour() -> bool:
+	if _gather_res_type != Constants.RESOURCE_WOOD or gather_target == null \
+			or not is_instance_valid(gather_target):
+		return false
+	if int(gather_target.forest_kind) == ResourceNode.FOREST_WALL:
+		return true
+	var p: Vector3 = position if _local_xform else global_position
+	return GameManager.army.forest_at(p.x, p.z)
+
+## ── РАСЧЁТНЫЙ ДОХОД РАБОЧЕГО, ЕД./С (ТЗ 24.09.2026, п. 5) ─────────────────
+## Приток на верхней плашке считается СТАТИЧЕСКИ — «рабочих на ресурсе × доход
+## одного», а не по факту сдачи за окно: сдача идёт ходками, и цифра по факту
+## прыгала в миг добегания рабочего до ратуши. Доход одного — груз, делённый на
+## полный рейс: цикл добычи (с кузницей и ресурсом) плюс ходка туда-обратно
+## между жилой и ближайшим складом. Ходка меряется от ЖИЛЫ, а не от рабочего:
+## иначе число гуляло бы вместе с ним. Жилы нет (рабочий между целями) —
+## номинальное плечо INCOME_NOMINAL_ARM. Мясо — цель фермы
+## (MEAT_PER_SEC_TARGET): рейс фермера расписан там же
+const INCOME_NOMINAL_ARM := 12.0
+func nominal_income_per_sec() -> float:
+	var res: int = assigned_resource_type()
+	if res < 0:
+		return 0.0
+	if res == Constants.RESOURCE_FOOD:
+		return _UCfgW.MEAT_PER_SEC_TARGET if (_sheep_phase != SheepPhase.NONE or farm_pen() != null) else 0.0
+	var arm: float = INCOME_NOMINAL_ARM
+	if gather_target != null and is_instance_valid(gather_target):
+		var gp: Vector3 = gather_target.global_position
+		var dep: Node3D = GameManager.get_nearest_dropoff(faction, gp)
+		if dep != null:
+			var dv: Vector3 = dep.global_position - gp
+			dv.y = 0.0
+			arm = maxf(dv.length() - _dest_edge(dep, dv), 2.0)
+	var wk: float = 1.0 + GameManager.unit_bonus(faction, stat_id, "bonus_walk_pct")
+	var wkl: float = wk + GameManager.unit_bonus(faction, stat_id, "bonus_walk_loaded_pct")
+	var trip: float = arm / maxf(walk_speed_empty * wk, 0.5) + arm / maxf(walk_speed_loaded * wkl, 0.5)
+	return carry_capacity() / maxf(_cycle_time() + trip, 0.5)
 
 ## Сколько ресурса рабочий уносит за одну ходку. База из конфига плюс ветка
 ## вместимости в кузнице (bonus_carry)
 func carry_capacity() -> float:
+	# Груз — ДОЛЕЙ от базового (ТЗ 24.09.2026, п. 11: «всё в процентах»);
+	# прежний штучный bonus_carry оставлен сложением для старых сохранений
 	return maxf(1.0, gather_amount
+		* (1.0 + GameManager.unit_bonus(faction, stat_id, "bonus_carry_pct"))
 		+ GameManager.unit_bonus(faction, stat_id, "bonus_carry"))
+
+## Время одного удара ножом при разделке: ветка «Мясо» — доля долой
+## (bonus_gather_food, потолок тот же GATHER_PCT_CAP)
+func _sheep_cut_sec() -> float:
+	var pct: float = GameManager.unit_bonus(faction, stat_id, "bonus_gather_food")
+	return SHEEP_CUT_SEC * (1.0 - clampf(pct, 0.0, _UCfgW.GATHER_PCT_CAP))
 
 ## Насколько близко к своей точке на кольце нужно подойти, чтобы считать, что
 ## рабочий на месте. Заметно шире базовых 30 см: в бригаде соседи всё время

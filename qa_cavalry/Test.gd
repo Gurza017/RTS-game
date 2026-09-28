@@ -376,25 +376,42 @@ func _e_breakthrough() -> void:
 	# «Строй смяло» видно ровно пока строй ещё есть. К концу боя фаланга
 	# ВЫБИТА ЦЕЛИКОМ, отряды расформированы, и та же проверка честно считает
 	# ноль сдвинутых из нуля выживших — первый прогон так и вышел
-	await frames(600)
+	# ── ЛУЧШИЙ МОМЕНТ, А НЕ ФИКСИРОВАННЫЙ КАДР (ТЗ 24.09.2026) ────────────
+	# Удар во фланг и в тыл теперь снимает 25/50 % запаса каждому накрытому,
+	# и к десятой секунде фаланги нередко уже нет («0 из 0 живых»). Строй
+	# смяло — свойство разгара: берём лучший замер из серии каждые полсекунды
 	var alive_mid: Array = []
-	for u in wall:
-		if is_instance_valid(u) and not (u as Unit).is_dead():
-			alive_mid.append(u)
 	var shoved := 0
 	var worst := 0.0
-	for u in alive_mid:
-		var h: Vector3 = home[u]
-		var d: float = Vector2((u as Node3D).global_position.x - h.x,
-			(u as Node3D).global_position.z - h.z).length()
-		worst = maxf(worst, d)
-		if d > 1.0:
-			shoved += 1
+	var dented_any := 0
+	for _k in range(20):
+		await frames(30)
+		var alive_k: Array = []
+		for u in wall:
+			if is_instance_valid(u) and not (u as Unit).is_dead():
+				alive_k.append(u)
+		var sh_k := 0
+		var w_k := 0.0
+		for u in alive_k:
+			var h: Vector3 = home[u]
+			var d: float = Vector2((u as Node3D).global_position.x - h.x,
+				(u as Node3D).global_position.z - h.z).length()
+			w_k = maxf(w_k, d)
+			if d > 1.0:
+				sh_k += 1
+		for sid_k in wall_sids:
+			if GameManager.squad_dent_depth(int(sid_k)) > 0.0:
+				dented_any = maxi(dented_any, 1)
+		if alive_k.size() > 0 and (alive_mid.is_empty()
+				or float(sh_k) / float(alive_k.size()) > float(shoved) / float(maxi(alive_mid.size(), 1))):
+			alive_mid = alive_k
+			shoved = sh_k
+			worst = w_k
 	verdict("E1 строй расступился: бойцов физически смяло со своих мест",
 		alive_mid.size() > 0 and shoved >= alive_mid.size() / 3 and worst > 2.0,
 		"сдвинуто дальше метра %d из %d живых, самый дальний на %.1f м"
 			% [shoved, alive_mid.size(), worst])
-	var dented := 0
+	var dented := dented_any
 	for sid in wall_sids:
 		if GameManager.squad_dent_depth(int(sid)) > 0.0:
 			dented += 1
@@ -409,7 +426,7 @@ func _e_breakthrough() -> void:
 	# СРОК ПОДНЯТ ВСЛЕД ЗА TTK: запас жизни копейщика вырос почти вдвое
 	# (см. docs/BALANCE_MATH.md), и стадо ломает стену вдвое дольше. Проверяемое
 	# свойство («стена сломана») не изменилось — изменился бюджет ожидания
-	await frames(2100)
+	await frames(1500)
 	var left := 0
 	for u in wall:
 		if is_instance_valid(u) and not (u as Unit).is_dead():

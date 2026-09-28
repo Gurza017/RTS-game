@@ -246,34 +246,32 @@ func _run() -> void:
 	_kill(blue2)
 	await pframes(2)
 
-	# ── F. Руина и восстановление ──────────────────────────────────────────
-	print("\n═════ F. РУИНА ═════")
+	# ── F. Снос рудника: хозяин теряется, рудник остаётся (ТЗ 25.09.2026, п. 6) ──
+	# РАЗВОРОТ: прежде снесённый рудник оставлял руину (F1-F4 утверждали
+	# руину и отстройку рабочим). Руины растворяются через RUIN_LIFETIME_SEC,
+	# и вместе с ними с карты навсегда пропадал рудник. Теперь рудник —
+	# постоянный объект: снос сбрасывает его в ничейный, захват — пехотой
+	print("\n═════ F. СНОС РУДНИКА ═════")
+	var mid0: int = m.get_instance_id()
 	m.take_damage(1.0e9)
 	await pframes(3)
-	var ruin: Node = null
+	var mine_ruins := 0
 	for r in get_tree().get_nodes_in_group("ruins"):
 		if is_instance_valid(r) and String((r as Node).get_meta("ruin_building_id", "")) == "mine" \
 				and (r as Node3D).global_position.distance_to(mp) < 1.0:
-			ruin = r
-	verdict("F1 снесённый рудник оставил руину, отстроить может любой",
-		ruin != null and bool(ruin.get_meta("ruin_any_faction", false)))
-	if ruin == null:
-		_finish()
-		return
-	var rs := ruin.get_node_or_null("RuinSprite") as MeshInstance3D
-	var rtex = null
-	if rs != null:
-		rtex = ((rs.mesh as QuadMesh).material as ShaderMaterial).get_shader_parameter("albedo_tex")
-	verdict("F2 руина нарисована картинкой GoldMine_Destroyed",
-		rtex != null and (rtex as Texture2D).resource_path == _MineS.SPRITE_DESTROYED,
-		str(rtex.resource_path if rtex != null else "нет"))
-	var site = GameManager.rebuild_ruin(ruin, Constants.FACTION_PLAYER)
-	verdict("F3 клик по руине заводит стройку рудника для отстраивающего",
-		site != null and String(site.get("target_id")) == "mine" and (site as Building).faction == Constants.FACTION_PLAYER)
-	if site == null:
-		_finish()
-		return
-	site.set("build_time", 0.6)
+			mine_ruins += 1
+	verdict("F1 снесённый рудник НЕ удалён: тот же узел, не мёртв, руины нет",
+		is_instance_valid(m) and m.get_instance_id() == mid0 and not m.is_dead()
+		and not m.is_queued_for_deletion() and mine_ruins == 0)
+	verdict("F2 снос сбросил рудник в ничейный с полным запасом прочности",
+		m.is_neutral() and is_equal_approx(m.current_health, m.max_health) and not m.flag_visible(),
+		"сторона %d, прочность %.0f/%.0f" % [m.faction, m.current_health, m.max_health])
+	var blue3: Array = _spawn_squad("spearman", Constants.FACTION_PLAYER, mp + Vector3(4.0, 0.0, 0.0), 6)
+	var g5: int = await _wait_faction(m, Constants.FACTION_PLAYER, 60 * 12)
+	verdict("F3 ничейный рудник снова захватывается пехотой",
+		m.faction == Constants.FACTION_PLAYER and m.flag_visible(), "физкадров %d" % g5)
+	_kill(blue3)
+	await pframes(2)
 	var w2: Unit = (Building.PRELOAD_SCENES["worker"] as PackedScene).instantiate()
 	w2.faction = Constants.FACTION_PLAYER
 	main.world_add(w2)
@@ -282,18 +280,9 @@ func _run() -> void:
 	w2.sync_row()
 	GameManager.add_to_squad(GameManager.new_squad(Constants.FACTION_PLAYER, "worker"), w2)
 	await pframes(2)
-	(w2 as Worker).command_build(site as Node3D)
-	var g5 := 0
-	var rebuilt: Mine = null
-	while g5 < 60 * 40 and rebuilt == null:
-		await get_tree().physics_frame
-		g5 += 1
-		for b in get_tree().get_nodes_in_group("player_buildings"):
-			if is_instance_valid(b) and b is Mine and (b as Node3D).global_position.distance_to(mp) < 1.0:
-				rebuilt = b
-	verdict("F4 рабочий отстроил руину — новый рудник игрока с флагом",
-		rebuilt != null and rebuilt.faction == Constants.FACTION_PLAYER and rebuilt.flag_visible(),
-		"физкадров %d" % g5)
+	var rebuilt: Mine = m if m.faction == Constants.FACTION_PLAYER else null
+	verdict("F4 после сноса и захвата рудник на прежнем месте, реестр игрока",
+		rebuilt != null and rebuilt.is_in_group("player_buildings"))
 	if rebuilt != null:
 		await pframes(2)
 		sm.selected_units = [w2]

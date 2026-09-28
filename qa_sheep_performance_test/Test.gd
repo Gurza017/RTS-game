@@ -90,6 +90,9 @@ func _finish() -> void:
 func _pen(at: Vector3) -> Building:
 	var pen: Building = _Pen.new()
 	pen.faction = Constants.FACTION_PLAYER
+	# Загон тикает (ТЗ 24.09.2026-2) и досаживал бы своих овец за 5 с —
+	# стенд считает СВОИХ, респаун гасится (ручной _tick_restock работает)
+	pen.set("auto_restock", false)
 	main.world_add(pen)
 	pen.global_position = Vector3(at.x, main.get_terrain_height(at.x, at.z), at.z)
 	return pen
@@ -288,10 +291,12 @@ func _run() -> void:
 	_finish()
 
 func _limits() -> void:
-	# L1 вместимость загона 30 из конфига
+	# L1 вместимость загона — ИЗ КОНФИГА, без запомненного числа.
+	# Здесь стояло «и SHEEP_PEN_CAPACITY == 30»: вместимость урезана до пяти
+	# (ТЗ 23.09.2026, загон-колодец), и проверка утверждала снятое требование
 	var pen: Building = _pens[0]
 	verdict("L1 вместимость загона = SHEEP_PEN_CAPACITY = %d" % _UCfg.SHEEP_PEN_CAPACITY,
-		int(pen.call("capacity")) == _UCfg.SHEEP_PEN_CAPACITY and _UCfg.SHEEP_PEN_CAPACITY == 30,
+		int(pen.call("capacity")) == _UCfg.SHEEP_PEN_CAPACITY and _UCfg.SHEEP_PEN_CAPACITY > 0,
 		"capacity() = %d" % int(pen.call("capacity")))
 	# L2 тридцать первую загон не принимает (accept_sheep)
 	var flock: Array = []
@@ -327,8 +332,13 @@ func _limits() -> void:
 			_pens[k].call("accept_sheep", s2)
 	await pframes(2)
 	var owned: int = int(_Sheep.owned_count(Constants.FACTION_PLAYER))
+	# Потолок стада теперь ВЫВОДИТСЯ из вместимости загонов
+	# (SHEEP_PEN_MAX_COUNT × SHEEP_PEN_CAPACITY + выпас у замка), а не стоит
+	# числом 90: с пятиместными загонами до девяноста овец дойти негде
 	verdict("L3 у игрока ровно SHEEP_PLAYER_MAX = %d овец" % _UCfg.SHEEP_PLAYER_MAX,
-		owned == _UCfg.SHEEP_PLAYER_MAX and _UCfg.SHEEP_PLAYER_MAX == 90, "привязано %d" % owned)
+		owned == _UCfg.SHEEP_PLAYER_MAX
+		and _UCfg.SHEEP_PLAYER_MAX == _UCfg.SHEEP_PEN_MAX_COUNT * _UCfg.SHEEP_PEN_CAPACITY,
+		"привязано %d" % owned)
 	var s_any: Node3D = flock[0]
 	s_any.set("_calm_t", 1.0e6)
 	var born: int = int(s_any.call("breed_one"))

@@ -457,12 +457,15 @@ func _run() -> void:
 	# И отряд: последний боец отряда игрока пал от тролля
 	var sq_f: Array = _squad("archer", Constants.FACTION_PLAYER, troll.global_position + Vector3(3.0, 0.0, 3.0), 2)
 	await pframes(2)
+	# Опора — счёт ДО первого убийства: сколько добиваний ушло на F7, зависит
+	# от жребия (TROLL_VICTORY_CHANCE), и tv0 + 1 верно только при удаче с первого
+	var tvf: int = GameManager.troll_victory_events
 	(sq_f[1][0] as Unit).take_damage(1e9, troll)
 	await frames(2)
 	var tv1: int = GameManager.troll_victory_events
 	(sq_f[1][1] as Unit).take_damage(1e9, troll)
 	await frames(2)
-	verdict("F8 клич — на ПОСЛЕДНЕГО бойца отряда, не на каждого", tv1 == tv0 + 1 and GameManager.troll_victory_events == tv1 + 1)
+	verdict("F8 клич — на ПОСЛЕДНЕГО бойца отряда, не на каждого", tv1 == tvf and GameManager.troll_victory_events == tv1 + 1)
 	verdict("F9 файл клича на месте", ResourceLoader.exists(String((AudioManager.SFX_BANK["troll_victory"] as Array)[0])))
 	troll.take_damage(1e9)
 	await pframes(2)

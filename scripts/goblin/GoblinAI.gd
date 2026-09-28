@@ -34,6 +34,46 @@ const _Commander := preload("res://scripts/goblin/GoblinAttackCommander.gd")
 ## Командир штурма базы (заказ 10.09.2026): сбор на дистанции, паттерны,
 ## отход и лечение. Ведёт полевые отряды в фазе охоты, см. _issue_orders
 var commander = _Commander.new()
+## Сбор перед ударом (ТЗ 24.09.2026, п. 8): атака волной, а не гуськом
+const _Stager := preload("res://scripts/goblin/WaveStager.gd")
+var stager = _Stager.new()
+## Набеги по расписанию (ТЗ 24.09.2026, второе письмо): свои отряды, свой строй
+const _RaidsM := preload("res://scripts/goblin/GoblinRaids.gd")
+var raids = _RaidsM.new()
+
+## Куда идут набеги: КРЕПОСТЬ игрока (ТЗ 25.09.2026, п. 1).
+## Прежде здесь стояло СРЕДНЕЕ всех построек игрока — вместе с отбитыми
+## рудниками и башнями по всей карте. К 90-й минуте такая «база» уезжала
+## к середине карты, а то и к лагерю красного ИИ, и набег строил линию
+## сбора у ЧУЖОЙ базы: владелец видел это как «у красного ИИ отспавнились
+## отряды гоблинов». Крепостей несколько — ближайшая к деревне; нет ни
+## одной — медиана построек (медиана, а не среднее: см. _centroid_of)
+func _player_base() -> Vector3:
+	var best := Vector3.ZERO
+	var bd := INF
+	var xs: Array = []
+	var zs: Array = []
+	for b in main.get_tree().get_nodes_in_group(Constants.building_group(Constants.FACTION_PLAYER)):
+		if not is_instance_valid(b) or (b as Building).is_dead():
+			continue
+		var p: Vector3 = (b as Node3D).global_position
+		# Рудники в медиану не идут: они стоят по всей карте и тянут «базу»
+		# прочь от неё — ровно та болезнь, от которой эта функция лечится
+		if not (b is Mine):
+			xs.append(p.x)
+			zs.append(p.z)
+		if String((b as Building).building_id) == "castle":
+			var d: float = p.distance_squared_to(village)
+			if d < bd:
+				bd = d
+				best = p
+	if bd < INF:
+		return best
+	if xs.is_empty():
+		return Vector3.ZERO
+	xs.sort()
+	zs.sort()
+	return Vector3(float(xs[xs.size() / 2]), 0.0, float(zs[zs.size() / 2]))
 ## Стенд: цель охоты вместо _weakest_target (INF — не задана)
 var hunt_target_override: Vector3 = Vector3.INF
 
@@ -160,8 +200,11 @@ func setup(p_main: Node3D, p_village: Vector3) -> void:
 	main = p_main
 	village = p_village
 	reset()
+	raids.setup(p_main, p_village)
 
 func reset() -> void:
+	stager.reset()
+	raids.reset()
 	squads.clear()
 	commander.reset()
 	hunt_target_override = Vector3.INF
@@ -293,6 +336,7 @@ func _tick_timed() -> void:
 	_sweep_heal()
 	var t3: int = Time.get_ticks_usec(); _OptGA.sys_add("ga_econ_heal", t3 - t2)
 	_tick_raids()
+	raids.tick(clock, _player_base())
 	var t4: int = Time.get_ticks_usec(); _OptGA.sys_add("ga_raids", t4 - t3)
 	if not first_contact:
 		_check_first_contact()
@@ -329,6 +373,7 @@ func _tick_body() -> void:
 	_retreat_broken()
 	_sweep_heal()
 	_tick_raids()
+	raids.tick(clock, _player_base())
 	if not first_contact:
 		_check_first_contact()
 	var was: String = phase
@@ -1502,33 +1547,22 @@ func _issue_orders(only_revenge: bool = false) -> void:
 		# на вылазку (она в raid_sids)
 		if reserve_sids.has(sid0) and not raid_sids.has(sid0):
 			continue
+		# Отряды набега по расписанию ведёт GoblinRaids
+		if raids.owned.has(sid0):
+			handled[sid0] = true
+			continue
 		field.append(sq0)
-	# ── ТРЕВОГА РУДНИКА: вся орда к нему ─────────────────────────────────────
+	# ── ТРЕВОГА РУДНИКА: УПРАВЛЯЕМЫЕ ВОЛНЫ (ТЗ 24.09.2026, второе письмо) ────
+	# Было «вся орда к руднику» — бессистемная куча в первый же захват.
+	# Теперь волна из MINE_WAVE_SQUADS отрядов: выстроилась (WaveStager) →
+	# атаковала → при потерях или по сроку отступила → следующая волна
+	# ДРУГИМИ отрядами. Прочие отряды поля держат деревню
 	if alarm and not only_revenge:
-		for s1 in field:
-			var sq1: Dictionary = s1
-			var sid1: int = int(sq1["id"])
-			if reserve_sids.has(sid1):
-				continue
-			handled[sid1] = true
-			sq1["role"] = ROLE_MINE_ALARM
-			raid_sids.erase(sid1)
-			var c1: Vector3 = _squad_center(sq1)
-			var foe1: Node3D = _nearest_foe(mine_pos, _GobCfg.CENTER_RADIUS)
-			if foe1 == null:
-				foe1 = _nearest_foe(c1, _GobCfg.CENTER_RADIUS)
-			if foe1 != null:
-				if not GameManager.squad_in_combat(sid1):
-					_order_queue.append({"sq": sq1, "foe": foe1, "wake": true})
-				continue
-			var goal1 := Vector3(mine_pos.x + 6.0 * float(field.find(s1) - field.size() / 2), 0.0, mine_pos.z)
-			sq1["target"] = goal1
-			if (sq1.get("ordered_goal", Vector3.INF) as Vector3).distance_to(goal1) < 0.5 \
-					and clock - float(sq1.get("ordered_at", -1.0e9)) < REISSUE_KEEPALIVE_SEC:
-				continue
-			_order_queue.append({"sq": sq1, "goal": goal1, "center": c1, "wake": true})
-		last_action += "|ТРЕВОГА: орда идёт к руднику"
+		_mine_waves(field, mine_pos, handled)
 		field = []
+	elif not alarm and _mw_state != "":
+		_mw_state = ""
+		_mw_sids.clear()
 	# ── МИРНАЯ ФАЗА: ПАТРУЛЬ ГРАНИЦ ДЕРЕВНИ (уточнение владельца) ───────────
 	if not only_revenge and not alarm and phase == PHASE_PEACE:
 		if _village_threatened():
@@ -1647,7 +1681,7 @@ func _issue_orders(only_revenge: bool = false) -> void:
 		if members.is_empty():
 			continue
 		var sid: int = int(sq["id"])
-		if tactical.has(sid) or handled.has(sid):
+		if tactical.has(sid) or handled.has(sid) or raids.owned.has(sid):
 			continue                       # приказы этого отряда уже в плане
 		# РЕЗЕРВ ВЕДЁТ DormantReserve, и общий путь его не касается (19.09.2026):
 		# из списка field он выброшен, а здесь обход идёт по ВСЕМ отрядам —
@@ -1688,7 +1722,21 @@ func _issue_orders(only_revenge: bool = false) -> void:
 			# каждые две секунды только будило и передёргивало всю орду
 			if GameManager.squad_in_combat(sid):
 				continue
-			_order_queue.append({"sq": sq, "foe": foe})
+			# ── СБОР ПЕРЕД УДАРОМ (ТЗ 24.09.2026, п. 8) ─────────────────
+			# Не бить поодиночке: отряды, увидевшие того же врага, сперва
+			# встают линией перед ним и уходят в бой одной волной
+			var gt: Dictionary = stager.gate(sid, center, foe, clock)
+			if gt.has("stage"):
+				var sg: Vector3 = gt["stage"]
+				sq["target"] = sg
+				var pg: Vector3 = sq.get("ordered_goal", Vector3.INF)
+				var fresh_at: bool = clock - float(sq.get("ordered_at", -1.0e9)) < REISSUE_KEEPALIVE_SEC
+				if pg.distance_to(sg) < 1.0 and fresh_at:
+					continue
+				_order_queue.append({"sq": sq, "goal": sg, "center": center, "wake": true})
+				continue
+			# Фронт на фронт: волна делит чужую линию (WaveStager._go)
+			_order_queue.append({"sq": sq, "foe": gt.get("foe", foe)})
 			continue
 		# Марш в ту же точку не переиздаётся чаще страховочного срока
 		var prev_goal: Vector3 = sq.get("ordered_goal", Vector3.INF)
@@ -1697,6 +1745,107 @@ func _issue_orders(only_revenge: bool = false) -> void:
 				and clock - prev_at < REISSUE_KEEPALIVE_SEC:
 			continue
 		_order_queue.append({"sq": sq, "goal": goal, "center": center})
+
+## ── ВОЛНЫ НА РУДНИКЕ ─────────────────────────────────────────────────────────
+const MINE_WAVE_SQUADS := 2
+const MINE_WAVE_ATTACK_SEC := 60.0
+const MINE_WAVE_GAP_SEC := 20.0
+const MINE_WAVE_LOSS := 0.5
+var _mw_sids: Array = []
+var _mw_state: String = ""
+var _mw_since: float = 0.0
+var _mw_peak: int = 0
+var _mw_used: Dictionary = {}
+## Стендам: сколько волн ушло на рудник
+var mine_waves_sent: int = 0
+
+func _mw_alive() -> int:
+	var n := 0
+	for sid in _mw_sids:
+		var raw: Variant = GameManager.squads.get(int(sid))
+		if raw == null:
+			continue
+		for m in (raw as Dictionary)["members"]:
+			if m != null and is_instance_valid(m) and not (m as Unit).is_dead():
+				n += 1
+	return n
+
+func _mine_waves(field: Array, mine_pos: Vector3, handled: Dictionary) -> void:
+	var by_id: Dictionary = {}
+	for s in field:
+		var sq: Dictionary = s
+		var sid: int = int(sq["id"])
+		if reserve_sids.has(sid):
+			continue
+		by_id[sid] = sq
+		handled[sid] = true
+		raid_sids.erase(sid)
+	var foe: Node3D = _nearest_foe(mine_pos, _GobCfg.CENTER_RADIUS)
+	# ── ВЫБОР ВОЛНЫ ─────────────────────────────────────────────────────────
+	if _mw_state == "" or (_mw_state == "gap" and clock - _mw_since >= MINE_WAVE_GAP_SEC):
+		_mw_sids.clear()
+		var cands: Array = []
+		for sid2 in by_id.keys():
+			if not _mw_used.has(sid2):
+				cands.append(sid2)
+		if cands.size() < MINE_WAVE_SQUADS:
+			_mw_used.clear()
+			cands = by_id.keys()
+		cands.sort_custom(func(a, b): return (by_id[a]["members"] as Array).size() > (by_id[b]["members"] as Array).size())
+		for k in range(mini(MINE_WAVE_SQUADS, cands.size())):
+			_mw_sids.append(int(cands[k]))
+			_mw_used[int(cands[k])] = true
+		_mw_state = "go" if not _mw_sids.is_empty() else ""
+		_mw_since = clock
+		_mw_peak = _mw_alive()
+		if not _mw_sids.is_empty():
+			mine_waves_sent += 1
+			last_action += "|волна на рудник (%d отр.)" % _mw_sids.size()
+	# ── ПРОЧИЕ ДЕРЖАТ ДЕРЕВНЮ ───────────────────────────────────────────────
+	for sid3 in by_id.keys():
+		if _mw_sids.has(int(sid3)) and _mw_state != "gap":
+			continue
+		var sq3: Dictionary = by_id[sid3]
+		sq3["role"] = ROLE_DEFEND
+		var home := Vector3(village.x, 0.0, village.z)
+		var c3: Vector3 = _squad_center(sq3)
+		if c3.distance_to(home) > _GobCfg.VILLAGE_RADIUS + 10.0 \
+				and (sq3.get("ordered_goal", Vector3.INF) as Vector3).distance_to(home) > 0.5:
+			sq3["target"] = home
+			_order_queue.append({"sq": sq3, "goal": home, "center": c3, "retreat": _mw_sids.has(int(sid3))})
+	if _mw_state == "gap" or _mw_sids.is_empty():
+		return
+	# ── ВОЛНА: СБОР → УДАР → ОТХОД ─────────────────────────────────────────
+	var alive: int = _mw_alive()
+	var attack_long: bool = _mw_state == "attack" and clock - _mw_since >= MINE_WAVE_ATTACK_SEC
+	if alive == 0 or foe == null or attack_long or float(alive) < float(_mw_peak) * (1.0 - MINE_WAVE_LOSS):
+		_mw_state = "gap"
+		_mw_since = clock
+		for sid4 in _mw_sids:
+			var sq4: Variant = by_id.get(sid4)
+			if sq4 != null:
+				_order_queue.append({"sq": sq4, "goal": Vector3(village.x, 0.0, village.z),
+					"center": _squad_center(sq4), "retreat": true})
+		last_action += "|волна рудника отходит"
+		return
+	for sid5 in _mw_sids:
+		var sq5: Variant = by_id.get(sid5)
+		if sq5 == null:
+			continue
+		(sq5 as Dictionary)["role"] = ROLE_MINE_ALARM
+		if GameManager.squad_in_combat(int(sid5)):
+			continue
+		var c5: Vector3 = _squad_center(sq5)
+		var gt: Dictionary = stager.gate(int(sid5), c5, foe, clock)
+		if gt.has("stage"):
+			var sg: Vector3 = gt["stage"]
+			if (sq5.get("ordered_goal", Vector3.INF) as Vector3).distance_to(sg) >= 1.0:
+				_order_queue.append({"sq": sq5, "goal": sg, "center": c5, "wake": true})
+			continue
+		if _mw_state != "attack":
+			_mw_state = "attack"
+			_mw_since = clock
+		_order_queue.append({"sq": sq5, "foe": gt.get("foe", foe), "wake": true})
 
 ## Порядковый номер гарнизонного отряда (для разноса по околице)
 func garrison_idx_of(sid: int) -> int:

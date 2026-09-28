@@ -116,7 +116,18 @@ const UI_BANK := {
 	"pick_barracks": DIR_SFX + "lever_pull.mp3",
 	"pick_smithy":   DIR_SFX + "Door Close 1.wav",
 	"pick_squad":  "click3.ogg",               # выделен отряд/юниты
+	# ── ПОДТВЕРЖДЕНИЕ ПРИКАЗА (ТЗ 23.09.2026) ────────────────────────────
+	# Путь ФИКТИВНЫЙ и файла на диске не имеет: поток для него собирается
+	# кодом (см. _order_click_stream). Запись в банке всё равно нужна —
+	# play_ui выходит на пустом имени, а окно повтора и громкость берёт
+	# отсюда же, как у всех прочих событий
+	"order_move":  ORDER_CLICK_ID,
 }
+
+## Имя-метка процедурного щелчка. Не «res://…» и не имя файла: в ui_path оно
+## превратилось бы в DIR_UI + метка, то есть в заведомо отсутствующий путь —
+## а перехватывается оно РАНЬШЕ, до всякого пути
+const ORDER_CLICK_ID := "@proc_order_click"
 
 ## Пауза между повторами одного события и громкость. Пауза нужна: заказ
 ## десяти рабочих одной кнопкой — это десять вызовов в один кадр, и без окна
@@ -129,6 +140,10 @@ const UI_LIMITS := {
 	"pick_barracks": {"gap": 0.05, "db": -7.0},
 	"pick_smithy":   {"gap": 0.05, "db": -7.0},
 	"pick_squad":    {"gap": 0.05, "db": -7.0},
+	# ТИХИЙ И ГЛУХОЙ по заказу: −13 дБ против −6/−7 у прочих кнопок. Приказы
+	# отдаются десятками в минуту, и щелчок такой частоты обязан быть на
+	# грани слышимости — иначе он перекроет бой, ради которого его и жмут
+	"order_move":    {"gap": 0.04, "db": -13.0},
 }
 
 ## ── ПОЧЕМУ У ИНТЕРФЕЙСА СВОИ ГОЛОСА, А НЕ ОБЩИЙ ПУЛ ─────────────────────────
@@ -529,7 +544,15 @@ const SFX_BANK := {
 	# прежний «Sword_hit_armor» с питчем 0.55 звучал как удар молотком по
 	# ведру на каждом шагу. Два синтезированных thud'а (62 и 74 Гц, спад
 	# 0.28 с, шум без металла), 12 КБ на оба — не мегабайт
-	"big_step":    [DIR_GOBLIN_VOICE + "big_step_1.wav", DIR_GOBLIN_VOICE + "big_step_2.wav"],
+	# ── ШАГ ПЕРЕСОБРАН КОДОМ И СТАЛ ТИШЕ (ТЗ 23.09.2026, п. 5) ────────────
+	# Жалоба: «звучит как громкий барабанный бой, бум-бум-бум». Оба прежних
+	# сэмпла — thud'ы с МГНОВЕННОЙ атакой, а мгновенная атака на низкой ноте
+	# и есть барабан: ухо читает ступеньку как удар по мембране, сколько ни
+	# убавляй громкость. Поэтому не «сделать тише», а ПЕРЕСОБРАТЬ: у шага
+	# появилась атака в 22 мс (нога опускается, а не бьёт), тон опущен до
+	# 48/64 Гц, и сверху лёгкий призвук земли вместо звона. Файлы на диске
+	# остались — их больше никто не читает
+	"big_step":    [BIG_STEP_ID_A, BIG_STEP_ID_B],
 	"big_sweep":   ["WHSH_Whoosh_HoveAud_SwordCombat_07.wav",
 					"WHSH_Whoosh_HoveAud_SwordCombat_26.wav"],
 	"vox_action":  ["VOXEfrt_ActionGrunt_HoveAud_SwordCombat_01.wav",
@@ -696,7 +719,10 @@ const SFX_LIMITS := {
 	"spear_hit":    {"voices": 6, "gap": 0.04,  "db": -6.0},
 	# Туша: шаг РЕДКИЙ и НИЗКИЙ (питч вниз), свип — низкий протяжный замах.
 	# Голосов мало намеренно: пять туш в отряде не должны перекрикивать бой
-	"big_step":     {"voices": 3, "gap": 0.25, "db": -14.0, "pitch": [0.92, 1.08]},
+	# −14 → −23 дБ (ТЗ 23.09.2026): туша тяжёлая, но она ФОН боя, а не его
+	# метроном. Разброс питча сужен: широкий разброс на низкой ноте слышен
+	# как расстроенный барабан, а не как разные ноги
+	"big_step":     {"voices": 3, "gap": 0.25, "db": -23.0, "pitch": [0.96, 1.05]},
 	"big_sweep":    {"voices": 3, "gap": 0.20, "db": -3.0, "pitch": [0.55, 0.70]},
 	# Голоса — редкая приправа поверх гула, их лимиты почти не тронуты
 	"vox_action":   {"voices": 3, "gap": 0.90,  "db": -8.0},
@@ -1151,16 +1177,27 @@ func _preload_music() -> void:
 
 ## Путь боевого звука: запись банка относительна DIR_SFX, кроме «res://»
 ## (папки орды и тролля — спринт 18)
+## МЕТКА ПРОЦЕДУРНОГО ЗВУКА ПУТЁМ НЕ СТАНОВИТСЯ. Без этой ветки «@proc_…»
+## склеивалось бы с каталогом в заведомо отсутствующий файл, и перехват в
+## _stream не срабатывал бы никогда — туша ходила бы молча
 static func sfx_path(fname: String) -> String:
-	return fname if fname.begins_with("res://") else DIR_SFX + fname
+	if fname.begins_with("@proc_") or fname.begins_with("res://"):
+		return fname
+	return DIR_SFX + fname
 
 ## Путь звука интерфейса: запись банка относительна DIR_UI, кроме «res://»
 static func ui_path(fname: String) -> String:
-	return fname if fname.begins_with("res://") else DIR_UI + fname
+	if fname.begins_with("@proc_") or fname.begins_with("res://"):
+		return fname
+	return DIR_UI + fname
 
 func _preload_ui() -> void:
 	for k in UI_BANK:
-		_stream(ui_path(String(UI_BANK[k])))
+		var f: String = String(UI_BANK[k])
+		if f == ORDER_CLICK_ID:
+			_order_click_stream()    # считается один раз, здесь же
+			continue
+		_stream(ui_path(f))
 
 ## ЗВУК ИНТЕРФЕЙСА. Ни тумана, ни расстояния, ни слушателя — только окно
 ## повтора. Возвращает true, если звук реально пошёл
@@ -1183,6 +1220,9 @@ func play_ui(event: String) -> bool:
 	var now: float = float(Time.get_ticks_msec()) * 0.001
 	if now - float(_ui_last.get(event, -999.0)) < float(lim.get("gap", 0.05)):
 		return false
+	# ПРОЦЕДУРНЫЕ ЗВУКИ РАЗБИРАЕТ САМ _stream — ОДНА ТОЧКА НА ВСЕ ПУТИ.
+	# Раньше перехват стоял здесь, и второй такой звук (шаг туши, ТЗ
+	# 23.09.2026) потребовал бы второй такой же ветки в другом месте
 	var s: AudioStream = _stream(ui_path(fname))
 	if s == null:
 		return false
@@ -1737,7 +1777,142 @@ func _drain_voice_queue() -> void:
 		_voice_last_any = -999.0
 		play_voice(String(head[0]))
 
+## ═══════════════════════════════════════════════════════════════════════════
+## ПРОЦЕДУРНЫЙ ЩЕЛЧОК ПОДТВЕРЖДЕНИЯ ПРИКАЗА (ТЗ 23.09.2026)
+## ═══════════════════════════════════════════════════════════════════════════
+## Заказ: «короткий, приятный, тихий глухой клик». Файла под это в проекте нет,
+## и заводить ассет ради сорока миллисекунд звука незачем — волна считается
+## кодом один раз за партию и кэшируется.
+##
+## ИЗ ЧЕГО ОН СДЕЛАН И ПОЧЕМУ ИМЕННО ТАК:
+##   • ДВА ТОНА, а не один. Чистая синусоида читается как писк будильника;
+##     основной тон 420 Гц плюс его квинта 630 Гц с втрое меньшим весом дают
+##     призвук дерева, а не сигнал прибора.
+##   • ОГИБАЮЩАЯ БЕЗ АТАКИ. Щелчок начинается с полной громкости и гаснет по
+##     экспоненте за 38 мс. Ступенька в начале — это и есть «клик»; сгладь её
+##     атакой хоть в пять миллисекунд, и звук превратится в «пум».
+##   • ПЕРВАЯ И ПОСЛЕДНЯЯ ВЫБОРКИ — НУЛИ. Волна, оборванная на ненулевом
+##     значении, даёт собственный щелчок ПОВЕРХ нашего, и слышен он как треск
+##     динамика. Хвост exp(-x) до нуля не доходит никогда, поэтому последние
+##     выборки домножаются на спадающий клин.
+##   • 16 бит, МОНО, 22 050 Гц. У щелчка нет ни стерео-картины, ни содержания
+##     выше 10 кГц — вдвое меньшая частота дискретизации экономит вдвое и
+##     ничего не отнимает
+const ORDER_CLICK_HZ := 22050
+const ORDER_CLICK_SEC := 0.038
+const ORDER_CLICK_TONE := 420.0
+const ORDER_CLICK_TONE2 := 630.0
+const ORDER_CLICK_DECAY := 95.0      # чем больше, тем короче хвост
+const ORDER_CLICK_TAIL := 0.25       # доля волны под спадающий клин
+var _order_click: AudioStreamWAV = null
+
+## ═══════════════════════════════════════════════════════════════════════════
+## ТЯЖЁЛЫЙ ШАГ ТУШИ — ПРОЦЕДУРНЫЙ (ТЗ 23.09.2026, п. 5)
+## ═══════════════════════════════════════════════════════════════════════════
+## ЧТО ИМЕННО ДЕЛАЕТ ЗВУК «БАРАБАНОМ», А НЕ «ШАГОМ»: не громкость и не нота, а
+## АТАКА. У прежних сэмплов волна начиналась с максимума — ухо читает такую
+## ступеньку как удар по натянутой мембране. Нога живого существа опускается
+## за десятки миллисекунд, и этого достаточно: та же нота с атакой в 22 мс
+## звучит как «туп», а не «бум».
+##
+## ИЗ ЧЕГО СОБРАН:
+##   • НИЗКИЙ ТОН с лёгким СКОЛЬЖЕНИЕМ ВНИЗ (64 → 48 Гц у первого варианта):
+##     постоянная частота звучит как настроенный том, съезжающая — как масса,
+##     осевшая в грунт;
+##   • ШУМ ЗЕМЛИ поверх, с быстрым спадом и вдесятеро тише тона: это шорох
+##     гравия под ступнёй. Без него тон чистый и снова похож на барабан;
+##   • АТАКА 22 мс и спад 0.30 с, края волны обнулены клином — оборванная на
+##     ненулевом значении волна даёт собственный треск (тот же разбор, что у
+##     щелчка приказа).
+## ДВА ВАРИАНТА разными нотами: левая нога и правая. Разброс питча в лимитах
+## оставлен узким — он добавляет живости, но различать ноги должен САМПЛ
+const BIG_STEP_ID_A := "@proc_big_step_a"
+const BIG_STEP_ID_B := "@proc_big_step_b"
+const BIG_STEP_HZ := 22050
+const BIG_STEP_SEC_LEN := 0.30
+const BIG_STEP_ATTACK := 0.022     # секунды подъёма: главное число во всём звуке
+const BIG_STEP_DECAY := 11.0
+const BIG_STEP_NOISE := 0.10       # доля шума земли поверх тона
+const BIG_STEP_TAIL := 0.30
+var _big_step: Dictionary = {}     # метка -> AudioStreamWAV
+
+func _big_step_stream(id: String) -> AudioStream:
+	var have: Variant = _big_step.get(id)
+	if have != null:
+		return have
+	# Две ноты: первая нога ниже второй. Скольжение вниз — та же доля у обеих
+	var f0: float = 64.0 if id == BIG_STEP_ID_A else 72.0
+	var f1: float = f0 * 0.75
+	var n: int = int(BIG_STEP_HZ * BIG_STEP_SEC_LEN)
+	var data := PackedByteArray()
+	data.resize(n * 2)
+	var tail_from: int = int(float(n) * (1.0 - BIG_STEP_TAIL))
+	# ШУМ БЕРЁТСЯ ИЗ СВОЕГО ГЕНЕРАТОРА, А НЕ ИЗ randf(): партия сеется, и
+	# лишний жребий в общем потоке сдвинул бы ВСЕ прочие (см. CLAUDE.md)
+	var nrng := RandomNumberGenerator.new()
+	nrng.seed = 20260923 if id == BIG_STEP_ID_A else 20260924
+	var phase := 0.0
+	for i in range(n):
+		var t: float = float(i) / float(BIG_STEP_HZ)
+		var k: float = t / BIG_STEP_SEC_LEN
+		# Мгновенная частота ползёт вниз — фаза копится, а не считается от t
+		phase += TAU * lerpf(f0, f1, k) / float(BIG_STEP_HZ)
+		var env: float = 0.0
+		if t < BIG_STEP_ATTACK:
+			# Атака по синусной четверти: без излома на стыке с спадом
+			env = sin(t / BIG_STEP_ATTACK * PI * 0.5)
+		else:
+			env = exp(-BIG_STEP_DECAY * (t - BIG_STEP_ATTACK))
+		if i >= tail_from:
+			env *= float(n - i) / float(maxi(n - tail_from, 1))
+		var w: float = sin(phase)
+		# Шум гаснет вчетверо быстрее тона: это касание, а не шипение
+		w += BIG_STEP_NOISE * nrng.randf_range(-1.0, 1.0) * exp(-4.0 * BIG_STEP_DECAY * t)
+		var v: int = clampi(int(w * env * 0.70 * 32767.0), -32767, 32767)
+		data.encode_s16(i * 2, v)
+	var w_stream := AudioStreamWAV.new()
+	w_stream.format = AudioStreamWAV.FORMAT_16_BITS
+	w_stream.mix_rate = BIG_STEP_HZ
+	w_stream.stereo = false
+	w_stream.data = data
+	_big_step[id] = w_stream
+	return w_stream
+
+func _order_click_stream() -> AudioStream:
+	if _order_click != null:
+		return _order_click
+	var n: int = int(ORDER_CLICK_HZ * ORDER_CLICK_SEC)
+	var data := PackedByteArray()
+	data.resize(n * 2)                       # 16 бит моно
+	var tail_from: int = int(float(n) * (1.0 - ORDER_CLICK_TAIL))
+	for i in range(n):
+		var t: float = float(i) / float(ORDER_CLICK_HZ)
+		var env: float = exp(-ORDER_CLICK_DECAY * t)
+		if i >= tail_from:
+			env *= float(n - i) / float(maxi(n - tail_from, 1))
+		var w: float = sin(TAU * ORDER_CLICK_TONE * t) \
+			+ 0.33 * sin(TAU * ORDER_CLICK_TONE2 * t)
+		var v: int = clampi(int(w * env * 0.55 * 32767.0), -32767, 32767)
+		data.encode_s16(i * 2, v)
+	var w_stream := AudioStreamWAV.new()
+	w_stream.format = AudioStreamWAV.FORMAT_16_BITS
+	w_stream.mix_rate = ORDER_CLICK_HZ
+	w_stream.stereo = false
+	w_stream.data = data
+	_order_click = w_stream
+	return _order_click
+
 func _stream(path: String) -> AudioStream:
+	# ПРОЦЕДУРНЫЕ ЗВУКИ ПЕРЕХВАТЫВАЮТСЯ ЗДЕСЬ, А НЕ У КАЖДОГО ВЫЗЫВАЮЩЕГО:
+	# сюда сходятся ВСЕ пути загрузки (бой, интерфейс, предзагрузка банка), и
+	# метка без файла обязана разбираться в одном месте — иначе забытая ветка
+	# молча вернула бы null, то есть тишину
+	if path.begins_with("@proc_"):
+		if path == BIG_STEP_ID_A or path == BIG_STEP_ID_B:
+			return _big_step_stream(path)
+		if path == ORDER_CLICK_ID:
+			return _order_click_stream()
+		return null
 	if _streams.has(path):
 		return _streams[path]
 	if not ResourceLoader.exists(path):

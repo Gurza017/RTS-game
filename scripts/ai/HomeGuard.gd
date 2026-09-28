@@ -53,8 +53,11 @@ func setup(p_main, p_castle: Castle) -> void:
 		_side = Vector3(-_front.z, 0.0, _front.x)
 	set_process(false)
 
-## Взять отряд под охрану: пост — его нынешний центр, сон — сразу
-func adopt(sid: int, post: Vector3, cols: int, spacing: float) -> void:
+## Взять отряд под охрану: пост — его нынешний центр, сон — сразу.
+## front/side — оси СВОЕЙ раскладки (ТЗ 25.09.2026: кольцо смотрит наружу,
+## линии — по курсу обороны); пустые — общие оси замка
+func adopt(sid: int, post: Vector3, cols: int, spacing: float,
+		front: Vector3 = Vector3.ZERO, side: Vector3 = Vector3.ZERO, level: int = 0) -> void:
 	if sid <= 0 or not GameManager.squads.has(sid):
 		return
 	for s in squads:
@@ -65,6 +68,9 @@ func adopt(sid: int, post: Vector3, cols: int, spacing: float) -> void:
 		"sid": sid, "post": post, "unit": GameManager.squad_type(sid),
 		"vet": int(GameManager.squads[sid].get("level", 0)),
 		"cols": maxi(cols, 1), "spacing": spacing,
+		"front": front if front.length_squared() > 1e-6 else _front,
+		"side": side if side.length_squared() > 1e-6 else _side,
+		"level": level,          # уровень обороны (1 кольцо, 2 линии, 3 периметр; 0 — не задан)
 	})
 	_set_sleep(sid, true)
 	set_process(true)
@@ -178,16 +184,33 @@ func castle_under_attack() -> bool:
 		return false
 	return float(Time.get_ticks_msec() - castle.last_hit_ms) * 0.001 < _AICfg.HOME_GUARD_HIT_SEC
 
-## Штурм: удар по замку, прорыв в зону ЛИБО бьют саму охрану
+## Штурм: удар по замку, прорыв в зону, бьют саму охрану ЛИБО чужой боевой
+## подобрался к ЛЮБОМУ посту гарнизона (HOME_GUARD_POST_ZONE, ТЗ 25.09.2026:
+## линии гарнизона стоят дальше зоны замка, и враг, вставший перед ними,
+## иначе не будил никого)
+## Почему тревога (стендам): castle / zone / hit:<sid> / post:<sid> / ""
+var last_reason: String = ""
+
 func _threatened() -> bool:
 	if castle_under_attack():
+		last_reason = "castle"
 		return true
 	if _foes_in_zone() >= _AICfg.HOME_GUARD_WAKE_FOES:
+		last_reason = "zone"
 		return true
 	# «Бьют саму охрану» — УДАР, а не наличие цели (см. DormantReserve)
 	for s in squads:
 		if GameManager.squad_hit_recently(int(s["sid"])):
+			last_reason = "hit:%d" % int(s["sid"])
 			return true
+	var pz: float = _AICfg.HOME_GUARD_POST_ZONE
+	if pz > 0.0:
+		for s in squads:
+			var f: Node3D = _nearest_foe(s["post"], pz)
+			if f != null:
+				last_reason = "post:%d foe %s" % [int(s["sid"]), f.name]
+				return true
+	last_reason = ""
 	return false
 
 func _process(delta: float) -> void:
@@ -280,15 +303,34 @@ var wave_clock: float = 0.0
 var waves: int = 0
 var waves_total: int = 0
 
-## Тревога: разбудить ВОЛНУ и бросить на ближайшего чужого у замка
+## Тревога: разбудить ВОЛНУ и бросить на ближайшего чужого у замка.
+## HOME_GUARD_WAVE_SQUADS <= 0 — ВЕСЬ гарнизон разом (ТЗ 25.09.2026, п. 1:
+## обстрел любого отряда базы поднимает все резервы)
 func _fight() -> void:
 	var cp: Vector3 = _castle_pos()
 	var budget: int = 0
 	if wave_clock >= _AICfg.HOME_GUARD_WAVE_GAP_SEC:
-		budget = maxi(_AICfg.HOME_GUARD_WAVE_SQUADS, 1)
+		budget = _AICfg.HOME_GUARD_WAVE_SQUADS if _AICfg.HOME_GUARD_WAVE_SQUADS > 0 \
+			else squads.size()
 		wave_clock = 0.0
 		waves += 1
 		waves_total += 1
+	# ОБЩАЯ ЦЕЛЬ ГАРНИЗОНА ищется один раз на такт: у замка, иначе у любого
+	# поста (ТЗ 25.09.2026 — весь гарнизон идёт на того, кто обстреливает
+	# линию; прежде отряд без чужого в СВОЕЙ зоне просыпался и стоял столбом)
+	var shared: Node3D = null
+	if cp.x != INF:
+		shared = _nearest_foe(cp, _AICfg.HOME_GUARD_ZONE + 20.0)
+	if shared == null:
+		var bd := INF
+		for s in squads:
+			var f: Node3D = _nearest_foe(s["post"], _AICfg.HOME_GUARD_POST_ZONE + 20.0)
+			if f == null:
+				continue
+			var d: float = _xz2(f.global_position, s["post"])
+			if d < bd:
+				bd = d
+				shared = f
 	for s in squads:
 		var sid: int = int(s["sid"])
 		if _asleep.has(sid):
@@ -302,15 +344,17 @@ func _fight() -> void:
 		var c: Vector3 = _centroid(sid)
 		if c.x == INF:
 			continue
-		var foe: Node3D = null
-		if cp.x != INF:
-			foe = _nearest_foe(cp, _AICfg.HOME_GUARD_ZONE + 20.0)
+		# Ближний к САМОМУ отряду — первым (он уже в зоне), иначе общая цель
+		var foe: Node3D = _nearest_foe(c, _AICfg.HOME_GUARD_ZONE)
 		if foe == null:
-			foe = _nearest_foe(c, _AICfg.HOME_GUARD_ZONE)
+			foe = shared
 		if foe == null:
 			continue
 		for m in _members(sid):
 			(m as Unit).command_attack(foe, true)
+
+func _xz2(a: Vector3, b: Vector3) -> float:
+	return Vector2(a.x - b.x, a.z - b.z).length_squared()
 
 func _go_home() -> void:
 	for s in squads:
@@ -326,7 +370,9 @@ func post_spot(s: Dictionary, k: int) -> Vector3:
 	var post: Vector3 = s["post"]
 	var lateral: float = (float(k % cols) - float(cols - 1) * 0.5) * sp
 	var depth: float = float(k / cols) * sp
-	return post + _side * lateral - _front * depth
+	var f: Vector3 = s.get("front", _front)
+	var sd: Vector3 = s.get("side", _side)
+	return post + sd * lateral - f * depth
 
 func _order_home(s: Dictionary) -> void:
 	var ms: Array = _members(int(s["sid"]))

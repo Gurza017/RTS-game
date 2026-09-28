@@ -214,6 +214,22 @@ func build_cliff_mask(ox: float, oz: float, cell: float, cols: int, rows: int,
 	_c.BuildCliffMask(ox, oz, cell, cols, rows, relief_amp, slope_thr)
 	return int(_c.CliffCells)
 
+## Лес-стена (ТЗ 24.09.2026, п. 13): круги деревьев в маске скал ядра
+func forest_add(x: float, z: float, r: float) -> void:
+	_c.ForestAdd(x, z, r)
+
+func forest_remove(x: float, z: float) -> void:
+	_c.ForestRemove(x, z)
+
+func forest_clear() -> void:
+	_c.ForestClear()
+
+func forest_cells() -> int:
+	return int(_c.ForestCells)
+
+func forest_at(x: float, z: float) -> bool:
+	return bool(_c.ForestAt(x, z))
+
 func set_cliff_enabled(on: bool) -> void:
 	_c.SetCliffEnabled(on)
 

@@ -18,6 +18,11 @@ extends Building
 
 const _UCfgL  := preload("res://scripts/unit_stats_config.gd")
 const _GobCfgL := preload("res://scripts/goblin/goblin_config.gd")
+## СЛОЖНОСТЬ КРУТИТ ЧИСЛО ДИКИХ И ЧАСТОТУ ВОЛН (ТЗ 23.09.2026, п. 6).
+## Читается ЗДЕСЬ, а не в конфиге орды: сам конфиг — это база, одна на все
+## пресеты, и подмешивать в него текущий выбор игрока значило бы сделать
+## базовые числа зависящими от меню
+const _DiffL := preload("res://scripts/game_difficulty_config.gd")
 const _BBUtilL := preload("res://scripts/BillboardUtil.gd")
 const _TrollScene := preload("res://scenes/units/Troll.tscn")
 const _SheepScript := preload("res://scripts/goblin/Sheep.gd")
@@ -254,7 +259,7 @@ func _start_troll_respawn() -> void:
 	if _troll_timer != null:
 		return
 	_troll_timer = Timer.new()
-	_troll_timer.wait_time = _GobCfgL.TROLL_RESPAWN_SEC
+	_troll_timer.wait_time = _DiffL.mob_gap(_GobCfgL.TROLL_RESPAWN_SEC)
 	_troll_timer.one_shot = false
 	_troll_timer.timeout.connect(_on_troll_respawn)
 	add_child(_troll_timer)
@@ -265,7 +270,7 @@ func _on_troll_respawn() -> void:
 		if _troll_timer != null:
 			_troll_timer.stop()
 		return
-	if trolls_alive() + virt_trolls >= _GobCfgL.TROLL_GUARDS_MAX:
+	if trolls_alive() + virt_trolls >= _DiffL.mob_count(_GobCfgL.TROLL_GUARDS_MAX):
 		return
 	var fresh: Array = spawn_guards(1)
 	respawned_total += fresh.size() if not frozen else 1
@@ -335,7 +340,7 @@ func spawn_gnoll_squads(n: int) -> int:
 	var size: int = int(_GobCfgL.SQUAD_SIZE.get("gnoll", 12))
 	# ПОТОЛОК ЖИВЫХ НА ПЕНЬ (19.09.2026, лог партии: гноллы копились до 312 и
 	# давали половину A*): волна выходит только в свободные места
-	var room: int = _GobCfgL.GNOLL_MAX_ALIVE - gnolls_alive() - virt_gnoll_squads * size
+	var room: int = _DiffL.mob_count(_GobCfgL.GNOLL_MAX_ALIVE) - gnolls_alive() - virt_gnoll_squads * size
 	n = mini(n, int(floor(float(room) / float(maxi(size, 1)))))
 	gnoll_capped += 1 if n <= 0 else 0
 	if n <= 0:
@@ -382,7 +387,7 @@ func _start_gnoll_pack() -> void:
 	for sq in GameManager.squads_of_faction(Constants.FACTION_GOBLIN):
 		if String((sq as Dictionary).get("type", "")) == "gnoll":
 			return
-	spawn_gnoll_squads(_GobCfgL.GNOLL_START_SQUADS)
+	spawn_gnoll_squads(_DiffL.mob_count(_GobCfgL.GNOLL_START_SQUADS))
 
 ## ── ЧАСЫ ВОЛН — УЗЕЛ-ТАЙМЕР, А НЕ СВОЙ ТИК ────────────────────────────────
 ## У логова нет _process вовсе (_needs_tick = false), и заводить его ради
@@ -400,7 +405,7 @@ func on_lair_attacked() -> void:
 		_gnoll_timer.one_shot = true
 		add_child(_gnoll_timer)
 		_gnoll_timer.timeout.connect(_on_gnoll_wave)
-	_gnoll_timer.wait_time = _GobCfgL.GNOLL_WAVE_SEC
+	_gnoll_timer.wait_time = _DiffL.mob_gap(_GobCfgL.GNOLL_WAVE_SEC)
 	_gnoll_timer.start()
 	# ── ЗАЩИТА ЛОГОВА ТУШАМИ: МГНОВЕННО (заказ 13.09.2026) ────────────────
 	# «При атаке на логово мгновенно спавнятся ещё 2 защитных отряда».
@@ -515,7 +520,7 @@ func _on_gnoll_wave() -> void:
 		return
 	if gnoll_wave < _GobCfgL.GNOLL_WAVES_MAX:
 		gnoll_wave += 1
-		spawn_gnoll_squads(_GobCfgL.GNOLL_WAVE_SQUADS)
+		spawn_gnoll_squads(_DiffL.mob_count(_GobCfgL.GNOLL_WAVE_SQUADS))
 		# Волна «родника»: вместе со стаей выходит один отряд туш (заказ)
 		spawn_big_squads(_GobCfgL.BIG_WAVE_SQUADS)
 		# ПОСЛЕ ТРЕТЬЕЙ ВОЛНЫ — ДЛИННЫЙ ОТКАТ, а не остановка: пень жив,
@@ -527,7 +532,7 @@ func _on_gnoll_wave() -> void:
 	# Откат истёк — счёт волн начинается заново
 	gnoll_wave = 0
 	if _gnoll_timer != null:
-		_gnoll_timer.wait_time = _GobCfgL.GNOLL_WAVE_SEC
+		_gnoll_timer.wait_time = _DiffL.mob_gap(_GobCfgL.GNOLL_WAVE_SEC)
 		_gnoll_timer.start()
 
 func _start_flock() -> void:
@@ -826,7 +831,7 @@ func on_guard_hit(troll: Node, attacker: Node3D) -> void:
 				if defense_wave_ready(now) and _GobCfgL.TROLL_DEFENSE_WAVE > 0:
 					_defense_wave_at = now
 					defense_waves += 1
-					var wave: Array = spawn_guards(_GobCfgL.TROLL_DEFENSE_WAVE)
+					var wave: Array = spawn_guards(_DiffL.mob_count(_GobCfgL.TROLL_DEFENSE_WAVE))
 					for w in wave:
 						if attacker != null and is_instance_valid(attacker):
 							(w as Unit).command_attack(attacker, true, true)

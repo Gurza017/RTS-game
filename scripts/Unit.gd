@@ -1676,6 +1676,13 @@ var vet_speed:   float = 0.0
 ## некуда, поэтому они живут здесь (см. GameManager._apply_bonus_to_unit)
 var vet_spread:  float = 0.0
 var vet_gather:  float = 0.0
+## ДОЛЯ ДОЛОЙ С ОТКАТА СПОСОБНОСТИ (ТЗ 23.09.2026, авто-ветеранство).
+## Читает тот, у кого способность есть: пока это «Яростная атака» мечника
+## (Warrior._effective_cooldown). Поле на БАЗЕ, а не на мечнике, ровно по той
+## же причине, по какой на базе лежат прочие vet_*: раздаёт их одно место
+## (GameManager._apply_bonus_to_unit), и ветвиться там по типу бойца значило
+## бы платить приведением типа за каждого, у кого способности нет
+var vet_rage_cd: float = 0.0
 # true — марш строем шагом: скорость вдвое ниже, строй держится плотно
 var march_slow: bool = false
 # ── НАПРАВЛЕНИЕ ВЗГЛЯДА ПОСЛЕ ПРИБЫТИЯ ───────────────────────────────────────
@@ -2079,6 +2086,8 @@ var _route_i: int = 0
 var _route_goal: Vector3 = Vector3.ZERO
 var _route_from: Vector3 = Vector3.ZERO     # откуда маршрут начат (первое колено)
 var _route_los_t: float = 0.0
+## Индекс входа в брод в _route (-1 — нет). См. _route_ford_passed
+var _route_ford_i: int = -1
 const ROUTE_WP_RADIUS := 1.6
 const ROUTE_LOS_SEC := 0.5
 ## Подход к цели атаки в обход (см. _atk_waypoint)
@@ -2117,6 +2126,18 @@ func _route_beside_wp(mypos: Vector3) -> bool:
 		return true
 	var s: float = ((mypos.x - prev.x) * lx + (mypos.z - prev.z) * lz) / ll
 	return s >= ll - ROUTE_WP_RADIUS
+
+## Пройден ли вход в брод: поравнялся с ним по ходу колена, либо уже у самого
+## русла (ближе к оси, чем сам вход)
+func _route_ford_passed(mypos: Vector3) -> bool:
+	if _route_beside_wp(mypos):
+		return true
+	var m = GameManager.main
+	if m == null or not m.has_method("river_x"):
+		return false
+	var wp: Vector3 = _route[_route_i]
+	var ax: float = float(m.call("river_x", mypos.z))
+	return absf(mypos.x - ax) < absf(wp.x - float(m.call("river_x", wp.z))) - 0.3
 
 ## Следующая точка маршрута (или конечная), когда текущая пройдена
 func _route_advance() -> void:
@@ -2175,6 +2196,11 @@ const NAV_DIR_MIN := 2.0
 ## проходит 2-3 м, а последний метр до стены закрывает следование стене
 ## (ArmyCore._cliffSide). С обходом на руках — прежний NAV_RECHECK_SEC
 const NAV_RECHECK_FREE_SEC := 1.2
+
+## Обход по сетке не нужен вовсе (лесоруб леса-стены, ТЗ 24.09.2026): зовётся
+## раз в NAV_RECHECK_SEC из хода, а не каждый тик
+func _skip_nav_detour() -> bool:
+	return false
 
 func _nav_dir(mp: Vector3, tp: Vector3, delta: float, straight: Vector3) -> Vector3:
 	if GameManager.nav_cells_blocked <= 0 or not GameManager.world_bounds_enabled:
@@ -2330,6 +2356,7 @@ func command_move(target_pos: Vector3, slow_march: bool = false, face_dir: Vecto
 	_route = GameManager.build_route(
 		position if _local_xform else global_position, move_target, _ford_lane(), _lat_offset(), _nav_clear, squad_id)
 	_route_i = 0
+	_route_ford_i = GameManager.route_ford_entry
 	_route_from = position if _local_xform else global_position
 	_nav_dead_end = false
 	_route_los_t = ROUTE_LOS_SEC
@@ -5746,6 +5773,17 @@ func _process_move(delta: float) -> void:
 		if dist < ROUTE_WP_RADIUS:
 			_route_advance()
 			return
+		# ── ВХОД В БРОД, ПРОЙДЕННЫЙ ПО ХОДУ, НАЗАД НЕ ЗОВЁТ (ТЗ 24.09.2026, п. 9)
+		# Жалоба: «хвосты отрываются, бегут назад к берегу, разворачиваются и
+		# бегут обратно». Толпа выносила бойца за точку входа (или сжимала за
+		# кромку полосы брода), прямой на выход ему не было видно — и пропуск
+		# угла по видимости не срабатывал: он возвращался к пройденному входу.
+		# Вход — не угол обхода, срезать тут нечего: поравнялся по ходу или
+		# уже стоит у русла — сразу к выходу. Боком к воде его доведёт
+		# скольжение шага вдоль кромки, а не разворот
+		if _route_i == _route_ford_i and _route_ford_passed(mypos):
+			_route_advance()
+			return
 		_route_los_t -= delta
 		if _route_los_t <= 0.0:
 			_route_los_t = ROUTE_LOS_SEC
@@ -5810,7 +5848,12 @@ func _process_move(delta: float) -> void:
 		if nav_active and _Opt.nav_detour_move and _route_i >= _route.size() \
 				and dist > NAV_DIR_MIN:
 			_nav_t -= delta
-			if _nav_t <= 0.0:
+			if _nav_t <= 0.0 and _skip_nav_detour():
+				# Лесоруб стены (Worker): лес его не держит, обход ему не нужен
+				_nav_t = NAV_RECHECK_SEC
+				if not _atk_route.is_empty():
+					_atk_route = PackedVector3Array()
+			elif _nav_t <= 0.0:
 				if GameManager.nav_blocked(mypos, move_target, _nav_clear):
 					_nav_t = NAV_RECHECK_SEC + float(get_instance_id() % 7) * 0.03
 					GameManager.nav_who = stat_id
@@ -7170,6 +7213,19 @@ func _charge_impact(target: Unit, dirn: Vector3) -> void:
 	# он получает их укол и идёт дальше — это босс, а не кабан. СТЕНА КОПИЙ
 	# (spearman_1d, спринт 18) останавливает и его
 	var trample: int = _trample_count()
+	# ── КОННИЦА НА КОПЬЯ В ЛОБ: ВОЛНЫ (ТЗ 24.09.2026, п. 2) ────────────────
+	# Без «Стены копий» первая волна теряет 50 % СВОЕГО максимального запаса,
+	# вторая и следующие — 25 % (волну считает CavalryImpactHandler по отряду
+	# копейщиков). Со «Стеной копий» та же доля ×3 («300 % входящего урона»):
+	# первая волна гибнет на копьях, вторая теряет 75 %. Топчущего (тролль)
+	# это не касается — копья его только царапают (charge_counter_frac)
+	if trample <= 0 and target.repels_charge() and target._faces_charge(dirn):
+		var wave_frac: float = _CavImpact.front_wave_frac(target)
+		var wall: bool = target.spear_wall_active()
+		take_frac_damage(wave_frac * (_CavImpact.WALL_COUNTER_MULT if wall else 1.0), target)
+		if wall and not is_dead():
+			target.spear_wall_strike(self)
+		return
 	if target.repels_charge() and target._faces_charge(dirn):
 		var back: float = max_health * charge_counter_frac
 		if back > 0.0:
@@ -7199,7 +7255,16 @@ func _charge_impact(target: Unit, dirn: Vector3) -> void:
 	var cav_prof: Dictionary = _CavImpact.profile(dirn, target)
 	var cav_dmg: float = float(cav_prof["dmg"])
 	var cav_kb: float = float(cav_prof["kb"])
-	for n in GameManager.unit_grid.query_radius(at, charge_splash):
+	var cav_sec: int = int(cav_prof["sector"])
+	# ── ТЫЛ И ФЛАНГ: ДОЛЯ ЗАПАСА КАЖДОМУ НАКРЫТОМУ (ТЗ 24.09.2026, п. 2) ────
+	# Удар в спину снимает у каждого накрытого 50 % МАКСИМАЛЬНОГО запаса, во
+	# фланг — 25 %, мимо брони, с разлётом. Круг шире лобового
+	# (SIDE_SPLASH_MULT): в тыл конница влетает в строй, а не упирается в
+	# него, и «перерезать её в ближнем бою» строю должно быть уже некем
+	var splash: float = charge_splash
+	if trample <= 0 and cav_sec != _CavImpact.SECTOR_FRONT:
+		splash *= _CavImpact.SIDE_SPLASH_MULT
+	for n in GameManager.unit_grid.query_radius(at, splash):
 		var v := n as Unit
 		if v == null or not is_instance_valid(v) or v.is_dead():
 			continue
@@ -7219,6 +7284,41 @@ func _charge_impact(target: Unit, dirn: Vector3) -> void:
 			if is_instance_valid(v3) and not v3.is_dead():
 				_trample_kills += 1
 				v3.take_damage(v3.max_health * 100.0, self)
+	if trample <= 0 and cav_sec != _CavImpact.SECTOR_FRONT:
+		var sfrac: float = _CavImpact.sector_frac(cav_sec)
+		# ── ЛЕТЯТ ТОЛЬКО ПЕРВЫЕ ДВА РЯДА (ТЗ 24.09.2026, второе письмо) ─────
+		# «Уменьшить разлёт: отлетать должны только первые 1-2 ряда». Урон
+		# получают все накрытые, а отлёт — те, кто в двух рядах от точки
+		# касания по ходу удара, и короче прежнего (SIDE_KNOCK_MULT)
+		var first_along := INF
+		for nv0 in victims:
+			var sv0 := nv0 as Unit
+			if sv0 == null or not is_instance_valid(sv0) or sv0.is_dead():
+				continue
+			var o0: Vector3 = sv0.global_position - mp
+			var al0: float = o0.x * dirn.x + o0.z * dirn.z
+			if al0 >= -0.3:
+				first_along = minf(first_along, al0)
+		for nv in victims:
+			var sv := nv as Unit
+			if sv == null or not is_instance_valid(sv) or sv.is_dead():
+				continue
+			var soff: Vector3 = sv.global_position - mp
+			var along: float = soff.x * dirn.x + soff.z * dirn.z
+			if along < -0.3:
+				continue    # позади всадника — не накрыт
+			sv.take_frac_damage(sfrac, self)
+			if not is_instance_valid(sv) or sv.is_dead():
+				continue
+			var row: float = (along - first_along) / maxf(charge_row_depth, 0.5)
+			if row <= 1.5:
+				sv.apply_knockback(dirn, charge_knockback * _CavImpact.SIDE_KNOCK_MULT, at)
+				if cav_sec == _CavImpact.SECTOR_REAR and row <= 0.5:
+					sv.knock_down(CHARGE_ROW_KNOCKDOWN_SEC)
+		_CavImpact.apply_morale(target, cav_prof)
+		if charge_breakthrough > 0.0:
+			push_smooth(dirn, charge_breakthrough, true)
+		return
 	# ── УДАР ПО РЯДАМ (свиноконница, заказ спринта 15) ───────────────────
 	if charge_row_kill > 0 and trample <= 0:
 		_charge_rows(victims, mp, dirn, at, cav_dmg, cav_kb)
@@ -7330,8 +7430,9 @@ func knock_down(sec: float) -> void:
 	velocity = Vector3.ZERO
 	if GameManager.main != null and _down_prop == null:
 		var gp: Vector3 = global_position
+		# live = true: сбитый с ног ЖИВ и не темнеет (ТЗ 24.09.2026, второе письмо)
 		_down_prop = GameManager.corpses.spawn(self, GameManager.main.world_root(),
-			GameManager.get_terrain_height(gp.x, gp.z))
+			GameManager.get_terrain_height(gp.x, gp.z), true)
 	leave_render()
 	if _active_sprite != null and is_instance_valid(_active_sprite):
 		_active_sprite.visible = false
@@ -8286,6 +8387,29 @@ func _upgrade_damage_bonus() -> float:
 ## Проверка стоит ОДНО вычитание и одно сравнение и делается по КВАДРАТАМ.
 ## Промах кэша означает свой скан — ровно как до кэша; частота этих сканов
 ## задана таймером авто-агро (0.5–2 с), а не кадром
+## Ближайший живой боец чужого отряда (состав читается напрямую — без
+## squad_members(), который аллоцирует и распускает пустой отряд)
+func _nearest_of_squad(sid: int, mp: Vector3, fallback: Node3D) -> Node3D:
+	var raw: Variant = GameManager.squads.get(sid)
+	if raw == null:
+		return fallback
+	var best: Node3D = fallback
+	var bd := INF
+	for m in (raw as Dictionary)["members"]:
+		if m == null or not is_instance_valid(m):
+			continue
+		var u := m as Unit
+		if u.is_dead():
+			continue
+		var up: Vector3 = u.position if u._local_xform else u.global_position
+		var dx: float = up.x - mp.x
+		var dz: float = up.z - mp.z
+		var d: float = dx * dx + dz * dz
+		if d < bd:
+			bd = d
+			best = u
+	return best
+
 func _squad_cached_enemy(range_limit: float) -> Node3D:
 	if not _Opt.squad_target_cache or squad_id == 0:
 		return _find_nearest_enemy_in_range(range_limit, "cache_off")
@@ -8307,6 +8431,13 @@ func _squad_cached_enemy(range_limit: float) -> Node3D:
 		var hz: float = hp.z - mp2.z
 		var lim: float = range_limit + _pad_of(hit)
 		if hx * hx + hz * hz <= lim * lim:
+			# ── ФРОНТ НА ФРОНТ (ТЗ 24.09.2026, второе письмо) ────────────────
+			# Общий ответ отряда — это С КАКИМ ОТРЯДОМ драться (фокус по
+			# знаменосцу, прежний заказ). Модель внутри него каждый берёт
+			# БЛИЖАЙШУЮ К СЕБЕ: одна модель на весь отряд стягивала строй 10×10
+			# в точку («сжимается в 1×1 ради одной цели»)
+			if hu != null and hu.squad_id != 0:
+				return _nearest_of_squad(hu.squad_id, mp2, hit)
 			return hit
 		# Ответ отряда мне не подходит — ищу сам. Кэш при этом НЕ перетираем:
 		# для того, кто его положил, он верен, и обнулять чужой верный ответ
@@ -8423,6 +8554,17 @@ func _find_nearest_enemy_in_range(range_limit: float, site: String = "?") -> Nod
 ## Счётчик atk_damage — списание урона целиком: снятие здоровья, отметка отряда,
 ## ответная реакция, гибель. Считается на СТОРОНЕ ЦЕЛИ, поэтому попадает в общий
 ## тик через того, кого бьют, а не через бьющего
+## Снять ДОЛЮ МАКСИМАЛЬНОГО ЗАПАСА — ровно её, мимо брони и щита (удар конницы
+## по сектору, контрудар копий — ТЗ 24.09.2026, п. 2). Смерть, тело, фраг и
+## мораль идут штатным путём take_damage
+var _true_hit_once: bool = false
+func take_frac_damage(frac: float, attacker: Node3D = null) -> void:
+	if frac <= 0.0 or state == State.DEAD:
+		return
+	_true_hit_once = true
+	take_damage(max_health * frac, attacker)
+	_true_hit_once = false
+
 func take_damage(amount: float, attacker: Node3D = null) -> void:
 	if state == State.DEAD:
 		return
@@ -8509,6 +8651,12 @@ func take_damage(amount: float, attacker: Node3D = null) -> void:
 	# всё равно не полагаются
 	if sprinting:
 		actual *= SPRINT_DAMAGE_MULT
+	# ── ДОЛЯ ЗАПАСА — МИМО БРОНИ (take_frac_damage, ТЗ 24.09.2026) ─────────
+	# «50 % от максимального HP» обязано значить ровно половину запаса: броня,
+	# щит и паника сюда не вмешиваются, иначе у бронированного выходило бы 43 %
+	if _true_hit_once:
+		_true_hit_once = false
+		actual = amount
 	current_health -= actual
 	if _Opt.telemetry:
 		GameManager.tm_damage(self, attacker, actual)

@@ -477,10 +477,21 @@ func _block_economy() -> void:
 	var v_empty: float = float(_UCfg.stat("worker", "walk_speed_empty", 3.0))
 	var v_load: float = float(_UCfg.stat("worker", "walk_speed_loaded", 2.0))
 	var haul: float = HAUL_DIST / v_empty + HAUL_DIST / v_load
+	# ── ЦИКЛ У КАЖДОГО РЕСУРСА СВОЙ (ТЗ 23.09.2026) ──────────────────────
+	# Стенд считал ОДИН общий цикл и потому мерил экономику, которой в игре
+	# нет: дерево добывается за 0.8 базового цикла, золото за 1.3. Темп на
+	# дереве и на золоте расходится в полтора раза, и первое исследование
+	# упирается в ТОТ ресурс, которого не хватает, а не в средний по палате
+	var cyc_wood: float = cycle * _UCfg.gather_time_mult(Constants.RESOURCE_WOOD)
+	var cyc_gold: float = cycle * _UCfg.gather_time_mult(Constants.RESOURCE_GOLD)
 	var full: float = cycle + haul
 	var per_min: float = amount / full * 60.0
+	var pm_wood: float = amount / (cyc_wood + haul) * 60.0
+	var pm_gold: float = amount / (cyc_gold + haul) * 60.0
 	print("  цикл добычи %.1f с + ходка %.1f с = %.1f с на %.0f единиц"
 		% [cycle, haul, full, amount])
+	print("  по ресурсам: дерево %.1f с → %.0f ед/мин, золото %.1f с → %.0f ед/мин"
+		% [cyc_wood + haul, pm_wood, cyc_gold + haul, pm_gold])
 	print("  ОДИН рабочий приносит %.0f единиц в минуту" % per_min)
 	for crew in [4, 6, 8, 12]:
 		print("    %2d рабочих → %4.0f ед/мин" % [crew, per_min * float(crew)])
@@ -491,12 +502,25 @@ func _block_economy() -> void:
 	var t1: Dictionary = _Forge.get_node(_Forge.node_id("spearman", "1a"))
 	var w: float = float(t1.get("cost_wood", 0.0))
 	var g: float = float(t1.get("cost_gold", 0.0))
-	var rate_each: float = per_min * 4.0        # по четыре рабочих на ресурс
-	var need: float = maxf(w / maxf(rate_each, 0.01), g / maxf(rate_each, 0.01))
+	# Считается по СВОЕМУ темпу каждого ресурса, а не по общему
+	var need: float = maxf(w / maxf(pm_wood * 4.0, 0.01), g / maxf(pm_gold * 4.0, 0.01))
 	print("  первый узел кузницы: %.0f дерева + %.0f золота" % [w, g])
 	print("  при бригаде 4+4 копится %.1f мин" % need)
-	verdict("E1 первое исследование копится 2-4 минуты",
-		need >= 2.0 and need <= 4.0, "вышло %.1f мин" % need)
+	# ── ОКНО ПЕРЕСЧИТАНО ПО ТЗ 23.09.2026 («не душно, но мотивирует») ────
+	# Было «2-4 минуты» — замысел августа, когда рабочий шёл 2.5/1.6 м/с и
+	# половину цикла тратил на ходку. ОКНО КРАСНЕЛО И ТОГДА: при цене узла
+	# 300 дерева и бригаде 4+4 выходило 1.27 мин, то есть проверка утверждала
+	# темп, которого в конфиге не было НИ РАЗУ с тех пор, как владелец поднял
+	# добычу. Теперь окно названо честно: первый узел — это первая минута-две
+	# партии, а не её первая четверть
+	# ТЗ 24.09.2026 (второе письмо): добыча удвоена по заказу («30 минут одни
+	# дрова») — окно сдвинуто вдвое вниз
+	# ТЗ 24.09.2026 (партия 90 мин): ранние ряды кузницы дешевле (множитель
+	# ряда 1 — 0.6), цель заказа — «1-й уровень доступен на 5-й минуте».
+	# Потолок берётся из economy_model, нижний порог — «не даром» (> 0.1 мин)
+	var row1_by: float = float(preload("res://scripts/economy_model.gd").FORGE_ROW_BY_MIN[1])
+	verdict("E1 первое исследование копится не дольше %.0f мин и не даром" % row1_by,
+		need > 0.1 and need <= row1_by, "вышло %.1f мин" % need)
 
 	# E2 — ТРИ УЛУЧШЕНИЯ ПОДРЯД КУПИТЬ НЕЛЬЗЯ: стартовый запас меньше цены
 	# даже одного узла плюс обязательных построек
@@ -506,9 +530,67 @@ func _block_economy() -> void:
 	var s_wood: float = float(start.get(Constants.RESOURCE_WOOD, 0.0))
 	var s_gold: float = float(start.get(Constants.RESOURCE_GOLD, 0.0))
 	print("  стартовый запас ИИ: %.0f дерева, %.0f золота" % [s_wood, s_gold])
-	verdict("E2 расчётного стартового запаса (ИИ) не хватает и на одно исследование",
-		s_wood < w * 3.0 and s_gold < g * 3.0,
-		"хватило бы на %.1f узла по дереву" % (s_wood / maxf(w, 1.0)))
+	# ── ИЗВЕСТНЫЙ КРАСНЫЙ, И ЭТО РАЗВОРОТ ВЛАДЕЛЬЦА, А НЕ ПОЛОМКА ────────
+	# Проверка писалась под расчётный запас ИИ 450/350. Владелец поднял его до
+	# 15 000+ (как и свой до 20 000, зафиксировано 10.09.2026), и «запаса не
+	# хватает на один узел» стало неверным по его же решению. Вердикт оставлен
+	# ПЕЧАТАТЬ ЧИСЛО, но судит теперь то, что от заказа не зависит: цена узла
+	# должна быть осмысленной долей запаса, иначе древо не читается как выбор
+	print("  запаса ИИ хватает на %.1f узла по дереву" % (s_wood / maxf(w, 1.0)))
+	verdict("E2 цена первого узла — не копейка на фоне запаса ИИ",
+		w > 0.0 and g > 0.0 and (w + g) >= 100.0,
+		"узел стоит %.0f дерева + %.0f золота при запасе %.0f/%.0f" % [w, g, s_wood, s_gold])
+
+	# ── E2б СТАРТОВЫЙ БАНК ХВАТАЕТ НА ЗАКАЗАННЫЙ КОМПЛЕКТ ────────────────
+	# ТЗ 23.09.2026 (третье письмо): «на Normal у игрока не должно быть
+	# простоя; банк позволяет мгновенно построить стартовую инфраструктуру».
+	# Перечень дан заказом дословно, и проверка складывает ЕГО — цены берутся
+	# из конфига, а не переписываются сюда числами (правило 10)
+	var bank: Dictionary = _UCfg.starting_resources(Constants.FACTION_PLAYER)
+	var kit: Dictionary = {}
+	for row in [["castle", 1], ["house", 3], ["barracks", 1], ["smithy", 1]]:
+		var bid: String = String(row[0])
+		var cnt: int = int(row[1])
+		var c: Dictionary = _UCfg.building_cost(bid)
+		for k in c:
+			kit[k] = float(kit.get(k, 0.0)) + float(c[k]) * float(cnt)
+	# два первых узла экономики и отряд копейщиков
+	for nid in ["economy_1a", "economy_1b"]:
+		var n: Dictionary = _Forge.get_node(nid)
+		for ck in ["cost_wood", "cost_gold", "cost_stone", "cost_food"]:
+			var v: float = float(n.get(ck, 0.0))
+			if v <= 0.0:
+				continue
+			var key: int = Constants.RESOURCE_WOOD
+			if ck == "cost_gold": key = Constants.RESOURCE_GOLD
+			elif ck == "cost_stone": key = Constants.RESOURCE_STONE
+			elif ck == "cost_food": key = Constants.RESOURCE_FOOD
+			kit[key] = float(kit.get(key, 0.0)) + v
+	var hire: Dictionary = _UCfg.train_cost("barracks", "spearman")
+	for hk in hire:
+		kit[hk] = float(kit.get(hk, 0.0)) + float(hire[hk])
+	var worker_cost: Dictionary = _UCfg.train_cost("castle", "worker")
+	for wk in worker_cost:
+		kit[wk] = float(kit.get(wk, 0.0)) + float(worker_cost[wk]) * 5.0
+	var short: Array = []
+	for key2 in kit:
+		if float(bank.get(key2, 0.0)) < float(kit[key2]):
+			short.append("%s: %.0f < %.0f" % [str(key2), float(bank.get(key2, 0.0)),
+				float(kit[key2])])
+	print("  банк %s" % str(bank))
+	print("  комплект заказа %s" % str(kit))
+	verdict("E2б стартового банка хватает на комплект заказа без простоя",
+		short.is_empty(), "не хватает: %s" % str(short))
+	# ЗАПАС НЕ ДОЛЖЕН БЫТЬ ЧРЕЗМЕРНЫМ: банк ровно под комплект плюс немного,
+	# иначе «нет простоя» превращается в «экономики нет вовсе»
+	var slack_ok := true
+	for key3 in kit:
+		if float(kit[key3]) <= 0.0:
+			continue
+		if float(bank.get(key3, 0.0)) > float(kit[key3]) * 1.6:
+			slack_ok = false
+	verdict("E2в и при этом банк не превращает экономику в декорацию",
+		slack_ok, "банк %s против комплекта %s" % [str(bank), str(kit)])
 
 	# E3 — ЛЕСТНИЦА ТИРОВ МОНОТОННА: каждый следующий ряд дороже
 	var prev := 0.0

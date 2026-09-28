@@ -21,10 +21,22 @@ extends Building
 ## вершины берётся у `GameManager.get_terrain_height`, сверху крохотный
 ## подъём MESH_LIFT против z-fighting с землёй.
 ##
-## ── ОВЦЫ ПРИВЯЗАНЫ К ЗАГОНУ, А НЕ ЗАПЕРТЫ В НЁМ ───────────────────────────
-## `accept_sheep` ставит овце `pen = self` (Sheep.bind_to), и дальше она
-## пасётся сама в радиусе `graze_radius()` — то есть ЗАХОДИТ И ВЫХОДИТ, как
-## и просили. Ограда — не коллизия: физтел в проекте нет вовсе.
+## ── ЗАГОН — «КОЛОДЕЦ РЕСУРСОВ» (ТЗ 23.09.2026, третье письмо) ────────────
+## ТРЕБОВАНИЕ РАЗВЁРНУТО. Прежде здесь было записано: «овцы привязаны к
+## загону, а не заперты в нём — заходят и выходят, как и просили». Новый
+## заказ просит обратного и по пунктам:
+##   • ровно SHEEP_PEN_CAPACITY (5) мест;
+##   • на одну овцу один рабочий, то есть не больше пяти на загон;
+##   • овцы НЕ выходят за ограду;
+##   • забитую заменяет новая через SHEEP_PEN_RESPAWN_SEC — и только пока
+##     мест меньше пяти.
+## Ограда по-прежнему не коллизия (физтел в проекте нет): «не выходят»
+## делается радиусом выпаса, а не стеной.
+##
+## РЕГЕНЕРАЦИЯ СЧИТАЕТСЯ ОТ ЧИСЛА ЖИВЫХ, А НЕ ПО СОБЫТИЮ «ОВЦА УМЕРЛА».
+## Событие пришлось бы ловить на всех путях гибели (разделка, тролль, снос
+## загона, загрузка партии), и любой забытый оставил бы загон навсегда
+## пустым. Проверка состояния раз в такт не может забыть ничего.
 ##
 ## Файл без class_name: подключается через preload (как Tower/Archery).
 
@@ -40,9 +52,12 @@ const MESH_LIFT := 0.05
 
 const FENCE_TEX := "res://assets/environment/resources/Wooden/Wooden Fence_64x64 tile.png"
 
-## Насколько овцам разрешено выходить за ограду (доля полуширины загона).
-## Единица означала бы «строго внутри», а овца обязана заходить и выходить
-const ROAM_FACTOR := 1.35
+## Насколько овцам разрешено отходить от центра (доля полуширины загона).
+## ── БЫЛО 1.35 «ОВЦА ОБЯЗАНА ЗАХОДИТЬ И ВЫХОДИТЬ», СТАЛО 0.72 ────────────
+## Заказ 23.09.2026: «овцы не убегают и находятся только внутри загона».
+## Не единица, а чуть меньше: ровно по кромке овца вставала бы НА ограду, и
+## половина спрайта оказывалась бы снаружи рисунка
+const ROAM_FACTOR := 0.72
 
 ## Ограда без стен: овцы пасутся внутри, рабочий заносит овцу в загон
 func blocks_movement() -> bool:
@@ -58,6 +73,121 @@ func _ready() -> void:
 	display_name = String(_UCfgP.building_cfg("sheep_pen").get("name", "Загон для овец"))
 	super._ready()
 	add_to_group("sheep_pens")
+	# ── ЗАГОН СРАЗУ С ПЯТЬЮ ОВЦАМИ (ТЗ 24.09.2026, п. 1) ─────────────────
+	# Флаг ставит ТОЛЬКО стройка (ConstructionSite._complete и мгновенная
+	# постройка в GameManager): стенды, заводящие загон через .new(), ставят
+	# СВОИХ овец и шестой-седьмой лишней получить не должны. Отложенно — в
+	# _ready точка узла ещё нулевая (см. _build_visual)
+	if stock_on_ready:
+		call_deferred("_stock_initial")
+
+## Заполнить загон до вместимости сразу (новая постройка)
+var stock_on_ready: bool = false
+
+func _stock_initial() -> void:
+	if not is_inside_tree() or _dead:
+		return
+	var guard: int = capacity()
+	while live_count() < capacity() and guard > 0:
+		guard -= 1
+		var before: int = live_count()
+		_spawn_one_sheep()
+		if live_count() <= before:
+			break    # потолок стада игрока — дальше не посадить
+	_respawn_t = _roll_respawn()
+
+## ── СНОС ЗАГОНА УБИВАЕТ СТАДО (ТЗ 24.09.2026, п. 3) ──────────────────────
+## Было «овцы снесённого загона разбегаются» (ТЗ 19.09.2026, блок 3).
+## ТРЕБОВАНИЕ РАЗВЁРНУТО: живые овцы гибнут на месте и ложатся красными
+## тушами — мясо с них по-прежнему можно вынести (туша хозяйская,
+## Worker._next_owned_sheep берёт мёртвых по owner_faction). Делается в _die,
+## а не в _exit_tree: из дерева загон уходит и при смене сцены, и в стендах —
+## там убивать стадо незачем
+func _die() -> void:
+	if not _dead:
+		for s in get_tree().get_nodes_in_group("sheep"):
+			if s == null or not is_instance_valid(s) or s.get("pen") != self:
+				continue
+			if bool(s.get("dead")) or bool(s.get("eaten")):
+				continue
+			if s.has_method("release_from") and s.get("captor") != null:
+				s.call("release_from", s.get("captor"))
+			if s.has_method("kill_by"):
+				s.call("kill_by", null)
+	super._die()
+
+## ── ПЕПЕЛИЩЕ ЗАГОНА ЛЕЖИТ ПЛАШМЯ И РОВНО ПО ЦЕНТРУ (ТЗ 24.09.2026, п. 3) ──
+## Общая руина — ВЕРТИКАЛЬНЫЙ квад, поднятый на половину высоты: на экране
+## он уезжает вверх от центра ограды, а его глубина берётся у точки на земле
+## под ним — туши, лежащие в загоне ЗА этой точкой, уходили под картинку.
+## Ограда нарисована сверху, и пепелище ложится так же — сеткой по рельефу
+## (тот же приём, что у самой ограды). Тогда центр рисунка стоит в центре
+## загона, а любой спрайт, стоящий на нём, рисуется поверх по глубине сам:
+## его точка на земле ближе к камере, чем пол под его верхней частью.
+## Высота плоскости выводится из пропорции картинки с поправкой на наклон
+## камеры (V_STRETCH) — иначе рисунок на экране сплющился бы
+func spawn_ruin() -> Node3D:
+	var ruin: Node3D = super.spawn_ruin()
+	if ruin == null:
+		return null
+	var old: MeshInstance3D = ruin.get_node_or_null("RuinSprite") as MeshInstance3D
+	if old == null:
+		return ruin
+	var q: QuadMesh = old.mesh as QuadMesh
+	var smat: ShaderMaterial = q.material as ShaderMaterial if q != null else null
+	var tex: Texture2D = smat.get_shader_parameter("albedo_tex") as Texture2D if smat != null else null
+	if q == null or tex == null:
+		return ruin
+	var w: float = q.size.x
+	var d: float = q.size.y * _BBUtil.V_STRETCH
+	# Не шире самой ограды. По глубине НЕ ужимаем: плоскость под камерой в 45°
+	# и так укорачивается в 0.71 раза — ровно как рисунок стоящего квада
+	var k: float = minf(1.0, build_size.x * 1.1 / maxf(w, 0.01))
+	w *= k
+	d *= k
+	var org: Vector3 = ruin.global_position
+	var verts := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var idx := PackedInt32Array()
+	for iz in range(MESH_CELLS_Z + 1):
+		for ix in range(MESH_CELLS_X + 1):
+			var u: float = float(ix) / float(MESH_CELLS_X)
+			var v: float = float(iz) / float(MESH_CELLS_Z)
+			var lx: float = -w * 0.5 + u * w
+			var lz: float = -d * 0.5 + v * d
+			var h: float = GameManager.get_terrain_height(org.x + lx, org.z + lz) - org.y
+			verts.append(Vector3(lx, h + MESH_LIFT, lz))
+			uvs.append(Vector2(u, v))
+	for iz2 in range(MESH_CELLS_Z):
+		for ix2 in range(MESH_CELLS_X):
+			var a: int = iz2 * (MESH_CELLS_X + 1) + ix2
+			var b: int = a + 1
+			var c: int = a + MESH_CELLS_X + 1
+			idx.append_array([a, c, b, b, c, c + 1])
+	var arr := []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = verts
+	arr[Mesh.ARRAY_TEX_UV] = uvs
+	arr[Mesh.ARRAY_INDEX] = idx
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	var mat := StandardMaterial3D.new()
+	mat.albedo_texture = tex
+	mat.albedo_color = smat.get_shader_parameter("modulate") if smat.get_shader_parameter("modulate") is Color else Color.WHITE
+	mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+	mat.alpha_scissor_threshold = 0.5
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mesh.surface_set_material(0, mat)
+	# ПРАВИЛО 6: remove_child перед queue_free — имя «RuinSprite» занимает новый
+	ruin.remove_child(old)
+	old.queue_free()
+	var mi := MeshInstance3D.new()
+	mi.name = "RuinSprite"
+	mi.mesh = mesh
+	ruin.add_child(mi)
+	return ruin
 
 func _exit_tree() -> void:
 	# ОВЦЫ ПЕРЕЖИВАЮТ ЗАГОН: снесённая ограда не убивает стадо, но привязка
@@ -181,7 +311,13 @@ func capacity() -> int:
 ## OVERFLOW_RADIUS. Кто внутри, решает ПОРЯДОК ПРИВЯЗКИ (Sheep.bind_seq):
 ## первые десять по счётчику — внутри, остальные снаружи; выбыла внутренняя
 ## — следующая по порядку занимает её место сама, при первой же перебежке
-const INSIDE_CAP := 10
+## ── ВНУТРИ ВСЕ, КТО ЕСТЬ (ТЗ 23.09.2026) ─────────────────────────────────
+## Было «первые десять внутри, остальные вокруг в OVERFLOW_RADIUS»: при
+## тридцати местах иначе и не расставишь. Пять овец помещаются внутрь все,
+## и потолок выведен из вместимости — двумя числами они разошлись бы
+const INSIDE_CAP := _UCfgP.SHEEP_PEN_CAPACITY
+## Оставлен для тех, кто пасётся ВНЕ загона (у замка, дикие): к самому загону
+## он больше не относится
 const OVERFLOW_RADIUS := 20.0
 const INSIDE_FRAC := 0.62
 var _bind_counter: int = 0
@@ -222,7 +358,17 @@ func graze_center() -> Vector3:
 func graze_radius() -> float:
 	return maxf(build_size.x, build_size.z) * 0.5 * ROAM_FACTOR
 
-## Сколько овец уже привязано к ЭТОМУ загону
+## Сколько ЖИВЫХ овец в загоне (туши место не держат — ТЗ 24.09.2026)
+func live_count() -> int:
+	var n := 0
+	for s in get_tree().get_nodes_in_group("sheep"):
+		if s == null or not is_instance_valid(s):
+			continue
+		if s.get("pen") == self and not bool(s.get("eaten")) and not bool(s.get("dead")):
+			n += 1
+	return n
+
+## Сколько овец уже привязано к ЭТОМУ загону (с тушами)
 func sheep_count() -> int:
 	var n := 0
 	for s in get_tree().get_nodes_in_group("sheep"):
@@ -235,7 +381,7 @@ func sheep_count() -> int:
 ## Место есть, когда не полон ЗАГОН и не полон ПОТОЛОК ИГРОКА
 ## (Sheep.owned_cap_ok, SHEEP_PLAYER_MAX — ТЗ 19.09.2026)
 func has_room() -> bool:
-	if sheep_count() >= capacity():
+	if live_count() >= capacity():
 		return false
 	return bool(_SheepP.owned_cap_ok(faction))
 
@@ -249,7 +395,168 @@ func accept_sheep(s: Node3D) -> bool:
 	s.call("bind_to_pen", self, faction)
 	return true
 
-## Подпись для панели интерфейса (заказ: «Вместимость: X / 20 овец»)
+# ─────────────────────────────────────────────────────────────────────────────
+# РЕГЕНЕРАЦИЯ СТАДА: ЗАГОН САМ ВОСПОЛНЯЕТ ПУСТЫЕ МЕСТА
+# ─────────────────────────────────────────────────────────────────────────────
+# (ТЗ 23.09.2026, третье письмо.) Загон — «колодец»: пока в нём меньше пяти
+# овец, через SHEEP_PEN_RESPAWN_SEC появляется одна новая. Таймер общий на
+# загон, а не свой у каждого пустого места: пять пустых мест не должны
+# заполниться разом через двенадцать секунд — стадо восстанавливается по
+# одной овце, и это видно глазом.
+#
+# ТАКТ РЕДКИЙ И СВОЙ. Загон — здание, его _process идёт и так; заводить ради
+# одной проверки Timer значило бы завести узел на каждый загон
+
+## Сколько ждать до следующей овцы (взводится, как только место освободилось).
+## ── НАЧАЛЬНОЕ ЗНАЧЕНИЕ — ПОЛНАЯ ПАУЗА, А НЕ НОЛЬ ────────────────────────
+## С нулём первый же кадр после постройки давал `_respawn_t <= 0`, и загон
+## рождал овцу МГНОВЕННО, ещё до того, как игрок увидел ограду. В стенде это
+## выглядело как «в загоне шесть овец из пяти»: стенд ставил свои пять, а
+## одну загон уже успел добавить сам
+var _respawn_t: float = _UCfgP.SHEEP_PEN_RESPAWN_SEC
+
+## Пауза до следующей овцы — жребий в [MIN, MAX] (ТЗ 24.09.2026: «20-30 с»).
+## Свой генератор, а не общий randf(): новый потребитель общего потока
+## сдвинул бы все сеяные жребии партии (правило проекта)
+var _rng := RandomNumberGenerator.new()
+func _roll_respawn() -> float:
+	return _rng.randf_range(_UCfgP.SHEEP_PEN_RESPAWN_MIN_SEC, _UCfgP.SHEEP_PEN_RESPAWN_SEC)
+## Стендам: сколько овец загон восполнил за партию
+var sheep_respawned: int = 0
+
+## SUPER ОБЯЗАТЕЛЕН: у Building свой _process (очередь найма, полоса
+## готовности, ремонт). Перекрой его молча — и загон перестал бы делать всё,
+## что умеет обычное здание, а заметили бы это далеко не сразу
+## ЗАГОН ТИКАЕТ ВСЕГДА (ТЗ 24.09.2026, второе письмо). Базовое здание
+## включает _process только тем, кому он нужен (_needs_tick), — у загона флага
+## не было, и таймер респауна не шёл НИ РАЗУ: овцы появлялись только в
+## стендах, звавших _tick_restock руками. Это и был «пустой загон с пятью
+## рабочими» со скриншота
+func _needs_tick() -> bool:
+	return true
+
+func _process(delta: float) -> void:
+	super._process(delta)
+	_tick_restock(delta)
+
+## Один шаг восполнения. Вызывается и стендом напрямую — ему незачем ждать
+## реального такта в двенадцать секунд
+## Стендам, которые сажают своих овец руками: false — загон не досаживает
+var auto_restock: bool = true
+
+func _tick_restock(delta: float) -> void:
+	if not auto_restock and delta < 1.0:
+		return
+	if _dead or faction == Constants.FACTION_NEUTRAL:
+		return
+	var n: int = live_count()
+	if n >= capacity():
+		# Загон полон — часы сбрасываются: пауза отсчитывается ОТ ТОГО МИГА,
+		# когда место освободилось, а не с постройки загона
+		_respawn_t = _roll_respawn()
+		return
+	_respawn_t -= delta
+	if _respawn_t > 0.0:
+		return
+	_respawn_t = _roll_respawn()
+	_spawn_one_sheep()
+
+## Новая овца в случайной точке внутри ограды.
+## ИМЯ СО СУФФИКСОМ, потому что `_spawn_one` ЗАНЯТО РОДИТЕЛЕМ: у Building так
+## зовётся выпуск нанятого юнита, и переопределение с другой сигнатурой —
+## ошибка разбора («The function signature doesn't match the parent»)
+func _spawn_one_sheep() -> void:
+	if not is_inside_tree():
+		return
+	# Потолок стада игрока — тот же, что у переноски (Sheep.owned_cap_ok)
+	if not bool(_SheepP.owned_cap_ok(faction)):
+		return
+	var sh = _SheepP.new()
+	get_parent().add_child(sh)
+	var a: float = _rng.randf() * TAU
+	var r: float = sqrt(_rng.randf()) * inside_radius()
+	var px: float = global_position.x + cos(a) * r
+	var pz: float = global_position.z + sin(a) * r
+	sh.global_position = Vector3(px, GameManager.get_terrain_height(px, pz), pz)
+	if sh.has_method("bind_to_pen"):
+		sh.call("bind_to_pen", self, faction)
+	sheep_respawned += 1
+
+# ─────────────────────────────────────────────────────────────────────────────
+# РАБОЧИЕ: ОДИН НА ОВЦУ
+# ─────────────────────────────────────────────────────────────────────────────
+
+## Сколько рабочих сейчас занято овцами ЭТОГО загона
+func workers_here() -> int:
+	var n := 0
+	for w in get_tree().get_nodes_in_group(Constants.unit_group(faction)):
+		if w == null or not is_instance_valid(w):
+			continue
+		if not (w is Worker) or (w as Unit).is_dead():
+			continue
+		if (w as Worker).farm_pen() == self:
+			n += 1
+			continue
+		var tgt = (w as Worker).sheep_target()
+		if tgt != null and is_instance_valid(tgt) and tgt.get("pen") == self:
+			n += 1
+	return n
+
+## ── КАКУЮ ОВЦУ ДАТЬ ФЕРМЕРУ ЗАГОНА (ТЗ 24.09.2026, п. 1) ──────────────────
+## Сперва ТУША с мясом и свободным местом у ножа (доработать начатое), потом
+## живая свободная овца. Овцы, на которых уже нацелен другой рабочий, в
+## выбор не идут — иначе двое шли бы к одной, и второй разворачивался бы на
+## полпути. null — работы сейчас нет, фермер ждёт у ограды
+func pick_sheep_for(worker: Node) -> Node3D:
+	var taken: Dictionary = {}
+	for w in get_tree().get_nodes_in_group(Constants.unit_group(faction)):
+		if w == worker or w == null or not is_instance_valid(w) or not (w is Worker):
+			continue
+		var t = (w as Worker).sheep_target()
+		if t != null:
+			taken[t] = true
+	var from: Vector3 = (worker as Node3D).global_position if worker is Node3D else global_position
+	var best_body: Node3D = null
+	var bd_body := INF
+	var best_live: Node3D = null
+	var bd_live := INF
+	for sh in get_tree().get_nodes_in_group("sheep"):
+		if sh == null or not is_instance_valid(sh) or sh.get("pen") != self or taken.has(sh):
+			continue
+		if bool(sh.get("eaten")):
+			continue
+		var d: float = from.distance_squared_to((sh as Node3D).global_position)
+		if bool(sh.get("dead")):
+			if int(sh.get("meat_left")) <= 0 or not bool(sh.call("butcher_has_room")):
+				continue
+			if d < bd_body:
+				bd_body = d
+				best_body = sh
+		elif bool(sh.call("is_free")) and d < bd_live:
+			bd_live = d
+			best_live = sh
+	return best_body if best_body != null else best_live
+
+## Где фермер ждёт новую овцу: у проёма ограды (нижняя кромка), а не в центре
+func farm_wait_point(worker: Node) -> Vector3:
+	var off: float = 0.0
+	if worker != null:
+		off = (fposmod(float(worker.get_instance_id()) * 0.618, 1.0) - 0.5) * build_size.x * 0.6
+	var p: Vector3 = global_position + Vector3(off, 0.0, build_size.z * 0.5 + 1.0)
+	p.y = GameManager.get_terrain_height(p.x, p.z)
+	return p
+
+## Можно ли поставить сюда ещё одного рабочего.
+## ПРАВИЛО «ОДИН РАБОЧИЙ НА ОДНУ ОВЦУ» ВЫРАЖЕНО ДВУМЯ УСЛОВИЯМИ СРАЗУ, и оба
+## нужны: потолок по загону (SHEEP_PEN_WORKERS) отсекает шестого, даже если
+## овец пять, а занятость конкретной овцы (Sheep.butcher_count) — второго
+## желающего на ту же тушу
+func worker_slot_free() -> bool:
+	return workers_here() < _UCfgP.SHEEP_PEN_WORKERS
+
+## Подпись для панели интерфейса
 func capacity_text() -> String:
 	var n: int = sheep_count()
-	return "Вместимость: %d / %d овец (внутри %d / %d)" % [n, capacity(), mini(n, INSIDE_CAP), INSIDE_CAP]
+	var w: int = workers_here()
+	return "Овец: %d / %d · рабочих: %d / %d" % [
+		n, capacity(), w, _UCfgP.SHEEP_PEN_WORKERS]

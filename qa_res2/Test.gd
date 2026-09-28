@@ -630,29 +630,34 @@ func _f_mining() -> void:
 # а не оставаться числом в таблице. Числа берутся из конфига, а не пишутся сюда:
 # стенд проверяет, что прибавка равна ровно той, что объявлена в узле.
 func _g_worker_forge() -> void:
+	# ── ТЗ 24.09.2026, п. 11: ВСЁ В ПРОЦЕНТАХ ───────────────────────────────
+	# Секундный bonus_gather и штучный bonus_carry из древа сняты. Груз —
+	# доля bonus_carry_pct (вкладка рабочего), темп — доля по ресурсу
+	# (bonus_gather_wood, вкладка «economy»). Стенд проверяет прежнее свойство:
+	# прибавка ДОХОДИТ до рабочего ровно такой, какой объявлена в узле
 	print("\n═════ G. ВЕТКА РАБОЧЕГО ═════")
 	var f: int = Constants.FACTION_PLAYER
 	var w := _new_worker(Vector3(0.0, 0.0, -600.0))
 	await frames(2)
-
-	# Ищем в древе рабочего узлы с нужными ключами — позицию не хардкодим
 	var carry_id := ""
 	var carry_val := 0.0
 	var gather_id := ""
 	var gather_val := 0.0
 	for n in _Forge.tree("worker"):
 		var d: Dictionary = n
-		if carry_id.is_empty() and float(d.get("bonus_carry", 0.0)) > 0.0:
-			carry_id = String(d["id"]); carry_val = float(d["bonus_carry"])
-		if gather_id.is_empty() and float(d.get("bonus_gather", 0.0)) > 0.0:
-			gather_id = String(d["id"]); gather_val = float(d["bonus_gather"])
-	verdict("G0 в ветке рабочего есть узлы вместимости и темпа добычи",
+		if carry_id.is_empty() and float(d.get("bonus_carry_pct", 0.0)) > 0.0:
+			carry_id = String(d["id"]); carry_val = float(d["bonus_carry_pct"])
+	for n2 in _Forge.tree("worker"):
+		var d2: Dictionary = n2
+		if gather_id.is_empty() and float(d2.get("bonus_gather_wood", 0.0)) > 0.0:
+			gather_id = String(d2["id"]); gather_val = float(d2["bonus_gather_wood"])
+	verdict("G0 в древе рабочего есть узлы груза и темпа добычи (доли)",
 		not carry_id.is_empty() and not gather_id.is_empty(),
-		"груз=%s (+%.2f), темп=%s (−%.2f с)" % [carry_id, carry_val, gather_id, gather_val])
+		"груз=%s (+%.0f %%), темп=%s (+%.0f %%)" % [carry_id, carry_val * 100.0, gather_id, gather_val * 100.0])
 	if carry_id.is_empty() or gather_id.is_empty():
 		w.queue_free()
 		return
-
+	w._gather_res_type = Constants.RESOURCE_WOOD
 	var carry0: float = w.carry_capacity()
 	var cycle0: float = w._cycle_time()
 	GameManager.finish_research(f, carry_id)
@@ -660,26 +665,19 @@ func _g_worker_forge() -> void:
 	await frames(2)
 	var carry1: float = w.carry_capacity()
 	var cycle1: float = w._cycle_time()
-
-	verdict("G1 вместимость выросла ровно на объявленное узлом",
-		is_equal_approx(carry1 - carry0, carry_val),
-		"было %.1f, стало %.1f (узел даёт %.1f)" % [carry0, carry1, carry_val])
-	verdict("G2 цикл добычи сократился ровно на объявленное узлом",
-		is_equal_approx(cycle0 - cycle1, gather_val),
-		"было %.2f с, стало %.2f с (узел даёт %.2f с)" % [cycle0, cycle1, gather_val])
-
-	# Экономический бонус НЕ должен протекать на бойцов: узлы древа адресные
-	var leak: float = GameManager.unit_bonus(f, "spearman", "bonus_carry") \
-		+ GameManager.unit_bonus(f, "spearman", "bonus_gather")
-	verdict("G3 экономический бонус не протекает на копейщиков",
-		is_zero_approx(leak), "утечка %.2f" % leak)
-
-	# Пол цикла: никакая прокачка не должна превратить добычу в струю
+	verdict("G1 груз вырос ровно на объявленную долю",
+		absf(carry1 - carry0 * (1.0 + carry_val)) < 0.01,
+		"было %.2f, стало %.2f (узел +%.0f %%)" % [carry0, carry1, carry_val * 100.0])
+	verdict("G2 цикл рубки сократился ровно на объявленную долю",
+		absf(cycle1 - maxf(cycle0 * (1.0 - gather_val), Worker.MIN_CYCLE_TIME)) < 0.01,
+		"было %.2f с, стало %.2f с (узел −%.0f %%)" % [cycle0, cycle1, gather_val * 100.0])
+	var leak: float = GameManager.unit_bonus(f, "spearman", "bonus_carry_pct")
+	verdict("G3 груз рабочего не протекает на копейщиков", is_zero_approx(leak), "утечка %.2f" % leak)
 	GameManager.unit_bonuses[f]["worker"]["bonus_gather"] = 999.0
 	verdict("G4 цикл добычи не опускается ниже порога",
 		is_equal_approx(w._cycle_time(), Worker.MIN_CYCLE_TIME),
 		"цикл %.2f при пороге %.2f" % [w._cycle_time(), Worker.MIN_CYCLE_TIME])
-
+	GameManager.unit_bonuses[f]["worker"].erase("bonus_gather")
 	w.queue_free()
 	await frames(2)
 

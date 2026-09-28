@@ -222,8 +222,19 @@ func _run() -> void:
 	var one_hit: float = _UCfg.damage_after_armor((men[0] as Unit).attack_damage, arm) if alive_r else 0.0
 	# Обычный укол копий с разгона (charge_counter_frac от запаса всадника)
 	# идёт ПОМИМО стены — вычитаем его и судим о добавке стены
-	var back_dmg: float = _UCfg.damage_after_armor(rider.max_health * rider.charge_counter_frac, arm) if alive_r else 0.0
-	var wall_dmg: float = lost - back_dmg
+	# ТЗ 24.09.2026, п. 2: укол копий в лоб — ДОЛЯ запаса всадника мимо брони
+	# по волне (первая 50 %, следующие 25 %), со стеной ×3. Какая волна это
+	# была — стенду знать не нужно: берём ту, при которой остаток — удар стены
+	const _CavS := preload("res://scripts/units/CavalryImpactHandler.gd")
+	var back_dmg: float = 0.0
+	var wall_dmg: float = lost
+	if alive_r:
+		for wf in [_CavS.FIRST_WAVE_FRAC, _CavS.NEXT_WAVE_FRAC]:
+			var bd: float = rider.max_health * float(wf) * _CavS.WALL_COUNTER_MULT
+			var wd: float = lost - bd
+			if wd >= one_hit * 2.5 and wd <= one_hit * 3.6:
+				back_dmg = bd
+				wall_dmg = wd
 	verdict("B7 урон контакта стены — 300 %% удара копейщика (%.0f при обычном %.0f, укол копий %.0f отдельно)" % [wall_dmg, one_hit, back_dmg],
 		alive_r and wall_dmg >= one_hit * 2.5 and wall_dmg <= one_hit * 3.6, "снято всего %.1f" % lost)
 	verdict("B8 всадник остановлен: разгон и напор сняты", alive_r and rider._push_after_cap() == 0.0
@@ -485,29 +496,23 @@ func _run() -> void:
 				sh3.call("eat")
 		castle.queue_free()
 		keep.queue_free()
-	# Рудник орды восстанавливается сам
+	# Рудник орды восстанавливается сам. ТЗ 25.09.2026, п. 6: рудник больше
+	# не умирает и не оставляет руину — снос сбрасывает его в ничейный, и
+	# через MINE_RESTORE_SEC ТОТ ЖЕ узел возвращается орде (E14-E16 переписаны)
 	var gm: Node = GameManager.goblin_mine
 	if gm != null and is_instance_valid(gm):
-		var at: Vector3 = (gm as Node3D).global_position
 		var pend0: int = GameManager.mine_restore_pending
 		var rs0: int = GameManager.mine_restores
 		(gm as Building).take_damage(1e9)
 		await pframes(3)
 		verdict("E14 снос рудника орды взводит восстановление (60 с)", GameManager.mine_restore_pending == pend0 + 1
-			and (not is_instance_valid(gm) or (gm as Building).is_dead()) and is_equal_approx(Mine.MINE_RESTORE_SEC, 60.0))
-		GameManager._restore_mine_at(at, Constants.FACTION_GOBLIN)
+			and is_instance_valid(gm) and (gm as Mine).is_neutral() and is_equal_approx(Mine.MINE_RESTORE_SEC, 60.0))
+		(gm as Mine)._restore_owner(Constants.FACTION_GOBLIN)
 		await pframes(2)
-		var back: Node = null
-		for b in get_tree().get_nodes_in_group("goblin_buildings"):
-			if b is Mine and (b as Node3D).global_position.distance_to(at) < 2.0 and not (b as Building).is_dead():
-				back = b
-		verdict("E15 по таймеру руина снова рудник орды", back != null and GameManager.mine_restores == rs0 + 1
-			and int((back as Building).faction) == Constants.FACTION_GOBLIN)
-		var ruins_left := 0
-		for r in get_tree().get_nodes_in_group("ruins"):
-			if is_instance_valid(r) and String(r.get_meta("ruin_building_id", "")) == "mine" and (r as Node3D).global_position.distance_to(at) < 2.0:
-				ruins_left += 1
-		verdict("E16 руина снята", ruins_left == 0)
+		verdict("E15 по таймеру рудник снова у орды", is_instance_valid(gm) and GameManager.mine_restores == rs0 + 1
+			and int((gm as Building).faction) == Constants.FACTION_GOBLIN)
+		verdict("E16 рудник не удалялся — тот же узел, руины нет", is_instance_valid(gm)
+			and not (gm as Building).is_dead() and GameManager.goblin_mine == gm)
 
 	print("\n═════ F. СКАЛЫ ═════")
 	GameManager.world_bounds_enabled = true

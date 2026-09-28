@@ -82,6 +82,10 @@ uniform float depth_push = 0.0;
 // стоящего в трёх метрах ПЕРЕД башней. С якорем спрайт сортируется по точке
 // ХОЗЯИНА (подножие постройки): кто стоит перед стеной — тот и поверх крыши.
 // Ряды на крыше разводятся между собой уже depth_push
+// ── РАСТВОРЕНИЕ (руины, ТЗ 24.09.2026): 0 — целиком, 1 — исчез. Дизер по
+// UV, а не прозрачность: срез альфы у материала сохраняется (см. CLAUDE.md —
+// «порог среза не снимать никогда»)
+uniform float dissolve = 0.0;
 uniform float depth_anchor_on = 0.0;
 uniform vec3 depth_anchor = vec3(0.0);
 varying float v_base_vz;
@@ -147,6 +151,12 @@ void fragment() {
 		? floor(mod(TIME * frame_fps + frame_phase, frame_count))
 		: 0.0;
 	vec2 uv = vec2((UV.x + fidx) / frame_count, UV.y);
+	if (dissolve > 0.0) {
+		vec2 cell = floor(UV * 64.0);
+		if (fract(sin(dot(cell, vec2(12.9898, 78.233))) * 43758.5453) < dissolve) {
+			discard;
+		}
+	}
 	vec4 col = texture(albedo_tex, uv) * modulate;
 	ALBEDO = col.rgb;
 	ALPHA = col.a;

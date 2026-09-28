@@ -465,13 +465,13 @@ func _check_houses(keep: Castle) -> void:
 	var h0: int = GameManager.house_count(f)
 	var c0: int = GameManager.castle_count(f)
 	var wc0: int = GameManager.pop_worker_cap(f)
-	var sc0: int = GameManager.pop_squad_cap(f)
+	var sc0: int = GameManager.pop_army_cap(f)
 	# КРЕПОСТЬ ТОЖЕ ДАЁТ ЛИМИТ (заказ 10.09.2026): в стенде на карте стоит
 	# замок, поэтому ожидание — база плюс его слоты, а не одна база
 	verdict("D1 без домов потолки равны базе плюс крепости",
 		h0 == 0 and wc0 == _UCfg.pop_worker_cap(0, c0)
-		and sc0 == _UCfg.pop_squad_cap(0, c0),
-		"домов %d, крепостей %d, раб. %d, отр. %d" % [h0, c0, wc0, sc0])
+		and sc0 == _UCfg.pop_army_cap(0, c0),
+		"домов %d, крепостей %d, раб. %d, армия %d" % [h0, c0, wc0, sc0])
 	# Три дома разного вида
 	var houses: Array = []
 	var i := 0
@@ -494,18 +494,20 @@ func _check_houses(keep: Castle) -> void:
 	verdict("D2 три дома встали со своими картинками", ids_ok and sprites.size() == 3
 		and not sprites.values().has(false), "%s" % str(sprites))
 	var wc: int = GameManager.pop_worker_cap(f)
-	var sc: int = GameManager.pop_squad_cap(f)
-	verdict("D3 каждый дом даёт +%d рабочих и +%d отряда" % [
-			_UCfg.HOUSE_WORKER_SLOTS, _UCfg.HOUSE_SQUAD_SLOTS],
+	var sc: int = GameManager.pop_army_cap(f)
+	verdict("D3 каждый дом даёт +%d рабочих и +%d мест в армии" % [
+			_UCfg.HOUSE_WORKER_SLOTS, _UCfg.ARMY_HOUSE_UNITS],
 		wc == _UCfg.pop_worker_cap(3, GameManager.castle_count(f))
-			and sc == _UCfg.pop_squad_cap(3, GameManager.castle_count(f)),
-		"раб. %d, отр. %d" % [wc, sc])
+			and sc == _UCfg.pop_army_cap(3, GameManager.castle_count(f)),
+		"раб. %d, армия %d" % [wc, sc])
 	# Панель дома
 	main.hud.show_selection([houses[0]])
 	await frames(2)
 	var txt: String = String(main.hud.info_label.text)
+	# «отряда» сменилось на «мест в армии» (ТЗ 23.09.2026): лимит считается
+	# головами, и подпись обязана говорить то же, что и счётчик наверху
 	verdict("D4 панель дома показывает слоты и еду",
-		txt.find("рабочих") >= 0 and txt.find("отряда") >= 0 and txt.find("еды") >= 0,
+		txt.find("рабочих") >= 0 and txt.find("армии") >= 0 and txt.find("еды") >= 0,
 		"текст «%s»" % txt.replace("\n", " | "))
 	main.hud.show_selection([])
 	# Ворота найма: отряды до потолка принимаются, сверх — нет и не оплачиваются
@@ -516,19 +518,26 @@ func _check_houses(keep: Castle) -> void:
 	await pframes(3)
 	ResourceManager.add_resource(f, Constants.RESOURCE_WOOD, 50000.0)
 	ResourceManager.add_resource(f, Constants.RESOURCE_GOLD, 50000.0)
+	# ── ПОТОЛОК В БОЙЦАХ, А НЕ В ОТРЯДАХ (ТЗ 23.09.2026) ────────────────
+	# Заказ звучал «кап 2000 юнитов», и проверка обязана мерить тем же. Сколько
+	# отрядов влезет — величина ПРОИЗВОДНАЯ: копейщиков по 60 в отряде, и
+	# заказ, которому не хватает места на ПОЛНЫЙ штат, не принимается вовсе
+	var per_squad: int = _UCfg.squad_size("spearman")
+	var fit: int = sc / per_squad
 	var accepted := 0
-	for _k in range(sc + 3):
+	for _k in range(fit + 3):
 		if br.train_from_config("spearman"):
 			accepted += 1
 	var gold_before: float = ResourceManager.get_amount(f, Constants.RESOURCE_GOLD)
 	var extra: bool = br.train_from_config("spearman")
 	var gold_after: float = ResourceManager.get_amount(f, Constants.RESOURCE_GOLD)
 	verdict("D5 найм отрядов упирается в потолок, лишний не оплачивается",
-		accepted == sc and not extra and is_equal_approx(gold_before, gold_after),
-		"принято %d при потолке %d, лишний=%s, золото %.0f→%.0f" % [
-			accepted, sc, str(extra), gold_before, gold_after])
-	verdict("D5б заказанные считаются занятыми слотами",
-		GameManager.pop_squads_used(f) == sc, "занято %d" % GameManager.pop_squads_used(f))
+		accepted == fit and not extra and is_equal_approx(gold_before, gold_after),
+		"принято %d отрядов по %d при потолке %d бойцов, лишний=%s, золото %.0f→%.0f" % [
+			accepted, per_squad, sc, str(extra), gold_before, gold_after])
+	verdict("D5б заказанные считаются занятыми местами в армии",
+		GameManager.pop_army_used(f) == fit * per_squad,
+		"занято %d из %d" % [GameManager.pop_army_used(f), sc])
 	# Рабочие — своя шкала
 	# ЧАСТЬ ПОТОЛКА УЖЕ ЗАНЯТА: партия открывается стартовой бригадой
 	# (Main.START_WORKER_RESOURCES, пять рабочих), и свободных слотов ровно

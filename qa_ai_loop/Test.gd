@@ -207,6 +207,10 @@ func _run() -> void:
 		w._soa_push_stats()
 		pworkers.append(w)
 	ai._raid_last = -1.0e9
+	# Рейд — только после перемирия ИИ. Часы берутся ИЗ КОНФИГА (ТЗ 24.09.2026
+	# подняло AI_TRUCE_SEC 600 → 900): прежние 601 с стояли внутри перемирия,
+	# и D1-D5 краснели на исправном коде
+	ai.clock = maxf(ai.clock, _AICfg.AI_TRUCE_SEC + 1.0)
 	await think(1)
 	verdict("D1 после мира выходит рейд на экономику игрока", ai.raids_launched >= 1 and ai.raid_sid > 0,
 		"рейдов %d" % ai.raids_launched)

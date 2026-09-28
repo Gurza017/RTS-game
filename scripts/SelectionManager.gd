@@ -1,6 +1,7 @@
 extends Node
 class_name SelectionManager
 const _OptSys := preload("res://scripts/perf_config.gd")
+const _UCfg := preload("res://scripts/unit_stats_config.gd")
 
 const DRAG_THRESHOLD        := 6.0
 const GROUP_DOUBLE_TAP_TIME := 0.35
@@ -25,6 +26,27 @@ const RANK_GAP              := 2.2
 ## Меньше — и обычный прямоугольный строй начнёт сминаться в круг при каждом
 ## приказе; больше — и «колбаса» пролезет обратно (см. _issue_march_keeping_shape)
 const SHAPE_CLAMP_SLACK := 1.5
+
+## ═══════════════════════════════════════════════════════════════════════════
+## РЕЖИМ АТАКИ ПО ПУТИ (клавиша A, ТЗ 23.09.2026)
+## ═══════════════════════════════════════════════════════════════════════════
+## Нажали [A] — курсор становится прицелом, СЛЕДУЮЩИЙ клик (любой кнопкой)
+## задаёт точку Attack-Move и режим гаснет. Второе нажатие [A] и Esc снимают
+## режим, не отдавая приказа.
+##
+## ПОЧЕМУ ОДИН КЛИК, А НЕ «РЕЖИМ ДО ОТМЕНЫ». Так делают все RTS, и причина
+## не в традиции: пока режим висит, ЛЮБОЙ клик игрока — это боевой приказ,
+## включая клик по собственному рабочему или по кнопке панели. Один выстрел
+## делает промах безобидным.
+##
+## ОДНО ПОЛЕ НА ВСЁ. Признак читают трое: обработчик клика (куда деть клик),
+## HUD (подсветить кнопку [A]) и курсор. Второго признака заводить нельзя —
+## разойдутся при первом же Esc
+var attack_move_armed: bool = false
+## Командир отрядных команд (S/C/A). Создаётся лениво: SelectionManager живёт
+## и в стендах, которые про команды строя не знают вовсе
+var _squad_commander: Node = null
+const _SquadCommanderS := preload("res://scripts/SquadCommander.gd")
 
 var camera: Camera3D
 var selected_units: Array  = []
@@ -238,6 +260,37 @@ func _unhandled_input(event: InputEvent) -> void:
 		get_viewport().set_input_as_handled()
 		return
 
+	# ── КОМАНДЫ ОТРЯДУ: [S] ДЕРЖАТЬ · [C] ВОЛЬНО · [A] АТАКА ПО ПУТИ ─────────
+	# (ТЗ 23.09.2026). СТОЯТ ПОСЛЕ Delete, НО ПЕРЕД ГОРЯЧИМИ ГРУППАМИ и перед
+	# клавишами строя — с цифрами они не пересекаются, а порядок здесь читается
+	# как приоритет. ПРОВЕРЯЕТСЯ physical_keycode, а не keycode: на русской
+	# раскладке keycode у этих клавиш — «ы», «с» и «ф», и команда молча
+	# переставала работать ровно тогда, когда игрок печатал в чате
+	if event is InputEventKey and event.pressed and not event.echo \
+			and not event.ctrl_pressed and not event.alt_pressed \
+			and not selected_units.is_empty():
+		var pk: int = event.physical_keycode if event.physical_keycode != 0 else event.keycode
+		match pk:
+			KEY_S:
+				_squad_cmd().stand_ground(self)
+				AudioManager.play_ui("order_move")
+				get_viewport().set_input_as_handled()
+				return
+			KEY_C:
+				_squad_cmd().at_ease(self)
+				AudioManager.play_ui("order_move")
+				get_viewport().set_input_as_handled()
+				return
+			KEY_A:
+				set_attack_move_armed(not attack_move_armed)
+				get_viewport().set_input_as_handled()
+				return
+			KEY_ESCAPE:
+				if attack_move_armed:
+					set_attack_move_armed(false)
+					get_viewport().set_input_as_handled()
+					return
+
 	# ── КЛАВИШИ СТРОЯ ПРИ РАСТЯГЕ ПКМ (спринт 17) ─────────────────────────────
 	# Стоит ПЕРЕД горячими группами: цифры 1-3 те же, и пока идёт растяг,
 	# они означают геометрию строя, а не вызов группы
@@ -271,6 +324,14 @@ func _unhandled_input(event: InputEvent) -> void:
 					_press_over_ui = false
 					drag_rect_ui.visible = false
 					return
+				# ── РЕЖИМ [A]: КЛИК — ЭТО ТОЧКА АТАКИ ПО ПУТИ ──────────────
+				# Стоит ПОСЛЕ проверки панели и ДО разбора «клик или рамка»:
+				# в режиме атаки рамка выделения не нужна вовсе, а промах по
+				# панели обязан просто снять режим (см. _consume_attack_move_click)
+				if attack_move_armed:
+					drag_rect_ui.visible = false
+					_consume_attack_move_click(drag_end)
+					return
 				if drag_start.distance_to(drag_end) < DRAG_THRESHOLD:
 					_handle_single_click(drag_end, event.shift_pressed)
 				else:
@@ -279,6 +340,16 @@ func _unhandled_input(event: InputEvent) -> void:
 
 		elif event.button_index == MOUSE_BUTTON_RIGHT:
 			if event.pressed:
+				# ── РЕЖИМ [A]: ПКМ ТОЖЕ ЗАДАЁТ ТОЧКУ АТАКИ ─────────────────
+				# ТЗ говорит «следующий клик ЛКМ/ПКМ». Расходуется ПО НАЖАТИЮ,
+				# а не по отпусканию: иначе нажатие успело бы завести растяг
+				# строя (_rmb_down), и отпускание построило бы шеренгу вместо
+				# приказа
+				if attack_move_armed:
+					_rmb_down = false
+					_rmb_dragging = false
+					_consume_attack_move_click(event.position)
+					return
 				# Нажатие на панели приказом не становится (см. _rmb_press_over_ui)
 				if _rmb_press_over_ui:
 					return
@@ -883,6 +954,80 @@ func _process_timed(_delta: float) -> void:
 	_fp_last = _fp_mouse
 	_update_formation_preview(_fp_mouse)
 
+## ═══════════════════════════════════════════════════════════════════════════
+## ПРИЗРАК СТРОЯ В ТОЧКЕ ПРИКАЗА (ТЗ 23.09.2026, п. 4)
+## ═══════════════════════════════════════════════════════════════════════════
+## Заказ: «вместо банальных кружочков скопировать текущий боевой порядок и
+## нарисовать силуэты в точке назначения».
+##
+## СТРОЙ КОПИРУЕТСЯ, А НЕ СТРОИТСЯ ЗАНОВО. Берутся ФАКТИЧЕСКИЕ смещения
+## бойцов от их центра и переносятся в точку клика — то есть ровно то, что
+## сделает сам приказ (_issue_march_keeping_shape переносит блок целиком).
+## Построй я здесь «правильную» сетку — призрак обещал бы одно, а войска
+## встали бы иначе, и это хуже, чем не показывать ничего.
+##
+## ЗАЖИМ ТОТ ЖЕ, ЧТО У ПРИКАЗА (SHAPE_CLAMP_SLACK): растянутый боем отряд
+## переносит не «колбасу», а собранный блок, и призрак обязан показывать
+## собранный.
+##
+## ПОТОЛОК ЧИСЛА СИЛУЭТОВ — ЭТО ПРОРЕЖИВАНИЕ, А НЕ ОТКАЗ РИСОВАТЬ.
+## Первая версия выше порога показывала одно кольцо, и владелец увидел ровно
+## это: «при 3+ отрядах жёлтые призраки пропадают» — три отряда копейщиков
+## это 180 моделей против прежнего порога 120. Но и рисовать все 600 нельзя:
+## это 600 unproject_position и жёлтая каша на пол-экрана.
+##
+## Поэтому силуэты ПРОРЕЖИВАЮТСЯ РАВНОМЕРНО: показывается каждый k-й слот,
+## k = ceil(n / GHOST_MAX_SLOTS). Форма строя от этого не меняется — она
+## задаётся расположением точек, а не их плотностью, — а число примитивов
+## остаётся ограниченным при любом размере армии
+const GHOST_MAX_SLOTS := 160
+
+## Куда боец пойдёт по только что отданному приказу. `post_pos` переписывает
+## ЛЮБОЙ command_move (см. CLAUDE.md, «post_pos — это НЕ разметка отряда»),
+## поэтому сразу после приказа там лежит именно цель этого приказа
+func _order_point_of(u: Node) -> Vector3:
+	var un := u as Unit
+	if un == null:
+		return (u as Node3D).global_position
+	var p: Vector3 = un.post_pos
+	if p == Vector3.ZERO or p.x == INF:
+		p = un.global_position
+	p.y = 0.0
+	return p
+
+func _flash_destination(movable: Array, center: Vector3) -> void:
+	if _fp == null or camera == null or movable.is_empty():
+		return
+	var elev := Vector3(0.0, 0.5, 0.0)
+	# ОДИНОЧКА (рабочий, монах, один боец) — кольцо, а не «строй из одного»
+	if movable.size() == 1:
+		_fp.flash_ping(camera.unproject_position(center + elev))
+		return
+	# Шаг прореживания: сколько бы ни было выделено, точек не больше потолка
+	var step: int = maxi(int(ceil(float(movable.size()) / float(GHOST_MAX_SLOTS))), 1)
+	var slots: Array = []
+	var i := 0
+	for u in movable:
+		if i % step == 0:
+			slots.append(camera.unproject_position(_order_point_of(u) + elev))
+		i += 1
+	if slots.is_empty():
+		_fp.flash_ping(camera.unproject_position(center + elev))
+		return
+	# Курс — от центра ВЫДЕЛЕНИЯ к точке приказа; угол считается в ЭКРАННЫХ
+	# координатах, как и у растяга: камера повёрнута, и мировой угол дал бы
+	# треугольники, глядящие мимо
+	var centroid: Vector3 = GameManager._centroid_of(movable)
+	centroid.y = 0.0
+	var course: Vector3 = center - centroid
+	course.y = 0.0
+	if course.length() < 0.01:
+		course = Vector3.FORWARD
+	course = course.normalized()
+	var c_scr: Vector2 = camera.unproject_position(center + elev)
+	var f_scr: Vector2 = camera.unproject_position(center + course * 2.0 + elev)
+	_fp.flash_formation(slots, (f_scr - c_scr).angle() + PI * 0.5)
+
 func _update_formation_preview(mouse_screen: Vector2) -> void:
 	if _fp == null:
 		return
@@ -1434,6 +1579,9 @@ func clear_selection() -> void:
 # _disband_squad и on_selection_changed — то есть правит ровно тот массив, по
 # которому шёл бы обход.
 ## Возвращает, сколько бойцов расформировано (нужно стенду)
+## Стендам: сколько построек снесено клавишей Delete
+var buildings_razed: int = 0
+
 func disband_selected() -> int:
 	_purge_invalid()
 	# Выделенные ОВЦЫ утилизируются тем же нажатием (ТЗ 19.09.2026, блок 2):
@@ -1442,8 +1590,20 @@ func disband_selected() -> int:
 	if selected_units.is_empty():
 		return sheep_gone
 	var doomed: Array = []
+	var razed: Array = []
 	for u in selected_units:
 		if not is_instance_valid(u):
+			continue
+		# ── СНОС ВЫДЕЛЕННОГО ЗДАНИЯ (ТЗ 24.09.2026, второе письмо) ─────────
+		# Прежде здания в выделении пропускались: «снос замка по случайному
+		# нажатию». Заказ просит снос по Delete явно — и он идёт ТОЛЬКО когда
+		# в выделении нет бойцов: рамка вокруг армии с зацепленной постройкой
+		# казнит армию, а здание не трогает. Снос — штатная смерть (_die):
+		# руина, реестры, условие победы — всё тем же путём, что от врага
+		if u is Building:
+			var b := u as Building
+			if b.faction == Constants.FACTION_PLAYER and not b.is_dead():
+				razed.append(b)
 			continue
 		var un := u as Unit
 		if un == null or un.is_dead():
@@ -1451,6 +1611,14 @@ func disband_selected() -> int:
 		if un.faction != Constants.FACTION_PLAYER:
 			continue
 		doomed.append(un)
+	if doomed.is_empty() and not razed.is_empty():
+		_clear_selection()
+		for b2 in razed:
+			if is_instance_valid(b2):
+				(b2 as Building).call("_die")
+		buildings_razed += razed.size()
+		GameManager.on_selection_changed(selected_units)
+		return razed.size() + sheep_gone
 	if doomed.is_empty():
 		return sheep_gone
 	# Выделение снимается ПЕРЕД казнью: кольца выделения гасятся штатным путём,
@@ -2149,6 +2317,11 @@ func _handle_right_click(screen_pos: Vector2, run: bool = false) -> void:
 	# «под панелью», куда игрок вообще не показывал
 	if _over_ui(screen_pos):
 		return
+	# ЛЮБОЙ НОВЫЙ ПРИКАЗ ОТМЕНЯЕТ АТАКУ ПО ПУТИ (ТЗ 23.09.2026). Иначе командир
+	# продолжал бы возвращать отряд к прежней точке после каждой стычки — то
+	# есть отменял бы приказ игрока, отданный только что
+	if _squad_commander != null and is_instance_valid(_squad_commander):
+		_squad_commander.call("_cancel_for_selection", self)
 	_purge_invalid()
 	if selected_units.is_empty():
 		# ПКМ ПО СВОЕЙ БАШНЕ БЕЗ ВЫДЕЛЕНИЯ — выпустить лучников наружу
@@ -2252,6 +2425,13 @@ func _handle_right_click(screen_pos: Vector2, run: bool = false) -> void:
 				(u3 as Worker).set_sheep_dest(target as Node3D)
 				routed += 1
 		if routed > 0:
+			return
+		# ── ЗАГОН — КОЛОДЕЦ МЯСА: ПКМ РАБОЧИМИ СТАВИТ ИХ НА ЗАГОН (ТЗ 24.09.2026)
+		# Мест на загоне SHEEP_PEN_WORKERS (5, по рабочему на овцу). Из
+		# выделения берутся СЛУЧАЙНЫЕ рабочие ровно на свободные места; прочие
+		# приказа НЕ получают и продолжают прежнюю работу. Уже стоящие на
+		# этом загоне места не занимают заново
+		if _assign_pen_farmers(target as Building) >= 0:
 			return
 
 	if target is Castle and target.faction == Constants.FACTION_PLAYER:
@@ -2443,6 +2623,19 @@ func _handle_right_click(screen_pos: Vector2, run: bool = false) -> void:
 ## run = true — ДВОЙНОЙ ПКМ: отряд бежит (Unit.SPRINT_SPEED_FACTOR), фаланга
 ## на время бега распускается, авто-бой игнорируется. Сбрасывается сам по
 ## прибытии (см. Unit._set_sprinting)
+## ═══════════════════════════════════════════════════════════════════════════
+## ПРИКАЗ НА ДВИЖЕНИЕ: ОБЁРТКА, ПОКАЗЫВАЮЩАЯ ПРИЗРАК ПО ФАКТУ
+## ═══════════════════════════════════════════════════════════════════════════
+## ПРИЗРАК СЧИТАЕТСЯ ПОСЛЕ ПРИКАЗА, А НЕ ВМЕСТО НЕГО (ТЗ 23.09.2026, п. 4).
+## Первая версия строила предполагаемую раскладку САМА — переносила общий
+## центр выделения. Для одного отряда это совпадало с приказом, а для трёх и
+## больше — нет: там работает СЕТКА БЛОКОВ (_issue_group_grid_move), где у
+## каждого отряда своя ячейка. Призрак обещал бы одно, войска встали бы иначе.
+##
+## Теперь точки берутся ОТТУДА, КУДА БОЙЦЫ РЕАЛЬНО ПОШЛИ: `command_move`
+## записывает цель в `post_pos` каждому, и любая ветка приказа — сетка блоков,
+## перенос строя, россыпь — оставляет там свою правду. Врать этот призрак не
+## может по построению.
 func _issue_formation_move(center: Vector3, run: bool = false) -> void:
 	var movable: Array = []
 	for u in selected_units:
@@ -2450,6 +2643,16 @@ func _issue_formation_move(center: Vector3, run: bool = false) -> void:
 			movable.append(u)
 	if movable.is_empty():
 		return
+	# ЩЕЛЧОК ПОДТВЕРЖДЕНИЯ ПРИКАЗА (ТЗ 23.09.2026). Точка выбрана ЗДЕСЬ по той
+	# же причине, по какой здесь же стоят клич и массовый марш: сюда сходятся
+	# ВСЕ ветки приказа на движение (сетка блоков, марш строем, россыпь).
+	# На кнопках мыши его ставить нельзя — щёлкало бы и на промахе по панели,
+	# и на клике, который приказом не стал
+	AudioManager.play_ui("order_move")
+	_issue_formation_move_body(center, run, movable)
+	_flash_destination(movable, center)
+
+func _issue_formation_move_body(center: Vector3, run: bool, movable: Array) -> void:
 	_order_battle_cry(movable)
 	# ── ДВОЙНОЙ ПКМ: СПЕЦПРИЁМ, ЕСЛИ ОН КУПЛЕН, ИНАЧЕ БЕГ ─────────────────
 	# Заказ спринта 13 отдаёт двойной ПКМ двум способностям: «Яростный Набег»
@@ -2497,6 +2700,73 @@ func _issue_formation_move(center: Vector3, run: bool = false) -> void:
 		movable[i].formation_row = row
 		movable[i].command_move(center + Vector3(offset_x, 0.0, offset_z), false, course,
 			false, true, run)     # player_order — см. Unit._move_lock
+
+## Командир отрядных команд — один на менеджер, создаётся при первом спросе
+func _squad_cmd() -> Node:
+	if _squad_commander != null and is_instance_valid(_squad_commander):
+		return _squad_commander
+	_squad_commander = _SquadCommanderS.new()
+	_squad_commander.name = "SquadCommander"
+	add_child(_squad_commander)
+	return _squad_commander
+
+## Публичный доступ (HUD рисует по нему подсветку кнопки, стенды — вердикты)
+func squad_commander() -> Node:
+	return _squad_cmd()
+
+## Включить/снять режим атаки по пути. ЕДИНСТВЕННАЯ ТОЧКА, через которую
+## признак меняется: курсор и подсветка кнопки обязаны ехать вместе с ним, а
+## не обновляться «когда-нибудь потом»
+func set_attack_move_armed(on: bool) -> void:
+	if on and selected_units.is_empty():
+		on = false
+	if attack_move_armed == on:
+		return
+	attack_move_armed = on
+	_apply_attack_cursor(on)
+	if on:
+		AudioManager.play_ui("order_move")
+	attack_move_changed.emit(on)
+
+signal attack_move_changed(armed: bool)
+
+## ── КУРСОР: ПРИЦЕЛ В РЕЖИМЕ АТАКИ ────────────────────────────────────────
+## Готовой картинки прицела в наборе нет, и заводить ради неё ассет незачем:
+## встроенная форма CURSOR_CROSS читается как «целься» на любом фоне и не
+## зависит ни от темы, ни от размера курсора в системе
+func _apply_attack_cursor(on: bool) -> void:
+	Input.set_default_cursor_shape(
+		Input.CURSOR_CROSS if on else Input.CURSOR_ARROW)
+
+## Клик в режиме атаки: точка приказа. true — клик израсходован
+func _consume_attack_move_click(screen_pos: Vector2) -> bool:
+	if not attack_move_armed:
+		return false
+	set_attack_move_armed(false)
+	if _over_ui(screen_pos):
+		return true          # промах по панели: режим снят, приказа нет
+	_purge_invalid()
+	if selected_units.is_empty():
+		return true
+	var hit := _screen_ray_hit(screen_pos, Constants.LAYER_GROUND)
+	if not hit.has("position"):
+		return true
+	var pos: Vector3 = hit["position"]
+	pos.y = 0.0
+	if _squad_cmd().attack_move(self, pos, false) > 0:
+		AudioManager.play_ui("order_move")
+	return true
+
+## ═══════════════════════════════════════════════════════════════════════════
+## МАРШ ВЫДЕЛЕНИЯ В ТОЧКУ — ПУБЛИЧНЫЙ ВХОД (ТЗ 23.09.2026, Attack-Move)
+## ═══════════════════════════════════════════════════════════════════════════
+## Attack-Move обязан ходить ТЕМ ЖЕ способом, что и обычный ПКМ: та же сетка
+## блоков, тот же перенос строя, та же проверка занятости точки. Заведи
+## командиру свою раскладку — и отряд, отправленный по [A], встал бы иначе,
+## чем тот же отряд, отправленный мышью, а игрок читал бы это как «игра
+## по-разному понимает один и тот же клик»
+func march_selection_to(center: Vector3, run: bool = false) -> void:
+	_issue_formation_move(center, run)
 
 # ═════════════════════════════════════════════════════════════════════════════
 # СЕТКА ОТРЯДОВ: НЕСКОЛЬКО БЛОКОВ НЕ СВАЛИВАЮТСЯ В ОДНУ КУЧУ
@@ -3002,6 +3272,43 @@ func _try_rebuild_ruin(target) -> bool:
 ## тем же command_build (утиный контракт Building.work_position/add_builder);
 ## прочие выделенные идут к зданию маршем. Стоит ПОСЛЕ рудника и руины и
 ## ДО стройплощадки: у тех свой контракт
+## Поставить рабочих выделения на загон (ТЗ 24.09.2026, п. 1). Ответ: -1 —
+## рабочих в выделении нет (клик разбирается дальше как обычно), иначе число
+## поставленных (0 — мест нет, но приказ поглощён: остальные не трогаются).
+## Выбор СЛУЧАЙНЫЙ, как просил заказ; генератор свой — общий поток партии
+## сеян, и лишний randi() сдвинул бы её жребии
+var _pen_rng := RandomNumberGenerator.new()
+func _assign_pen_farmers(pen: Building) -> int:
+	if pen == null or not is_instance_valid(pen) or not pen.has_method("pick_sheep_for"):
+		return -1
+	var pool: Array = []
+	var any_worker := false
+	for u in selected_units:
+		if not is_instance_valid(u) or not (u is Worker):
+			continue
+		var w := u as Worker
+		if w.garrisoned or w.is_dead():
+			continue
+		any_worker = true
+		if w.farm_pen() == pen:
+			continue    # уже на этом загоне
+		pool.append(w)
+	if not any_worker:
+		return -1
+	var free: int = _UCfg.SHEEP_PEN_WORKERS - int(pen.call("workers_here"))
+	if free <= 0 or pool.is_empty():
+		return 0
+	# Тасовка Фишера-Йейтса своим генератором
+	for i in range(pool.size() - 1, 0, -1):
+		var j: int = _pen_rng.randi_range(0, i)
+		var t = pool[i]
+		pool[i] = pool[j]
+		pool[j] = t
+	var n: int = mini(free, pool.size())
+	for k in range(n):
+		(pool[k] as Worker).command_farm_pen(pen)
+	return n
+
 func _try_repair(target) -> bool:
 	if target == null or not is_instance_valid(target) or not (target is Building):
 		return false

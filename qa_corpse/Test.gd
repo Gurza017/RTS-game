@@ -925,8 +925,13 @@ func _test_fade_and_volume() -> void:
 		scales[snappedf(float(lay[6]), 0.01)] = true
 		dark = minf(dark, t)
 		bright = maxf(bright, t)
-	verdict("L1 тела в завале притенены по-разному (глубина читается)",
-		tints.size() >= 5 and bright - dark > 0.1,
+	# ТЗ 24.09.2026 (второе письмо): тон — ПО КУЧЕ (CorpseRenderer._pile_push):
+	# одиночное тело — верх кучи (PILE_TOP_TINT), под каждым новым сверху
+	# нижние темнеют ступенью до PILE_FLOOR_TINT. Разброс тонов зависит от
+	# того, легли ли тела друг на друга, поэтому судим о диапазоне
+	verdict("L1 тела притенены мягко и по куче: тон между полом и верхом кучи",
+		not tints.is_empty() and bright <= _Corpses.PILE_TOP_TINT + 0.001
+			and dark >= _Corpses.PILE_FLOOR_TINT - 0.001,
 		"оттенков %d, от %.2f до %.2f" % [tints.size(), dark, bright])
 	verdict("L2 ни одно тело не уходит в черноту",
 		dark >= _Corpses.TINT_DARKEST - 0.001,

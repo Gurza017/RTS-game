@@ -205,6 +205,15 @@ func _find_arrows() -> Array:
 
 ## [узлов, в полёте, торчащих (по узлам), висящих в воздухе, слотов буфера,
 ##  свободных слотов, в пуле, в реестре торчащих, худший подъём над землёй]
+## Опора стрелы: грунт, а над водой — её зеркало. Тело павшего в реке лежит
+## на зеркале (ТЗ 24.09.2026, п. 10), и стрела в нём стоит над дном русла на
+## полтора метра, не вися в воздухе
+func _floor_y(x: float, z: float) -> float:
+	var g: float = GameManager.get_terrain_height(x, z)
+	if main != null and main.has_method("in_water_mesh") and main.in_water_mesh(x, z):
+		g = maxf(g, float(main.water_surface_y(x, z)))
+	return g
+
 func _arrow_stats() -> Dictionary:
 	var arrows: Array = _find_arrows()
 	var flying := 0
@@ -221,7 +230,7 @@ func _arrow_stats() -> Dictionary:
 			continue
 		stuck += 1
 		var rp: Vector3 = r["pos"]
-		var rl: float = rp.y - GameManager.get_terrain_height(rp.x, rp.z)
+		var rl: float = rp.y - _floor_y(rp.x, rp.z)
 		if rl > 0.5:
 			hanging += 1
 			print("    ВИСИТ (ядро): y=%.2f грунт=%.2f в теле=%s гаснет=%.2f" % [
@@ -244,7 +253,7 @@ func _arrow_stats() -> Dictionary:
 		if slot.size() < 16 or slot[0] == 0.0:
 			continue
 		var y: float = slot[7]
-		var g: float = GameManager.get_terrain_height(slot[3], slot[11])
+		var g: float = _floor_y(slot[3], slot[11])
 		var lift: float = y - g
 		# Торчащая в грунте стоит центром на ~0.11 м над землёй, в теле —
 		# чуть выше; полметра над грунтом — это уже «висит в воздухе»

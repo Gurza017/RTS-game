@@ -97,6 +97,20 @@ const SHORE_DRY := 0.10
 ## зеркалом, глубже всего 0.06 м — ровно этот запас)
 static func wet_depth() -> float:
 	return RIVER_DEPTH * WATER_DROP - 0.02 - SHORE_DRY
+## ── ВОЗВЫШЕННОСТИ: ОБЩИЙ ВЫКЛЮЧАТЕЛЬ (ТЗ 23.09.2026) ───────────────
+## Заказ: временно убрать холмы и горы — карта равнина, CPU свободен
+## под экономику. ВЫКЛЮЧАТЕЛЬ ОДИН НА ВСЮ ЦЕПОЧКУ, и это главное:
+## высота живёт В ДВУХ ЯЗЫКАХ (Main.get_terrain_height и ArmyCore.Height),
+## и погаси я гору только здесь — ядро продолжало бы считать её, и бойцы
+## ушли бы под землю на том самом месте, где гора была. Поэтому
+## HIGHLANDS_ENABLED читают ВСЕ четыре потребителя: hill_height,
+## plateau_list (а через неё и plateau_height/plateau_params), тайлы земли и
+## GameManager._sync_world_bounds (set_hill в ядро).
+## РЕКА ОСТАЁТСЯ: вода и брод — не рельеф, их заказ не трогал.
+## Навигация при этом НЕ выключается: маска скал выходит ПУСТОЙ сама
+## собой (на равнине нет уклона выше CLIFF_SLOPE), а сетка обхода ЗДАНИЙ
+## строится по-прежнему — её заказ велел сохранить
+const HIGHLANDS_ENABLED := false
 ## Гора: гауссов холм, высота и радиус (σ = радиус / 2)
 const HILL_HEIGHT := 7.0
 const HILL_RADIUS := 30.0
@@ -215,7 +229,6 @@ const LAKE_MARGIN := 0.6
 var hud: HUD
 var selection_manager: SelectionManager
 var enemy_ai: Node             = null     # см. scripts/EnemyAI.gd
-var voice: Node                = null     # голосовое управление, scripts/VoiceControl.gd
 ## ── ТРЕТЬЯ СТОРОНА: ОРДА ГОБЛИНОВ ──────────────────────────────────────────
 ## Отдельный узел, а не второй EnemyAI: у гоблинов нет ни рабочих, ни кузницы,
 ## ни союзников, зато есть расписание (спячка до 30:00 и волны). Общего с
@@ -233,7 +246,6 @@ const _HomeGuard := preload("res://scripts/ai/HomeGuard.gd")
 const _TowerS := preload("res://scripts/Tower.gd")
 const _DormantReserve := preload("res://scripts/goblin/DormantReserve.gd")
 const _GnollAI := preload("res://scripts/goblin/GnollAI.gd")
-const _VoiceControl := preload("res://scripts/VoiceControl.gd")
 const _GoblinHut := preload("res://scripts/goblin/GoblinHut.gd")
 const _TrollLair := preload("res://scripts/goblin/TrollLair.gd")
 const _GobCfg    := preload("res://scripts/goblin/goblin_config.gd")
@@ -365,6 +377,8 @@ func _ready() -> void:
 	# бойца, но старую сцену выгружают ДО построения новой, поэтому здесь
 	# реестр уже пуст — сброс лишь гарантирует это на случай аварийного выхода
 	GameManager.army.clear()
+	# Лес-стена прошлой карты (ТЗ 24.09.2026): список кругов живёт в ядре
+	GameManager.army.forest_clear()
 	# И реестр тел павших: его бакеты тоже уходят вместе со старым World, а
 	# учёт живёт в автозагрузке и без сброса пережил бы сцену со ссылками на
 	# освобождённые узлы
@@ -391,11 +405,6 @@ func _ready() -> void:
 	gnoll_ai.name = "GnollAI"
 	add_child(gnoll_ai)
 	gnoll_ai.setup(self)
-	# Голосовое управление (прототип): свой бус захвата, свой слой интерфейса,
-	# распознаватель в фоновом потоке. См. scripts/VoiceControl.gd
-	voice = _VoiceControl.new()
-	voice.name = "VoiceControl"
-	add_child(voice)
 	_setup_pause_modes()
 	start_game()
 
@@ -1841,9 +1850,38 @@ func _faction_beaten(units_group: String, buildings_group: String) -> bool:
 			has_castle = true
 	return not has_castle or not has_any
 
+## ═══════════════════════════════════════════════════════════════════════════
+## ТРИ РАЗНЫХ ВЫХОДА ИЗ ПАРТИИ, И ПУТАТЬ ИХ НЕЛЬЗЯ (ТЗ 23.09.2026, п. 1)
+## ═══════════════════════════════════════════════════════════════════════════
+## Здесь была ОДНА функция `restart_game`, и её звала кнопка «Выйти в меню» —
+## то есть меню паузы перезапускало матч вместо выхода. Жалоба владельца
+## «кнопка Выход перезапускает игру» описывает ровно это.
+##   • restart_game()  — ЗАНОВО: тот же матч с нуля (новая кнопка [Заново]);
+##   • quit_to_menu()  — В ГЛАВНОЕ МЕНЮ: смена сцены на MainMenu.tscn;
+##   • quit_game()     — ЗАКРЫТЬ ПРИЛОЖЕНИЕ.
+## ПАУЗУ СНИМАЕТ КАЖДЫЙ ИЗ ТРЁХ. Забытая пауза переживает и смену сцены
+## (get_tree().paused — свойство ДЕРЕВА, а не сцены), и новая партия
+## открывалась бы замороженной.
+
+## ЗАНОВО: тот же матч с нуля. Зерно мира пересевается сценой заново
 func restart_game() -> void:
 	get_tree().paused = false
+	# Слепок сохранённой партии не должен подхватиться перезапуском: «заново»
+	# означает чистый старт, а не загрузку (см. GameManager.pending_load)
+	GameManager.pending_load = {}
 	get_tree().reload_current_scene()
+
+## В ГЛАВНОЕ МЕНЮ. Та же сцена, из которой партия и открывается
+func quit_to_menu() -> void:
+	get_tree().paused = false
+	GameManager.pending_load = {}
+	get_tree().change_scene_to_file("res://scenes/MainMenu.tscn")
+
+## ЗАКРЫТЬ ИГРУ. Пауза снимается и здесь: под паузой движок не обрабатывает
+## штатное завершение у узлов, которым выставлен PROCESS_MODE_PAUSABLE
+func quit_game() -> void:
+	get_tree().paused = false
+	get_tree().quit()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # RESOURCE HELPERS
@@ -2291,7 +2329,7 @@ func _add_base_forest_pocket(anchor: Vector3) -> void:
 		# литерал, наоборот, выпускал бы деревья за край поля
 		if not _fits_in_map(px, pz):
 			continue
-		if is_water(px, pz):
+		if veg_river_blocked(px, pz):
 			continue
 		if _is_reserved(px, pz):
 			continue
@@ -2868,7 +2906,7 @@ func _dress_lair_glade(c: Vector3) -> void:
 			var r: float = rng.randf_range(r0, r1)
 			var x: float = c.x + cos(a) * r
 			var z: float = c.z + sin(a) * r
-			if not _fits_in_map(x, z) or is_water(x, z) or near_river(x, z, 1.5):
+			if not _fits_in_map(x, z) or veg_river_blocked(x, z):
 				continue
 			var tex: Texture2D = _deco_tex(int(ids[rng.randi() % ids.size()]))
 			if _deco_plant(tex, x, z, rng.randf_range(hr.x, hr.y)):
@@ -2896,7 +2934,7 @@ func _dress_lair_glade(c: Vector3) -> void:
 			pts.append(cand)
 			var px: float = cc.x + cand.x
 			var pz: float = cc.z + cand.y
-			if not _fits_in_map(px, pz) or is_water(px, pz) or near_river(px, pz, 1.5):
+			if not _fits_in_map(px, pz) or veg_river_blocked(px, pz):
 				continue
 			var tree := ResourceNode.new()
 			tree.resource_type = Constants.RESOURCE_WOOD
@@ -3038,13 +3076,144 @@ func _spawn_squad_block(uid: String, faction: int, origin: Vector3, front: Vecto
 		GameManager.add_to_squad(sid, u)
 	return sid
 
-## Точка стартовой обороны: в пределах карты, на суше, без леса вокруг
-func _home_defense_spot(p: Vector3, clear_r: float) -> Vector3:
+## Точка стартовой обороны: в пределах карты, на суше, без леса вокруг.
+## `half` — полуразмер строя, который встанет в эту точку: центр держится от
+## кромки на полуразмер плюс GameManager.SQUAD_EDGE_PAD (squad_inside) — иначе
+## слоты за краем зажимались бы по одному и строй ложился ниткой вдоль борта.
+## clear_r <= 0 — ресурсы не трогать (посты кольца обходят жилы базы сами)
+func _home_defense_spot(p: Vector3, clear_r: float, half: float = 0.0) -> Vector3:
 	var q := Vector3(clampf(p.x, -MAP_CLAMP_X, MAP_CLAMP_X), 0.0,
 		clampf(p.z, -MAP_CLAMP_Z, MAP_CLAMP_Z))
+	if half > 0.0:
+		q = GameManager.squad_inside(q, half)
 	q = GameManager.land_target(q)
-	_clear_area_of_resources(q, clear_r)
+	if clear_r > 0.0:
+		_clear_area_of_resources(q, clear_r)
 	return Vector3(q.x, get_terrain_height(q.x, q.z), q.z)
+
+## ── ОБОРОНА БАЗЫ ИИ В ТРИ УРОВНЯ (ТЗ 25.09.2026, п. 1) ─────────────────────
+## Курс обороны — на базу игрока (та же ось, что у EnemyAI._defense_course):
+## по нему строятся линии гарнизона и посты у башен. Прежняя раскладка шла по
+## Building.front_dir() («к центру карты») и клала тыл в угол карты
+func _home_course(cpos: Vector3) -> Vector3:
+	var base: Vector3 = PLAYER_BASE_ANCHOR
+	for b in get_tree().get_nodes_in_group(Constants.building_group(Constants.FACTION_PLAYER)):
+		if not is_instance_valid(b):
+			continue
+		var c := b as Castle
+		if c != null and c.is_stronghold() and not c.is_dead():
+			base = c.global_position
+			break
+	var d := base - cpos
+	d.y = 0.0
+	if d.length() < 0.01:
+		return Vector3.FORWARD
+	return d.normalized()
+
+## Полуразмер прямоугольного блока n бойцов в cols колонок (по диагонали —
+## отступ от кромки обязан покрыть строй при любом повороте)
+func _block_half(n: int, cols: int, spacing: float) -> float:
+	var c: int = maxi(cols, 1)
+	var rows: int = int(ceil(float(n) / float(c)))
+	var w: float = float(c) * spacing
+	var d: float = float(rows) * spacing
+	return sqrt(w * w + d * d) * 0.5
+
+## Уровень 1: пост кольца охраны — угол k из n по кольцу RING_DIST вокруг
+## крепости, обходя башни и жилы базы (не ближе HOME_RING_CLEAR к ним).
+## Возвращает [точка, фронт наружу]
+func _home_ring_post(cpos: Vector3, k: int, n: int, half: float) -> Array:
+	var blockers: Array = []
+	for b in get_tree().get_nodes_in_group(Constants.building_group(Constants.FACTION_ENEMY)):
+		if not is_instance_valid(b) or (b as Building).is_stronghold():
+			continue
+		var bp: Vector3 = (b as Node3D).global_position
+		if Vector2(bp.x - cpos.x, bp.z - cpos.z).length() < _AICfg.HOME_RING_DIST * 2.0:
+			blockers.append(bp)
+	# Жилы базы (золото, камень) обходим; ДЕРЕВЬЯ — тоже ресурс, но их под
+	# постом просто вырубаем (clear_r ниже): кольцо на 13 м лежит за
+	# расчищенным кругом базы (BASE_CLEAR_RADIUS 11), то есть в лесу
+	for r in get_tree().get_nodes_in_group("resource_nodes"):
+		if not is_instance_valid(r):
+			continue
+		var rn := r as ResourceNode
+		if rn == null or rn.resource_type == Constants.RESOURCE_WOOD:
+			continue
+		var rp: Vector3 = rn.global_position
+		if Vector2(rp.x - cpos.x, rp.z - cpos.z).length() < _AICfg.HOME_RING_DIST * 2.0:
+			blockers.append(rp)
+	var course: Vector3 = _home_course(cpos)
+	var base_ang: float = atan2(course.z, course.x)
+	var step: float = TAU / float(maxi(n, 1))
+	var clear: float = _AICfg.HOME_RING_CLEAR + half
+	# Первый пост — по курсу обороны; занятый угол сдвигается на 12° до 8 раз
+	for tries in range(8):
+		var ang: float = base_ang + step * float(k) + deg_to_rad(12.0 * float(tries))
+		var dir := Vector3(cos(ang), 0.0, sin(ang))
+		var p: Vector3 = cpos + dir * _AICfg.HOME_RING_DIST
+		var free := true
+		for bp in blockers:
+			if Vector2(p.x - (bp as Vector3).x, p.z - (bp as Vector3).z).length() < clear:
+				free = false
+				break
+		if free:
+			return [_home_defense_spot(p, half + 0.5, half), dir]
+	var dir0 := Vector3(cos(base_ang + step * float(k)), 0.0, sin(base_ang + step * float(k)))
+	return [_home_defense_spot(cpos + dir0 * _AICfg.HOME_RING_DIST, half + 0.5, half), dir0]
+
+## Уровни 2 и 3: посты гарнизона — линии поперёк курса обороны, остаток у
+## передних башен. Возвращает список {"post", "front", "side"} на count отрядов
+## блока n × cols
+func _home_garrison_posts(cpos: Vector3, count: int, n: int, cols: int, spacing: float) -> Array:
+	var out: Array = []
+	var course: Vector3 = _home_course(cpos)
+	var side := Vector3(-course.z, 0.0, course.x)
+	var c: int = maxi(cols, 1)
+	var rows: int = int(ceil(float(n) / float(c)))
+	var block_w: float = float(c) * spacing + _AICfg.HOME_LINE_GAP
+	var block_d: float = float(rows) * spacing + _AICfg.HOME_LINE_ROW_GAP
+	var half: float = _block_half(n, c, spacing)
+	var per_line: int = maxi(_AICfg.HOME_LINE_SQUADS, 1)
+	var in_lines: int = mini(count, per_line * maxi(_AICfg.HOME_LINE_ROWS, 0))
+	# Уровень 2: линии. Первая — дальняя (LINE_DIST), следующие ближе к замку
+	for k in range(in_lines):
+		var col: int = k % per_line
+		var row: int = k / per_line
+		var lateral: float = (float(col) - float(per_line - 1) * 0.5) * block_w
+		var depth: float = _AICfg.HOME_LINE_DIST - float(row) * block_d
+		var p: Vector3 = cpos + course * depth + side * lateral
+		out.append({"post": _home_defense_spot(p, 4.5, half), "front": course, "side": side, "level": 2})
+	# Уровень 3 — ВНЕШНИЙ ПЕРИМЕТР: посты у башен, стоящих ВПЕРЕДИ линий
+	# (пограничные башни EnemyAI на трети пути к игроку). Домашние башни базы
+	# стоят на 10-20 м от замка — внутри полосы линий (первый прогон стенда:
+	# пост у такой башни ложился в 4.8 м от поста линии). Нет башен впереди —
+	# посты «у въездов»: фланги первой линии, попеременно слева и справа
+	var outer_from: float = _AICfg.HOME_LINE_DIST + block_d
+	var towers: Array = []
+	for b in get_tree().get_nodes_in_group(Constants.building_group(Constants.FACTION_ENEMY)):
+		if not is_instance_valid(b) or (b as Building).is_dead():
+			continue
+		var t := b as Castle
+		if t == null or t.is_stronghold():
+			continue
+		var off: Vector3 = t.global_position - cpos
+		if off.x * course.x + off.z * course.z >= outer_from:
+			towers.append(t.global_position)
+	var extra: int = count - in_lines
+	for k in range(extra):
+		var p: Vector3
+		if towers.is_empty():
+			# Фланги первой линии: k=0 справа, k=1 слева, дальше — следующие ячейки
+			var sgn: float = 1.0 if k % 2 == 0 else -1.0
+			var cell: float = float(per_line - 1) * 0.5 + 1.0 + float(k / 2)
+			p = cpos + course * _AICfg.HOME_LINE_DIST + side * (sgn * cell * block_w)
+		else:
+			var tp: Vector3 = towers[k % towers.size()]
+			# Вторая смена у той же башни — вбок от первой
+			var shift: float = float(k / towers.size()) * block_w
+			p = tp + course * _AICfg.HOME_TOWER_POST_DIST + side * shift
+		out.append({"post": _home_defense_spot(p, 4.5, half), "front": course, "side": side, "level": 3})
+	return out
 
 func _spawn_home_defense(castle: Castle) -> void:
 	var ef: int = Constants.FACTION_ENEMY
@@ -3077,23 +3246,28 @@ func _spawn_home_defense(castle: Castle) -> void:
 			n_ar, START_SQUAD_COLS, START_SQUAD_SPACING)
 		if sid_c > 0:
 			castle.garrison_now(sid_c)
-	# 3) ОХРАНА — КОЛОННОЙ ЗА ЗАМКОМ, В ГЛУБИНЕ БАЗЫ. Между базовыми жилами
-	#    (они на ±35° от той же оси, см. _base_resource_spots) остаётся проход
-	#    шире строя в START_SQUAD_COLS колонок; отряды идут вглубь один за другим
+	# 3) ОХРАНА — УРОВЕНЬ 1: КОЛЬЦОМ ВОКРУГ КРЕПОСТИ, ЛИЦОМ НАРУЖУ (ТЗ
+	#    25.09.2026). Прежняя колонна «за замком, по оси от центра карты»
+	#    уходила в угол поля; посты кольца обходят башни и жилы базы
+	#    (_home_ring_post) и держатся от кромки на полуразмер строя
 	enemy_guard = _HomeGuard.new()
 	enemy_guard.name = "EnemyHomeGuard"
 	add_child(enemy_guard)
 	enemy_guard.setup(self, castle)
-	var depth: float = _AICfg.HOME_GUARD_DEPTH
-	for row in _AICfg.home_guard_squads():
+	var guard_rows: Array = _AICfg.home_guard_squads()
+	var k_ring: int = 0
+	for row in guard_rows:
 		var d: Dictionary = row
 		var uid: String = String(d["unit"])
 		var n: int = int(d["count"])
 		var cols: int = mini(START_SQUAD_COLS, maxi(n, 1))
-		var rows: int = int(ceil(float(n) / float(cols)))
-		var post: Vector3 = _home_defense_spot(cpos - front * depth, 4.5)
-		var sid: int = _spawn_squad_block(uid, ef, post, front, side, n, cols, START_SQUAD_SPACING)
-		depth += float(rows) * START_SQUAD_SPACING + _AICfg.HOME_GUARD_GAP
+		var half: float = _block_half(n, cols, START_SQUAD_SPACING)
+		var rp: Array = _home_ring_post(cpos, k_ring, guard_rows.size(), half)
+		k_ring += 1
+		var post: Vector3 = rp[0]
+		var g_front: Vector3 = rp[1]
+		var g_side := Vector3(-g_front.z, 0.0, g_front.x)
+		var sid: int = _spawn_squad_block(uid, ef, post, g_front, g_side, n, cols, START_SQUAD_SPACING)
 		if sid <= 0:
 			continue
 		if int(d["vet"]) > 0:
@@ -3104,7 +3278,7 @@ func _spawn_home_defense(castle: Castle) -> void:
 		if uid == "spearman":
 			for m in GameManager.squad_members(sid):
 				(m as Unit).set_stance("defense")
-		enemy_guard.adopt(sid, post, cols, START_SQUAD_SPACING)
+		enemy_guard.adopt(sid, post, cols, START_SQUAD_SPACING, g_front, g_side, 1)
 
 ## ── ПОДКРЕПЛЕНИЕ КРАСНОГО ИИ (ТЗ 19.09.2026-3, п. 2) ───────────────────────
 ## REINFORCE_SQUADS отрядов REINFORCE_UNIT рождаются блоками в УГЛУ ЗА ЗАМКОМ
@@ -3129,24 +3303,20 @@ func spawn_ai_reinforcements() -> int:
 		add_child(enemy_guard)
 		enemy_guard.setup(self, castle)
 	var cpos: Vector3 = castle.global_position
-	var front: Vector3 = castle.front_dir()
-	var side := Vector3(-front.z, 0.0, front.x)
 	var uid: String = _AICfg.REINFORCE_UNIT
 	var n: int = _UCfg.squad_size(uid)
 	var cols: int = mini(START_SQUAD_COLS, maxi(n, 1))
-	var rows: int = int(ceil(float(n) / float(cols)))
-	var block_w: float = float(cols) * START_SQUAD_SPACING + START_SQUAD_GAP
-	var block_d: float = float(rows) * START_SQUAD_SPACING + _AICfg.HOME_GUARD_GAP
-	# Угол: глубже колонны охраны, сбоку от оси — охрана стоит по оси
-	var depth0: float = _AICfg.HOME_GUARD_DEPTH + float(_AICfg.home_guard_squads().size()) * block_d + 4.0
+	# УРОВНИ 2 И 3 (ТЗ 25.09.2026): линии поперёк курса обороны, остаток — у
+	# передних башен. Прежние блоки «в углу за замком» уходили за кромку и
+	# ложились ниткой вдоль края (см. _home_garrison_posts)
+	var posts: Array = _home_garrison_posts(cpos, _AICfg.REINFORCE_SQUADS, n, cols, START_SQUAD_SPACING)
 	var placed: int = 0
-	for k in range(_AICfg.REINFORCE_SQUADS):
-		var col: int = k % _AICfg.REINFORCE_COLS
-		var row: int = k / _AICfg.REINFORCE_COLS
-		var lateral: float = (float(col) + 1.0) * block_w
-		var post: Vector3 = _home_defense_spot(
-			cpos - front * (depth0 + float(row) * block_d) + side * lateral, 4.5)
-		var sid: int = _spawn_squad_block(uid, ef, post, front, side, n, cols, START_SQUAD_SPACING)
+	for rec in posts:
+		var d: Dictionary = rec
+		var post: Vector3 = d["post"]
+		var g_front: Vector3 = d["front"]
+		var g_side: Vector3 = d["side"]
+		var sid: int = _spawn_squad_block(uid, ef, post, g_front, g_side, n, cols, START_SQUAD_SPACING)
 		if sid <= 0:
 			continue
 		placed += 1
@@ -3156,7 +3326,7 @@ func spawn_ai_reinforcements() -> int:
 		if uid == "spearman":
 			for m in GameManager.squad_members(sid):
 				(m as Unit).set_stance("defense")
-		enemy_guard.adopt(sid, post, cols, START_SQUAD_SPACING)
+		enemy_guard.adopt(sid, post, cols, START_SQUAD_SPACING, g_front, g_side, int(d["level"]))
 	return placed
 
 ## Куда становятся стартовые отряды ИИ относительно своего замка: между замком
@@ -3315,7 +3485,8 @@ func _setup_terrain() -> void:
 # в резерв или за край карты, просто пропускаются.
 
 ## Мелочь: сколько всего штук на карту (масштабируется вместе с её площадью)
-const DECO_SMALL_PER_UNIT := 150
+## ТЗ 24.09.2026, п. 13: «больше кустарников, костей, мелких деталей» (было 150)
+const DECO_SMALL_PER_UNIT := 240
 ## Высота квада мелочи, метры. Кадр 64×64, рисунок занимает его частью —
 ## поэтому это ВЕРХНЯЯ оценка размера самой вещи
 const DECO_SMALL_H := Vector2(0.65, 1.05)
@@ -3348,7 +3519,7 @@ func _deco_tex(n: int) -> Texture2D:
 func _deco_spot_ok(x: float, z: float, margin: float = 0.0) -> bool:
 	if not _fits_in_map(x, z):
 		return false
-	if is_water(x, z):
+	if veg_river_blocked(x, z):
 		return false
 	if _is_reserved(x, z, margin):
 		return false
@@ -3452,7 +3623,7 @@ func _scatter_deco_scarecrows() -> void:
 			var pz: float = c.y + sin(ang) * r * k
 			# Пугало стоит СНАРУЖИ зоны, поэтому _is_reserved его и не должен
 			# отвергать — проверяем только карту и воду
-			if not _fits_in_map(px, pz) or is_water(px, pz):
+			if not _fits_in_map(px, pz) or veg_river_blocked(px, pz):
 				continue
 			if _deco_plant(tex, px, pz, DECO_CROW_H):
 				placed += 1
@@ -3473,7 +3644,7 @@ func _add_forest_clusters() -> void:
 	# росли только вокруг замков и в углах, а середина карты оставалась
 	# редколесьем — «густые кластеры, как у замка» и просили распространить
 	# на всё поле. Рощ стало в полтора раза больше, каждая — заметно плотнее
-	var target_clusters := int(42.0 * MAP_GROWTH * MAP_GROWTH)
+	var target_clusters := int(DECOR_GROVES_PER_UNIT * MAP_GROWTH * MAP_GROWTH)
 	var placed   := 0
 	var attempts := 0
 	while placed < target_clusters and attempts < 1400:
@@ -3493,11 +3664,18 @@ func _add_forest_clusters() -> void:
 		# Не сажать рощу на базу
 		if _is_reserved(cx, cz, 6.0):
 			continue
-		# Деревьев в роще вдвое больше, а просвет между стволами вдвое меньше
-		# (0.85 вместо 1.7): роща читается как чаща, а не как редкие кустики
-		_spawn_tree_cluster(Vector3(cx, 0.0, cz), randi_range(11, 24),
-			randf_range(3.5, 8.0), 0.85)
+		# Внутри леса-стены и в её проходах декору не место
+		if FOREST_WALL_ENABLED and _in_wall_zone(cx, cz, 6.0):
+			continue
+		# ── ЛЕС-ДЕКОР (ТЗ 24.09.2026, п. 13) ─────────────────────────────
+		# Была сплошная чаща по 11-24 ствола в каждой из двухсот рощ — поле
+		# превращалось в лабиринт. Теперь это РЕДКИЕ группы по 1-5 деревьев,
+		# ПРОХОДИМЫЕ (ствола в реестре обхода нет): отряд идёт сквозь них.
+		# Непроходимый лес — только стена (_add_forest_wall)
+		_spawn_tree_cluster(Vector3(cx, 0.0, cz), randi_range(1, 5),
+			randf_range(1.6, 3.4), 1.3, ResourceNode.FOREST_DECOR)
 		placed += 1
+	_add_forest_wall()
 	_add_corner_forests()
 	# Подкова густого леса вокруг каждой базы — ПОВЕРХ общей генерации,
 	# ничего из неё не отменяя
@@ -3519,6 +3697,109 @@ const CORNER_CENTERS := [
 	Vector3( MAP_HALF_X - CORNER_FOREST_INSET, 0.0,  MAP_HALF_Z - CORNER_FOREST_INSET),
 ]
 
+# ═════════════════════════════════════════════════════════════════════════════
+# ЛЕС-СТЕНА ВОКРУГ ЗОНЫ ИГРОКА (ТЗ 24.09.2026, п. 13)
+# ═════════════════════════════════════════════════════════════════════════════
+# Естественный забор человеческой локации: полоса леса по правой и нижней
+# сторонам зоны базы игрока (левая и верхняя — край карты), с ДВУМЯ широкими
+# проходами — вправо (к броду) и вниз (к центру и базе ИИ). Полоса не прямая:
+# осевая линия гуляет двумя синусами, толщина дышит — есть утолщения и
+# перехваты. Деревья разных видов и размеров. Каждое — FOREST_WALL: круг в
+# маске скал ядра, шаг скользит вдоль кромки, A* обходит полосу как скалу.
+# Рабочий прорубает кромку (FWorking лес не держит), пни — у каждого третьего.
+# Кромка размыта редкими проходимыми деревьями декора снаружи полосы
+## Выключатель леса-стены: false — ни полосы вокруг зоны игрока, ни стены в
+## угловых массивах (они сажаются прежней проходимой чащей-«нормалью»)
+const FOREST_WALL_ENABLED := true
+const DECOR_GROVES_PER_UNIT := 34.0
+## Граница зоны игрока относительно его якоря: правая стена и нижняя стена
+const WALL_RIGHT_DX := 64.0
+const WALL_BOTTOM_DZ := 52.0
+## Полутолщина полосы: база и размах «дыхания»
+const WALL_HALF_MIN := 3.8
+const WALL_HALF_VAR := 3.0
+## Ширина проходов и где они (смещение вдоль стены от якоря игрока)
+const WALL_GAP_W := 26.0
+const WALL_GAP_RIGHT_AT := 0.0     # проход вправо — на уровне базы по Z
+const WALL_GAP_DOWN_AT := 18.0     # проход вниз — чуть правее базы по X
+## Шаг посадки внутри полосы (круги FOREST_WALL_R перекрываются)
+const WALL_STEP := 1.9
+var wall_trees_placed: int = 0
+
+func _wall_right_x(z: float) -> float:
+	return PLAYER_BASE_ANCHOR.x + WALL_RIGHT_DX + 4.0 * sin(z * 0.071) + 2.2 * sin(z * 0.19 + 1.3)
+
+func _wall_bottom_z(x: float) -> float:
+	return PLAYER_BASE_ANCHOR.z + WALL_BOTTOM_DZ + 4.0 * sin(x * 0.067 + 0.8) + 2.2 * sin(x * 0.21 + 2.1)
+
+func _wall_half(t: float) -> float:
+	return WALL_HALF_MIN + WALL_HALF_VAR * (0.5 + 0.5 * sin(t * 0.113 + 2.0)) 		+ 1.2 * maxf(0.0, sin(t * 0.29 + 0.4))
+
+## Точка — в полосе леса-стены или в её проходе (с запасом margin): там не
+## растёт ничего другого — ни чаща, ни роща-декор (проход обязан быть чистым)
+func _in_wall_zone(x: float, z: float, margin: float) -> bool:
+	var zb: float = _wall_bottom_z(x)
+	var xr: float = _wall_right_x(z)
+	# Правая стена: от верхнего края карты до угла с нижней
+	if z <= zb + _wall_half(z) and absf(x - xr) <= _wall_half(z) + margin:
+		return true
+	# Нижняя стена: от левого края карты до угла с правой
+	if x <= xr + _wall_half(x) and absf(z - zb) <= _wall_half(x) + margin:
+		return true
+	return false
+
+func _wall_gap(along: float, gap_center: float) -> bool:
+	return absf(along - gap_center) < WALL_GAP_W * 0.5
+
+func _add_forest_wall() -> void:
+	wall_trees_placed = 0
+	if not FOREST_WALL_ENABLED:
+		return
+	var corner_z: float = _wall_bottom_z(_wall_right_x(PLAYER_BASE_ANCHOR.z + WALL_BOTTOM_DZ))
+	var corner_x: float = _wall_right_x(corner_z)
+	# Правая полоса: вдоль Z, от верхнего края до угла
+	var z: float = -MAP_HALF_Z + 1.0
+	while z <= corner_z + 2.0:
+		if not _wall_gap(z, PLAYER_BASE_ANCHOR.z + WALL_GAP_RIGHT_AT):
+			_wall_row(Vector2(_wall_right_x(z), z), Vector2(1.0, 0.0), _wall_half(z))
+		z += WALL_STEP
+	# Нижняя полоса: вдоль X, от левого края до угла
+	var x: float = -MAP_HALF_X + 1.0
+	while x <= corner_x + 2.0:
+		if not _wall_gap(x, PLAYER_BASE_ANCHOR.x + WALL_GAP_DOWN_AT):
+			_wall_row(Vector2(x, _wall_bottom_z(x)), Vector2(0.0, 1.0), _wall_half(x))
+		x += WALL_STEP
+
+## Один поперечный ряд полосы: сплошь FOREST_WALL, по краям — редкий декор
+func _wall_row(mid: Vector2, across: Vector2, half: float) -> void:
+	var v: float = -half
+	while v <= half:
+		var jx: float = randf_range(-0.45, 0.45)
+		var jz: float = randf_range(-0.45, 0.45)
+		var p: Vector2 = mid + across * v + Vector2(jx, jz)
+		v += WALL_STEP
+		if not _fits_in_map(p.x, p.y) or veg_river_blocked(p.x, p.y) or _is_reserved(p.x, p.y, 1.5):
+			continue
+		_plant_tree(p, ResourceNode.FOREST_WALL, randf_range(0.85, 1.35))
+		wall_trees_placed += 1
+	# Размытая кромка: редкие проходимые деревья снаружи полосы
+	for side in [-1.0, 1.0]:
+		if randf() < 0.30:
+			var d: float = half + randf_range(1.6, 4.5)
+			var q: Vector2 = mid + across * (d * float(side)) + Vector2(randf_range(-0.8, 0.8), randf_range(-0.8, 0.8))
+			if _fits_in_map(q.x, q.y) and not veg_river_blocked(q.x, q.y) and not _is_reserved(q.x, q.y, 1.5):
+				_plant_tree(q, ResourceNode.FOREST_DECOR, randf_range(0.75, 1.05))
+
+func _plant_tree(p: Vector2, kind: int, scale: float) -> void:
+	var tree := ResourceNode.new()
+	tree.resource_type = Constants.RESOURCE_WOOD
+	tree.remaining     = randf_range(480.0, 720.0)
+	tree.tree_variant  = randi_range(1, 4)
+	tree.forest_kind   = kind
+	tree.tree_scale    = scale
+	_world.add_child(tree)
+	tree.global_position = Vector3(p.x, get_terrain_height(p.x, p.y), p.y)
+
 func _add_corner_forests() -> void:
 	var radius_mult: float = sqrt(CORNER_AREA_MULT)          # площадь ×3
 	var count_mult:  float = CORNER_AREA_MULT * CORNER_DENSITY_MULT   # ×6 деревьев
@@ -3534,14 +3815,17 @@ func _add_corner_forests() -> void:
 			var jitter := Vector3(randf_range(-7.0, 7.0), 0.0, randf_range(-7.0, 7.0))
 			var radius: float = randf_range(5.0, 8.0) * radius_mult
 			var count:  int   = int(randf_range(7.0, 11.0) * count_mult)
-			_spawn_tree_cluster(center + jitter, count, radius, 0.85)
+			# Угловые массивы — лес-стена (естественная граница карты)
+			_spawn_tree_cluster(center + jitter, count, radius, 1.6,
+				ResourceNode.FOREST_WALL if FOREST_WALL_ENABLED else ResourceNode.FOREST_NORMAL)
 
 # Овальная роща: деревья рассыпаны по эллипсу со случайной ориентацией,
 # с минимальной дистанцией между стволами — никаких рядов/«заборов».
 # Каждое дерево — отдельный StaticBody3D (ResourceNode), зафиксированный
 # в мировых координатах; billboard только на его собственном спрайте.
 # min_gap — минимальный просвет между стволами: чем он меньше, тем гуще лес
-func _spawn_tree_cluster(center: Vector3, count: int, radius: float = 5.5, min_gap: float = 1.7) -> void:
+func _spawn_tree_cluster(center: Vector3, count: int, radius: float = 5.5, min_gap: float = 1.7,
+		kind: int = 0) -> void:
 	var ell_ang   := randf() * TAU                 # ориентация эллипса рощи
 	var rz_factor := randf_range(0.6, 1.0)         # сжатие: 1.0 = круг, 0.6 = овал
 	var placed_pts: Array = []
@@ -3573,13 +3857,21 @@ func _spawn_tree_cluster(center: Vector3, count: int, radius: float = 5.5, min_g
 		if not _fits_in_map(center.x + pt.x, center.z + pt.y):
 			continue
 		# И не в реку, и не на самую кромку: ствол в воде — не роща, а преграда
-		if is_water(center.x + pt.x, center.z + pt.y) \
+		if veg_river_blocked(center.x + pt.x, center.z + pt.y) \
 				or near_river(center.x + pt.x, center.z + pt.y, 1.5):
+			continue
+		# Угловые массивы — тоже стена; всё прочее у стены не растёт
+		if FOREST_WALL_ENABLED and kind != ResourceNode.FOREST_WALL and _in_wall_zone(center.x + pt.x, center.z + pt.y, 0.0):
 			continue
 		var tree := ResourceNode.new()
 		tree.resource_type = Constants.RESOURCE_WOOD
 		tree.remaining     = randf_range(480.0, 720.0)   # 3x ёмкость
 		tree.tree_variant  = randi_range(1, 4)
+		tree.forest_kind   = kind
+		if kind == ResourceNode.FOREST_DECOR:
+			tree.tree_scale = randf_range(0.8, 1.1)
+		elif kind == ResourceNode.FOREST_WALL:
+			tree.tree_scale = randf_range(0.9, 1.35)
 		_world.add_child(tree)
 		var px := center.x + pt.x
 		var pz := center.z + pt.y
@@ -3648,6 +3940,8 @@ const GRASS_SUBDIV := 2
 ## зелёный оставлен полным — палитра пиксель-арта сохраняется, оттенок уходит
 ## в чистую зелень
 const GRASS_TINT := Color(0.62, 1.0, 0.52)
+## Оттенок песчаных кос брода: тёплый, без зелёного множителя травы
+const SAND_TINT := Color(1.0, 0.93, 0.78)
 
 ## ЕДИНСТВЕННЫЙ ИСТОЧНИК ВЫСОТЫ: и для меша земли, и для всего, что на ней стоит
 func get_terrain_height(x: float, z: float) -> float:
@@ -3666,6 +3960,11 @@ func get_terrain_height(x: float, z: float) -> float:
 ## спуск повёрнут к ближнему замку (рудник берут пехотой — к нему должна
 ## вести дорога), остальные — к середине карты
 func plateau_list() -> Array:
+	# Пустой список гасит разом и высоту (plateau_height), и числа для ядра
+	# (plateau_params), и декор кустов на вершинах. Координаты PLATEAU_SPECS
+	# при этом живы: на них стоит рудник Красного ИИ (ai_mine_spot)
+	if not HIGHLANDS_ENABLED:
+		return []
 	if not _plateaus.is_empty():
 		return _plateaus
 	# ПЛАТО ТОЛЬКО ПОД РУДНИКАМИ НА ПУТИ: рудник у брода стоит на песке
@@ -3734,7 +4033,7 @@ func hill_center() -> Vector2:
 
 ## Подъём горы в точке: гауссов колокол, σ = HILL_RADIUS / 2
 func hill_height(x: float, z: float) -> float:
-	if HILL_HEIGHT <= 0.0:
+	if not HIGHLANDS_ENABLED or HILL_HEIGHT <= 0.0:
 		return 0.0
 	var c := hill_center()
 	var dx: float = x - c.x
@@ -3814,6 +4113,34 @@ func ford_route(from_p: Vector3, to_p: Vector3, lane_dz: float) -> Array:
 	return [a, b]
 
 ## Точка ближе margin к руслу (включая само русло и брод)
+## ── ЗАПРЕТ ПОСАДОК У ВОДЫ (ТЗ 24.09.2026, п. 10) ──────────────────────────
+## is_water() считает брод СУШЕЙ — он для ходьбы, — и все садки, спрашивавшие
+## только его, сажали грибы, кусты и деревья прямо в воду брода. Теперь
+## растительность и декор не встают ни на зеркало воды (оно накрывает и откос,
+## near_river(RIVER_BANK)), ни на песчаные косы у брода (FORD_BANK_CLEAR):
+## там был «лес стеной прямо в воду»
+const FORD_BANK_CLEAR := 7.0
+func veg_river_blocked(x: float, z: float) -> bool:
+	if is_water(x, z):
+		return true
+	if not RIVER_ENABLED or not river_in_field(z):
+		return false
+	if near_river(x, z, RIVER_BANK + 0.8):
+		return true
+	return absf(z - FORD_Z) < FORD_HALF + 4.0 and near_river(x, z, RIVER_BANK + FORD_BANK_CLEAR)
+
+## Точка под зеркалом воды (там, где его рисует _spawn_river)
+func in_water_mesh(x: float, z: float) -> bool:
+	return RIVER_ENABLED and river_in_field(z) and near_river(x, z, RIVER_BANK)
+
+## Песчаная коса у брода: неровная кромка (шум по Z), чтобы берег не был линейкой
+func ford_sand(x: float, z: float) -> bool:
+	if not RIVER_ENABLED or absf(z - FORD_Z) > FORD_HALF + 3.0:
+		return false
+	var wob: float = 1.6 * sin(z * 0.37) + 1.1 * sin(z * 0.91 + 1.3)
+	var edge_fade: float = clampf((FORD_HALF + 3.0 - absf(z - FORD_Z)) / 5.0, 0.0, 1.0)
+	return near_river(x, z, RIVER_BANK + (3.0 + FORD_BANK_CLEAR * 0.6 + wob) * edge_fade)
+
 func near_river(x: float, z: float, margin: float = 0.0) -> bool:
 	if not RIVER_ENABLED or not river_in_field(z):
 		return false
@@ -3899,6 +4226,11 @@ func _build_flat_terrain() -> void:
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 	var st_hill := SurfaceTool.new()
 	st_hill.begin(Mesh.PRIMITIVE_TRIANGLES)
+	# Песок брода — своим мешем: материал травы умножает всё на зелёный
+	# GRASS_TINT, и песок выходил салатовым (ТЗ 24.09.2026, п. 10)
+	var st_sand := SurfaceTool.new()
+	st_sand.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var sand_quads := 0
 	var hill_quads := 0
 	for iz in range(nz):
 		for ix in range(nx):
@@ -3945,8 +4277,12 @@ func _build_flat_terrain() -> void:
 				cols = COLOR_COLS
 				rows = COLOR_ROWS
 				tile = TILE_COLOR_WALL if slope > HILL_CLIFF_SLOPE else TILE_COLOR_LOW
-			elif ford_here and near_river(cx, cz, 3.0):
+			elif ford_sand(cx, cz):
+				# Песчаная коса у брода (ТЗ 24.09.2026, п. 10): шире прежних 3 м
+				# и с неровной кромкой — берег, а не лес в воду
 				tile = TILE_SAND
+				target = st_sand
+				sand_quads += 1
 			else:
 				# Пятна травы другого оттенка поверх основного листа
 				var shade: int = grass_shade(cx, cz)
@@ -3969,7 +4305,7 @@ func _build_flat_terrain() -> void:
 			# тайл: рисунок травы становится вдвое мельче, а сетка рельефа и
 			# выбор тайла остаются те же. Гора и песок брода не дробятся
 			var sub: int = 1
-			if target != st_hill and tile != TILE_SAND:
+			if target != st_hill and target != st_sand:
 				sub = GRASS_SUBDIV
 			for sz2 in range(sub):
 				for sx2 in range(sub):
@@ -4006,6 +4342,17 @@ func _build_flat_terrain() -> void:
 	mi.material_override = mat
 	add_child(mi)
 	for k in color_st.keys():
+		# ── МЕШ ПРОВЕРЯЕТСЯ ДО СОЗДАНИЯ УЗЛА (ТЗ 23.09.2026) ───────────────
+		# Здесь `MeshInstance3D.new()` стоял ВЫШЕ проверки, и пустой слой
+		# уходил в `continue`, оставляя узел БЕЗ РОДИТЕЛЯ — то есть утечку
+		# (Performance.OBJECT_ORPHAN_NODE_COUNT). Пока плато были на карте,
+		# слой COLOR_PLATEAU не пустовал никогда, и баг не проявлялся;
+		# погашенные возвышенности обнажили его сразу (qa_squad «7 нет утечки
+		# узлов»: orphan=1). Узел заводится только тогда, когда его есть чем
+		# наполнить
+		var cmesh: ArrayMesh = (color_st[k] as SurfaceTool).commit()
+		if cmesh == null or cmesh.get_surface_count() == 0:
+			continue
 		var cmi := MeshInstance3D.new()
 		cmi.name = "TerrainColor%d" % int(k)
 		var cmat := StandardMaterial3D.new()
@@ -4014,12 +4361,21 @@ func _build_flat_terrain() -> void:
 		cmat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
 		cmat.roughness = 0.90
 		cmat.vertex_color_use_as_albedo = true
-		var cmesh: ArrayMesh = (color_st[k] as SurfaceTool).commit()
-		if cmesh == null or cmesh.get_surface_count() == 0:
-			continue
 		cmi.mesh = cmesh
 		cmi.material_override = cmat
 		add_child(cmi)
+	if sand_quads > 0 and grass_tex != null:
+		var smi := MeshInstance3D.new()
+		smi.name = "FordSand"
+		var smat := StandardMaterial3D.new()
+		smat.albedo_texture = grass_tex
+		smat.albedo_color = SAND_TINT
+		smat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+		smat.roughness = 0.95
+		smat.vertex_color_use_as_albedo = true
+		smi.mesh = st_sand.commit()
+		smi.material_override = smat
+		add_child(smi)
 	if hill_quads > 0:
 		var hmi := MeshInstance3D.new()
 		hmi.name = "Hill"
@@ -4332,6 +4688,9 @@ func _spawn_river() -> void:
 	var dz: float = MAP_HALF_Z * 2.0 / float(nz)
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var st_ford := SurfaceTool.new()
+	st_ford.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var ford_quads := 0
 	var quads := 0
 	for iz in range(nz):
 		for ix in range(nx):
@@ -4351,6 +4710,16 @@ func _spawn_river() -> void:
 			var b := Vector3(x1, water_surface_y(x1, z0), z0)
 			var c := Vector3(x1, water_surface_y(x1, z1), z1)
 			var d := Vector3(x0, water_surface_y(x0, z1), z1)
+			# Мелководье брода — своим мешем и своим цветом (см. _ford_water_mat)
+			var tgt: SurfaceTool = st_ford if in_ford(cz) else st
+			if tgt == st_ford:
+				ford_quads += 1
+				for vf in [a, b, c, a, c, d]:
+					var pf: Vector3 = vf
+					tgt.set_normal(Vector3.UP)
+					tgt.set_uv(Vector2(pf.x / WATER_TILE_M, pf.z / WATER_TILE_M))
+					tgt.add_vertex(pf + Vector3(0.0, 0.01, 0.0))
+				continue
 			for v in [a, b, c, a, c, d]:
 				var p: Vector3 = v
 				var full: float = FORD_DEPTH if in_ford(p.z) else RIVER_DEPTH
@@ -4379,8 +4748,43 @@ func _spawn_river() -> void:
 		river.mesh = st.commit()
 		river.material_override = wmat
 		_world.add_child(river)
+	if ford_quads > 0:
+		var ford := MeshInstance3D.new()
+		ford.name = "FordShallows"
+		ford.mesh = st_ford.commit()
+		ford.material_override = _ford_water_mat(water_tex)
+		_world.add_child(ford)
 	_spawn_river_foam()
 	_spawn_ford_rocks()
+
+## ── МЕЛКОВОДЬЕ БРОДА (ТЗ 24.09.2026, п. 10) ───────────────────────────────
+## Вода брода рисовалась той же текстурой, что и глубокая, чуть светлее
+## вершинным цветом — множитель не умеет СВЕТЛИТЬ, и брод на глаз не читался
+## мелью. Здесь та же текстура подмешана к светлому бирюзово-зелёному
+## (SHALLOW_COLOR, доля SHALLOW_MIX): рисунок волн сохраняется, тон — мель
+const SHALLOW_COLOR := Color(0.52, 0.86, 0.78)
+const SHALLOW_MIX := 0.55
+func _ford_water_mat(tex: Texture2D) -> Material:
+	var sh := Shader.new()
+	sh.code = """shader_type spatial;
+render_mode unshaded, cull_disabled;
+uniform sampler2D water_tex : source_color, filter_nearest, repeat_enable;
+uniform vec4 shallow : source_color;
+uniform float mix_k = 0.55;
+uniform float has_tex = 1.0;
+void fragment() {
+	vec3 w = has_tex > 0.5 ? texture(water_tex, UV).rgb : vec3(0.30, 0.62, 0.86);
+	ALBEDO = mix(w, shallow.rgb, mix_k);
+}
+"""
+	var m := ShaderMaterial.new()
+	m.shader = sh
+	m.set_shader_parameter("shallow", SHALLOW_COLOR)
+	m.set_shader_parameter("mix_k", SHALLOW_MIX)
+	m.set_shader_parameter("has_tex", 1.0 if tex != null else 0.0)
+	if tex != null:
+		m.set_shader_parameter("water_tex", tex)
+	return m
 
 ## Лоскуты пены у кромок воды (первый кадр Water Foam, плашмя)
 func _spawn_river_foam() -> void:
@@ -4442,9 +4846,12 @@ func _spawn_river_foam() -> void:
 
 ## Камни в воде брода — по ним видно, где переходить (анимированные Rocks_0N)
 func _spawn_ford_rocks() -> void:
+	# ── ТОЛЬКО МЕЛКАЯ ГАЛЬКА (ТЗ 24.09.2026, п. 10) ─────────────────────
+	# Rocks_03/04 — крупные валуны (непрозрачная часть 65-80 % кадра): сняты.
+	# Остались три мелких вида — Rocks_01/02 и «камень в воде» Water Rocks_01
 	var paths: Array = []
-	for i in range(1, 5):
-		var p: String = TILE_ROCKS_DIR + "Rocks_%02d.png" % i
+	for p in [TILE_ROCKS_DIR + "Rocks_01.png", TILE_ROCKS_DIR + "Rocks_02.png",
+			"res://assets/environment/terrain/Water Rocks_01.png"]:
 		if ResourceLoader.exists(p):
 			paths.append(p)
 	if paths.is_empty():
@@ -4472,7 +4879,7 @@ func _spawn_ford_rocks() -> void:
 		# Детерминированная россыпь по полосе брода
 		var fz: float = FORD_Z + (float(i) / float(FORD_ROCKS) - 0.5) * 2.0 * (FORD_HALF - 2.0)
 		var fx: float = river_x(fz) + sin(float(i) * 2.399) * (RIVER_HALF_W - 1.5)
-		var w: float = 1.4 + 0.5 * absf(sin(float(i) * 1.7))
+		var w: float = 0.7 + 0.35 * absf(sin(float(i) * 1.7))
 		var h: float = w / aspect
 		var xf := Transform3D(Basis.IDENTITY.scaled(Vector3(w, w, w)),
 			Vector3(fx, get_terrain_height(fx, fz) + h * 0.5 - 0.05, fz))
@@ -4660,7 +5067,7 @@ func _scatter_cluster_bushes(mid: Vector2, half: Vector2) -> void:
 		var bz: float = mid.y + sin(a) * rz * k
 		if not _fits_in_map(bx, bz):
 			continue
-		if is_water(bx, bz):
+		if veg_river_blocked(bx, bz):
 			continue
 		# Пятачок базы: куст там мешал бы поставить здание ровно так же, как
 		# кусок руды (см. отбраковку кусков выше)
@@ -4677,10 +5084,11 @@ func _spawn_bushes() -> void:
 		return
 
 	# Кусты растут ОКРУГЛЫМИ/овальными группами (как рощи), а не поодиночке
-	var target_clusters := int(12.0 * MAP_GROWTH * MAP_GROWTH)
+	# ТЗ 24.09.2026, п. 13: кустов больше (было 12 групп на единицу площади)
+	var target_clusters := int(20.0 * MAP_GROWTH * MAP_GROWTH)
 	var placed   := 0
 	var attempts := 0
-	while placed < target_clusters and attempts < 400:
+	while placed < target_clusters and attempts < 700:
 		attempts += 1
 		var cx := randf_range(-GEN_HALF_X, GEN_HALF_X)
 		var cz := randf_range(-GEN_HALF_Z, GEN_HALF_Z)
@@ -4729,6 +5137,8 @@ func _spawn_bush_cluster(textures: Array, center: Vector3, count: int) -> void:
 			continue
 		placed_pts.append(pt)
 		if not _fits_in_map(center.x + pt.x, center.z + pt.y):
+			continue
+		if veg_river_blocked(center.x + pt.x, center.z + pt.y):
 			continue
 
 		var tex: Texture2D = textures[randi() % textures.size()]

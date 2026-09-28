@@ -201,22 +201,40 @@ func _a_layout() -> void:
 				or int(GameManager.squads[sid].get("pending", 0)) != 0:
 			full_ok = false
 	verdict("A6 отряды охраны полные, награды за ранг разобраны", full_ok)
-	# За замком: проекция центра на ось «замок → центр карты» отрицательна
-	var front: Vector3 = keep.front_dir()
-	var behind_ok := true
-	var far_ok := true
-	var projs := ""
+	# ТЗ 25.09.2026 (уровень 1): охрана КОЛЬЦОМ вокруг крепости на HOME_RING_DIST,
+	# каждый пост внутри карты с отступом полуразмера строя + SQUAD_EDGE_PAD.
+	# Прежнее «колонной за замком» развёрнуто: колонна уходила в угол карты
+	var ring_ok := true
+	var inside_ok := true
+	var ring_d := ""
+	var lim_x: float = GameManager.map_lim_x - GameManager.SQUAD_EDGE_PAD
+	var lim_z: float = GameManager.map_lim_z - GameManager.SQUAD_EDGE_PAD
 	for s in guard.squads:
 		var c: Vector3 = _centroid(int(s["sid"]))
-		var off: Vector3 = c - keep.global_position
-		var pr: float = off.x * front.x + off.z * front.z
-		projs += "%.1f " % pr
-		if pr > -4.0:
-			behind_ok = false
-		if _xz(c, keep.global_position) > 40.0:
-			far_ok = false
-	verdict("A7 охрана стоит В ГЛУБИНЕ базы: за замком, не дальше 40 м", behind_ok and far_ok,
-		"проекции на фронт: " + projs)
+		var d: float = _xz(c, keep.global_position)
+		ring_d += "%.1f " % d
+		if absf(d - _AICfg.HOME_RING_DIST) > 3.5:
+			ring_ok = false
+		if absf(c.x) > lim_x or absf(c.z) > lim_z:
+			inside_ok = false
+	verdict("A7 охрана кольцом вокруг крепости (%.0f м ±3.5)" % _AICfg.HOME_RING_DIST, ring_ok,
+		"от замка, м: " + ring_d)
+	verdict("A7б посты охраны внутри карты с отступом от кромки", inside_ok)
+	# Кольцо не наложилось на башни и жилы базы
+	var clear_ok := true
+	var min_d := 999.0
+	for s in guard.squads:
+		var c: Vector3 = _centroid(int(s["sid"]))
+		for t in towers:
+			min_d = minf(min_d, _xz(c, (t as Node3D).global_position))
+		# Жилы — золото и камень; деревья под постом вырубаются при рождении
+		for r in get_tree().get_nodes_in_group("resource_nodes"):
+			if is_instance_valid(r) and (r as ResourceNode).resource_type != Constants.RESOURCE_WOOD:
+				min_d = minf(min_d, _xz(c, (r as Node3D).global_position))
+	if min_d < _AICfg.HOME_RING_CLEAR:
+		clear_ok = false
+	verdict("A7в посты кольца не ближе %.1f м к башне или жиле" % _AICfg.HOME_RING_CLEAR, clear_ok,
+		"ближайшее %.1f м" % min_d)
 	var stance_ok := true
 	for s in guard.squads:
 		var sid: int = int(s["sid"])
@@ -307,8 +325,10 @@ func _c_wake() -> void:
 	await pframes(int(_AICfg.HOME_GUARD_TICK_SEC * 60.0) * 2 + 6)
 	# ТЗ 19.09.2026 (блок 3.3): по тревоге просыпается ПЕРВАЯ ВОЛНА
 	# (HOME_GUARD_WAVE_SQUADS отрядов), остальные — через HOME_GUARD_WAVE_GAP_SEC
+	# ТЗ 25.09.2026: WAVE_SQUADS = 0 — по тревоге встаёт ВЕСЬ гарнизон
 	var n_guard: int = guard.squads.size()
-	var wave1: int = mini(_AICfg.HOME_GUARD_WAVE_SQUADS, n_guard)
+	var wave1: int = n_guard if _AICfg.HOME_GUARD_WAVE_SQUADS <= 0 \
+		else mini(_AICfg.HOME_GUARD_WAVE_SQUADS, n_guard)
 	verdict("C1 прорыв в зону охраны — тревога, проснулась первая волна (%d из %d)" % [wave1, n_guard],
 		guard.alarm and guard.asleep_count() == n_guard - wave1,
 		"тревога %s, спит %d" % [str(guard.alarm), guard.asleep_count()])
@@ -347,10 +367,17 @@ func _c_wake() -> void:
 	# Угроза снята: чужие убиты — через CALM_SEC охрана идёт домой, у постов засыпает
 	_kill_squad(_intruder_sid)
 	await pframes(6)
+	# Ждём СВОЙСТВО с потолком: после смерти чужих окно «били недавно» (3 с)
+	# у пяти дерущихся отрядов отодвигает начало отсчёта покоя
 	var calm_frames: int = int(_AICfg.HOME_GUARD_CALM_SEC * 60.0) + 60
-	await pframes(calm_frames)
-	verdict("C4 угрозы нет %.0f с — тревога снята" % _AICfg.HOME_GUARD_CALM_SEC, not guard.alarm,
-		"тревога %s" % str(guard.alarm))
+	var calm_seen := false
+	for _w in range(2 * calm_frames):
+		await pframes(1)
+		if not guard.alarm:
+			calm_seen = true
+			break
+	verdict("C4 угрозы нет %.0f с — тревога снята" % _AICfg.HOME_GUARD_CALM_SEC, calm_seen,
+		"тревога %s (причина: %s)" % [str(guard.alarm), String(guard.last_reason)])
 	# Домой идут пешком: ждём СВОЙСТВО (все уснули), потолок в физкадрах
 	var slept := false
 	for _w in range(60):
@@ -391,8 +418,10 @@ func _d_castle_hit_and_save() -> void:
 	var hp0: float = keep.current_health
 	keep.take_damage(25.0, shooter)
 	await pframes(int(_AICfg.HOME_GUARD_TICK_SEC * 60.0) * 2 + 6)
+	var w1: int = guard.squads.size() if _AICfg.HOME_GUARD_WAVE_SQUADS <= 0 \
+		else mini(_AICfg.HOME_GUARD_WAVE_SQUADS, guard.squads.size())
 	verdict("D1 удар по замку будит охрану — первую волну (замок под ударом %.0f с)" % _AICfg.HOME_GUARD_HIT_SEC,
-		guard.alarm and guard.asleep_count() == guard.squads.size() - mini(_AICfg.HOME_GUARD_WAVE_SQUADS, guard.squads.size()),
+		guard.alarm and guard.asleep_count() == guard.squads.size() - w1,
 		"тревога %s, спит %d, запас замка %.0f → %.0f" % [str(guard.alarm), guard.asleep_count(),
 			hp0, keep.current_health])
 	var on_shooter := 0

@@ -24,6 +24,8 @@ const _OptSys := preload("res://scripts/perf_config.gd")
 ## сетке ядра (nearest_of_side), а не обходом групп.
 
 const _GobCfg := preload("res://scripts/goblin/goblin_config.gd")
+## Сложность крутит размер волны резерва (ТЗ 23.09.2026, п. 6)
+const _DiffR := preload("res://scripts/game_difficulty_config.gd")
 
 var main = null
 var ai = null                    # GoblinAI
@@ -271,7 +273,7 @@ func _all_idle(sid: int) -> bool:
 func _fight() -> void:
 	var budget: int = 0
 	if wave_clock >= _GobCfg.RESERVE_WAVE_GAP_SEC:
-		budget = maxi(_GobCfg.RESERVE_WAVE_SQUADS, 1)
+		budget = maxi(_DiffR.mob_count(_GobCfg.RESERVE_WAVE_SQUADS), 1)
 		wave_clock = 0.0
 		waves += 1
 		waves_total += 1
@@ -295,8 +297,24 @@ func _fight() -> void:
 			foe = _nearest_foe(c, _GobCfg.RESERVE_WAKE_RADIUS)
 		if foe == null:
 			continue
+		# ── СБОР ПЕРЕД УДАРОМ (ТЗ 24.09.2026, п. 8) ─────────────────────
+		# Проснувшиеся отряды не бегут на копья по одному: встают линией
+		# перед врагом и уходят одной волной (WaveStager)
+		var gt: Dictionary = stager.gate(sid, c, foe, Time.get_ticks_msec() * 0.001)
+		if gt.has("stage"):
+			var sg: Vector3 = gt["stage"]
+			var prev: Vector3 = s.get("stage_goal", Vector3.INF)
+			if prev.distance_to(sg) >= 1.0:
+				s["stage_goal"] = sg
+				_order_home(sid, sg)
+			continue
+		s["stage_goal"] = Vector3.INF
+		var pf: Node3D = gt.get("foe", foe)
 		for m in _members(sid):
-			(m as Unit).command_attack(foe, true)
+			(m as Unit).command_attack(pf, true)
+
+const _StagerR := preload("res://scripts/goblin/WaveStager.gd")
+var stager = _StagerR.new()
 
 func _go_home() -> void:
 	for s in squads:

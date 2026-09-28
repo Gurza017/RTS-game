@@ -84,6 +84,23 @@ uniform vec3 decay_tone : source_color = vec3(0.34, 0.27, 0.18);
 uniform float decay_darkest : hint_range(0.0, 1.0) = 0.45;
 uniform float decay_tone_mix : hint_range(0.0, 1.0) = 0.72;
 uniform float dither_start : hint_range(0.0, 1.0) = 0.35;
+// ── ТЕЛО В ВОДЕ (ТЗ 24.09.2026, п. 10; ТЗ 25.09.2026, п. 2) ────────────────
+// submerge — доля фигуры под водой (0 — сухое тело).
+// ЛИНИЯ ВОДЫ ИДЁТ ВДОЛЬ ТЕЛА, А НЕ ПОПЕРЁК. Рисунок — стоящая фигура, и
+// у лежащего квада её вертикаль (UV.y) — это ПРОДОЛЬНАЯ ось тела: срез по
+// UV.y топил ноги и оставлял над водой голову и острие копья, «как будто
+// тело стоит вертикально под водой» (жалоба 25.09). Теперь режется по UV.x —
+// по ширине фигуры: одна сторона туловища под водой, другая над ней, линия
+// проходит от головы до ступней. fig_left/fig_right — полоса фигуры в кадре
+// по UV.x (доли ширины КАДРА), снимает CorpseRenderer раз на мокрый бакет;
+// fig_top/fig_bot оставлены — по ним идёт рябь линии
+uniform float submerge = 0.0;
+uniform float fig_top = 0.0;
+uniform float fig_bot = 1.0;
+uniform float fig_left = 0.0;
+uniform float fig_right = 1.0;
+uniform vec3 water_tone : source_color = vec3(0.33, 0.66, 0.70);
+uniform float water_mix : hint_range(0.0, 1.0) = 0.72;
 
 void fragment() {
 	float fidx = floor(COLOR.r * 255.0 + 0.5);
@@ -125,6 +142,18 @@ void fragment() {
 		float lum = dot(rgb, vec3(0.299, 0.587, 0.114));
 		vec3 earth = mix(vec3(lum), decay_tone * (lum * 2.0 + 0.25), decay_tone_mix);
 		rgb = mix(rgb, earth, rot) * mix(1.0, decay_darkest, rot);
+	}
+	if (submerge > 0.001) {
+		// u — координата ВНУТРИ кадра с учётом зеркала: сторона фигуры,
+		// ушедшая под воду, у зеркального тела та же по рисунку
+		float cut = fig_right - submerge * (fig_right - fig_left);
+		float wobble = 0.012 * sin(UV.y * 40.0);
+		float under = u - (cut + wobble);
+		if (under > 0.0) {
+			rgb = mix(rgb, water_tone, water_mix);
+		} else if (under > -0.012) {
+			rgb = mix(rgb, vec3(0.85, 0.95, 0.95), 0.55);
+		}
 	}
 	ALBEDO = rgb;
 	ALPHA = col.a;

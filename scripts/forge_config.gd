@@ -8,7 +8,42 @@ const COLS := ["a", "b", "c", "d"]
 const ABILITY_COL := "d"
 
 ## Порядок вкладок в панели кузницы — он же порядок иконок в верхней полосе.
+## «economy» — ВКЛАДКА, А НЕ РОД ВОЙСК (ТЗ 23.09.2026). Заказ требовал
+## раздельные ветки по дереву, камню и золоту плюс экономику найма, а сетка
+## рабочего 5×4 занята вся и по заказу же неприкосновенна («ничего не удаляй»).
+## Расширять сетку в ширину значило бы ломать геометрию панели у ВСЕХ пяти
+## вкладок ради одной; отдельная вкладка даёт ровно четыре нужные колонки и не
+## трогает ни одного существующего узла
+## «economy» слита в «worker» (ТЗ 24.09.2026, второе письмо)
 const UNIT_TABS := ["worker", "warrior", "spearman", "archer", "monk"]
+
+## К КАКИМ ЮНИТАМ ПРИМЕНЯЮТСЯ БОНУСЫ ВКЛАДКИ. По умолчанию — к своему роду
+## войск (вкладка «archer» качает лучников), и это подразумевалось молча: tree()
+## ставил applies_to = [имя вкладки]. У «economy» рода войск нет вовсе, а её
+## узлы читают и рабочий (добыча), и здания (найм, стройка) — поэтому «all».
+## Само хранилище бонусов при этом прежнее, второго заводить не нужно
+const TAB_APPLIES := {
+	"economy": ["all"],
+}
+
+## ── ЦЕНА РЯДА: РАННИЕ ДЕШЕВЛЕ, ПОЗДНИЕ ДОРОЖЕ (ТЗ 24.09.2026, партия 90 мин) ──
+## Множитель ко ВСЕМ ценам узла (дерево, золото, камень, еда) по номеру ряда.
+## Числа в UNITS — «средняя» цена ряда; прогрессию задаёт ЭТА таблица, а не
+## сотня правок по узлам: поменять крутизну — пять чисел. Время исследования
+## не трогается. Расчёт — scripts/economy_model.gd и стенд qa_economy90:
+## ряд 1 открыт на 5-й минуте, ряд 2 — к 15-й, ряды 4-5 стоят по три-восемь
+## отрядов копейщиков за узел (дилемма «ещё отряды ИЛИ элитное оружие»)
+const ROW_COST_MULT := {1: 0.60, 2: 0.90, 3: 1.30, 4: 2.00, 5: 2.60}
+const _COST_KEYS := ["cost_wood", "cost_gold", "cost_stone", "cost_food"]
+
+static func row_cost_mult(row: int) -> float:
+	return float(ROW_COST_MULT.get(row, 1.0))
+
+static func tab_applies_to(unit_id: String) -> Array:
+	var lst: Variant = TAB_APPLIES.get(unit_id)
+	if lst == null:
+		return [unit_id]
+	return (lst as Array).duplicate()
 
 ## ═══════════════════════════════════════════════════════════════════════════
 ## ═══════════════════════════════════════════════════════════════════════════
@@ -18,170 +53,95 @@ const UNITS := {
 # ═════════════════════════════════════════════════════════════════════════════
 # РАБОЧИЙ — ЭКОНОМИЧЕСКАЯ ВЕТКА
 "worker": {
-	"1a": {"icon": "icon_trader.png", "prereq": [], "link": [],
-		"name": "Крепкие корзины", "desc": "+2 к грузу за ходку",
-		"cost_gold": 200.0, "cost_wood": 300.0, "cost_stone": 0.0, "research_time": 25.0,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 0.0, "bonus_carry": 2.0, "bonus_gather": 0.0},
-	"1b": {"icon": "icon_axe.png", "prereq": [], "link": [],
-		"name": "Правка инструмента", "desc": "−0.25 с к циклу добычи",
-		"cost_gold": 200.0, "cost_wood": 300.0, "cost_stone": 0.0, "research_time": 25.0,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.25},
+	# ═══════════════════════════════════════════════════════════════════════
+	# РАБОЧИЙ — ОДНО ДРЕВО, ТРИ ВЕТКИ (ТЗ 24.09.2026, второе письмо)
+	# ═══════════════════════════════════════════════════════════════════════
+	# Вкладка «Экономика» («рудник» в кузнице) слита сюда и снята. Удар и запас
+	# жизни рабочего из древа убраны. Всё — ДОЛИ:
+	#   a — ПРОМЫСЛЫ: дерево, камень, золото (bonus_gather_wood/_stone/_gold)
+	#   b — МЯСО И ГРУЗ: разделка (bonus_gather_food), груз (bonus_carry_pct)
+	#   c — ХОД С ГРУЗОМ (bonus_walk_loaded_pct — только с ношей) и стройка
+	#   d — НАЙМ РАБОЧИХ (bonus_train, bonus_hire_cost): награда за полный ряд
+	"1a": {"icon": "icon_axe.png", "prereq": [], "link": [],
+		"name": "Лесопилка", "desc": "Рубка дерева быстрее на 15 %",
+		"cost_gold": 150.0, "cost_wood": 250.0, "cost_stone": 0.0, "research_time": 20.0,
+		"bonus_gather_wood": 0.15},
+	"1b": {"icon": "icon_drop.png", "prereq": [], "link": [],
+		"name": "Мясницкий нож", "desc": "Разделка мяса быстрее на 15 %",
+		"cost_gold": 150.0, "cost_wood": 250.0, "cost_stone": 0.0, "research_time": 20.0,
+		"bonus_gather_food": 0.15},
 	"1c": {"icon": "icon_luck_horseshoe.png", "prereq": [], "link": [],
-		"name": "Крепкая обувь", "desc": "+0.15 к скорости",
-		"cost_gold": 200.0, "cost_wood": 300.0, "cost_stone": 0.0, "research_time": 25.0,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-		"bonus_health": 0.0, "bonus_speed": 0.15, "bonus_range": 0.0,
-		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-	# ── КОЛОНКА D — ОБУЧЕНИЕ И СТРОЙКА (письмо 12) ────────────────────────
-	"1d": {"icon": "icon_hammer.png", "prereq": [], "link": [],
-		"name": "Артельный подряд", "desc": "+20 % к темпу обучения рабочих",
-		"cost_gold": 200.0, "cost_wood": 300.0, "cost_stone": 0.0, "research_time": 25.0,
-		"bonus_train": 0.20,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-	"2a": {"icon": "icon_trader.png", "prereq": ["1a"], "link": ["2b"],
-		"name": "Заплечные носилки", "desc": "+3 к грузу за ходку",
-		"cost_gold": 400.0, "cost_wood": 550.0, "cost_stone": 150.0, "research_time": 40.0,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 0.0, "bonus_carry": 3.0, "bonus_gather": 0.0},
-	"2b": {"icon": "icon_hammer.png", "prereq": ["1b"], "link": ["2a"],
-		"name": "Закалённые кирки", "desc": "−0.35 с к циклу добычи",
-		"cost_gold": 400.0, "cost_wood": 550.0, "cost_stone": 150.0, "research_time": 40.0,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.35},
-	"2c": {"icon": "icon_heart.png", "prereq": ["1c"], "link": [],
-		"name": "Сытный паёк", "desc": "+16 к запасу HP",
-		"cost_gold": 400.0, "cost_wood": 550.0, "cost_stone": 150.0, "research_time": 40.0,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-		"bonus_health": 16.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-	"2d": {"icon": "icon_gold.png", "prereq": ["1d"], "link": [],
-		"name": "Учёт и порядок", "desc": "+25 % к темпу стройки, +15 % к темпу обучения",
-		"cost_gold": 400.0, "cost_wood": 550.0, "cost_stone": 150.0, "cost_food": 120.0, "research_time": 40.0,
-		"bonus_build": 0.25, "bonus_train": 0.15,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-		"bonus_health": 0.0, "bonus_speed": 0.2, "bonus_range": 0.0,
-		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 0.0, "bonus_carry": 3.0, "bonus_gather": 0.0},
-	"3a": {"icon": "icon_trader.png", "prereq": ["2a"], "link": [],
-		"name": "Тачки", "desc": "+3 к грузу за ходку",
-		"cost_gold": 500.0, "cost_wood": 700.0, "cost_stone": 200.0, "research_time": 45.0,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 0.0, "bonus_carry": 3.0, "bonus_gather": 0.0},
-	"3b": {"icon": "icon_axe.png", "prereq": ["2b"], "link": ["3c"],
-		"name": "Двуручный топор", "desc": "−0.35 с к циклу добычи",
-		"cost_gold": 500.0, "cost_wood": 700.0, "cost_stone": 200.0, "research_time": 45.0,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.35},
-	"3c": {"icon": "icon_luck_horseshoe.png", "prereq": ["2c"], "link": ["3b"],
-		"name": "Торные тропы", "desc": "+0.2 к скорости, +1 к удару",
-		"cost_gold": 500.0, "cost_wood": 700.0, "cost_stone": 200.0, "research_time": 45.0,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_attack": 1.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-		"bonus_health": 0.0, "bonus_speed": 0.2, "bonus_range": 0.0,
-		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-	"3d": {"icon": "icon_drop.png", "prereq": ["2d"], "link": [],
-		"name": "Артельный обоз", "desc": "+40 % к темпу стройки, +25 % к темпу обучения",
-		"cost_gold": 500.0, "cost_wood": 700.0, "cost_stone": 200.0, "cost_food": 180.0, "research_time": 45.0,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_build": 0.40, "bonus_train": 0.25, "bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-	"4a": {"icon": "icon_gold.png", "prereq": ["3a"], "link": ["4b"],
-		"name": "Крытые повозки", "desc": "+4 к грузу за ходку",
-		"cost_gold": 800.0, "cost_wood": 1000.0, "cost_stone": 300.0, "research_time": 60.0,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 0.0, "bonus_carry": 4.0, "bonus_gather": 0.0},
-	"4b": {"icon": "icon_hammer.png", "prereq": ["3b"], "link": ["4a"],
-		"name": "Рудничный вороток", "desc": "−0.45 с к циклу добычи",
-		"cost_gold": 800.0, "cost_wood": 1000.0, "cost_stone": 300.0, "research_time": 60.0,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.45},
-	"4c": {"icon": "icon_heart.png", "prereq": ["3c"], "link": [],
-		"name": "Артельный лекарь", "desc": "+20 к запасу HP, +1 к удару",
-		"cost_gold": 800.0, "cost_wood": 1000.0, "cost_stone": 300.0, "research_time": 60.0,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_attack": 1.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-		"bonus_health": 20.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		"name": "Крепкие лямки", "desc": "С грузом ходит быстрее на 10 %",
+		"cost_gold": 150.0, "cost_wood": 250.0, "cost_stone": 0.0, "research_time": 20.0,
+		"bonus_walk_loaded_pct": 0.1},
+	"1d": {"icon": "icon_might.png", "prereq": [], "link": [],
+		"name": "Артельный подряд", "desc": "Найм рабочих быстрее на 20 %",
+		"cost_gold": 150.0, "cost_wood": 250.0, "cost_stone": 0.0, "research_time": 20.0,
+		"bonus_train": 0.2},
+	"2a": {"icon": "icon_hammer.png", "prereq": ["1a"], "link": [],
+		"name": "Каменоломня", "desc": "Добыча камня быстрее на 15 %",
+		"cost_gold": 260.0, "cost_wood": 400.0, "cost_stone": 100.0, "research_time": 32.0,
+		"bonus_gather_stone": 0.15},
+	"2b": {"icon": "icon_trader.png", "prereq": ["1b"], "link": [],
+		"name": "Заплечные корзины", "desc": "Груз за ходку больше на 25 % (20 → 25)",
+		"cost_gold": 260.0, "cost_wood": 400.0, "cost_stone": 100.0, "research_time": 32.0,
+		"bonus_carry_pct": 0.25},
+	"2c": {"icon": "icon_luck_horseshoe.png", "prereq": ["1c"], "link": [],
+		"name": "Торные тропы", "desc": "С грузом ещё +10 %, стройка быстрее на 15 %",
+		"cost_gold": 260.0, "cost_wood": 400.0, "cost_stone": 100.0, "research_time": 32.0,
+		"bonus_walk_loaded_pct": 0.1, "bonus_build": 0.15},
+	"2d": {"icon": "icon_might.png", "prereq": ["1d"], "link": [],
+		"name": "Верстаки Крепости", "desc": "Найм рабочих быстрее ещё на 20 %",
+		"cost_gold": 260.0, "cost_wood": 400.0, "cost_stone": 100.0, "cost_food": 60.0, "research_time": 32.0,
+		"bonus_train": 0.2},
+	"3a": {"icon": "icon_gold.png", "prereq": ["2a"], "link": [],
+		"name": "Промывка породы", "desc": "Добыча золота быстрее на 15 %",
+		"cost_gold": 420.0, "cost_wood": 620.0, "cost_stone": 200.0, "research_time": 42.0,
+		"bonus_gather_gold": 0.15},
+	"3b": {"icon": "icon_drop.png", "prereq": ["2b"], "link": [],
+		"name": "Коптильня", "desc": "Разделка мяса быстрее ещё на 15 %",
+		"cost_gold": 420.0, "cost_wood": 620.0, "cost_stone": 200.0, "research_time": 42.0,
+		"bonus_gather_food": 0.15},
+	"3c": {"icon": "icon_luck_horseshoe.png", "prereq": ["2c"], "link": [],
+		"name": "Вьючные ремни", "desc": "С грузом ходит быстрее ещё на 10 %",
+		"cost_gold": 420.0, "cost_wood": 620.0, "cost_stone": 200.0, "research_time": 42.0,
+		"bonus_walk_loaded_pct": 0.1},
+	"3d": {"icon": "icon_might.png", "prereq": ["2d"], "link": [],
+		"name": "Учёт и порядок", "desc": "Найм ещё +15 %, рабочий дешевле на 10 % мяса",
+		"cost_gold": 420.0, "cost_wood": 620.0, "cost_stone": 200.0, "cost_food": 110.0, "research_time": 42.0,
+		"bonus_train": 0.15, "bonus_hire_cost": 0.1},
+	"4a": {"icon": "icon_axe.png", "prereq": ["3a"], "link": [],
+		"name": "Артельный инструмент", "desc": "Дерево, камень и золото быстрее ещё на 10 %",
+		"cost_gold": 800.0, "cost_wood": 1100.0, "cost_stone": 380.0, "research_time": 55.0,
+		"bonus_gather_wood": 0.1, "bonus_gather_stone": 0.1, "bonus_gather_gold": 0.1},
+	"4b": {"icon": "icon_trader.png", "prereq": ["3b"], "link": [],
+		"name": "Тачки", "desc": "Груз за ходку больше ещё на 25 % (до 30)",
+		"cost_gold": 800.0, "cost_wood": 1100.0, "cost_stone": 380.0, "research_time": 55.0,
+		"bonus_carry_pct": 0.25},
+	"4c": {"icon": "icon_luck_horseshoe.png", "prereq": ["3c"], "link": [],
+		"name": "Мощёные дороги", "desc": "С грузом ещё +10 %, стройка ещё +15 %",
+		"cost_gold": 800.0, "cost_wood": 1100.0, "cost_stone": 380.0, "research_time": 55.0,
+		"bonus_walk_loaded_pct": 0.1, "bonus_build": 0.15},
 	"4d": {"icon": "icon_might.png", "prereq": ["3d"], "link": [],
-		"name": "Гильдия артелей", "desc": "+60 % к темпу стройки, +35 % к темпу обучения",
-		"cost_gold": 800.0, "cost_wood": 1000.0, "cost_stone": 300.0, "cost_food": 300.0, "research_time": 60.0,
-		"bonus_build": 0.60,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_train": 0.35, "bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-	"5a": {"icon": "icon_trader.png", "prereq": ["4a"], "link": [],
-		"name": "Складские артели", "desc": "+4 к грузу за ходку",
-		"cost_gold": 1000.0, "cost_wood": 1300.0, "cost_stone": 400.0, "research_time": 75.0,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 0.0, "bonus_carry": 4.0, "bonus_gather": 0.0},
-	"5b": {"icon": "icon_axe.png", "prereq": ["4b"], "link": [],
-		"name": "Мастера промысла", "desc": "−0.45 с к циклу добычи",
-		"cost_gold": 1000.0, "cost_wood": 1300.0, "cost_stone": 400.0, "research_time": 75.0,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.45},
+		"name": "Гильдия артелей", "desc": "Найм ещё +15 %, рабочий дешевле ещё на 10 %",
+		"cost_gold": 800.0, "cost_wood": 1100.0, "cost_stone": 380.0, "cost_food": 220.0, "research_time": 55.0,
+		"bonus_train": 0.15, "bonus_hire_cost": 0.1},
+	"5a": {"icon": "icon_hammer.png", "prereq": ["4a"], "link": [],
+		"name": "Мастера промысла", "desc": "Дерево, камень и золото быстрее ещё на 10 %",
+		"cost_gold": 1200.0, "cost_wood": 1700.0, "cost_stone": 560.0, "research_time": 70.0,
+		"bonus_gather_wood": 0.1, "bonus_gather_stone": 0.1, "bonus_gather_gold": 0.1},
+	"5b": {"icon": "icon_gold.png", "prereq": ["4b"], "link": [],
+		"name": "Крытые повозки", "desc": "Груз ещё +25 % (до 35), разделка ещё +10 %",
+		"cost_gold": 1200.0, "cost_wood": 1700.0, "cost_stone": 560.0, "research_time": 70.0,
+		"bonus_carry_pct": 0.25, "bonus_gather_food": 0.1},
 	"5c": {"icon": "icon_luck_horseshoe.png", "prereq": ["4c"], "link": [],
-		"name": "Мощёные дороги", "desc": "+20 к запасу HP, +0.25 к скорости, +2 к удару",
-		"cost_gold": 1000.0, "cost_wood": 1300.0, "cost_stone": 400.0, "research_time": 75.0,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_attack": 2.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-		"bonus_health": 20.0, "bonus_speed": 0.25, "bonus_range": 0.0,
-		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-	"5d": {"icon": "icon_gold.png", "prereq": ["4d"], "link": [],
-		"name": "Королевский откуп", "desc": "+80 % к темпу стройки, +50 % к темпу обучения",
-		"cost_gold": 1000.0, "cost_wood": 1300.0, "cost_stone": 400.0, "research_time": 75.0,
-		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_build": 0.80, "bonus_train": 0.50, "bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
-		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
-		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
-		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
+		"name": "Королевский тракт", "desc": "С грузом ходит быстрее ещё на 15 %",
+		"cost_gold": 1200.0, "cost_wood": 1700.0, "cost_stone": 560.0, "research_time": 70.0,
+		"bonus_walk_loaded_pct": 0.15},
+	"5d": {"icon": "icon_might.png", "prereq": ["4d"], "link": [],
+		"name": "Королевский откуп", "desc": "Найм рабочих быстрее ещё на 15 %",
+		"cost_gold": 1200.0, "cost_wood": 1700.0, "cost_stone": 560.0, "cost_food": 340.0, "research_time": 70.0,
+		"bonus_train": 0.15},
 },
 # ═════════════════════════════════════════════════════════════════════════════
 # ═════════════════════════════════════════════════════════════════════════════
@@ -222,7 +182,7 @@ const UNITS := {
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"2a": {"icon": "icon_hand.png", "prereq": ["1a"], "link": ["2b"],
 		"name": "Наручи", "desc": "+1 к броне",
-		"cost_gold": 400.0, "cost_wood": 550.0, "cost_stone": 150.0, "research_time": 40.0,
+		"cost_gold": 345.0, "cost_wood": 474.4, "cost_stone": 129.4, "research_time": 40.0,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 0.0, "bonus_armor": 1.0, "bonus_defense": 0.0,
 		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
@@ -230,7 +190,7 @@ const UNITS := {
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"2b": {"icon": "icon_fire_hand.png", "prereq": ["1b"], "link": ["2a", "2c"],
 		"name": "Хват огня", "desc": "+2 к урону",
-		"cost_gold": 400.0, "cost_wood": 550.0, "cost_stone": 150.0, "research_time": 40.0,
+		"cost_gold": 345.0, "cost_wood": 474.4, "cost_stone": 129.4, "research_time": 40.0,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 2.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
 		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
@@ -238,7 +198,7 @@ const UNITS := {
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"2c": {"icon": "icon_might.png", "prereq": ["1c"], "link": ["2b"],
 		"name": "Мощь", "desc": "+0.9 к напору",
-		"cost_gold": 400.0, "cost_wood": 550.0, "cost_stone": 150.0, "research_time": 40.0,
+		"cost_gold": 345.0, "cost_wood": 474.4, "cost_stone": 129.4, "research_time": 40.0,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
 		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
@@ -247,7 +207,7 @@ const UNITS := {
 	# ── РАССЕЧЕНИЕ — удар по площади: каждый удар задевает соседей цели ───
 	"2d": {"icon": "icon_broken_sword.png", "prereq": ["1d"], "link": [],
 		"name": "Рассечение", "desc": "Удар по площади: каждый удар мечника задевает до 2 врагов рядом с целью (50 % урона)",
-		"cost_gold": 400.0, "cost_wood": 550.0, "cost_stone": 150.0, "research_time": 40.0,
+		"cost_gold": 345.0, "cost_wood": 474.4, "cost_stone": 129.4, "research_time": 40.0,
 		"bonus_cleave": 2.0, "bonus_cleave_dmg": 0.5,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
@@ -257,7 +217,7 @@ const UNITS := {
 	# ── СКОРОСТИ У РЫЦАРЯ НЕТ (ТЗ-B 19.09.2026): броня и напор ────────────
 	"3a": {"icon": "icon_luck_horseshoe.png", "prereq": ["2a"], "link": ["3b"],
 		"name": "Тяжёлые латы", "desc": "+1.5 к броне, +0.4 к напору",
-		"cost_gold": 500.0, "cost_wood": 700.0, "cost_stone": 200.0, "research_time": 45.0,
+		"cost_gold": 507.5, "cost_wood": 710.5, "cost_stone": 203.0, "research_time": 45.0,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 0.0, "bonus_armor": 1.5, "bonus_defense": 0.0,
 		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
@@ -265,7 +225,7 @@ const UNITS := {
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"3b": {"icon": "icon_fireball.png", "prereq": ["2b"], "link": ["3a", "3c"],
 		"name": "Огненный шар", "desc": "+2 к урону",
-		"cost_gold": 500.0, "cost_wood": 700.0, "cost_stone": 200.0, "research_time": 45.0,
+		"cost_gold": 507.5, "cost_wood": 710.5, "cost_stone": 203.0, "research_time": 45.0,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 2.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
 		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
@@ -273,7 +233,7 @@ const UNITS := {
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"3c": {"icon": "icon_healing_potion.png", "prereq": ["2c"], "link": ["3b"],
 		"name": "Зелья", "desc": "+16 к запасу HP",
-		"cost_gold": 500.0, "cost_wood": 700.0, "cost_stone": 200.0, "research_time": 45.0,
+		"cost_gold": 507.5, "cost_wood": 710.5, "cost_stone": 203.0, "research_time": 45.0,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
 		"bonus_health": 16.0, "bonus_speed": 0.0, "bonus_range": 0.0,
@@ -282,7 +242,7 @@ const UNITS := {
 	# ── НЕИСТОВСТВО — прокачка «Яростной Атаки»: +2 удара (итого 7) ───────
 	"3d": {"icon": "icon_dual_sword.png", "prereq": ["2d"], "link": [],
 		"name": "Неистовство", "desc": "«Яростная Атака»: серия длиннее на 2 удара (5 → 7)",
-		"cost_gold": 500.0, "cost_wood": 700.0, "cost_stone": 200.0, "research_time": 45.0,
+		"cost_gold": 507.5, "cost_wood": 710.5, "cost_stone": 203.0, "research_time": 45.0,
 		"bonus_rage_hits": 2.0,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
@@ -291,7 +251,7 @@ const UNITS := {
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"4a": {"icon": "icon_trader.png", "prereq": ["3a"], "link": [],
 		"name": "Обозы", "desc": "+16 к морали",
-		"cost_gold": 800.0, "cost_wood": 1000.0, "cost_stone": 300.0, "research_time": 60.0,
+		"cost_gold": 988.0, "cost_wood": 1235.0, "cost_stone": 370.5, "research_time": 60.0,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
 		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
@@ -299,7 +259,7 @@ const UNITS := {
 		"bonus_morale": 16.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"4b": {"icon": "icon_skull.png", "prereq": ["3b"], "link": [],
 		"name": "Устрашение", "desc": "+1.2 к напору",
-		"cost_gold": 800.0, "cost_wood": 1000.0, "cost_stone": 300.0, "research_time": 60.0,
+		"cost_gold": 988.0, "cost_wood": 1235.0, "cost_stone": 370.5, "research_time": 60.0,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
 		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
@@ -307,7 +267,7 @@ const UNITS := {
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"4c": {"icon": "icon_gold.png", "prereq": ["3c"], "link": [],
 		"name": "Трофеи", "desc": "+20 к запасу HP",
-		"cost_gold": 800.0, "cost_wood": 1000.0, "cost_stone": 300.0, "research_time": 60.0,
+		"cost_gold": 988.0, "cost_wood": 1235.0, "cost_stone": 370.5, "research_time": 60.0,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
 		"bonus_health": 20.0, "bonus_speed": 0.0, "bonus_range": 0.0,
@@ -316,7 +276,7 @@ const UNITS := {
 	# ── СТАЛЬНОЙ ВИХРЬ — прокачка «Рассечения»: +1 цель, соседям 75 % ────
 	"4d": {"icon": "icon_fire_hand.png", "prereq": ["3d"], "link": [],
 		"name": "Стальной вихрь", "desc": "«Рассечение»: задевает на одного врага больше (3), соседям 75 % урона",
-		"cost_gold": 800.0, "cost_wood": 1000.0, "cost_stone": 300.0, "research_time": 60.0,
+		"cost_gold": 988.0, "cost_wood": 1235.0, "cost_stone": 370.5, "research_time": 60.0,
 		"bonus_cleave": 1.0, "bonus_cleave_dmg": 0.25,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
@@ -325,7 +285,7 @@ const UNITS := {
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"5a": {"icon": "icon_trap.png", "prereq": ["4a"], "link": [],
 		"name": "Осадный опыт", "desc": "+2.5 к броне",
-		"cost_gold": 1000.0, "cost_wood": 1300.0, "cost_stone": 400.0, "research_time": 75.0,
+		"cost_gold": 1440.0, "cost_wood": 1872.0, "cost_stone": 576.0, "research_time": 75.0,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 0.0, "bonus_armor": 2.5, "bonus_defense": 0.0,
 		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
@@ -333,7 +293,7 @@ const UNITS := {
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"5b": {"icon": "icon_demon.png", "prereq": ["4b"], "link": [],
 		"name": "Чёрный рыцарь", "desc": "+2.5 к урону",
-		"cost_gold": 1000.0, "cost_wood": 1300.0, "cost_stone": 400.0, "research_time": 75.0,
+		"cost_gold": 1440.0, "cost_wood": 1872.0, "cost_stone": 576.0, "research_time": 75.0,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 2.5, "bonus_armor": 0.0, "bonus_defense": 0.0,
 		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
@@ -341,7 +301,7 @@ const UNITS := {
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"5c": {"icon": "icon_dual_sword.png", "prereq": ["4c"], "link": [],
 		"name": "Парные клинки", "desc": "+2.5 к урону, +16 к морали",
-		"cost_gold": 1000.0, "cost_wood": 1300.0, "cost_stone": 400.0, "research_time": 75.0,
+		"cost_gold": 1440.0, "cost_wood": 1872.0, "cost_stone": 576.0, "research_time": 75.0,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 2.5, "bonus_armor": 0.0, "bonus_defense": 0.0,
 		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
@@ -350,7 +310,7 @@ const UNITS := {
 	# ── КРОВЬ БЕРСЕРКА — раненый мечник бьёт сильнее ─────────────────────
 	"5d": {"icon": "icon_demon.png", "prereq": ["4d"], "link": [],
 		"name": "Кровь берсерка", "desc": "При запасе ниже половины удары мечника сильнее на 25 %",
-		"cost_gold": 1000.0, "cost_wood": 1300.0, "cost_stone": 400.0, "research_time": 75.0,
+		"cost_gold": 1440.0, "cost_wood": 1872.0, "cost_stone": 576.0, "research_time": 75.0,
 		"bonus_berserk": 0.25,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
@@ -394,7 +354,7 @@ const UNITS := {
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"2a": {"icon": "icon_hand.png", "prereq": ["1a"], "link": ["2b"],
 		"name": "Упор щита", "desc": "+1 к броне",
-		"cost_gold": 400.0, "cost_wood": 550.0, "cost_stone": 150.0, "research_time": 40.0,
+		"cost_gold": 345.0, "cost_wood": 474.4, "cost_stone": 129.4, "research_time": 40.0,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 0.0, "bonus_armor": 1.0, "bonus_defense": 0.0,
 		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
@@ -402,7 +362,7 @@ const UNITS := {
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"2b": {"icon": "icon_trap_spears.png", "prereq": ["1b"], "link": ["2a", "2c"],
 		"name": "Длинное древко", "desc": "+2 к урону",
-		"cost_gold": 400.0, "cost_wood": 550.0, "cost_stone": 150.0, "research_time": 40.0,
+		"cost_gold": 345.0, "cost_wood": 474.4, "cost_stone": 129.4, "research_time": 40.0,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 2.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
 		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
@@ -410,7 +370,7 @@ const UNITS := {
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"2c": {"icon": "icon_might.png", "prereq": ["1c"], "link": ["2b"],
 		"name": "Слаженность", "desc": "+0.6 к напору",
-		"cost_gold": 400.0, "cost_wood": 550.0, "cost_stone": 150.0, "research_time": 40.0,
+		"cost_gold": 345.0, "cost_wood": 474.4, "cost_stone": 129.4, "research_time": 40.0,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
 		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
@@ -418,7 +378,7 @@ const UNITS := {
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"2d": {"icon": "icon_shield.png", "prereq": ["1d"], "link": [],
 		"name": "Приём копья", "desc": "Контрудар по коннице",
-		"cost_gold": 400.0, "cost_wood": 550.0, "cost_stone": 150.0, "research_time": 40.0, "squad_unlock_cost": 700.0,
+		"cost_gold": 345.0, "cost_wood": 474.4, "cost_stone": 129.4, "research_time": 40.0, "squad_unlock_cost": 700.0,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
 		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
@@ -426,7 +386,7 @@ const UNITS := {
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"3a": {"icon": "icon_luck_horseshoe.png", "prereq": ["2a"], "link": ["3b"],
 		"name": "Лёгкий шаг", "desc": "+0.2 к скорости",
-		"cost_gold": 500.0, "cost_wood": 700.0, "cost_stone": 200.0, "research_time": 45.0,
+		"cost_gold": 507.5, "cost_wood": 710.5, "cost_stone": 203.0, "research_time": 45.0,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
 		"bonus_health": 0.0, "bonus_speed": 0.2, "bonus_range": 0.0,
@@ -434,7 +394,7 @@ const UNITS := {
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"3b": {"icon": "icon_fire_hand.png", "prereq": ["2b"], "link": ["3a", "3c"],
 		"name": "Огненные жала", "desc": "+2 к урону",
-		"cost_gold": 500.0, "cost_wood": 700.0, "cost_stone": 200.0, "research_time": 45.0,
+		"cost_gold": 507.5, "cost_wood": 710.5, "cost_stone": 203.0, "research_time": 45.0,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 2.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
 		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
@@ -442,7 +402,7 @@ const UNITS := {
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"3c": {"icon": "icon_healing_potion.png", "prereq": ["2c"], "link": ["3b"],
 		"name": "Полевой лекарь", "desc": "+16 к запасу HP",
-		"cost_gold": 500.0, "cost_wood": 700.0, "cost_stone": 200.0, "research_time": 45.0,
+		"cost_gold": 507.5, "cost_wood": 710.5, "cost_stone": 203.0, "research_time": 45.0,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
 		"bonus_health": 16.0, "bonus_speed": 0.0, "bonus_range": 0.0,
@@ -450,7 +410,7 @@ const UNITS := {
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"3d": {"icon": "icon_trap.png", "prereq": ["2d"], "link": [],
 		"name": "Еж", "desc": "Круговая оборона",
-		"cost_gold": 500.0, "cost_wood": 700.0, "cost_stone": 200.0, "research_time": 45.0, "squad_unlock_cost": 900.0,
+		"cost_gold": 507.5, "cost_wood": 710.5, "cost_stone": 203.0, "research_time": 45.0, "squad_unlock_cost": 900.0,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
 		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
@@ -458,7 +418,7 @@ const UNITS := {
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"4a": {"icon": "icon_trader.png", "prereq": ["3a"], "link": [],
 		"name": "Снабжение", "desc": "+16 к морали",
-		"cost_gold": 800.0, "cost_wood": 1000.0, "cost_stone": 300.0, "research_time": 60.0,
+		"cost_gold": 988.0, "cost_wood": 1235.0, "cost_stone": 370.5, "research_time": 60.0,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
 		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
@@ -466,7 +426,7 @@ const UNITS := {
 		"bonus_morale": 16.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"4b": {"icon": "icon_might.png", "prereq": ["3b"], "link": [],
 		"name": "Боевой клич", "desc": "+0.8 к напору",
-		"cost_gold": 800.0, "cost_wood": 1000.0, "cost_stone": 300.0, "research_time": 60.0,
+		"cost_gold": 988.0, "cost_wood": 1235.0, "cost_stone": 370.5, "research_time": 60.0,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
 		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
@@ -474,7 +434,7 @@ const UNITS := {
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"4c": {"icon": "icon_gold.png", "prereq": ["3c"], "link": [],
 		"name": "Добыча", "desc": "+20 к запасу HP",
-		"cost_gold": 800.0, "cost_wood": 1000.0, "cost_stone": 300.0, "research_time": 60.0,
+		"cost_gold": 988.0, "cost_wood": 1235.0, "cost_stone": 370.5, "research_time": 60.0,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
 		"bonus_health": 20.0, "bonus_speed": 0.0, "bonus_range": 0.0,
@@ -483,7 +443,7 @@ const UNITS := {
 	# ── НАТИСК ФАЛАНГИ (заказ спринта 13, ЧЕТВЁРТЫЙ слот) ─────────────────
 	"4d": {"icon": "icon_skull.png", "prereq": ["3d"], "link": [],
 		"name": "Натиск Фаланги", "desc": "Двойной ПКМ: сомкнутый ход, 10 усиленных ударов, затем оттеснение",
-		"cost_gold": 800.0, "cost_wood": 1000.0, "cost_stone": 300.0, "research_time": 60.0, "squad_unlock_cost": 1200.0,
+		"cost_gold": 988.0, "cost_wood": 1235.0, "cost_stone": 370.5, "research_time": 60.0, "squad_unlock_cost": 1200.0,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
 		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
@@ -491,7 +451,7 @@ const UNITS := {
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"5a": {"icon": "icon_shield.png", "prereq": ["4a"], "link": [],
 		"name": "Ветеранский строй", "desc": "+2 к броне",
-		"cost_gold": 1000.0, "cost_wood": 1300.0, "cost_stone": 400.0, "research_time": 75.0,
+		"cost_gold": 1440.0, "cost_wood": 1872.0, "cost_stone": 576.0, "research_time": 75.0,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 0.0, "bonus_armor": 2.0, "bonus_defense": 0.0,
 		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
@@ -499,7 +459,7 @@ const UNITS := {
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"5b": {"icon": "icon_trap_spears.png", "prereq": ["4b"], "link": [],
 		"name": "Копьё смерти", "desc": "+2.5 к урону",
-		"cost_gold": 1000.0, "cost_wood": 1300.0, "cost_stone": 400.0, "research_time": 75.0,
+		"cost_gold": 1440.0, "cost_wood": 1872.0, "cost_stone": 576.0, "research_time": 75.0,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 2.5, "bonus_armor": 0.0, "bonus_defense": 0.0,
 		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
@@ -507,7 +467,7 @@ const UNITS := {
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"5c": {"icon": "icon_dual_sword.png", "prereq": ["4c"], "link": [],
 		"name": "Двойной удар", "desc": "+2.5 к урону, +16 к морали",
-		"cost_gold": 1000.0, "cost_wood": 1300.0, "cost_stone": 400.0, "research_time": 75.0,
+		"cost_gold": 1440.0, "cost_wood": 1872.0, "cost_stone": 576.0, "research_time": 75.0,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 2.5, "bonus_armor": 0.0, "bonus_defense": 0.0,
 		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
@@ -515,7 +475,7 @@ const UNITS := {
 		"bonus_morale": 16.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"5d": {"icon": "icon_trap_spikes.png", "prereq": ["4d"], "link": [],
 		"name": "Фаланга", "desc": "Неприступный строй",
-		"cost_gold": 1000.0, "cost_wood": 1300.0, "cost_stone": 400.0, "research_time": 75.0, "squad_unlock_cost": 1600.0,
+		"cost_gold": 1440.0, "cost_wood": 1872.0, "cost_stone": 576.0, "research_time": 75.0, "squad_unlock_cost": 1600.0,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
 		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
@@ -559,82 +519,82 @@ const UNITS := {
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"2a": {"icon": "icon_bow.png", "prereq": ["1a"], "link": ["2b"],
 		"name": "Длинная тетива II", "desc": "+2.5 м к дальности (17.5 → 20)",
-		"cost_gold": 400.0, "cost_wood": 550.0, "cost_stone": 150.0, "research_time": 40.0,
+		"cost_gold": 345.0, "cost_wood": 474.4, "cost_stone": 129.4, "research_time": 40.0,
 		"bonus_range": 2.5,
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"2b": {"icon": "icon_tripple_arrows_2.png", "prereq": ["1b"], "link": ["2a", "2c"],
 		"name": "Быстрая рука II", "desc": "Перезарядка −20 % всего",
-		"cost_gold": 400.0, "cost_wood": 550.0, "cost_stone": 150.0, "research_time": 40.0,
+		"cost_gold": 345.0, "cost_wood": 474.4, "cost_stone": 129.4, "research_time": 40.0,
 		"bonus_cooldown_pct": 0.1,
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"2c": {"icon": "icon_fire_hand.png", "prereq": ["1c"], "link": ["2b"],
 		"name": "Зажигательные", "desc": "+2 к урону стрелы",
-		"cost_gold": 400.0, "cost_wood": 550.0, "cost_stone": 150.0, "research_time": 40.0,
+		"cost_gold": 345.0, "cost_wood": 474.4, "cost_stone": 129.4, "research_time": 40.0,
 		"bonus_attack": 2.0,
 		"bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	# ── СНАЙПЕРСКИЙ ВЫСТРЕЛ: трое стрелков отряда бьют по прямой на 25 м,
 	# быстрее на 30 %, по отступающим и одиночкам, насмерть (Archer/Arrow) ──
 	"2d": {"icon": "icon_crossbow.png", "prereq": ["1d"], "link": [], "squad_unlock_cost": 700.0,
 		"name": "Снайперский выстрел", "desc": "3 снайпера в отряде: прямой выстрел на 25 м, насмерть по пехоте",
-		"cost_gold": 400.0, "cost_wood": 550.0, "cost_stone": 150.0, "research_time": 40.0,
+		"cost_gold": 345.0, "cost_wood": 474.4, "cost_stone": 129.4, "research_time": 40.0,
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"3a": {"icon": "icon_bow.png", "prereq": ["2a"], "link": ["3b"],
 		"name": "Большой лук", "desc": "+5 м к дальности (20 → 25)",
-		"cost_gold": 500.0, "cost_wood": 700.0, "cost_stone": 200.0, "research_time": 45.0,
+		"cost_gold": 507.5, "cost_wood": 710.5, "cost_stone": 203.0, "research_time": 45.0,
 		"bonus_range": 5.0,
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"3b": {"icon": "icon_tripple_arrows_2.png", "prereq": ["2b"], "link": ["3a", "3c"],
 		"name": "Быстрая рука III", "desc": "Перезарядка −30 % всего",
-		"cost_gold": 500.0, "cost_wood": 700.0, "cost_stone": 200.0, "research_time": 45.0,
+		"cost_gold": 507.5, "cost_wood": 710.5, "cost_stone": 203.0, "research_time": 45.0,
 		"bonus_cooldown_pct": 0.1,
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"3c": {"icon": "icon_fireball.png", "prereq": ["2c"], "link": ["3b"],
 		"name": "Огненный залп", "desc": "+2 к урону стрелы",
-		"cost_gold": 500.0, "cost_wood": 700.0, "cost_stone": 200.0, "research_time": 45.0,
+		"cost_gold": 507.5, "cost_wood": 710.5, "cost_stone": 203.0, "research_time": 45.0,
 		"bonus_attack": 2.0,
 		"bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"3d": {"icon": "icon_crossbow.png", "prereq": ["2d"], "link": [], "squad_unlock_cost": 900.0,
 		"name": "Частота снайперов", "desc": "Снайперов 3 → 5, их перезарядка −35 %",
-		"cost_gold": 500.0, "cost_wood": 700.0, "cost_stone": 200.0, "research_time": 45.0,
+		"cost_gold": 507.5, "cost_wood": 710.5, "cost_stone": 203.0, "research_time": 45.0,
 		"bonus_snipers": 2.0, "bonus_snipe_cd": 0.35,
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"4a": {"icon": "icon_skull.png", "prereq": ["3a"], "link": [],
 		"name": "Бронебойные I", "desc": "Стрела игнорирует 25 % брони цели",
-		"cost_gold": 800.0, "cost_wood": 1000.0, "cost_stone": 300.0, "research_time": 60.0,
+		"cost_gold": 988.0, "cost_wood": 1235.0, "cost_stone": 370.5, "research_time": 60.0,
 		"bonus_armor_pen": 0.25,
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"4b": {"icon": "icon_trap.png", "prereq": ["3b"], "link": [],
 		"name": "Гроза великанов I", "desc": "Урон ×1.5 по тушам, троллям и коннице",
-		"cost_gold": 800.0, "cost_wood": 1000.0, "cost_stone": 300.0, "research_time": 60.0,
+		"cost_gold": 988.0, "cost_wood": 1235.0, "cost_stone": 370.5, "research_time": 60.0,
 		"bonus_giant": 0.5,
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"4c": {"icon": "icon_fire_hand.png", "prereq": ["3c"], "link": [],
 		"name": "Стальные наконечники", "desc": "+2.5 к урону стрелы",
-		"cost_gold": 800.0, "cost_wood": 1000.0, "cost_stone": 300.0, "research_time": 60.0,
+		"cost_gold": 988.0, "cost_wood": 1235.0, "cost_stone": 370.5, "research_time": 60.0,
 		"bonus_attack": 2.5,
 		"bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"4d": {"icon": "icon_drop.png", "prereq": ["3d"], "link": [], "squad_unlock_cost": 1200.0,
 		"name": "Отравленные", "desc": "Урон по времени",
-		"cost_gold": 800.0, "cost_wood": 1000.0, "cost_stone": 300.0, "research_time": 60.0,
+		"cost_gold": 988.0, "cost_wood": 1235.0, "cost_stone": 370.5, "research_time": 60.0,
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"5a": {"icon": "icon_skull.png", "prereq": ["4a"], "link": [],
 		"name": "Бронебойные II", "desc": "Стрела игнорирует 50 % брони цели",
-		"cost_gold": 1000.0, "cost_wood": 1300.0, "cost_stone": 400.0, "research_time": 75.0,
+		"cost_gold": 1440.0, "cost_wood": 1872.0, "cost_stone": 576.0, "research_time": 75.0,
 		"bonus_armor_pen": 0.25,
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"5b": {"icon": "icon_trap.png", "prereq": ["4b"], "link": [],
 		"name": "Гроза великанов II", "desc": "Урон ×2.0 по тушам, троллям и коннице",
-		"cost_gold": 1000.0, "cost_wood": 1300.0, "cost_stone": 400.0, "research_time": 75.0,
+		"cost_gold": 1440.0, "cost_wood": 1872.0, "cost_stone": 576.0, "research_time": 75.0,
 		"bonus_giant": 0.5,
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"5c": {"icon": "icon_gold.png", "prereq": ["4c"], "link": [],
 		"name": "Мастер-лучник", "desc": "+2.5 к урону, +16 к морали",
-		"cost_gold": 1000.0, "cost_wood": 1300.0, "cost_stone": 400.0, "research_time": 75.0,
+		"cost_gold": 1440.0, "cost_wood": 1872.0, "cost_stone": 576.0, "research_time": 75.0,
 		"bonus_attack": 2.5, "bonus_morale": 16.0,
 		"bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"5d": {"icon": "icon_tripple_arrows_2.png", "prereq": ["4d"], "link": [], "squad_unlock_cost": 1600.0,
 		"name": "Стрелы-шипы", "desc": "Пробивает строй",
-		"cost_gold": 1000.0, "cost_wood": 1300.0, "cost_stone": 400.0, "research_time": 75.0,
+		"cost_gold": 1440.0, "cost_wood": 1872.0, "cost_stone": 576.0, "research_time": 75.0,
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 },
 "monk": {
@@ -661,67 +621,67 @@ const UNITS := {
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0, "bonus_build": 0.0, "bonus_train": 0.0, "bonus_heal_rate": 0.0, "bonus_heal_amount": 0.0, "bonus_heal_radius": 0.0},
 	"2a": {"icon": "icon_luck_horseshoe.png", "prereq": ["1a"], "link": ["2b"],
 		"name": "Расширение Ауры II", "desc": "+4 м к радиусу (8 → 12 м), скан вдвое реже",
-		"cost_gold": 250.0, "cost_wood": 0.0, "cost_stone": 0.0, "research_time": 30.0,
+		"cost_gold": 215.6, "cost_wood": 0.0, "cost_stone": 0.0, "research_time": 30.0,
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0, "bonus_build": 0.0, "bonus_train": 0.0, "bonus_heal_rate": 0.0, "bonus_heal_amount": 0.0, "bonus_heal_radius": 4},
 	"2b": {"icon": "icon_might.png", "prereq": ["1b"], "link": ["2a", "2c"],
 		"name": "Сила Веры", "desc": "+50 % к исцелению за такт, такт −15 %",
-		"cost_gold": 250.0, "cost_wood": 0.0, "cost_stone": 0.0, "research_time": 30.0,
+		"cost_gold": 215.6, "cost_wood": 0.0, "cost_stone": 0.0, "research_time": 30.0,
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0, "bonus_build": 0.0, "bonus_train": 0.0, "bonus_heal_rate": 0.176, "bonus_heal_amount": 0.5, "bonus_heal_radius": 0.0},
 	"2c": {"icon": "icon_trader.png", "prereq": ["1c"], "link": ["2b"],
 		"name": "Подвижность", "desc": "+20 % к шагу монаха, −10 % к отбросу",
-		"cost_gold": 250.0, "cost_wood": 0.0, "cost_stone": 0.0, "research_time": 30.0,
+		"cost_gold": 215.6, "cost_wood": 0.0, "cost_stone": 0.0, "research_time": 30.0,
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.2, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0, "bonus_build": 0.0, "bonus_train": 0.0, "bonus_heal_rate": 0.0, "bonus_heal_amount": 0.0, "bonus_heal_radius": 0.0},
 	"2d": {"icon": "icon_drop.png", "prereq": ["1d"], "link": [],
 		"name": "Первое Чудо", "desc": "Воскрешение: раз в 15 с, павший встаёт с 30 % запаса",
-		"cost_gold": 350.0, "cost_wood": 0.0, "cost_stone": 0.0, "research_time": 35.0,
+		"cost_gold": 301.9, "cost_wood": 0.0, "cost_stone": 0.0, "research_time": 35.0,
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0, "bonus_build": 0.0, "bonus_train": 0.0, "bonus_heal_rate": 0.0, "bonus_heal_amount": 0.0, "bonus_heal_radius": 0.0},
 	"3a": {"icon": "icon_fireball.png", "prereq": ["2a"], "link": ["3b"],
 		"name": "Расширение Ауры III", "desc": "+5 м к радиусу (12 → 17 м)",
-		"cost_gold": 500.0, "cost_wood": 50.0, "cost_stone": 0.0, "research_time": 45.0,
+		"cost_gold": 507.5, "cost_wood": 50.8, "cost_stone": 0.0, "research_time": 45.0,
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0, "bonus_build": 0.0, "bonus_train": 0.0, "bonus_heal_rate": 0.0, "bonus_heal_amount": 0.0, "bonus_heal_radius": 5},
 	"3b": {"icon": "icon_rain_of_arrows.png", "prereq": ["2b"], "link": ["3a", "3c"],
 		"name": "Концентрированное Благословение", "desc": "+100 % к исцелению за такт",
-		"cost_gold": 500.0, "cost_wood": 50.0, "cost_stone": 0.0, "research_time": 45.0,
+		"cost_gold": 507.5, "cost_wood": 50.8, "cost_stone": 0.0, "research_time": 45.0,
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0, "bonus_build": 0.0, "bonus_train": 0.0, "bonus_heal_rate": 0.0, "bonus_heal_amount": 1, "bonus_heal_radius": 0.0},
 	"3c": {"icon": "icon_shield.png", "prereq": ["2c"], "link": ["3b"],
 		"name": "Опека Строя", "desc": "+3 к броне монаха, иммунитет к замедлению",
-		"cost_gold": 500.0, "cost_wood": 50.0, "cost_stone": 0.0, "research_time": 45.0,
+		"cost_gold": 507.5, "cost_wood": 50.8, "cost_stone": 0.0, "research_time": 45.0,
 		"bonus_attack": 0.0, "bonus_armor": 3, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0, "bonus_build": 0.0, "bonus_train": 0.0, "bonus_heal_rate": 0.0, "bonus_heal_amount": 0.0, "bonus_heal_radius": 0.0},
 	"3d": {"icon": "icon_heart.png", "prereq": ["2d"], "link": [],
 		"name": "Опека и Самовоскрешение", "desc": "Лечит ВЕСЬ отряд разом; одно самовоскрешение за бой (50 % запаса)",
-		"cost_gold": 700.0, "cost_wood": 80.0, "cost_stone": 0.0, "research_time": 50.0,
+		"cost_gold": 710.5, "cost_wood": 81.2, "cost_stone": 0.0, "research_time": 50.0,
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0, "bonus_build": 0.0, "bonus_train": 0.0, "bonus_heal_rate": 0.0, "bonus_heal_amount": 0.0, "bonus_heal_radius": 0.0},
 	"4a": {"icon": "icon_gold.png", "prereq": ["3a"], "link": [],
 		"name": "Расширение Ауры IV", "desc": "+6 м к радиусу",
-		"cost_gold": 1000.0, "cost_wood": 0.0, "cost_stone": 150.0, "research_time": 60.0,
+		"cost_gold": 1235.0, "cost_wood": 0.0, "cost_stone": 185.2, "research_time": 60.0,
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0, "bonus_build": 0.0, "bonus_train": 0.0, "bonus_heal_rate": 0.0, "bonus_heal_amount": 0.0, "bonus_heal_radius": 6},
 	"4b": {"icon": "icon_trap_spears.png", "prereq": ["3b"], "link": ["4c"],
 		"name": "Непрерывный Поток", "desc": "Такт лечения 0.3 с — почти непрерывно",
-		"cost_gold": 1000.0, "cost_wood": 0.0, "cost_stone": 150.0, "research_time": 60.0,
+		"cost_gold": 1235.0, "cost_wood": 0.0, "cost_stone": 185.2, "research_time": 60.0,
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0, "bonus_build": 0.0, "bonus_train": 0.0, "bonus_heal_rate": 0.0, "bonus_heal_amount": 0.0, "bonus_heal_radius": 0.0},
 	"4c": {"icon": "icon_shield.png", "prereq": ["3c"], "link": ["4b"],
 		"name": "Святой Щит", "desc": "Щит на 150 HP, восстанавливается вне боя",
-		"cost_gold": 1000.0, "cost_wood": 0.0, "cost_stone": 150.0, "research_time": 60.0,
+		"cost_gold": 1235.0, "cost_wood": 0.0, "cost_stone": 185.2, "research_time": 60.0,
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0, "bonus_build": 0.0, "bonus_train": 0.0, "bonus_heal_rate": 0.0, "bonus_heal_amount": 0.0, "bonus_heal_radius": 0.0},
 	"4d": {"icon": "icon_skull.png", "prereq": ["3d"], "link": [],
 		"name": "Массовое Воскрешение", "desc": "Поднимает двоих разом каждые 12 с (50 % запаса)",
-		"cost_gold": 1400.0, "cost_wood": 0.0, "cost_stone": 200.0, "research_time": 70.0,
+		"cost_gold": 1729.0, "cost_wood": 0.0, "cost_stone": 247.0, "research_time": 70.0,
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0, "bonus_build": 0.0, "bonus_train": 0.0, "bonus_heal_rate": 0.0, "bonus_heal_amount": 0.0, "bonus_heal_radius": 0.0},
 	"5a": {"icon": "icon_dual_sword.png", "prereq": ["4a"], "link": [],
 		"name": "Глобальный Покров", "desc": "Аура на всю карту",
-		"cost_gold": 2000.0, "cost_wood": 0.0, "cost_stone": 300.0, "research_time": 90.0,
+		"cost_gold": 2880.0, "cost_wood": 0.0, "cost_stone": 432.0, "research_time": 90.0,
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0, "bonus_build": 0.0, "bonus_train": 0.0, "bonus_heal_rate": 0.0, "bonus_heal_amount": 0.0, "bonus_heal_radius": 0.0},
 	"5b": {"icon": "icon_demon.png", "prereq": ["4b"], "link": [],
 		"name": "Абсолютное Целительство", "desc": "Каждый такт восполняет живым 100 % запаса",
-		"cost_gold": 2000.0, "cost_wood": 0.0, "cost_stone": 300.0, "research_time": 90.0,
+		"cost_gold": 2880.0, "cost_wood": 0.0, "cost_stone": 432.0, "research_time": 90.0,
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0, "bonus_build": 0.0, "bonus_train": 0.0, "bonus_heal_rate": 0.0, "bonus_heal_amount": 0.0, "bonus_heal_radius": 0.0},
 	"5c": {"icon": "icon_broken_sword.png", "prereq": ["4c"], "link": [],
 		"name": "Второе Дыхание", "desc": "Смертельный удар оставляет 1 HP и 5 с неуязвимости",
-		"cost_gold": 2000.0, "cost_wood": 0.0, "cost_stone": 300.0, "research_time": 90.0,
+		"cost_gold": 2880.0, "cost_wood": 0.0, "cost_stone": 432.0, "research_time": 90.0,
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0, "bonus_build": 0.0, "bonus_train": 0.0, "bonus_heal_rate": 0.0, "bonus_heal_amount": 0.0, "bonus_heal_radius": 0.0},
 	"5d": {"icon": "icon_fireball.png", "prereq": ["4d"], "link": [],
 		"name": "Дух-Спас", "desc": "Пока в отряде жив хоть один — поднимает по 3-4 павших каждые 3 с",
-		"cost_gold": 2500.0, "cost_wood": 0.0, "cost_stone": 400.0, "research_time": 100.0,
+		"cost_gold": 3600.0, "cost_wood": 0.0, "cost_stone": 576.0, "research_time": 100.0,
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0, "bonus_build": 0.0, "bonus_train": 0.0, "bonus_heal_rate": 0.0, "bonus_heal_amount": 0.0, "bonus_heal_radius": 0.0},
 },
 }
@@ -770,10 +730,15 @@ static func tree(unit_id: String) -> Array:
 		node["id"]       = node_id(unit_id, cell)
 		node["cell"]     = cell
 		node["row"]      = int(cell.substr(0, cell.length() - 1))
+		var rk: float = row_cost_mult(int(node["row"]))
+		if rk != 1.0:
+			for ck in _COST_KEYS:
+				if node.has(ck):
+					node[ck] = round(float(node[ck]) * rk)
 		node["col"]      = cell.substr(cell.length() - 1, 1)
 		node["unit"]     = unit_id
 		node["icon"]     = String(data.get("icon", ""))
-		node["applies_to"] = [unit_id]
+		node["applies_to"] = tab_applies_to(unit_id)
 		# Зависимости — полными id, чтобы GameManager не знал про ячейки
 		var reqs: Array = []
 		for p in data.get("prereq", []):

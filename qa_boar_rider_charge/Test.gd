@@ -339,6 +339,9 @@ func _check_counter() -> void:
 	for _i in range(60 * 20):
 		await get_tree().physics_frame
 		if not is_instance_valid(rider) or rider.is_dead():
+			# ТЗ 24.09.2026, п. 2: со «Стеной копий» первая волна теряет
+			# 150 % запаса — гибель на копьях и есть состоявшийся навал
+			impacted = true
 			break
 		if not rider.is_charging and rider._charge_ready == false:
 			impacted = true
@@ -360,11 +363,11 @@ func _check_counter() -> void:
 		dead == 0 and down == 0 and moved == 0,
 		"погибло %d, лежат %d, сдвинуто %d" % [dead, down, moved])
 	var alive_r: bool = is_instance_valid(rider) and not rider.is_dead()
-	verdict("D3 всадник остановлен: помечен стеной и получил урон копий",
-		alive_r and rider._counter_hit_until_ms > rider.now_ms and rider.current_health < hp_r0,
+	verdict("D3 всадник остановлен стеной: погиб на копьях или помечен и ранен",
+		not alive_r or (rider._counter_hit_until_ms > rider.now_ms and rider.current_health < hp_r0),
 		"запас %.0f → %.0f" % [hp_r0, rider.current_health if alive_r else -1.0])
 	verdict("D4 напор остановленного всадника — ноль",
-		alive_r and rider._push_after_cap() == 0.0,
+		not alive_r or rider._push_after_cap() == 0.0,
 		"множитель после потолка %.2f" % (rider._push_after_cap() if alive_r else -1.0))
 	if alive_r:
 		# СПРИНТ 18: вместо «×2 от копий» — замедление −30 % на SPEAR_WALL_SLOW_SEC

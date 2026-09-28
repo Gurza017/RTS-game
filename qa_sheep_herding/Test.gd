@@ -62,6 +62,9 @@ func _finish() -> void:
 func _pen(at: Vector3) -> Building:
 	var pen: Building = _Pen.new()
 	pen.faction = Constants.FACTION_PLAYER
+	# Загон тикает (ТЗ 24.09.2026-2) и досаживал бы своих овец за 5 с —
+	# стенд считает СВОИХ, респаун гасится (ручной _tick_restock работает)
+	pen.set("auto_restock", false)
 	main.world_add(pen)
 	pen.global_position = Vector3(at.x, main.get_terrain_height(at.x, at.z), at.z)
 	return pen
@@ -219,10 +222,25 @@ func _a_select() -> void:
 	main._clear_area_of_resources(base, 30.0)
 	var pen: Building = _pen(base)
 	await pframes(4)
+	# ── ЗАГОН ЗАПОЛНЯЕТСЯ ДО ПОЛНОГО, И ЭТО НЕ ПРИДИРКА (ТЗ 23.09.2026) ──
+	# Загон стал «колодцем»: пока мест меньше SHEEP_PEN_CAPACITY, он сам
+	# досыпает по овце раз в SHEEP_PEN_RESPAWN_SEC. Три овцы в пятиместном
+	# загоне превращались в четыре прямо посреди проверки выделения — стенд
+	# краснел на исправном коде («выделяет всех овец загона (3)», а их уже
+	# четыре). Полный загон не досыпает ничего, и состав стабилен
 	var flock: Array = []
-	for i in range(3):
-		var s: Node3D = _sheep(base + Vector3(-2.0 + 2.0 * float(i), 0.0, 1.5), false)
+	for i in range(_UCfg.SHEEP_PEN_CAPACITY):
+		var s: Node3D = _sheep(base + Vector3(-1.6 + 0.8 * float(i), 0.0, 1.2), false)
 		s.call("bind_to_pen", pen, Constants.FACTION_PLAYER)
+		# ── ОВЦЫ ЗАМОРОЖЕНЫ, ИНАЧЕ ОНИ УХОДЯТ ИЗ-ПОД КУРСОРА ────────────
+		# Блок проверяет ВЫДЕЛЕНИЕ, а не выпас. Радиус выпаса сжат до ограды
+		# (ТЗ 23.09.2026: «овцы находятся только внутри загона»), и
+		# поставленная стендом овца тут же бежит к центру — между вычислением
+		# экранной точки и кликом она успевает сойти с места. Это ровно та
+		# ловушка, о которой предупреждает CLAUDE.md про камеру: точку клика
+		# надо считать в том же кадре, в каком кликаешь, а у подвижной цели
+		# честнее просто остановить её
+		s.set_process(false)
 		flock.append(s)
 	var lone: Node3D = _stray(base + Vector3(30.0, 0.0, 0.0), false)
 	var w: Worker = _spawn_worker(base + Vector3(0.0, 0.0, 9.0))
@@ -371,7 +389,8 @@ func _b_herd() -> void:
 	await pframes(3)
 	# Свободных загонов нет — овца остаётся, рабочий встаёт
 	var filler: Array = []
-	while int(pen.call("sheep_count")) < int(pen.call("capacity")):
+	# ТЗ 24.09.2026: туша место не держит — полноту судим по ЖИВЫМ (live_count)
+	while int(pen.call("live_count")) < int(pen.call("capacity")):
 		var f: Node3D = _sheep(base + Vector3(2.0, 0.0, -2.0), false)
 		f.call("bind_to_pen", pen, Constants.FACTION_PLAYER)
 		filler.append(f)

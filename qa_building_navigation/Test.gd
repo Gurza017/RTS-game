@@ -412,6 +412,12 @@ func _garrison_out(b: Building, sq: Array, what: String, round_i: int, tower: bo
 			_sample_workers()
 		clear_n = 0
 		for u in men:
+			# ПРАВИЛО 5: проверка на СЫРОЙ ссылке, ДО приведения типа.
+			# `u as Unit` на освобождённом объекте не возвращает null, а
+			# БРОСАЕТ — стенд падал молча посреди раунда («Trying to cast a
+			# freed object»), и дальше шли вердикты без данных
+			if u == null or not is_instance_valid(u):
+				continue
 			var uu := u as Unit
 			# Вышел, встал на свою точку выхода, не в фундаменте
 			if not uu.garrisoned and not _in_bld(uu.global_position) and uu.state == Unit.State.IDLE:
@@ -423,6 +429,10 @@ func _garrison_out(b: Building, sq: Array, what: String, round_i: int, tower: bo
 	var n_mov := 0
 	var far_gate := 0.0
 	for u in men:
+		# ПРАВИЛО 5: сначала СЫРАЯ ссылка. Боец мог погибнуть между тактами
+		# опроса, и `u as Unit` на нём БРОСАЕТ, а не возвращает null
+		if u == null or not is_instance_valid(u):
+			continue
 		var uu := u as Unit
 		if uu.garrisoned: n_gar += 1
 		elif _in_bld(uu.global_position): n_bld += 1
@@ -562,8 +572,15 @@ func _march(squads: Array, click: Vector3, tag: String) -> void:
 		var ext_now: float = _extent(men, true)
 		if ext_now > float(ext0[i]) + 2.5:
 			final_ext_bad += 1
+		# Род войск берём у ПЕРВОГО ЖИВОГО: головной боец мог погибнуть, и
+		# `squads[i][1][0].stat_id` тогда читается у освобождённого объекта
+		var kind := "?"
+		for uk in (squads[i][1] as Array):
+			if uk != null and is_instance_valid(uk):
+				kind = String((uk as Unit).stat_id)
+				break
 		print("    отряд %d (%s): крюк ×%.2f, поперечник %.1f → макс %.1f → в конце %.1f, проб с расщеплением %d, ближе всего к стене %.1f м, пришёл на %.1f с"
-			% [i + 1, String(squads[i][1][0].stat_id), ratio, float(ext0[i]), float(ext_max[i]), ext_now, int(split_n[i]),
+			% [i + 1, kind, ratio, float(ext0[i]), float(ext_max[i]), ext_now, int(split_n[i]),
 			float(hug[i]), float(int(arrive_frame[i])) / 60.0 if int(arrive_frame[i]) >= 0 else -1.0])
 	verdict("C-%s все 8 отрядов дошли за %.0f с (за %.1f с)" % [tag, float(bound) / 60.0, float(w) / 60.0], arrived_all)
 	verdict("C-%s отставших (дальше 7 м от центра отряда) нет" % tag, stragglers == 0, "отставших %d" % stragglers)

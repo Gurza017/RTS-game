@@ -468,17 +468,31 @@ func _fit_marker_to_sprite(tex: Texture2D, sprite_quad: QuadMesh) -> void:
 	var w: float = sprite_quad.size.x * r.size.x
 	var bottom: float = sprite_quad.size.y * (1.0 - r.end.y)
 	var top: float    = sprite_quad.size.y * (1.0 - r.position.y)
+	# Верх рамки по карнизу, а не по шпилю (marker_top_uv, ТЗ 24.09.2026, п. 4)
+	var top_uv: float = _UCfgB.building_stat(building_id, "marker_top_uv", 0.0)
+	var frame_top: float = top
+	if top_uv > r.position.y and top_uv < r.end.y:
+		frame_top = sprite_quad.size.y * (1.0 - top_uv)
 	var mw: float = w * MARKER_MARGIN
-	var mh: float = (top - bottom) * MARKER_MARGIN
-	mq.size = Vector2(w + mw * 2.0, (top - bottom) + mh * 2.0)
+	var mh: float = (frame_top - bottom) * MARKER_MARGIN
+	mq.size = Vector2(w + mw * 2.0, (frame_top - bottom) + mh * 2.0)
 	# Рисунок может стоять в кадре не по центру — держим рамку на нём
 	var cx: float = sprite_quad.size.x * (r.position.x + r.size.x * 0.5 - 0.5)
 	# Тот же множитель, что тянет само здание (BillboardUtil.V_STRETCH): узел
 	# растягивается вокруг своего центра, поэтому и центр поднимается на него же
 	selection_ring.scale = Vector3(1.0, _BBUtil.V_STRETCH, 1.0)
 	selection_ring.position = Vector3(cx,
-		((bottom - mh) + (top + mh)) * 0.5 * _BBUtil.V_STRETCH, MARKER_Z_LIFT)
+		((bottom - mh) + (frame_top + mh)) * 0.5 * _BBUtil.V_STRETCH, MARKER_Z_LIFT)
 	selection_ring.rotation = Vector3.ZERO
+	# ── РАМКА ПОВЕРХ КРОН (ТЗ 24.09.2026, п. 4) ─────────────────────────────
+	# Глубину рамка и так не писала, но ТЕСТ глубины был включён: дерево перед
+	# домом (его точка на земле ближе к камере) честно закрывало уголки. Рамка —
+	# интерфейс, а не предмет мира: рисуется поверх всего, прозрачным проходом
+	# и с высоким приоритетом
+	var smat := mq.material as StandardMaterial3D
+	if smat != null:
+		smat.no_depth_test = true
+		smat.render_priority = 100
 	# Те же три числа нужны кольцу на земле (см. ring_center / ring_radius).
 	# Считаются здесь и один раз: обмер текстуры не бесплатен, а меняться ему
 	# не с чего — рисунок у постройки один на всю её жизнь
@@ -810,7 +824,14 @@ func train_from_config(unit_id: String) -> bool:
 	var old_cols := squad_cols
 	squad_size = int(c.get("squad", 1))
 	squad_cols = int(c.get("cols", 4))
-	var ok := queue_unit(unit_id, _UCfgB.train_cost(building_id, unit_id),
+	# ── УДЕШЕВЛЕНИЕ НАЙМА РАБОЧИХ (ТЗ 23.09.2026, вкладка «Экономика») ────
+	# Скидка снимается ЗДЕСЬ, а не в самой TRAINING: цена едет вместе с
+	# заказом (см. queue_unit), и отмена по ПКМ обязана вернуть ровно ту
+	# сумму, что была списана, — пересчитай её задним числом после новой
+	# ступени исследования, и возврат разошёлся бы с платежом
+	var disc: float = GameManager.unit_bonus(faction, "worker", "bonus_hire_cost")
+	var ok := queue_unit(unit_id,
+		_UCfgB.train_cost_discounted(building_id, unit_id, disc),
 		float(c.get("time", 10.0)))
 	squad_size = old_size
 	squad_cols = old_cols
@@ -904,8 +925,18 @@ func queue_unit(unit_name: String, cost: Dictionary, build_time: float) -> bool:
 	# Доля к темпу: +25 % значит в 1.25 раза быстрее. Читается по типу
 	# заказа, поэтому ветка рабочего не ускоряет копейщиков
 	var tr: float = GameManager.unit_bonus(faction, unit_name, "bonus_train")
+	# ── ТЕМП ОБУЧЕНИЯ БОЕВЫХ ОТРЯДОВ (ТЗ 23.09.2026) ─────────────────────
+	# Отдельный ключ, а не тот же bonus_train, и это ДВА РАЗНЫХ ЗАКАЗА:
+	# «ускорить постройку рабочих в Крепости» и «ускорить обучение боевых
+	# отрядов в Бараках». Сведи их в один ключ — и ветка рабочего молча
+	# разгоняла бы рыцарей. Хранится он у «worker» (там вся экономика), а
+	# читается на ЛЮБОМ найме, кроме самого рабочего
+	if unit_name != "worker":
+		tr += GameManager.unit_bonus(faction, "worker", "bonus_train_army")
 	if tr > 0.0:
-		wait /= (1.0 + tr)
+		# Потолок — ДОЛЯ ДОЛОЙ ОТ ВРЕМЕНИ (TRAIN_SPEED_CAP), а не потолок
+		# множителя: так его читает и владелец в конфиге, и подпись в панели
+		wait = maxf(wait / (1.0 + tr), wait * (1.0 - _UCfgB.TRAIN_SPEED_CAP))
 	# Цена едет ВМЕСТЕ с заказом: только так отмена по ПКМ может вернуть ровно
 	# столько, сколько было списано, не пересчитывая её задним числом
 	production_queue.append({"name": unit_name, "time": wait, "size": sz,
@@ -951,6 +982,15 @@ const ROW_RELEASE_SEC := 0.25
 ## стягивать. Цена — один кадр на инстанцирование уставного отряда
 const SPAWN_WHOLE_SQUAD := true
 const SPAWN_SPACING_MULT := 1.35
+## ── ПОЛ ИНТЕРВАЛА ВЫХОДА (ТЗ 24.09.2026, п. 7) ──────────────────────────
+## «Копейщики выходят из бараков слишком плотными коробками». 0.35 × 1.35 =
+## 0.47 м — УЖЕ, чем разводит расталкивание (~0.60 м), и строй сразу же
+## распирало изнутри. Пол чуть шире расталкивания: строй встаёт свободно и
+## остаётся таким же — эта сетка уходит отряду в разметку
+const SPAWN_MIN_SPACING := 0.66
+
+static func spawn_spacing(base: float) -> float:
+	return maxf(base * SPAWN_SPACING_MULT, SPAWN_MIN_SPACING)
 
 var _pending_spawns: Array = []   # элементы: {"name","idx","cols","spacing"}
 ## Места появления текущего заказа (sid → [Vector3…]) — под разметку отряда
@@ -1012,7 +1052,10 @@ func _process(delta: float) -> void:
 			# заказ в пустом поле на полторы-две полосы вбок от ворот
 			# Колонны берём УЖЕ ВЫРОВНЕННЫМИ в квадрат: ровно с такими
 			# _spawn_one посчитает шаг полосы (см. square_cols там же)
-			var lane: int = _free_exit_lane(sid, sz, square_cols(sz, cols), sp)
+			# Интервал — ТОТ ЖЕ, что у раскладки в _spawn_one (spawn_spacing):
+			# полоса, выбранная по сырому интервалу, при разрежённой сетке
+			# выходила за площадку (qa_squad 2: второй отряд в 26 м от ворот)
+			var lane: int = _free_exit_lane(sid, sz, square_cols(sz, cols), spawn_spacing(sp))
 			# Строй отряда снимается СЕЙЧАС и едет вместе с каждой заявкой:
 			# пока отряд выходит по кадрам, squad_cols здания может смениться
 			# ТОЧКА СБОРА СНИМАЕТСЯ ТАМ ЖЕ И ПО ТОЙ ЖЕ ПРИЧИНЕ. Отряд выходит по
@@ -1723,7 +1766,7 @@ func _spawn_one(unit_name: String, idx: int, cols: int = -1, spacing: float = -1
 	if spacing < 0.0:
 		spacing = squad_spacing
 	# Сетка появления разрежена (ТЗ 19.09.2026-2, п. 2)
-	spacing *= SPAWN_SPACING_MULT
+	spacing = spawn_spacing(spacing)
 	# КВАДРАТ, А НЕ ПОЛОСА. Число колонн из конфига прибито к 5 независимо от
 	# размера заказа: отряд в 10 лучников выходил строем 5×2 — широкой лентой,
 	# а не «кирпичом». Ровный квадрат читается как строй с любого ракурса и
@@ -1889,7 +1932,7 @@ func _place_spawned(unit: Unit, gate: Vector3, rally: Vector3,
 func rally_zone() -> Dictionary:
 	var total: int = maxi(squad_size, 1)
 	var cols: int = square_cols(total, squad_cols)
-	var spacing: float = squad_spacing * SPAWN_SPACING_MULT
+	var spacing: float = spawn_spacing(squad_spacing)
 	# ВОРОТА — ПЕРВЫМИ: _gate_position() лениво ставит фасад (_face_front) и
 	# переписывает spawn_offset; читать его ДО этого значит взять начальное
 	# (3, 0, 0) и развернуть площадку вбок (поймал qa_rally_zone A4)
@@ -2004,18 +2047,18 @@ func _die() -> void:
 # Ставится в момент смерти, до queue_free(): дети умирающего узла уходят вместе
 # с ним, поэтому руина цепляется к РОДИТЕЛЮ, а не к себе.
 # ─────────────────────────────────────────────────────────────────────────────
-func spawn_ruin() -> void:
+func spawn_ruin() -> Node3D:
 	var parent := get_parent()
 	if parent == null or building_id.is_empty():
-		return
+		return null
 	var path: String = ruin_sprite_override()
 	if path.is_empty():
 		path = GameManager.ruin_sprite_path(faction, building_id)
 	if path.is_empty() or not ResourceLoader.exists(path):
-		return
+		return null
 	var tex := load(path) as Texture2D
 	if tex == null:
-		return
+		return null
 	# РУИНА — ТЕЛО ТОЛЬКО РАДИ ПКМ, И НА ОТДЕЛЬНОМ СЛОЕ.
 	# Группы зданий и здоровье ей по-прежнему не положены (см. шапку): для
 	# проверки победы, ИИ и левого клика её не существует. Но по ней должен
@@ -2080,5 +2123,32 @@ func spawn_ruin() -> void:
 	# Срок жизни руин — в конфиге владельца; 0 означает «лежат вечно»
 	var life: float = _UCfgB.RUIN_LIFETIME_SEC
 	if life > 0.0:
-		var t := ruin.get_tree().create_timer(life)
-		t.timeout.connect(ruin.queue_free)
+		var fade: float = minf(_UCfgB.RUIN_FADE_SEC, life)
+		var t := ruin.get_tree().create_timer(maxf(life - fade, 0.01))
+		t.timeout.connect(Building.ruin_dissolve.bind(ruin, fade))
+	return ruin
+
+## Растворить руину за `sec` и освободить. Материал берётся с RuinSprite ПРИ
+## ЗАПУСКЕ, а не при закладке: загон подменяет спрайт плоским мешем уже после
+## spawn_ruin (SheepPen.spawn_ruin)
+static func ruin_dissolve(ruin: Node3D, sec: float) -> void:
+	if ruin == null or not is_instance_valid(ruin):
+		return
+	var mi: MeshInstance3D = ruin.get_node_or_null("RuinSprite") as MeshInstance3D
+	var tw := ruin.create_tween()
+	if mi != null and mi.mesh != null and mi.mesh.get_surface_count() > 0:
+		var m: Material = mi.mesh.surface_get_material(0)
+		if m == null and mi.mesh is PrimitiveMesh:
+			m = (mi.mesh as PrimitiveMesh).material
+		if m is ShaderMaterial:
+			var sm := m as ShaderMaterial
+			tw.tween_method(func(v: float): sm.set_shader_parameter("dissolve", v), 0.0, 1.0, sec)
+		elif m is StandardMaterial3D:
+			var st := m as StandardMaterial3D
+			st.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+			tw.tween_property(st, "albedo_color:a", 0.0, sec)
+		else:
+			tw.tween_interval(sec)
+	else:
+		tw.tween_interval(sec)
+	tw.tween_callback(ruin.queue_free)

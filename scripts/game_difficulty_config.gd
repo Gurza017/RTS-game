@@ -37,6 +37,10 @@ const PRESETS := {
 		"goblin_dormant_mult": 1.35,  # орда просыпается позже
 		"goblin_food_mult":    0.70,  # и медленнее восполняет потери
 		"goblin_vet_shift":   -1,     # ранг стартовых отрядов на ступень ниже
+		# ── ТЗ 23.09.2026, п. 6 ─────────────────────────────────────────────
+		"player_resource_mult": 1.60, # игроку больше на старте
+		"mob_count_mult":       0.50, # мобов, троллей и гноллов ВДВОЕ меньше
+		"mob_gap_mult":         1.50, # и волны реже в полтора раза
 	},
 	NORMAL: {
 		"name": "Обычная",
@@ -51,6 +55,12 @@ const PRESETS := {
 		"goblin_dormant_mult": 1.0,
 		"goblin_food_mult":    1.0,
 		"goblin_vet_shift":    0,
+		# ЭТАЛОН: все множители ровно единица. Стенды и дефолтный запуск идут
+		# на нём (ТЗ 23.09.2026), и сдвинься здесь хоть одно число — прежние
+		# замеры перестали бы что-либо значить
+		"player_resource_mult": 1.0,
+		"mob_count_mult":       1.0,
+		"mob_gap_mult":         1.0,
 	},
 	HARD: {
 		"name": "Тяжёлая",
@@ -72,6 +82,10 @@ const PRESETS := {
 		"goblin_dormant_mult": 0.65,  # орда просыпается заметно раньше
 		"goblin_food_mult":    1.40,  # и быстрее восполняет потери
 		"goblin_vet_shift":    1,     # ранг стартовых отрядов на ступень выше
+		# ── ТЗ 23.09.2026, п. 6 ─────────────────────────────────────────────
+		"player_resource_mult": 0.60, # игроку меньше на старте
+		"mob_count_mult":       1.50, # мобов и волн больше
+		"mob_gap_mult":         0.70, # и приходят они чаще
 	},
 }
 
@@ -138,16 +152,54 @@ static func ai_peace_seconds() -> float:
 	return maxf(_AICfg.PEACE_SECONDS * _f("ai_peace_mult"), 0.0)
 
 ## Стартовый запас ресурсов фракции с учётом сложности.
+## ЗАПАС КРУТИТСЯ У ОБЕИХ СТОРОН, НО РАЗНЫМИ РУЧКАМИ (ТЗ 23.09.2026, п. 6).
+## Заказ: «Easy — игроку больше ресурсов, Hard — меньше». Прежде пресет трогал
+## только запас ИИ, и «легко» означало лишь «противник слабее»; теперь у
+## игрока свой множитель, и он НЕ тот же самый — иначе лёгкая сложность,
+## урезав запас ИИ, заодно урезала бы и игроку.
+## ГОБЛИНЫ СЮДА НЕ ВХОДЯТ: их экономика — хижины (goblin_hut_food_per_min),
+## склада у орды нет вовсе
 static func starting_resources(faction: int, base: Dictionary) -> Dictionary:
-	if faction != Constants.FACTION_ENEMY:
+	var m: float = 1.0
+	if faction == Constants.FACTION_ENEMY:
+		m = _f("ai_resource_mult")
+	elif faction == Constants.FACTION_PLAYER:
+		m = _f("player_resource_mult")
+	else:
 		return base
-	var m: float = _f("ai_resource_mult")
 	if is_equal_approx(m, 1.0):
 		return base
 	var out: Dictionary = {}
 	for k in base:
 		out[k] = float(base[k]) * m
 	return out
+
+## ═══════════════════════════════════════════════════════════════════════════
+## СКОЛЬКО ДИКИХ НА КАРТЕ И КАК ЧАСТО ИДУТ ВОЛНЫ (ТЗ 23.09.2026, п. 6)
+## ═══════════════════════════════════════════════════════════════════════════
+## Заказ: «Easy — спавн мобов, троллей и гоблинов снижен в 2 раза; Hard —
+## количество и частота волн увеличены».
+##
+## ДВЕ РУЧКИ, А НЕ ОДНА, И ЭТО ПО СУЩЕСТВУ. «Сколько их за раз» и «как часто
+## они приходят» — разные вещи: половинная стая, приходящая вдвое чаще, даёт
+## то же давление, что и полная. Поэтому счёт крутит mob_count_mult, а сроки
+## между волнами — mob_gap_mult (он ОБРАТНЫЙ: больше значит реже).
+##
+## ПОЛ У СЧЁТА — ЕДИНИЦА, А НЕ НОЛЬ. Пень без единого тролля и логово без
+## гноллов — это не «легко», это отсутствие механики: игрок не увидел бы её
+## вовсе и не понял бы, за что его потом бьют на Normal
+static func mob_count(base: int) -> int:
+	if base <= 0:
+		return base
+	return maxi(int(round(float(base) * _f("mob_count_mult"))), 1)
+
+## То же для дробных счётчиков (доли отрядов в волне)
+static func mob_count_f(base: float) -> float:
+	return maxf(base * _f("mob_count_mult"), 0.0)
+
+## Срок между волнами, секунды. Обратная ручка: на Hard он МЕНЬШЕ
+static func mob_gap(base: float) -> float:
+	return maxf(base * _f("mob_gap_mult"), 1.0)
 
 ## Время найма ОДНОГО отряда с учётом сложности, секунд.
 static func train_time(faction: int, base: float) -> float:

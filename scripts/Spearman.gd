@@ -177,6 +177,12 @@ func _load_directional_sprites(faction_name: String) -> bool:
 const PIXEL_SIZE := 0.0108   # тот же, что у _dir_sprite
 
 var _dir_bottom: Dictionary = {}          # ключ → нижний отступ альфы, px
+## Насколько НИЖЕ, чем у Idle, стоят ступни в кадре листа, px (замер по
+## первому кадру всех Lancer_*.png, 24.09.2026). Не упомянутые — ноль
+const FEET_SHIFT_PX := {
+	"defence_down": 7, "attack_down": 17,
+	"defence_downright": 4, "attack_downright": 11,
+}
 static var _bottom_cache: Dictionary = {} # путь PNG → нижний отступ, px
 
 # Нижний отступ непрозрачных пикселей в ПЕРВОМ кадре листа.
@@ -281,9 +287,13 @@ func _apply_dir_tex(key: String) -> void:
 	_look_loop   = true
 	_look_fps    = 10.0 if (key == "run" or key.begins_with("attack")) else 6.0
 	# Компенсация привязки листа: низ рисунка встаёт туда же, где у Idle
-	var ref: int  = int(_dir_bottom.get("idle", 0))
-	var mine: int = int(_dir_bottom.get(key, ref))
-	_sprite_base_y = SPRITE_BASE_Y + float(ref - mine) * PIXEL_SIZE
+	# ── ПО СТУПНЯМ, А НЕ ПО НИЖНЕЙ КРОМКЕ АЛЬФЫ (ТЗ 24.09.2026, п. 7) ─────
+	# Прежняя привязка ровняла самый нижний непрозрачный пиксель листа по
+	# Idle. Но в «нижних» позах ниже всего лежит НАКОНЕЧНИК КОПЬЯ, а не ноги:
+	# фигура поднималась на длину копья (79 px ≈ 0.85 м у defence_down), и
+	# кольцо выделения под ногами оказывалось спереди строя. Смещение ступней
+	# снято по кадрам глазом (FEET_SHIFT_PX), фигура там ниже Idle на 4-17 px
+	_sprite_base_y = SPRITE_BASE_Y + float(int(FEET_SHIFT_PX.get(key, 0))) * PIXEL_SIZE
 	# Направленные листы минуют _set_anim — лента в строку ядра отсюда
 	_push_row_anim()
 	if _mm_only:
@@ -353,7 +363,7 @@ func _process_can_sleep() -> bool:
 	# выставили 3 из 20», причём число плавало от прогона к прогону
 	# (qa_formation, D1: 3, 6, 8 при ожидаемых 10)
 	if (_stance_holds_ground() or _charging()) \
-			and _spear_down != (_live_rank < PHALANX_FRONT_RANKS):
+			and _spear_down != (PHALANX_ALL_RANKS or _live_rank < PHALANX_FRONT_RANKS):
 		return false
 	# НАПРАВЛЕННУЮ ПОЗУ НЕ УСЫПЛЯЕМ. Ракурс листов defence_*/attack_* зависит от
 	# положения камеры (см. _screen_angle), поэтому стоящий боец в такой позе
@@ -467,6 +477,8 @@ func _charging() -> bool:
 		return true
 	return squad_id > 0 and GameManager.squad_in_combat(squad_id)
 
+const PHALANX_ALL_RANKS := true
+
 func _spear_leveled() -> bool:
 	# Копьё горизонтально в двух случаях и ТОЛЬКО у первых двух шеренг:
 	#   • фаланга — стойка ЗАЩИТА (держим рубеж);
@@ -508,6 +520,14 @@ func _spear_leveled() -> bool:
 	# 3 и глубже. Между ними мёртвая зона, в которой решение НЕ МЕНЯЕТСЯ
 	# Стена копий: ряд не спрашивается вовсе — щетина по всей глубине строя
 	if wall:
+		if not _spear_down and now_ms >= _spear_ready_ms:
+			_spear_down = true
+		return _spear_down
+	# ── ВЕСЬ СТРОЙ ОДНОЙ ПОЗОЙ (ТЗ 24.09.2026, второе письмо) ──────────────
+	# Щетина только у первых двух шеренг давала строй «вразнобой» (передние с
+	# копьями вперёд, задние с поднятыми): заказ — все смотрят одинаково.
+	# Гистерезис по ряду остаётся запасным путём (PHALANX_ALL_RANKS = false)
+	if PHALANX_ALL_RANKS:
 		if not _spear_down and now_ms >= _spear_ready_ms:
 			_spear_down = true
 		return _spear_down
@@ -575,8 +595,10 @@ func _update_dir_sprite() -> void:
 			if not afoot:
 				tex_key = _standing_key()
 			elif _spear_leveled():
-				# Передние шеренги идут с копьями наперевес, в сторону марша
-				var mdir := velocity if velocity.length() > 0.05 else _facing
+				# Передние шеренги идут с копьями наперевес, в сторону марша.
+				# ВЕСЬ ОТРЯД — ПО КУРСУ ОТРЯДА (ТЗ 24.09.2026, второе письмо):
+				# личный шаг (смыкание, обход соседа) разворачивал бойцов вразнобой
+				var mdir := _squad_face(velocity if velocity.length() > 0.05 else _facing)
 				var msec := _facing_to_dir_key(mdir.normalized())
 				tex_key = DEFENCE_KEYS[msec]
 				_set_dir_flip(SECTOR_MIRROR[msec])
@@ -606,6 +628,11 @@ func _update_dir_sprite() -> void:
 		_:
 			# На месте передние ряды ДЕРЖАТ копьё выставленным (defence),
 			# задние стоят с поднятым (idle)
+			# Стоящий строй смотрит ПО КУРСУ ОТРЯДА — и с копьями, и без
+			var sf: Vector3 = _squad_face(_facing)
+			if sf.length_squared() > 1e-6 and sf != _facing:
+				_facing = sf
+				mark_flip_dirty()
 			if _spear_leveled():
 				var ssec := _facing_to_dir_key(_facing.normalized())
 				tex_key = DEFENCE_KEYS[ssec]
@@ -621,6 +648,17 @@ func _update_dir_sprite() -> void:
 	_apply_dir_tex(tex_key)
 
 # Направление на ЛИЧНОГО ближайшего противника этого бойца
+## ── ОДИН ВЗГЛЯД НА ОТРЯД (ТЗ 24.09.2026, второе письмо) ──────────────────
+## «Все юниты в строю смотрят строго в одну сторону в покое и при движении».
+## Вне боя направление позы — курс отряда (squad_course: направление
+## последнего приказа, по нему же считаются ряды), а не личный шаг бойца. В
+## бою каждый смотрит на своего противника (_own_enemy_dir) — это другое
+func _squad_face(fallback: Vector3) -> Vector3:
+	if squad_id <= 0 or GameManager.squad_in_combat(squad_id):
+		return fallback
+	var c: Vector3 = GameManager.squad_course(squad_id)
+	return c if c.length_squared() > 1e-6 else fallback
+
 func _own_enemy_dir() -> Vector3:
 	var dir := Vector3.ZERO
 	if attack_target != null and is_instance_valid(attack_target):

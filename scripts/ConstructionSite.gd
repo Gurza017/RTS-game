@@ -342,6 +342,9 @@ func _complete() -> void:
 	var made: Building = _make_target()
 	if made != null and parent != null:
 		made.faction = f
+		# Загон встаёт сразу с пятью овцами (ТЗ 24.09.2026, п. 1)
+		if "stock_on_ready" in made:
+			made.set("stock_on_ready", true)
 		parent.add_child(made)
 		made.global_position = pos
 		built.emit(made)

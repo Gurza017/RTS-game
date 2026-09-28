@@ -84,6 +84,11 @@ func _attacking(node) -> int:
 		var sid: int = int(s["sid"])
 		if node.is_asleep(sid):
 			continue
+		# ТЗ 24.09.2026, п. 8: проснувшийся отряд сперва встаёт на линию сбора
+		# перед врагом (WaveStager) и бьёт вместе с волной — это тоже «пошёл в бой»
+		if (s as Dictionary).get("stage_goal", Vector3.INF) != Vector3.INF:
+			n += 1
+			continue
 		for m in GameManager.squad_members(sid):
 			var u := m as Unit
 			if u != null and (u.attack_target != null or u.state == Unit.State.ATTACKING):
@@ -115,8 +120,10 @@ func _case(node, wave_n: int, gap: float, foe_at: Vector3, tag: String, label: S
 	var woke: bool = await _wait_alarm(node, 20.0)
 	await pframes(30)
 	var awake1: int = total - node.asleep_count()
-	verdict("%s1 тревога будит ПЕРВУЮ ВОЛНУ: проснулось %d (волна %d), остальные спят" % [tag, awake1, wave_n],
-		woke and awake1 == mini(wave_n, total) and node.waves == 1,
+	# ТЗ 25.09.2026: волна 0 — встаёт ВЕСЬ гарнизон разом (охрана крепости ИИ)
+	var w1: int = total if wave_n <= 0 else mini(wave_n, total)
+	verdict("%s1 тревога будит ПЕРВУЮ ВОЛНУ: проснулось %d (волна %d), остальные спят" % [tag, awake1, w1],
+		woke and awake1 == w1 and node.waves == 1,
 		"тревога %s, проснулось %d из %d, волн %d" % [str(woke), awake1, total, node.waves])
 	verdict("%s2 проснувшиеся пошли в атаку (цель есть)" % tag, _attacking(node) >= 1,
 		"с целью %d" % _attacking(node))
@@ -129,8 +136,9 @@ func _case(node, wave_n: int, gap: float, foe_at: Vector3, tag: String, label: S
 	node.wave_clock = gap
 	await pframes(90)
 	var awake2: int = total - node.asleep_count()
-	verdict("%s4 по истечении срока — вторая волна (+%d, всего %d)" % [tag, mini(wave_n, total - awake1), mini(2 * wave_n, total)],
-		awake2 == mini(awake1 + wave_n, total) and node.waves == 2,
+	var w2: int = total if wave_n <= 0 else mini(awake1 + wave_n, total)
+	verdict("%s4 по истечении срока — вторая волна (+%d, всего %d)" % [tag, w2 - awake1, w2],
+		awake2 == w2 and node.waves == 2,
 		"проснулось %d из %d, волн %d" % [awake2, total, node.waves])
 	# Уснувших не осталось, если 2 волны ≥ всего; иначе — удар по спящему
 	# отряду будит его вне очереди

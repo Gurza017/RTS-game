@@ -166,19 +166,24 @@ func _a_economy() -> void:
 	var cells: Array = ["1d", "2d", "3d", "4d", "5d"]
 	var train_cells := 0
 	var build_cells := 0
+	# ТЗ 24.09.2026, п. 11: древо рабочего переложено — наём/обучение в
+	# колонке D, стройка отдельной колонкой C. Свойство прежнее: и то и другое есть
 	for c in cells:
 		var node: Dictionary = _Forge.get_node(_Forge.node_id("worker", c))
 		if float(node.get("bonus_train", 0.0)) > 0.0:
 			train_cells += 1
-		if float(node.get("bonus_build", 0.0)) > 0.0:
+		var cnode: Dictionary = _Forge.get_node(_Forge.node_id("worker", c.replace("d", "c")))
+		if float(cnode.get("bonus_build", 0.0)) > 0.0:
 			build_cells += 1
-	verdict("A3 колонка D рабочего — обучение (%d узлов) и стройка (%d узлов)" % [train_cells, build_cells],
-		train_cells >= 4 and build_cells >= 3)
+	verdict("A3 колонка D рабочего — обучение (%d узлов), колонка C — стройка (%d узлов)" % [train_cells, build_cells],
+		train_cells >= 4 and build_cells >= 2)
 	var atk_cells := 0
-	for c2 in ["3c", "4c", "5c"]:
+	# Живучесть и удар рабочего — колонка B (ТЗ 24.09.2026)
+	for c2 in ["3b", "4b", "5b"]:
 		if float(_Forge.get_node(_Forge.node_id("worker", c2)).get("bonus_attack", 0.0)) > 0.0:
 			atk_cells += 1
-	verdict("A4 колонка C даёт удар (%d узлов)" % atk_cells, atk_cells == 3)
+	# ТЗ 24.09.2026 (второе письмо): «убрать у рабочих атаку и HP» из древа
+	verdict("A4 в древе рабочего удара больше нет (%d узлов)" % atk_cells, atk_cells == 0)
 	# Найм: bonus_train режет время заказа
 	var pf: int = Constants.FACTION_PLAYER
 	ResourceManager.add_resource(pf, Constants.RESOURCE_WOOD, 500.0)
@@ -194,9 +199,9 @@ func _a_economy() -> void:
 	var w: Worker = _spawn("worker", pf, main.PLAYER_BASE_ANCHOR + Vector3(30.0, 0.0, 30.0)) as Worker
 	await pframes(2)
 	var d0: float = w._upgrade_damage_bonus()
-	GameManager.finish_research(pf, _Forge.node_id("worker", "3c"))
+	GameManager.finish_research(pf, _Forge.node_id("worker", "3b"))
 	var d1: float = w._upgrade_damage_bonus()
-	verdict("A6 узел 3c прибавил удар рабочему (%.1f → %.1f)" % [d0, d1], d1 > d0)
+	verdict("A6 узел 3b удара рабочему не прибавляет (%.1f → %.1f)" % [d0, d1], is_equal_approx(d1, d0))
 	w.queue_free()
 	await pframes(2)
 
@@ -544,13 +549,16 @@ func _f_monks() -> void:
 		if u != null and is_instance_valid(u) and not u.is_dead() and u.faction == pf \
 				and u.stat_id == "warrior" and u.squad_id == vsid and not grp.has(u):
 			risen = u
-	verdict("F12 поднятый — воин в СВОЁМ отряде, у тела, с 1 HP", risen != null
+	verdict("F12 поднятый — воин в СВОЁМ отряде, у тела", risen != null
 		and _xz(risen.global_position, vpos) < 3.0 and risen.max_health > 5.0,
 		"найден %s" % str(risen != null))
 	var hp_at_rise: float = risen.current_health if risen != null else -1.0
 	await pframes(60 * 4)
 	verdict("F13 монах лечит поднятого: %.1f → %.1f" % [hp_at_rise, risen.current_health if risen != null else -1.0],
-		risen != null and hp_at_rise <= 2.0 and risen.current_health > hp_at_rise)
+		# ТЗ 24.09.2026, п. 12: встаёт с долей запаса ПО ПРОКАЧКЕ монаха
+		# (res_health_frac), а не с 1 HP; лечить его после подъёма — прежнее свойство
+		risen != null and absf(hp_at_rise - risen.max_health * float(m.res_health_frac())) < 2.0
+			and risen.current_health > hp_at_rise)
 	# ── Ауры по наградам ─────────────────────────────────────────────────
 	var choices: Array = _UCfg.veteran_choices("monk", 1)
 	var aura_ids: Dictionary = {}

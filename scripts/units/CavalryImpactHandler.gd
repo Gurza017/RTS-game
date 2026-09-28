@@ -40,11 +40,63 @@ const REAR_KB_MULT   := 1.5
 const FLANK_MORALE_HIT := 6.0
 const REAR_MORALE_HIT  := 15.0
 
+## ── ДОЛИ ЗАПАСА ПО СЕКТОРУ (ТЗ 24.09.2026, п. 2) ──────────────────────────
+## Удар в тыл снимает у каждого накрытого REAR_FRAC его МАКСИМАЛЬНОГО запаса,
+## во фланг — FLANK_FRAC; мимо брони (Unit.take_frac_damage)
+const REAR_FRAC  := 0.50
+const FLANK_FRAC := 0.25
+## Круг накрытия при ударе сбоку и сзади — шире лобового
+const SIDE_SPLASH_MULT := 1.5
+## Отлёт при ударе сбоку/сзади — доля charge_knockback (ТЗ 24.09.2026-2:
+## разлёт короче, летят только первые два ряда)
+const SIDE_KNOCK_MULT := 0.6
+
+static func sector_frac(sec: int) -> float:
+	return REAR_FRAC if sec == SECTOR_REAR else (FLANK_FRAC if sec == SECTOR_FLANK else 0.0)
+
+## ── ЛОБ НА КОПЬЯ: ПЕРВАЯ ВОЛНА И ПОСЛЕДУЮЩИЕ ──────────────────────────────
+## Без «Стены копий» всадник первой волны теряет FIRST_WAVE_FRAC своего
+## максимального запаса, следующих волн — NEXT_WAVE_FRAC; со стеной — то же ×
+## WALL_COUNTER_MULT («300 % входящего урона»).
+## ВОЛНА СЧИТАЕТСЯ ПО ОТРЯДУ КОПЕЙЩИКОВ: эпизод открывает первое касание; всё,
+## что влетело в тот же отряд за WAVE_WINDOW_MS, — первая волна (всадники
+## одного натиска касаются строя вразнобой, в пределах секунды-двух), позже —
+## вторая. Эпизод гаснет, если касаний не было WAVE_RESET_MS: следующий
+## натиск снова встречает «свежие» копья
+const FIRST_WAVE_FRAC := 0.50
+## Каждый второй всадник первой волны — насмерть (доля > 1 с запасом)
+const FIRST_WAVE_LETHAL := 1.05
+const NEXT_WAVE_FRAC  := 0.25
+const WALL_COUNTER_MULT := 3.0
+const WAVE_WINDOW_MS := 1500
+const WAVE_RESET_MS  := 10000
+## sid копейщиков → [начало эпизода, последнее касание], мс
+static var _waves: Dictionary = {}
+
+static func front_wave_frac(spear: Unit) -> float:
+	var key: int = spear.squad_id if spear.squad_id > 0 else -spear.get_instance_id()
+	var now: int = Time.get_ticks_msec()
+	var w: Variant = _waves.get(key)
+	if w == null or now - int(w[1]) > WAVE_RESET_MS:
+		_waves[key] = PackedInt64Array([now, now, 1])
+		return FIRST_WAVE_FRAC
+	var ep: PackedInt64Array = w
+	ep[1] = now
+	if now - ep[0] > WAVE_WINDOW_MS:
+		_waves[key] = ep
+		return NEXT_WAVE_FRAC
+	# ── ПЕРВАЯ ВОЛНА: КАЖДЫЙ ВТОРОЙ ГИБНЕТ НА КОПЬЯХ (ТЗ 24.09.2026, второе
+	# письмо) ── нечётные касания эпизода — 50 % запаса, чётные — насмерть
+	ep[2] = ep[2] + 1
+	_waves[key] = ep
+	return FIRST_WAVE_LETHAL if ep[2] % 2 == 0 else FIRST_WAVE_FRAC
+
 ## Стендам: сколько касаний пришлось на каждый сектор и последний профиль
 static var hits: PackedInt32Array = PackedInt32Array([0, 0, 0])
 static var last: Dictionary = {}
 
 static func reset_stats() -> void:
+	_waves.clear()
 	hits = PackedInt32Array([0, 0, 0])
 	last = {}
 

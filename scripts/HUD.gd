@@ -221,6 +221,10 @@ const UNIT_ICONS := {
 	# MONK_AVATARS), здесь — запасной вариант для цвета без своего портрета
 	"monk":     "res://assets/factions/humans/units/Human avatar/Monk_blue.png",
 	"troll":    "res://assets/factions/orc/Troll/Troll_Idle.png",
+	# ВКЛАДКА КУЗНИЦЫ, А НЕ РОД ВОЙСК (ТЗ 23.09.2026): своего портрета у неё
+	# быть не может, поэтому берётся значок ресурса — он и читается как
+	# «экономика» без подписи
+	"economy":  "res://assets/factions/humans/icons/hud/Gold_Resource.png",
 }
 ## Портрет монаха по цвету стороны (заказ 09.09.2026: у синих Monk_blue,
 ## у жёлтых Avatars_14, у красных Avatars_09; Avatars_04 в паке нет — только
@@ -243,6 +247,7 @@ const UNIT_TITLES := {
 	"worker": "Рабочий", "spearman": "Копейщик",
 	"archer": "Лучник",  "warrior": "Мечник", "monk": "Монах",
 	"troll": "Тролль",
+	"economy": "Экономика: промыслы, найм, стройка",
 }
 ## Иконки, которые на деле являются боевым спрайт-листом (несколько кадров в
 ## ряд), а не готовым портретом: путь -> сторона квадратного кадра. Первый
@@ -271,6 +276,8 @@ var _res_income_timer: float = 0.0
 var _inc_base: Dictionary = {}      # тип -> сколько было сдано на старте окна
 var _inc_elapsed: float = 0.0
 var _inc_rate: Dictionary = {}      # тип -> текущая оценка, ед./мин
+## Красная цифра расхода еды рядом с зелёным притоком (ТЗ 24.09.2026, п. 5)
+var _food_upkeep_label: Label = null
 ## Длина окна усреднения. Один рейс рабочего (дойти-накопать-донести) занимает
 ## десятки секунд, поэтому окно заведомо длиннее рейса: иначе цифра прыгала бы
 ## между «ноль» и «пик» ровно в такт сдаче груза — та самая жалоба на мигание
@@ -307,6 +314,40 @@ var _portrait_count_lbl: Label = null
 ## Значок ранга поверх портрета (виден у одиночного юнита с рангом)
 var _portrait_rank_lbl: Label = null
 var button_container: GridContainer
+
+## ═══════════════════════════════════════════════════════════════════════════
+## РЯД КОМАНД ОТРЯДУ: [S] ДЕРЖАТЬ · [C] ВОЛЬНО · [A] АТАКА ПО ПУТИ
+## ═══════════════════════════════════════════════════════════════════════════
+## ТЗ 23.09.2026. ПОДПИСЬ СТОИТ НАД ЗНАЧКОМ, А НЕ ПОВЕРХ НЕГО, и это прямое
+## требование заказа: каждая команда — VBoxContainer из Label и кнопки.
+## Положи подпись внутрь кнопки (как сделано у всех прочих кнопок панели —
+## _cmd кладёт текст в сам Button), и буква S утонула бы под словом
+## «Держать позицию».
+##
+## ЗНАЧКИ РИСУЮТСЯ КОДОМ, А НЕ БЕРУТСЯ ИЗ АССЕТОВ. Готовых иконок с буквами
+## в наборе нет, а буква на цветной плашке и есть самый читаемый значок для
+## команды, у которой ГЛАВНОЕ — её горячая клавиша: игрок обязан связать
+## кнопку с клавишей с первого взгляда, и картинка щита или ног этой связи
+## не даёт вовсе
+var _squad_cmd_bar: HBoxContainer = null
+var _squad_cmd_btns: Dictionary = {}     # "S"/"C"/"A" -> Button
+const SCMD_GAP := 6
+const SCMD_BTN := 30                      # сторона кнопки с буквой
+const SCMD_LABEL_H := 12
+## Ширина колонки: подпись длиннее кнопки, и без явной ширины HBox растянул бы
+## ряд по самой длинной надписи, сдвинув кнопки найма
+const SCMD_COL_W := 74
+const SCMD_KEYS := ["S", "C", "A"]
+const SCMD_TITLES := {
+	"S": "Держать позицию",
+	"C": "Вольно",
+	"A": "Двигаться и атаковать",
+}
+const SCMD_COLORS := {
+	"S": Color(0.16, 0.42, 0.18),   # зелёный — оборона, как у кнопки «Defend»
+	"C": Color(0.24, 0.26, 0.34),   # серо-синий — нейтральное состояние
+	"A": Color(0.52, 0.14, 0.12),   # красный — бой, как у кнопки «Attack»
+}
 var drag_rect: ColorRect
 var progress_bar: ProgressBar
 var progress_label: Label
@@ -925,17 +966,39 @@ func _build_resource_bar() -> void:
 
 	# ЛИМИТ НАСЕЛЕНИЯ (дома, 09.09.2026): «раб. 4/6 · отр. 2/3». Показывается
 	# только когда лимит действует (GameManager.pop_limit_enabled)
+	# ── ИКОНКИ ВМЕСТО СЛОВ (ТЗ 24.09.2026, п. 5) ─────────────────────────
+	# «раб.» → портрет рабочего, «армия» → портрет копейщика; к числу бойцов
+	# добавлено число ОТРЯДОВ. Два Label вместо одного: цвет «полон» у каждой
+	# половины свой — упёрся лимит рабочих, армию красить незачем
 	_pop_sep = VSeparator.new()
 	hbox.add_child(_pop_sep)
-	_pop_label = Label.new()
-	_pop_label.add_theme_font_size_override("font_size", 13)
-	_pop_label.add_theme_color_override("font_color", Color(0.85, 0.90, 0.95))
-	_pop_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	_pop_label.tooltip_text = "Лимит населения: рабочие и боевые отряды. Каждый дом даёт +%d и +%d" % [
-		_UCfg.HOUSE_WORKER_SLOTS, _UCfg.HOUSE_SQUAD_SLOTS]
-	hbox.add_child(_pop_label)
+	_pop_label = Label.new()      # рабочие: «13/41»
+	_pop_army_label = Label.new() # армия: «0/515 · 0 отр.»
+	var tip: String = "Лимит населения: рабочие и БОЙЦЫ (ТЗ 23.09.2026 — армия считается головами, не отрядами). Каждый дом даёт +%d рабочих и +%d мест в армии; потолок армии %d, это примерно %d домов" % [
+		_UCfg.HOUSE_WORKER_SLOTS, _UCfg.ARMY_HOUSE_UNITS,
+		_UCfg.ARMY_HARD_CAP, _UCfg.houses_for_full_army(1)]
+	_pop_box = HBoxContainer.new()
+	_pop_box.add_theme_constant_override("separation", 3)
+	_pop_box.tooltip_text = tip
+	_pop_box.mouse_filter = Control.MOUSE_FILTER_PASS
+	for pair in [["worker", _pop_label], ["spearman", _pop_army_label]]:
+		var ic := TextureRect.new()
+		ic.texture = _trimmed_icon(String(UNIT_ICONS.get(String(pair[0]), "")))
+		ic.custom_minimum_size = Vector2(RES_ICON_DISPLAY, RES_ICON_DISPLAY)
+		ic.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		ic.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		ic.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		ic.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		_pop_box.add_child(ic)
+		var lb: Label = pair[1]
+		lb.add_theme_font_size_override("font_size", 13)
+		lb.add_theme_color_override("font_color", Color(0.85, 0.90, 0.95))
+		lb.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		lb.tooltip_text = tip
+		_pop_box.add_child(lb)
+	hbox.add_child(_pop_box)
 	_pop_sep.visible = false
-	_pop_label.visible = false
+	_pop_box.visible = false
 
 	hbox.add_child(_pad(3, 0))
 
@@ -1113,6 +1176,16 @@ func _build_resource_card(rd: Dictionary) -> Control:
 	income_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	inc_wk_box.add_child(income_lbl)
 	_res_income_labels[rd["key"]] = income_lbl
+	# ── РАСХОД ЕДЫ — СВОЕЙ КРАСНОЙ ЦИФРОЙ (ТЗ 24.09.2026, п. 5) ─────────────
+	# «+52» зелёным, «−26» красным: одним Label двух цветов не нарисовать
+	if int(rd["key"]) == Constants.RESOURCE_FOOD:
+		_food_upkeep_label = Label.new()
+		_food_upkeep_label.text = ""
+		_food_upkeep_label.visible = false
+		_food_upkeep_label.add_theme_font_size_override("font_size", 11)
+		_food_upkeep_label.add_theme_color_override("font_color", Color(0.95, 0.35, 0.30))
+		_food_upkeep_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		inc_wk_box.add_child(_food_upkeep_label)
 
 	# ── ХВОСТ «ИНСТРУМЕНТ + РАБОЧИЕ» — В КАЖДОЙ СЕКЦИИ ──────────────────────
 	# Одно и то же во всех четырёх: «столько рабочих сидит на ЭТОМ ресурсе».
@@ -1333,6 +1406,8 @@ func _format_match_time(total_seconds: float) -> String:
 ## Вызывается ПЕРВЫМ делом из _process, до всех ранних return по выделению
 ## Счётчик населения в панели ресурсов (см. _build_resource_bar)
 var _pop_label: Label = null
+var _pop_army_label: Label = null
+var _pop_box: HBoxContainer = null
 var _pop_sep: VSeparator = null
 var _pop_timer: float = 0.0
 const POP_REFRESH_SEC := 0.5
@@ -1345,7 +1420,8 @@ func _refresh_pop(delta: float) -> void:
 		return
 	_pop_timer = POP_REFRESH_SEC
 	var on: bool = GameManager.pop_limit_enabled
-	_pop_label.visible = on
+	if _pop_box != null and is_instance_valid(_pop_box):
+		_pop_box.visible = on
 	if _pop_sep != null and is_instance_valid(_pop_sep):
 		_pop_sep.visible = on
 	if not on:
@@ -1353,12 +1429,20 @@ func _refresh_pop(delta: float) -> void:
 	var f: int = Constants.FACTION_PLAYER
 	var wu: int = GameManager.pop_workers_used(f)
 	var wc: int = GameManager.pop_worker_cap(f)
-	var su: int = GameManager.pop_squads_used(f)
-	var sc: int = GameManager.pop_squad_cap(f)
-	_pop_label.text = "раб. %d/%d · отр. %d/%d" % [wu, wc, su, sc]
-	var full: bool = wu >= wc or su >= sc
+	var su: int = GameManager.pop_army_used(f)
+	var sc: int = GameManager.pop_army_cap(f)
+	# ── ЕДИНЫЙ ФОРМАТ «ЕСТЬ / ЛИМИТ» (ТЗ 24.09.2026, второе письмо) ────────
+	# Сырые «181/605 бойцов» убраны: рядом с копейщиком — ОТРЯДЫ и лимит в
+	# отрядах. Бойцы и их лимит — во всплывающей подсказке
+	var sq: int = GameManager.pop_army_squads(f)
+	var sq_cap: int = GameManager.pop_squad_limit(f)
+	_pop_label.text = "%d / %d" % [wu, wc]
+	_pop_army_label.text = "%d / %d" % [sq, sq_cap]
+	_pop_army_label.tooltip_text = "Отряды: %d из %d. Бойцов %d из %d" % [sq, sq_cap, su, sc]
 	_pop_label.add_theme_color_override("font_color",
-		Color(0.95, 0.60, 0.50) if full else Color(0.85, 0.90, 0.95))
+		Color(0.95, 0.60, 0.50) if wu >= wc else Color(0.85, 0.90, 0.95))
+	_pop_army_label.add_theme_color_override("font_color",
+		Color(0.95, 0.60, 0.50) if (su >= sc or sq >= sq_cap) else Color(0.85, 0.90, 0.95))
 
 func _update_top_right(delta: float) -> void:
 	_refresh_pop(delta)
@@ -1749,6 +1833,18 @@ func _build_bottom_panel() -> void:
 	button_container.add_theme_constant_override("v_separation", BTN_GAP)
 	btn_slot.add_child(button_container)
 
+	# ── КОМАНДЫ ОТРЯДУ [S] [C] [A] (ТЗ 23.09.2026) ─────────────────────────
+	# Своя колонка в том же ряду, а НЕ отдельная плашка над панелью. Плашка
+	# гарнизона так уже висела и «дёргалась»: она пересобиралась своим тактом,
+	# а панель своим (см. ТЗ 20.09.2026, п. 6). Колонка живёт и обновляется
+	# вместе с панелью, и разъехаться ей не с чем
+	_squad_cmd_bar = HBoxContainer.new()
+	_squad_cmd_bar.name = "SquadCmdBar"
+	_squad_cmd_bar.add_theme_constant_override("separation", SCMD_GAP)
+	_squad_cmd_bar.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	_squad_cmd_bar.visible = false
+	hbox.add_child(_squad_cmd_bar)
+
 	# ОТСТУП ОТ ПРАВОГО КРАЯ. Фиксированная распорка ПОСЛЕ кнопок: у Замка это
 	# ровно CASTLE_BTN_RIGHT_PAD, у остальных выделений — ноль, чтобы не
 	# раздувать панель, считающуюся по содержимому (см. _sync_panel_grid_widths)
@@ -2055,6 +2151,7 @@ func _refresh_panel() -> void:
 	_hide_garrison()
 	_hide_stat_panel()
 	_rebuild_squad_strip()
+	_refresh_squad_cmd_bar()   # ряд [S]/[C]/[A] — ТЗ 23.09.2026
 	_train_badges.clear()   # кнопки пересобираются — старые ярлыки уже мертвы
 	_afford_watch.clear()   # и реестр живой доступности вместе с ними
 	_keep_rank_ui.clear()   # и кнопка ранга рыцарей с её радаром
@@ -3050,7 +3147,26 @@ func _filter_slot(unit_id: String, squads: int, men: int) -> Control:
 ## (см. _on_squad_card_pressed) — там это как раз и нужно, чтобы одним
 ## движением отправить в замок именно самый потрёпанный отряд
 func _on_type_filter_pressed(unit_id: String) -> void:
-	_expanded_type = "" if _expanded_type == unit_id else unit_id
+	# ── ПОДВЫБОР: КЛИК ПО ИКОНКЕ РОДА СУЖАЕТ ВЫДЕЛЕНИЕ (ТЗ 24.09.2026, второе
+	# письмо) ── «кликнул на Монаха — управление только им, армия стоит».
+	# Разбор по карточкам остаётся: полоса отрядов этого рода разворачивается,
+	# и кликом по карточке выделение сужается дальше, до одного отряда
+	var main := GameManager.main
+	if main != null and main.selection_manager != null:
+		var sm: SelectionManager = main.selection_manager
+		var keep: Array = []
+		for s in _selected_squad_ids():
+			if GameManager.squad_type(int(s)) == unit_id:
+				keep.append(int(s))
+		if not keep.is_empty():
+			sm._clear_selection()
+			for sid in keep:
+				for m in GameManager.squad_members(int(sid)):
+					var u := m as Unit
+					if u != null and is_instance_valid(u) and not u.is_dead():
+						sm._select_one(u)
+			GameManager.on_selection_changed(sm.selected_units)
+	_expanded_type = unit_id
 	# Панель перерисовывается целиком: уровень 2 — это не «добавить карточки к
 	# тому, что было», а совсем другое содержимое (портрет типа, его численность,
 	# его стойки). Полосу групп при этом НЕ трогаем: она и есть навигация между
@@ -3456,7 +3572,7 @@ func _pen_info_text(p: Building) -> String:
 
 func _house_info_text(h: Building) -> String:
 	var s: String = "%s  %d/%d HP" % [h.display_name, int(h.current_health), int(h.max_health)]
-	s += "\n+%d рабочих · +%d отряда" % [_UCfg.HOUSE_WORKER_SLOTS, _UCfg.HOUSE_SQUAD_SLOTS]
+	s += "\n+%d рабочих · +%d мест в армии" % [_UCfg.HOUSE_WORKER_SLOTS, _UCfg.ARMY_HOUSE_UNITS]
 	s += "\n+%d еды каждые %d c" % [int(_UCfg.HOUSE_FOOD_INCOME), int(_UCfg.HOUSE_FOOD_INTERVAL)]
 	return s
 
@@ -4798,6 +4914,12 @@ const MOD_SHORT_LABELS := {
 	"bonus_cooldown": "ИНТЕРВАЛ АТАКИ", "bonus_spread": "SPREAD",
 	"bonus_push": "PUSH", "bonus_morale": "MORALE",
 	"bonus_carry": "CARRY", "bonus_gather": "GATHERING", "bonus_build": "BUILDING",
+	# ── ЭКОНОМИКА (ТЗ 23.09.2026) ─────────────────────────────────────────
+	"bonus_gather_wood": "ДОБЫЧА ДЕРЕВА", "bonus_gather_stone": "ДОБЫЧА КАМНЯ",
+	"bonus_gather_gold": "ДОБЫЧА ЗОЛОТА", "bonus_gather_food": "РАЗДЕЛКА МЯСА",
+	"bonus_carry_pct": "ГРУЗ, ДОЛЯ", "bonus_walk_pct": "ХОДЬБА, ДОЛЯ",
+	"bonus_walk_loaded_pct": "ХОД С ГРУЗОМ, ДОЛЯ",
+	"bonus_hire_cost": "ЦЕНА НАЙМА РАБОЧЕГО", "bonus_train_army": "ОБУЧЕНИЕ ВОЙСК",
 	"bonus_heal_rate": "ТЕМП ЛЕЧЕНИЯ", "bonus_heal_amount": "ОБЪЁМ ЛЕЧЕНИЯ",
 	"bonus_heal_radius": "РАДИУС ЛЕЧЕНИЯ",
 	"bonus_train": "ОБУЧЕНИЕ",
@@ -5310,10 +5432,8 @@ func _train_cmd(bld: Building, unit_id: String, col: Color, size: float = 0.0,
 			lines.append("Лимит рабочих: %d/%d (дом даёт +%d)" % [
 				GameManager.pop_workers_used(bld.faction),
 				GameManager.pop_worker_cap(bld.faction), _UCfg.HOUSE_WORKER_SLOTS])
-		else:
-			lines.append("Лимит отрядов: %d/%d (дом даёт +%d)" % [
-				GameManager.pop_squads_used(bld.faction),
-				GameManager.pop_squad_cap(bld.faction), _UCfg.HOUSE_SQUAD_SLOTS])
+		# «Лимит армии» из карточки бойца УБРАН (ТЗ 24.09.2026, п. 6): он и
+		# так горит на верхней плашке, а в описании юнита читался как шум
 	if unit_id == "monk":
 		lines.append("Одиночный юнит, не больше %d; лечит раненых рядом" % _UCfg.MONK_LIMIT)
 	if keep_vet > 0:
@@ -6082,6 +6202,18 @@ const _BONUS_TITLES := {
 	# читается как «секунды долой», а не «плюс к чему-то» (см. Worker._cycle_time)
 	"bonus_gather": "с долой из цикла добычи", "bonus_carry": "к грузу за ходку",
 	"bonus_build": "к темпу стройки (доля)",
+	# ── ЭКОНОМИКА (ТЗ 23.09.2026): ВСЕ ПЯТЬ — ДОЛИ, и подпись обязана это
+	# говорить. «−0.35 с» и «+10 %» стоят в одной панели рядом, и перепутать
+	# единицы здесь значит соврать игроку о цене узла
+	"bonus_gather_wood": "к темпу рубки дерева (доля)",
+	"bonus_gather_stone": "к темпу добычи камня (доля)",
+	"bonus_gather_gold": "к темпу добычи золота (доля)",
+	"bonus_gather_food": "к темпу разделки мяса (доля)",
+	"bonus_carry_pct": "к грузу за ходку (доля)",
+	"bonus_walk_pct": "к скорости ходьбы рабочего (доля)",
+	"bonus_walk_loaded_pct": "к ходу рабочего с грузом (доля)",
+	"bonus_hire_cost": "цены найма рабочего долой (доля)",
+	"bonus_train_army": "к темпу обучения боевых отрядов (доля)",
 }
 
 func _forge_tip_line(box: VBoxContainer, text: String, col: Color, size: int) -> void:
@@ -6836,7 +6968,8 @@ func show_main_menu() -> void:
 	vbox.add_child(_spacer(20))
 	vbox.add_child(_make_btn("  Новая игра  ", Color(0.15, 0.35, 0.15), func():
 		_clear_overlay(); GameManager.main.start_game()))
-	vbox.add_child(_make_btn("  Выход  ", Color(0.35, 0.10, 0.10), func(): get_tree().quit()))
+	vbox.add_child(_make_btn("  Выход  ", Color(0.35, 0.10, 0.10), func():
+		GameManager.main.quit_game()))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # НАСТРОЙКИ ЗВУКА: ТРИ ПОЛЗУНКА
@@ -7151,9 +7284,17 @@ func _show_pause_menu() -> void:
 		_add_audio_sliders(box)
 		_add_vsync_toggle(box)
 		_add_armistice_toggle(box)
-	vbox.add_child(_make_btn("Выйти в меню", Color(0.25, 0.10, 0.08), func():
+	# ── ТРИ КНОПКИ, ТРИ РАЗНЫХ ДЕЙСТВИЯ (ТЗ 23.09.2026, п. 1) ──────────────
+	# «Выйти в меню» звала restart_game, то есть ПЕРЕЗАПУСКАЛА матч — отсюда
+	# и жалоба «кнопка Выход перезапускает игру». Теперь каждая кнопка зовёт
+	# свою функцию Main, и назвать их одним словом больше нельзя
+	vbox.add_child(_make_btn("Заново", Color(0.18, 0.28, 0.16), func():
+		_clear_overlay()
 		GameManager.main.restart_game()))
-	vbox.add_child(_make_btn("Выход из игры", Color(0.30, 0.08, 0.08), func(): get_tree().quit()))
+	vbox.add_child(_make_btn("Выйти в меню", Color(0.25, 0.10, 0.08), func():
+		GameManager.main.quit_to_menu()))
+	vbox.add_child(_make_btn("Выход из игры", Color(0.30, 0.08, 0.08), func():
+		GameManager.main.quit_game()))
 
 # ═════════════════════════════════════════════════════════════════════════════
 # ФОКУС ПАНЕЛИ ЗДАНИЯ
@@ -7274,7 +7415,8 @@ func show_victory() -> void:
 	t.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER; vbox.add_child(t)
 	vbox.add_child(_spacer(20))
 	vbox.add_child(_make_btn("  Играть снова  ", Color(0.14, 0.32, 0.14), func(): GameManager.main.restart_game()))
-	vbox.add_child(_make_btn("  Выход из игры  ", Color(0.30, 0.08, 0.08), func(): get_tree().quit()))
+	vbox.add_child(_make_btn("  Выход из игры  ", Color(0.30, 0.08, 0.08), func():
+		GameManager.main.quit_game()))
 
 func show_defeat() -> void:
 	_clear_overlay()
@@ -7286,7 +7428,8 @@ func show_defeat() -> void:
 	t.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER; vbox.add_child(t)
 	vbox.add_child(_spacer(20))
 	vbox.add_child(_make_btn("  Попробовать снова  ", Color(0.28, 0.10, 0.10), func(): GameManager.main.restart_game()))
-	vbox.add_child(_make_btn("  Выход из игры  ", Color(0.30, 0.08, 0.08), func(): get_tree().quit()))
+	vbox.add_child(_make_btn("  Выход из игры  ", Color(0.30, 0.08, 0.08), func():
+		GameManager.main.quit_game()))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # RESOURCES
@@ -7487,7 +7630,12 @@ func _update_resource_income(delta: float) -> void:
 
 	# Кто сейчас приписан к какому ресурсу. Обход группы здесь допустим —
 	# раз в секунду, это не горячий путь юнит-тика
+	# ── ПРИТОК СТАТИЧЕСКИЙ (ТЗ 24.09.2026, п. 5) ─────────────────────────
+	# «Рабочих на ресурсе × доход одного» (Worker.nominal_income_per_sec), а
+	# не сданное за окно: по факту сдачи цифра прыгала в миг добегания рабочего
+	# до склада. Еде к фермерам добавляется то, что капает с домов
 	var busy: Dictionary = {}
+	var nominal: Dictionary = {}
 	for n in get_tree().get_nodes_in_group("all_units"):
 		var w := n as Worker
 		if w == null or w.is_dead() or w.faction != Constants.FACTION_PLAYER:
@@ -7495,6 +7643,13 @@ func _update_resource_income(delta: float) -> void:
 		var rt: int = w.assigned_resource_type()
 		if rt >= 0:
 			busy[rt] = int(busy.get(rt, 0)) + 1
+			nominal[rt] = float(nominal.get(rt, 0.0)) + w.nominal_income_per_sec()
+	var houses := 0
+	for b in GameManager.nodes_in_group_cached(Constants.building_group(Constants.FACTION_PLAYER)):
+		if b != null and is_instance_valid(b) and b is Building and _UCfg.is_house(String((b as Building).building_id)) and not (b as Building)._dead:
+			houses += 1
+	var house_food: float = float(houses) * _UCfg.HOUSE_FOOD_INCOME / maxf(_UCfg.HOUSE_FOOD_INTERVAL, 0.1)
+	nominal[Constants.RESOURCE_FOOD] = float(nominal.get(Constants.RESOURCE_FOOD, 0.0)) + house_food
 
 	for rd in RES_DEFS:
 		var key: int = rd["key"]
@@ -7508,6 +7663,11 @@ func _update_resource_income(delta: float) -> void:
 		# «единиц в минуту», и первые секунды партии показывали бы дичь
 		if _inc_elapsed >= INC_MIN_SAMPLE_SEC:
 			rate = got / _inc_elapsed * 60.0
+		# Показываем РАСЧЁТНЫЙ приток; фактический (rate выше) — запасной, когда
+		# расчёта нет вовсе (ресурс пришёл не от рабочих и не от домов)
+		var nom: float = float(nominal.get(key, 0.0)) * 60.0
+		if nom > 0.0 or int(busy.get(key, 0)) > 0:
+			rate = nom
 		_inc_rate[key] = rate
 
 		var workers: int = int(busy.get(key, 0))
@@ -7541,12 +7701,17 @@ func _update_resource_income(delta: float) -> void:
 		# ЕДА: приток И РАСХОД (содержание армии, 10.09.2026). Красным —
 		# когда расход больше притока: склад тает, и игроку пора строить дома
 		# или красть овец
+		# Приток всегда ЗЕЛЁНЫЙ, расход — отдельной КРАСНОЙ цифрой
+		# (ТЗ 24.09.2026, п. 5: «−26 красным, +52 зелёным»)
 		if key == Constants.RESOURCE_FOOD:
 			var upk: float = ResourceManager.upkeep_rate(Constants.FACTION_PLAYER, key) * 60.0
+			if _food_upkeep_label != null and is_instance_valid(_food_upkeep_label):
+				_food_upkeep_label.visible = upk > 0.0
+				_food_upkeep_label.text = "−%d" % int(round(upk))
+				_food_upkeep_label.tooltip_text = "Расход еды: %d в минуту (рабочие и отряды)" % int(round(upk))
 			if upk > 0.0:
-				inc_lbl.text = "+%d −%d" % [int(round(rate)), int(round(upk))]
-				inc_lbl.add_theme_color_override("font_color",
-					Color(0.35, 0.9, 0.35) if rate >= upk else Color(0.95, 0.4, 0.3))
+				inc_lbl.text = "+%d" % int(round(rate))
+				inc_lbl.add_theme_color_override("font_color", Color(0.35, 0.9, 0.35))
 				inc_lbl.tooltip_text = "Еда: приток %d в минуту, расход %d в минуту (рабочие и отряды)" % [
 					int(round(rate)), int(round(upk))]
 				inc_lbl.visible = true
@@ -8173,14 +8338,33 @@ func _building_card(build_id: String) -> Dictionary:
 		lines.append("Ставится сразу, без стройки")
 	if _UCfg.is_house(build_id):
 		# Тексты заказа (ТЗ 19.09.2026-3); числа — из конфига
-		lines.append("Генерируют еду, дают +%d слота для рабочих и +%d слота для армии" % [
-			_UCfg.HOUSE_WORKER_SLOTS, _UCfg.HOUSE_SQUAD_SLOTS])
+		lines.append("Генерируют еду, дают +%d мест рабочим и +%d мест армии (%d домов = полный кап %d)" % [
+			_UCfg.HOUSE_WORKER_SLOTS, _UCfg.ARMY_HOUSE_UNITS,
+			_UCfg.houses_for_full_army(1), _UCfg.ARMY_HARD_CAP])
 	elif build_id == "tower":
 		lines.append("Обзор %d м, внутрь — отряд лучников" % int(_UCfg.TOWER_VISION))
 	elif build_id == "archery":
 		lines.append("Нанимает лучников")
 	elif build_id == "barracks":
 		lines.append("Нанимает копейщиков и мечников")
+	# ── ЦЕНА РАСТЁТ СО СЧЁТОМ, И ИГРОК ОБЯЗАН ВИДЕТЬ ЭТО ДО КЛИКА ────────
+	# (ТЗ 23.09.2026). Цену карточка и так показывает актуальную — её даёт
+	# build_cost_for, — но БЕЗ строки про множитель это читается как «игра
+	# сама подняла цену»: два барака подряд стоят по-разному, и объяснения
+	# нигде нет. Числа берутся тем же вызовом, что и покупка
+	var mult_now: float = GameManager.build_cost_mult_for(Constants.FACTION_PLAYER, build_id)
+	var have_now: int = GameManager.building_total(Constants.FACTION_PLAYER, build_id)
+	if build_id in _UCfg.PROGRESSIVE_BUILDINGS:
+		lines.append("Уже построено: %d. Каждое следующее дороже: 2-е ×2, 3-е ×3 … (сейчас ×%.0f)" % [
+			have_now, mult_now])
+	elif build_id == "tower":
+		if mult_now > 1.0:
+			lines.append("Башен: %d. С %d-й цена растёт на %d %% за каждую (сейчас ×%.2f)" % [
+				have_now, _UCfg.TOWER_FREE_COUNT + 1,
+				int(_UCfg.TOWER_COST_STEP * 100.0), mult_now])
+		else:
+			lines.append("Башен: %d из %d по базовой цене; дальше каждая дороже на %d %%" % [
+				have_now, _UCfg.TOWER_FREE_COUNT, int(_UCfg.TOWER_COST_STEP * 100.0)])
 	if build_id == "castle":
 		# Текст заказа (ТЗ 19.09.2026-3): 40 видимых на крыше из двух отрядов,
 		# остальные — резерв внутри; числа выводятся из раскладки крыш
@@ -8216,6 +8400,15 @@ func _upgrade_card(slot: Dictionary, faction: int) -> Dictionary:
 		"bonus_speed": "скорости", "bonus_push": "напору", "bonus_morale": "морали",
 		"bonus_carry": "грузу за ходку", "bonus_gather": "с долой из цикла добычи",
 		"bonus_build": "к темпу стройки",
+		"bonus_gather_wood": "темпу рубки дерева (доля)",
+		"bonus_gather_stone": "темпу добычи камня (доля)",
+		"bonus_gather_gold": "темпу добычи золота (доля)",
+		"bonus_gather_food": "темпу разделки мяса (доля)",
+		"bonus_carry_pct": "грузу за ходку (доля)",
+		"bonus_walk_pct": "скорости ходьбы (доля)",
+		"bonus_walk_loaded_pct": "ходу с грузом (доля)",
+		"bonus_hire_cost": "скидке на найм рабочего (доля)",
+		"bonus_train_army": "темпу обучения войск (доля)",
 	}
 	for key in _UCfg.BONUS_KEYS:
 		var k: String = String(key)
@@ -8680,6 +8873,126 @@ func _center_vbox(parent: Control) -> VBoxContainer:
 	var vbox := VBoxContainer.new()
 	vbox.add_theme_constant_override("separation", 18)
 	cc.add_child(vbox); return vbox
+
+# ═════════════════════════════════════════════════════════════════════════════
+# РЯД КОМАНД ОТРЯДУ: [S] ДЕРЖАТЬ · [C] ВОЛЬНО · [A] АТАКА ПО ПУТИ
+# ═════════════════════════════════════════════════════════════════════════════
+# Собирается ОДИН РАЗ (три колонки постоянны), а при каждом выделении только
+# показывается или прячется и перекрашивается. Пересобирать его вместе с
+# панелью нельзя: _refresh_panel сносит и создаёт кнопки заново по нескольку
+# раз в секунду, пока идёт найм, — три новых Control на каждый такой проход
+# это мусор на ровном месте.
+
+## Кнопка одной команды: подпись СВЕРХУ, значок с буквой снизу
+func _build_squad_cmd_col(key: String) -> Control:
+	var col := VBoxContainer.new()
+	col.name = "SquadCmd_" + key
+	col.add_theme_constant_override("separation", 2)
+	col.custom_minimum_size = Vector2(SCMD_COL_W, 0)
+	col.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+
+	# ПОДПИСЬ ПЕРВЫМ РЕБЁНКОМ — то есть НАД кнопкой (требование ТЗ). Перенос
+	# по словам и своя ширина: «Двигаться и атаковать» в одну строку шире
+	# колонки, и без переноса HBox растянул бы весь ряд на эту надпись
+	var lbl := Label.new()
+	lbl.text = String(SCMD_TITLES.get(key, key))
+	lbl.add_theme_font_size_override("font_size", 9)
+	lbl.add_theme_color_override("font_color", Color(0.86, 0.88, 0.92))
+	lbl.add_theme_color_override("font_outline_color", Color(0.02, 0.02, 0.04, 0.95))
+	lbl.add_theme_constant_override("outline_size", 3)
+	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	lbl.custom_minimum_size = Vector2(SCMD_COL_W, SCMD_LABEL_H)
+	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	col.add_child(lbl)
+
+	# ЗНАЧОК — БУКВА НА ПЛАШКЕ. Рисуется стилем, а не картинкой: см. шапку
+	# полей ряда (готовых иконок нет, а буква и есть подсказка о клавише)
+	var btn := QuietTooltipButton.new()
+	btn.name = "SquadCmdBtn_" + key
+	btn.text = key
+	btn.tooltip_text = "%s  [%s]" % [String(SCMD_TITLES.get(key, key)), key]
+	btn.focus_mode = Control.FOCUS_NONE
+	btn.custom_minimum_size = Vector2(SCMD_BTN, SCMD_BTN)
+	btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	btn.add_theme_font_size_override("font_size", 15)
+	btn.add_theme_color_override("font_color", Color(0.96, 0.94, 0.88))
+	btn.pressed.connect(func(): _on_squad_cmd(key))
+	col.add_child(btn)
+	_squad_cmd_btns[key] = btn
+	_paint_squad_cmd(key, false)
+	return col
+
+## Заливка и обводка кнопки. active — команда сейчас действует (отряд стоит в
+## обороне / режим атаки взведён): игрок обязан видеть СОСТОЯНИЕ, а не только
+## «кнопка есть». Тем же приёмом подсвечена активная стойка (см. _cmd)
+func _paint_squad_cmd(key: String, active: bool) -> void:
+	var btn = _squad_cmd_btns.get(key)
+	if btn == null or not is_instance_valid(btn):
+		return
+	var base: Color = SCMD_COLORS.get(key, Color(0.2, 0.2, 0.25))
+	var st := StyleBoxFlat.new()
+	st.bg_color = base if active else base.darkened(0.45)
+	_corners(st, 5)
+	_borders(st, 2)
+	st.border_color = Color(0.95, 0.85, 0.35) if active else Color(0.30, 0.28, 0.24)
+	(btn as Button).add_theme_stylebox_override("normal", st)
+	(btn as Button).add_theme_stylebox_override("hover", st)
+	(btn as Button).add_theme_stylebox_override("pressed", st)
+
+## Нажатие кнопки делает РОВНО ТО ЖЕ, что горячая клавиша, и через ту же
+## точку входа: две реализации одной команды разошлись бы при первой правке
+func _on_squad_cmd(key: String) -> void:
+	var m := GameManager.main
+	if m == null or not is_instance_valid(m) or m.selection_manager == null:
+		return
+	var sm = m.selection_manager
+	match key:
+		"S":
+			sm.squad_commander().stand_ground(sm)
+			AudioManager.play_ui("order_move")
+		"C":
+			sm.squad_commander().at_ease(sm)
+			AudioManager.play_ui("order_move")
+		"A":
+			sm.set_attack_move_armed(not sm.attack_move_armed)
+	_refresh_squad_cmd_bar()
+
+## Показать ряд под текущее выделение и перекрасить состояния.
+## РЯД ЕСТЬ ТОЛЬКО У СВОИХ БОЕВЫХ ОТРЯДОВ: рабочему «держать позицию» нечего
+## держать, а чужим отрядом не командуют вовсе (см. show_recon)
+func _refresh_squad_cmd_bar() -> void:
+	if _squad_cmd_bar == null or not is_instance_valid(_squad_cmd_bar):
+		return
+	if _squad_cmd_bar.get_child_count() == 0:
+		for k in SCMD_KEYS:
+			_squad_cmd_bar.add_child(_build_squad_cmd_col(String(k)))
+	var show := false
+	for u in _sel_units:
+		if u == null or not is_instance_valid(u) or not (u is Unit):
+			continue
+		var un := u as Unit
+		if un.is_dead() or un.faction != Constants.FACTION_PLAYER:
+			continue
+		# Признак «боевой» — ТОТ ЖЕ, что у клича и озвучки приказов
+		# (is_combatant): список типов пришлось бы дополнять, и забытая
+		# строка вернула бы кнопки рабочему
+		if un.squad_id > 0 and un.is_combatant():
+			show = true
+			break
+	_squad_cmd_bar.visible = show
+	if not show:
+		return
+	var m2 := GameManager.main
+	var sm = m2.selection_manager if m2 != null and is_instance_valid(m2) else null
+	var holding := false
+	var armed := false
+	if sm != null:
+		holding = String(sm.selection_stance()) == _UCfg.STANCE_DEFENSE
+		armed = bool(sm.attack_move_armed)
+	_paint_squad_cmd("S", holding)
+	_paint_squad_cmd("C", not holding and not armed)
+	_paint_squad_cmd("A", armed)
 
 func _corners(s: StyleBoxFlat, r: int = 6) -> void:
 	s.corner_radius_top_left = r; s.corner_radius_top_right = r

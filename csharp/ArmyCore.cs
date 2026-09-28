@@ -124,10 +124,143 @@ public partial class ArmyCore : RefCounted
                         _cliffNear[rr * cols + cc] = 1;
                     }
             }
-        _cliffOn = CliffCells > 0;
+        // Лес-стена: маска пересобрана — штампуем все стоящие деревья заново
+        _forest = new ushort[_cliff.Length];
+        ForestCells = 0;
+        foreach (var t in _forestTrees) ForestStamp(t.X, t.Y, t.Z, 1);
+        _cliffOn = CliffCells > 0 || ForestCells > 0;
     }
 
     public void SetCliffEnabled(bool on) { _cliffOn = on && _cliff.Length > 1; }
+
+    // ── ЛЕС-СТЕНА (ТЗ 24.09.2026, п. 13) ────────────────────────────────────
+    // Непроходимый лес живёт В ТОЙ ЖЕ МАСКЕ, что скалы: шаг в него скользит
+    // вдоль кромки (ветка скалы в BatchMoveRows), разведение на него не
+    // выталкивает, A* его обходит (BuildNavGrid/NavSync). Счётчик на ячейку —
+    // деревья перекрываются кругами, и срубленное снимает только СВОЙ круг.
+    // Рабочего (FWorking) лес не держит: он рубит кромку изнутри неё.
+    // Деревья, зарегистрированные ДО маски (посадка идёт раньше границ мира),
+    // хранятся списком и штампуются при сборке маски
+    private ushort[] _forest = System.Array.Empty<ushort>();
+    private readonly System.Collections.Generic.List<Vector3> _forestTrees = new();
+    public int ForestCells = 0;
+    public int ForestVersion = 0;
+
+    public void ForestAdd(float x, float z, float r)
+    {
+        _forestTrees.Add(new Vector3(x, z, r));
+        ForestStamp(x, z, r, 1);
+        ForestVersion++;
+    }
+
+    public void ForestRemove(float x, float z)
+    {
+        for (int k = 0; k < _forestTrees.Count; k++)
+        {
+            var t = _forestTrees[k];
+            float dx = t.X - x, dz = t.Y - z;
+            if (dx * dx + dz * dz > 0.01f) continue;
+            _forestTrees.RemoveAt(k);
+            ForestStamp(t.X, t.Y, t.Z, -1);
+            ForestNavRefresh(t.X, t.Y, t.Z);
+            ForestVersion++;
+            return;
+        }
+    }
+
+    public void ForestClear()
+    {
+        _forestTrees.Clear();
+        if (_forest.Length > 0) System.Array.Clear(_forest, 0, _forest.Length);
+        ForestCells = 0;
+        ForestVersion++;
+    }
+
+    public int ForestTreeCount() { return _forestTrees.Count; }
+
+    private void ForestStamp(float x, float z, float r, int d)
+    {
+        if (_cliff.Length <= 1 || _forest.Length != _cliff.Length) return;
+        int c0 = (int)Math.Floor((x - r - _cliffOx) / _cliffCell);
+        int c1 = (int)Math.Floor((x + r - _cliffOx) / _cliffCell);
+        int r0 = (int)Math.Floor((z - r - _cliffOz) / _cliffCell);
+        int r1 = (int)Math.Floor((z + r - _cliffOz) / _cliffCell);
+        float rr = r * r;
+        for (int rw = Math.Max(r0, 0); rw <= r1 && rw < _cliffRows; rw++)
+        {
+            float cz = _cliffOz + (rw + 0.5f) * _cliffCell - z;
+            for (int c = Math.Max(c0, 0); c <= c1 && c < _cliffCols; c++)
+            {
+                float cx = _cliffOx + (c + 0.5f) * _cliffCell - x;
+                if (cx * cx + cz * cz > rr) continue;
+                int i = rw * _cliffCols + c;
+                int v = _forest[i] + d;
+                if (v < 0) v = 0;
+                if (_forest[i] == 0 && v > 0) ForestCells++;
+                else if (_forest[i] > 0 && v == 0) ForestCells--;
+                _forest[i] = (ushort)Math.Min(v, 65535);
+            }
+        }
+        if (ForestCells > 0) _cliffOn = true;
+    }
+
+    public bool ForestAt(float x, float z)
+    {
+        if (ForestCells <= 0) return false;
+        int c = (int)Math.Floor((x - _cliffOx) / _cliffCell);
+        int r = (int)Math.Floor((z - _cliffOz) / _cliffCell);
+        if (c < 0 || r < 0 || c >= _cliffCols || r >= _cliffRows) return false;
+        return _forest[r * _cliffCols + c] != 0;
+    }
+
+    // Шаг строки упирается в скалу или лес-стену. Рабочий лес не замечает;
+    // уже стоящий в лесу (вытолкнут, рождён) вправе из него выйти
+    private bool StepHitsCliff(int i, float x, float z, float nx, float nz)
+    {
+        if (ForestCells > 0 && ForestAt(nx, nz))
+        {
+            if ((_flags[i] & FWorking) == 0 && !ForestAt(x, z)) return true;
+            return SlopeCliffAt(nx, nz) && !CliffEscape(x, z, nx, nz);
+        }
+        return IsCliffAt(nx, nz) && !CliffEscape(x, z, nx, nz);
+    }
+
+    // После вырубки: ячейки навигации, которые держал только этот круг,
+    // снова проходимы (базовый слой; постройки наложит NavSync)
+    private void ForestNavRefresh(float x, float z, float r)
+    {
+        if (_navBase.Length <= 1 || _navCell <= 0.0f) return;
+        int c0 = (int)Math.Floor((x - r - _navOx) / _navCell);
+        int c1 = (int)Math.Floor((x + r - _navOx) / _navCell);
+        int r0 = (int)Math.Floor((z - r - _navOz) / _navCell);
+        int r1 = (int)Math.Floor((z + r - _navOz) / _navCell);
+        for (int rw = Math.Max(r0, 0); rw <= r1 && rw < _navRows; rw++)
+            for (int c = Math.Max(c0, 0); c <= c1 && c < _navCols; c++)
+            {
+                int idx = rw * _navCols + c;
+                if (_navBase[idx] != 1) continue;
+                if (!NavCellHasWall(_navOx + c * _navCell, _navOz + rw * _navCell, _navCell))
+                    _navBase[idx] = 0;
+            }
+        _navBldDirty = true;
+    }
+
+    // Есть ли в ячейке навигации хоть одна ячейка скалы или леса
+    private bool NavCellHasWall(float x0, float z0, float cell)
+    {
+        int cc0 = (int)Math.Floor((x0 - _cliffOx) / _cliffCell);
+        int cr0 = (int)Math.Floor((z0 - _cliffOz) / _cliffCell);
+        int cc1 = (int)Math.Floor((x0 + cell - 0.01f - _cliffOx) / _cliffCell);
+        int cr1 = (int)Math.Floor((z0 + cell - 0.01f - _cliffOz) / _cliffCell);
+        bool fo = _forest.Length == _cliff.Length;
+        for (int rr = Math.Max(cr0, 0); rr <= cr1 && rr < _cliffRows; rr++)
+            for (int cc = Math.Max(cc0, 0); cc <= cc1 && cc < _cliffCols; cc++)
+            {
+                int k = rr * _cliffCols + cc;
+                if (_cliff[k] != 0 || (fo && _forest[k] != 0)) return true;
+            }
+        return false;
+    }
 
     // Высота без русла: гармоники + гора + плато (см. Height)
     private float DryHeight(float x, float z, float reliefAmp)
@@ -176,6 +309,14 @@ public partial class ArmyCore : RefCounted
     }
 
     public bool IsCliffAt(float x, float z)
+    {
+        if (!_cliffOn) return false;
+        if (ForestCells > 0 && ForestAt(x, z)) return true;
+        return SlopeCliffAt(x, z);
+    }
+
+    // Только склон, без леса
+    private bool SlopeCliffAt(float x, float z)
     {
         if (!_cliffOn || !CliffNear(x, z)) return false;
         float gx, gz;
@@ -2186,7 +2327,7 @@ public partial class ArmyCore : RefCounted
             // ── СКАЛА: скольжение вдоль обрыва, в лоб — стоим ───────────────
             // Стоящий НА скале (рождён там, вытолкнут) вправе уйти с неё: блок
             // только на ВХОД в скалу с проходимой земли
-            if (_cliffOn && boundsOn && IsCliffAt(nx, nz) && !CliffEscape(x, z, nx, nz))
+            if (_cliffOn && boundsOn && StepHitsCliff(i, x, z, nx, nz))
             {
                 // ВДОЛЬ ОБРЫВА С ПАМЯТЬЮ СТОРОНЫ: кольцо плато замкнуто, выход
                 // один — спуск, и боец обязан ползти вдоль стены до него.
@@ -5576,9 +5717,11 @@ public partial class ArmyCore : RefCounted
                 int cr0 = (int)Math.Floor((z0 - _cliffOz) / _cliffCell);
                 int cc1 = (int)Math.Floor((x0 + cell - 0.01f - _cliffOx) / _cliffCell);
                 int cr1 = (int)Math.Floor((z0 + cell - 0.01f - _cliffOz) / _cliffCell);
+                bool fo = _forest.Length == _cliff.Length && ForestCells > 0;
                 for (int rr = Math.Max(cr0, 0); rr <= cr1 && rr < _cliffRows && !blocked; rr++)
                     for (int cc = Math.Max(cc0, 0); cc <= cc1 && cc < _cliffCols; cc++)
-                        if (_cliff[rr * _cliffCols + cc] != 0) { blocked = true; break; }
+                        if (_cliff[rr * _cliffCols + cc] != 0
+                            || (fo && _forest[rr * _cliffCols + cc] != 0)) { blocked = true; break; }
                 // ── ВОДА — СВОЙ КОД 3 (ТЗ 20.09.2026, п. 1) ───────────────
                 // Прибавка отступа NavCliffExtra писана под ГОРУ: у скалы
                 // строй обязан идти шире. На БРОДЕ она сжимала проход —

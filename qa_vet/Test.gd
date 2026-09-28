@@ -158,14 +158,17 @@ func _test_config() -> void:
 ## и величину прибавки, реально осевшей в поле бойца.
 func _test_config_probe() -> void:
 	print("\n═════ 1б. ЗОНД: ЧИСЛА ПРИХОДЯТ ИЗ КОНФИГА ═════")
+	# ── ВЕТЕРАНСТВО ВЫДАЁТСЯ САМО (ТЗ 23.09.2026) ─────────────────────────
+	# Прежде проверка кликала apply_veteran_choice и ждала число из карточки.
+	# Карточек больше никто не выбирает: порог применяет фиксированный набор
+	# ступени (unit_stats_config.vet_auto_step), и ждать надо ЕГО
 	var t1: int = _UCfg.veteran_threshold("spearman", 1)
-	var want: float = float((_UCfg.veteran_choices("spearman", 1)[0] as Dictionary)["value"])
+	var want: float = float(_UCfg.vet_auto_step("spearman").get("bonus_attack", 0.0))
 	var sid: int = await make_squad(3, Vector3(-120.0, 0.0, -120.0))
 	await feed_kills(sid, t1 - 1)
 	var lvl_before: int = GameManager.squad_level(sid)
 	await feed_kills(sid, 1)
 	var lvl_after: int = GameManager.squad_level(sid)
-	GameManager.apply_veteran_choice(sid, 0)
 	var m0: Unit = GameManager.squad_members(sid)[0]
 	print("  ЗОНД порог1=%d  уровень при %d фрагах=%d  при %d фрагах=%d  прибавка атаки в поле=%.1f (в конфиге %.1f)" % [
 		t1, t1 - 1, lvl_before, t1, lvl_after, m0.vet_attack, want])
@@ -267,11 +270,18 @@ func _test_boundaries() -> void:
 		all_ok = all_ok and ok
 		print("    порог %3d: при %3d фрагах уровень=%d (ждали %d), при %3d фрагах уровень=%d (ждали %d)  %s" % [
 			thr, k1, l1, want1, k2, l2, want2, "ок" if ok else "СБОЙ"])
-	print("  накоплено наград без выбора: pending=%d" % GameManager.squad_pending(sid))
+	print("  ждущих выбора наград (обязан быть ноль): pending=%d"
+		% GameManager.squad_pending(sid))
 	verdict("2б уровень выдаётся РОВНО на пороге (порогов из конфига: %d)" % distinct.size(), all_ok)
-	verdict("2б непотраченные награды копятся (pending=%d)" % _UCfg.max_veteran_level("spearman"),
-		GameManager.squad_pending(sid) == _UCfg.max_veteran_level("spearman"),
-		"pending=%d" % GameManager.squad_pending(sid))
+	# ── ТРЕБОВАНИЕ РАЗВЁРНУТО (ТЗ 23.09.2026) ─────────────────────────────
+	# Было «непотраченные награды копятся (pending = число ступеней)» — то
+	# есть отряд ЖДАЛ кликов игрока и до них не получал ничего. Теперь ждать
+	# нечего: ступень применяется сразу, и ненулевой pending означал бы, что
+	# где-то остался старый путь
+	verdict("2б наград в очереди не остаётся — всё выдано сразу",
+		GameManager.squad_pending(sid) == 0,
+		"pending=%d, уровень=%d" % [GameManager.squad_pending(sid),
+			GameManager.squad_level(sid)])
 	for m in GameManager.squad_members(sid):
 		(m as Unit)._die()
 	await frames(2)
@@ -293,8 +303,14 @@ func _test_multi_pending() -> void:
 		GameManager.squad_pending(sid)])
 	verdict("2в один фраг через два порога → уровень 2",
 		GameManager.squad_level(sid) == 2, "уровень=%d" % GameManager.squad_level(sid))
-	verdict("2в выдано СРАЗУ ДВЕ награды, а не одна",
-		GameManager.squad_pending(sid) == 2, "pending=%d" % GameManager.squad_pending(sid))
+	# Две ступени = двойная прибавка в копилке отряда, а не pending == 2
+	var step2: float = float(_UCfg.vet_auto_step("spearman").get("bonus_attack", 0.0))
+	verdict("2в выдано СРАЗУ ДВЕ ступени прибавок, а не одна",
+		absf(GameManager.squad_bonus(sid, "attack") - step2 * 2.0) < 0.01,
+		"копилка атаки %.2f, ждали %.2f" % [
+			GameManager.squad_bonus(sid, "attack"), step2 * 2.0])
+	verdict("2в очередь выбора при этом пуста",
+		GameManager.squad_pending(sid) == 0, "pending=%d" % GameManager.squad_pending(sid))
 	var grade: int = _banner_grade(sid)
 	print("  знамя сразу под грейд %d" % grade)
 	verdict("2в знамя сразу показывает 2 уровня", grade == 2, "грейд=%d" % grade)
@@ -478,29 +494,31 @@ func _test_star_and_choice() -> void:
 		labels.append(((b as Button).text if (b as Button).text != "" else (b as Button).tooltip_text))
 	print("  подпись панели: «%s»" % hud.info_label.text)
 	print("  кнопки: %s" % str(labels))
-	# СТЕНД НЕ ХАРДКОДИТ ЧИСЛО НАГРАД. Сколько их на уровне —
-	# решает владелец в unit_stats_config; проверять надо СООТВЕТСТВИЕ
-	# панели конфигу, а не равенство пятёрке (правило проекта 10)
-	var want_btn: int = _UCfg.veteran_choices("spearman", 1).size()
-	verdict("4 кнопок на панели столько же, сколько наград в конфиге",
-		labels.size() == want_btn, "кнопок=%d, в конфиге=%d" % [labels.size(), want_btn])
+	# ── ТРЕБОВАНИЕ РАЗВЁРНУТО (ТЗ 23.09.2026) ─────────────────────────────
+	# Было: «кнопок на панели столько же, сколько наград в конфиге» — панель
+	# ветерана ПОДМЕНЯЛА стойки тремя карточками выбора. Кликать больше
+	# нечего, и панель обязана показывать ровно то же, что у любого другого
+	# отряда: стойки и команды
+	verdict("4 панель ветерана показывает стойки, а не карточки выбора",
+		("Attack" in labels) and ("Defend" in labels),
+		"кнопки=%s" % str(labels))
 
-	var atk_before: float = (members[0] as Unit).vet_attack
-	var choices: Array = _UCfg.veteran_choices("spearman", 1)
-	var want: float = float((choices[0] as Dictionary)["value"])
-	(hud.button_container.get_child(0) as Button).pressed.emit()
-	await frames(3)
+	# ПРИБАВКА ЛЕЖИТ У ВСЕХ МОДЕЛЕЙ — без единого клика. Отряд взял первую
+	# ступень ещё в блоке 2, значит у каждого бойца ровно её прибавка
+	var want: float = float(_UCfg.vet_auto_step("spearman").get("bonus_attack", 0.0))
+	var lvl_now: int = GameManager.squad_level(squad)
 	var applied := 0
 	for m in GameManager.squad_members(squad):
-		if absf((m as Unit).vet_attack - (atk_before + want)) < 0.001:
+		if absf((m as Unit).vet_attack - want * float(lvl_now)) < 0.01:
 			applied += 1
-	print("  после нажатия «%s»: vet_attack=%.1f у %d бойцов из %d" % [
-		String((choices[0] as Dictionary)["name"]),
-		(members[0] as Unit).vet_attack, applied, GameManager.squad_members(squad).size()])
-	verdict("4 бонус получили ВСЕ модели отряда",
+	print("  без единого клика: vet_attack=%.2f у %d бойцов из %d (ступеней %d)" % [
+		(members[0] as Unit).vet_attack, applied,
+		GameManager.squad_members(squad).size(), lvl_now])
+	verdict("4 прибавку получили ВСЕ модели отряда, без кликов",
 		applied == GameManager.squad_members(squad).size(),
-		"получили=%d из %d" % [applied, GameManager.squad_members(squad).size()])
-	verdict("4 награда списана (pending снова 0)",
+		"получили=%d из %d, ждали %.2f" % [applied,
+			GameManager.squad_members(squad).size(), want * float(lvl_now)])
+	verdict("4 очередь выбора пуста (кликать нечего)",
 		GameManager.squad_pending(squad) == 0,
 		"pending=%d" % GameManager.squad_pending(squad))
 	print("  суммарный ветеранский бонус отряда по атаке: +%.1f" % [
@@ -535,49 +553,53 @@ func _test_all_levels() -> void:
 		+ GameManager.squad_bonus(squad, "speed") \
 		+ GameManager.squad_bonus(squad, "health")
 	var awarded := 0
-	# Идём НЕ по номерам уровней, а по НЕВЫБРАННЫМ наградам: при повторяющихся
-	# порогах один фраг приносит сразу две, и цикл по уровням их бы пропустил
+	# ── ЛЕСТНИЦА ПРОХОДИТСЯ САМА (ТЗ 23.09.2026) ──────────────────────────
+	# Прежний цикл ждал pending и кликал apply_veteran_choice. Кликать
+	# больше некому: довели счёт до порога — ступень уже применена
+	var step_sum: float = _auto_step_sum("spearman")
 	var guard := 0
 	while GameManager.squad_level(squad) < maxlvl and guard < 50:
 		guard += 1
-		if GameManager.squad_pending(squad) <= 0:
-			var nxt: int = GameManager.squad_level(squad) + 1
-			set_kills(squad, _UCfg.veteran_threshold("spearman", nxt) - 1)
-			await feed_kills(squad, 1)
-			continue
-		var lvl: int = GameManager.squad_level(squad)
-		var choices: Array = _UCfg.veteran_choices("spearman", lvl)
-		var pick: int = mini(lvl - 1, choices.size() - 1)
-		var entry: Dictionary = choices[pick]
-		var ok: bool = GameManager.apply_veteran_choice(squad, pick)
-		if ok:
-			want_total += _reward_sum(entry)
-			awarded += 1
+		var lvl0: int = GameManager.squad_level(squad)
+		var nxt: int = lvl0 + 1
+		set_kills(squad, _UCfg.veteran_threshold("spearman", nxt) - 1)
+		await feed_kills(squad, 1)
+		var gained: int = GameManager.squad_level(squad) - lvl0
+		if gained <= 0:
+			break
+		want_total += step_sum * float(gained)
+		awarded += gained
 		var grade: int = _banner_grade(squad)
 		if grade != GameManager.squad_level(squad):
 			rays_ok = false
-		print("    уровень %d при %d убийствах, выбрано «%s» (+%.1f) → %s, грейд знамени=%d" % [
+		print("    уровень %d при %d убийствах: ступеней сразу %d, грейд знамени=%d" % [
 			GameManager.squad_level(squad), GameManager.squad_kills(squad),
-			String(entry.get("name", "?")), float(entry.get("value", 0.0)),
-			str(ok), grade])
-	# Добираем награды, накопившиеся на последнем шаге
-	while GameManager.squad_pending(squad) > 0 and guard < 60:
-		guard += 1
-		var lvl2: int = GameManager.squad_level(squad)
-		var ch2: Array = _UCfg.veteran_choices("spearman", lvl2)
-		var pick2: int = mini(lvl2 - 1, ch2.size() - 1)
-		var e2: Dictionary = ch2[pick2]
-		if GameManager.apply_veteran_choice(squad, pick2):
-			want_total += _reward_sum(e2)
-			awarded += 1
-			print("    добор награды на уровне %d: «%s» (+%.1f)" % [
-				lvl2, String(e2.get("name", "?")), float(e2.get("value", 0.0))])
-		if _banner_grade(squad) != GameManager.squad_level(squad):
-			rays_ok = false
+			gained, grade])
 	verdict("6 достигнут максимальный уровень %d" % maxlvl,
 		GameManager.squad_level(squad) == maxlvl,
 		"уровень=%d" % GameManager.squad_level(squad))
-	verdict("6 все награды выбраны", GameManager.squad_pending(squad) == 0)
+	verdict("6 очередь выбора пуста на всём пути",
+		GameManager.squad_pending(squad) == 0,
+		"pending=%d" % GameManager.squad_pending(squad))
+	# ── СЕДЬМАЯ СТУПЕНЬ ДАЛА ПРАВИЛО, И ТОЖЕ САМА ─────────────────────────
+	var legend: String = _UCfg.vet_auto_legend("spearman")
+	verdict("6 легендарный перк %s выдан автоматически" % legend,
+		legend != "" and GameManager.squad_has_perk(squad, legend),
+		"перки отряда: %s" % str(GameManager.squad_chosen(squad)))
+	# ── ВЕТЕРАН НЕ «ТЕРМИНАТОР»: ПОТОЛОК РОСТА НАЗВАН ЧИСЛОМ ──────────────
+	# Заказ прямо просил «ощутимо, но строго сбалансированно». Судим СВОЙСТВО:
+	# полная лестница обязана поднять запас жизни меньше чем вдвое, иначе
+	# ветеран VII ступени перестаёт быть тем же родом войск
+	var vm: Unit = GameManager.squad_members(squad)[0]
+	var base_hp: float = float(_UCfg.stat("spearman", "health", 180.0))
+	verdict("6 ветеран VII не вдвое живучее новобранца",
+		vm.max_health < base_hp * 2.0,
+		"HP %.0f против базовых %.0f (+%.0f %%)" % [vm.max_health, base_hp,
+			(vm.max_health / maxf(base_hp, 1.0) - 1.0) * 100.0])
+	# СКОРОСТЬ НЕ МЕНЯЕТСЯ НИ НА ОДНОЙ СТУПЕНИ — прямой запрет заказа
+	verdict("6 ветеранство не трогает скорость",
+		absf(GameManager.squad_bonus(squad, "speed")) < 0.001,
+		"прибавка к скорости %.3f" % GameManager.squad_bonus(squad, "speed"))
 	verdict("4б грейд знамени = уровню отряда на всех уровнях", rays_ok)
 
 	var m0: Unit = GameManager.squad_members(squad)[0]
@@ -596,17 +618,16 @@ func _test_all_levels() -> void:
 	# собрать ожидание заново. Накопление по ходу пропускало награды,
 	# выданные не циклом стенда, а подготовкой (arm_squad)
 	var chosen: Array = GameManager.squads[squad].get("chosen", [])
-	var want_cfg := 0.0
-	for ci in range(chosen.size()):
-		var lst: Array = _UCfg.veteran_choices("spearman", ci + 1)
-		for e3 in lst:
-			if String((e3 as Dictionary).get("id", "")) == String(chosen[ci]):
-				want_cfg += _reward_sum(e3)
-				break
-	print("  выбрано по уровням: %s" % str(chosen))
-	verdict("6 сумма начисленного равна сумме модификаторов выбранного",
+	# ── ОЖИДАНИЕ СЧИТАЕТСЯ ПО АВТО-ЛЕСТНИЦЕ (ТЗ 23.09.2026) ───────────────
+	# Прежде оно собиралось из карточек по списку `chosen`. Карточек больше
+	# не выбирают; в `chosen` теперь метки выданных ступеней и легендарный
+	# перк, а величины лежат в одной таблице на весь род войск — значит и
+	# ожидание считается одним умножением, а не перебором
+	var want_cfg: float = _auto_step_sum("spearman") * float(maxlvl)
+	print("  ступеней пройдено: %d, записей в chosen: %s" % [maxlvl, str(chosen)])
+	verdict("6 сумма начисленного равна лестнице ступеней",
 		absf(total - want_cfg) < 0.01,
-		"начислено=%.1f, по конфигу=%.1f (наград %d)" % [total, want_cfg, chosen.size()])
+		"начислено=%.2f, по таблице=%.2f (ступеней %d)" % [total, want_cfg, maxlvl])
 
 	sm._clear_selection()
 	sm._select(GameManager.squad_members(squad)[0])
@@ -678,93 +699,84 @@ func measure_taken(target: Unit, amount: float) -> float:
 	target.take_damage(amount, null)
 	return before - target.current_health
 
+## ═══════════════════════════════════════════════════════════════════════════
+## 5. ПРИБАВКИ СТУПЕНИ РАБОТАЮТ В БОЮ (фактические числа)
+## ═══════════════════════════════════════════════════════════════════════════
+## ПЕРЕПИСАНО ПОД АВТО-ВЕТЕРАНСТВО (ТЗ 23.09.2026). Прежний блок перебирал
+## КАРТОЧКИ уровня («Заточка», «Щит», «Выносливость»), кликал
+## apply_veteran_choice и сверял эффект с их модификаторами. Карточек больше
+## никто не выбирает, и клик молча не делал ничего: проверки мерили прибавку
+## авто-ступени, а ждали карточку — отсюда «увеличила урон на 3.0, стало +1».
+##
+## Теперь проверяется ровно то, что игра и делает: ОДНА ступень даёт
+## прибавки из vet_auto_step, и каждая из них видна в бою фактическим числом.
 func _test_bonus_effects() -> void:
-	print("\n═════ 5. БОНУСЫ РАБОТАЮТ В БОЮ (фактические числа) ═════")
-	# ── БЛОК ИДЁТ ПО СОСТАВУ КОНФИГА, А НЕ ПО НОМЕРАМ 0..4 ─────────────────
-	# Прежняя версия брала награды по фиксированным индексам и сверяла эффект
-	# с полем "value". Оба допущения больше неверны: владелец меняет и ЧИСЛО
-	# наград на уровень, и их набор, а сама награда давно не одна пара
-	# stat/value, а НАБОР модификаторов («+3 к Броне» даёт ещё и защиту, и
-	# урон, и минус к скорости). Поэтому каждая награда проверяется ПО СВОИМ
-	# МОДИФИКАТОРАМ: сколько обещала — столько и обязана дать
-	var lst: Array = _UCfg.veteran_choices("spearman", 1)
-	for idx in range(lst.size()):
-		var e: Dictionary = lst[idx]
-		var eid: String = String(e.get("id", ""))
-		var nm: String = String(e.get("name", eid))
-		var at: Vector3 = Vector3(300.0 + float(idx) * 10.0, 0.0, 0.0)
-		var b_atk: float = float(e.get("bonus_attack", 0.0))
-		var b_arm: float = float(e.get("bonus_armor", 0.0))
-		var b_def: float = float(e.get("bonus_defense", 0.0))
-		var b_spd: float = float(e.get("bonus_speed", 0.0))
-		var b_hp: float  = float(e.get("bonus_health", 0.0))
-		if eid == "attack" and b_atk > 0.0:
-			var sq_a: int = await make_squad(1, at)
-			var a: Unit = GameManager.squad_members(sq_a)[0]
-			var r1: Array = await measure_melee(a, at)
-			await arm_squad(sq_a)
-			GameManager.apply_veteran_choice(sq_a, idx)
-			var r2: Array = await measure_melee(a, at)
-			var d_before: float = float(r1[1])
-			var d_after: float = float(r2[1])
-			print("  АТАКА «%s»: сила удара %.1f → %.1f (ждали +%.1f), vet_attack=%.1f" % [
-				nm, d_before, d_after, b_atk, a.vet_attack])
-			verdict("5 «%s» реально увеличила урон на %.1f" % [nm, b_atk],
-				absf((d_after - d_before) - b_atk) < 0.01,
-				"было %.1f стало %.1f" % [d_before, d_after])
-		elif (eid == "armor" or eid == "defense") and (b_arm + b_def) > 0.0:
-			# БРОНЯ И ЗАЩИТА СРЕЗАЮТ УРОН ОДИНАКОВО, поэтому ждём их СУММУ:
-			# награда «+3 к Броне» в конфиге даёт и то, и другое
-			var sq_b: int = await make_squad(1, at)
-			var bu: Unit = GameManager.squad_members(sq_b)[0]
-			var t_before: float = measure_taken(bu, 60.0)
-			await arm_squad(sq_b)
-			GameManager.apply_veteran_choice(sq_b, idx)
-			var t_after: float = measure_taken(bu, 60.0)
-			# ── ЖДЁМ НЕ ВЫЧИТАНИЕ, А ФОРМУЛУ ────────────────────────────────
-			# Здесь стояло «прошло УМЕНЬШИЛОСЬ ровно на сумму брони»: под
-			# вычитание `урон − защита` это было верно. Формула заменена на
-			# долевую с затуханием (см. docs/BALANCE_MATH.md, раздел 1), и
-			# теперь +2 брони режут не два очка урона, а свою долю.
-			# Проверка переписана на ТУ ЖЕ функцию, по которой считает бой:
-			# стенд не имеет права держать вторую копию формулы
-			var arm_before: float = bu.armor + bu.defense
-			var arm_after: float = arm_before + b_arm + b_def
-			var want_before: float = _UCfg.damage_after_armor(60.0, arm_before)
-			var want_after: float = _UCfg.damage_after_armor(60.0, arm_after)
-			print("  ЗАЩИТА «%s»: из 60 прошло %.1f → %.1f (по формуле %.1f → %.1f), vet_armor=%.1f vet_defense=%.1f" % [
-				nm, t_before, t_after, want_before, want_after, bu.vet_armor, bu.vet_defense])
-			verdict("5 «%s» срезала урон по формуле брони" % nm,
-				t_after < t_before and absf(t_after - want_after) < 0.05,
-				"было %.1f стало %.1f, формула ждёт %.1f" % [t_before, t_after, want_after])
-		elif eid == "health" and b_hp > 0.0:
-			var sq_h: int = await make_squad(1, at)
-			var h: Unit = GameManager.squad_members(sq_h)[0]
-			var hp_before: float = h.max_health
-			await arm_squad(sq_h)
-			GameManager.apply_veteran_choice(sq_h, idx)
-			print("  HP «%s»: max_health %.0f → %.0f (ждали +%.0f)" % [
-				nm, hp_before, h.max_health, b_hp])
-			verdict("5 «%s» реально подняла max_health" % nm,
-				absf((h.max_health - hp_before) - b_hp) < 0.01,
-				"было %.0f стало %.0f" % [hp_before, h.max_health])
-		elif eid == "speed" and absf(b_spd) > 0.0:
-			var sq_s: int = await make_squad(1, at)
-			var su: Unit = GameManager.squad_members(sq_s)[0]
-			var v_before: float = su._effective_speed()
-			await arm_squad(sq_s)
-			GameManager.apply_veteran_choice(sq_s, idx)
-			var v_after: float = su._effective_speed()
-			print("  СКОРОСТЬ «%s»: %.2f → %.2f (ждали %+.2f)" % [
-				nm, v_before, v_after, b_spd])
-			verdict("5 «%s» реально изменила _effective_speed()" % nm,
-				absf((v_after - v_before) - b_spd) < 0.01,
-				"было %.2f стало %.2f" % [v_before, v_after])
-		else:
-			# Мораль, напор, откат и прочее здесь не мерятся: их действие
-			# проверяют свои блоки. Строка в печати обязательна — без неё
-			# непонятно, что награда вообще была рассмотрена
-			print("  «%s» (%s): прямого боевого замера нет, пропущена" % [nm, eid])
+	print("\n═════ 5. ПРИБАВКИ СТУПЕНИ РАБОТАЮТ В БОЮ ═════")
+	var step: Dictionary = _UCfg.vet_auto_step("spearman")
+	var b_atk: float = float(step.get("bonus_attack", 0.0))
+	var b_def: float = float(step.get("bonus_defense", 0.0)) \
+		+ float(step.get("bonus_armor", 0.0))
+	var b_hp: float = float(step.get("bonus_health", 0.0))
+	var b_cd: float = float(step.get("bonus_cooldown", 0.0))
+
+	# ── УРОН ─────────────────────────────────────────────────────────────
+	var at := Vector3(300.0, 0.0, 0.0)
+	var sq_a: int = await make_squad(1, at)
+	var a: Unit = GameManager.squad_members(sq_a)[0]
+	var r1: Array = await measure_melee(a, at)
+	await arm_squad(sq_a)                      # один порог = одна ступень
+	var r2: Array = await measure_melee(a, at)
+	var d_before: float = float(r1[1])
+	var d_after: float = float(r2[1])
+	print("  УРОН: сила удара %.2f → %.2f (ступень даёт +%.2f), vet_attack=%.2f" % [
+		d_before, d_after, b_atk, a.vet_attack])
+	verdict("5 ступень увеличила урон на %.2f" % b_atk,
+		absf((d_after - d_before) - b_atk) < 0.01,
+		"было %.2f стало %.2f" % [d_before, d_after])
+
+	# ── ЗАЩИТА: ЖДЁМ НЕ ВЫЧИТАНИЕ, А ФОРМУЛУ ─────────────────────────────
+	# Формула долевая с затуханием (docs/BALANCE_MATH.md), и стенд не имеет
+	# права держать вторую её копию — спрашиваем ту же функцию, по которой
+	# считает бой
+	var at2 := Vector3(320.0, 0.0, 0.0)
+	var sq_b: int = await make_squad(1, at2)
+	var bu: Unit = GameManager.squad_members(sq_b)[0]
+	# Публичного «итого защиты» у бойца нет (число собирается прямо в
+	# take_damage), поэтому берём его слагаемые тем же составом. Стенду
+	# достаточно базовых: у свежего бойца ни аур, ни исследований нет
+	var def0: float = bu.defense + bu.armor + bu.vet_armor + bu.vet_defense
+	var t_before: float = measure_taken(bu, 60.0)
+	await arm_squad(sq_b)
+	var t_after: float = measure_taken(bu, 60.0)
+	var want_after: float = _UCfg.damage_after_armor(60.0, def0 + b_def)
+	print("  ЗАЩИТА: прошло %.2f → %.2f, по формуле при защите %.2f ждём %.2f" % [
+		t_before, t_after, def0 + b_def, want_after])
+	verdict("5 ступень срезала урон ровно по формуле брони",
+		b_def <= 0.0 or absf(t_after - want_after) < 0.5,
+		"было %.2f стало %.2f, формула ждёт %.2f" % [t_before, t_after, want_after])
+
+	# ── ЗАПАС ЖИЗНИ ──────────────────────────────────────────────────────
+	var at3 := Vector3(340.0, 0.0, 0.0)
+	var sq_c: int = await make_squad(1, at3)
+	var cu: Unit = GameManager.squad_members(sq_c)[0]
+	var hp_before: float = cu.max_health
+	var cd_before: float = cu.attack_cooldown
+	await arm_squad(sq_c)
+	print("  ЗАПАС: %.0f → %.0f (ступень даёт +%.0f); перезарядка %.2f → %.2f (−%.2f)" % [
+		hp_before, cu.max_health, b_hp, cd_before, cu.attack_cooldown, b_cd])
+	verdict("5 ступень подняла max_health на %.0f" % b_hp,
+		absf((cu.max_health - hp_before) - b_hp) < 0.01,
+		"было %.0f стало %.0f" % [hp_before, cu.max_health])
+	verdict("5 ступень срезала перезарядку на %.2f с" % b_cd,
+		b_cd <= 0.0 or absf((cd_before - cu.attack_cooldown) - b_cd) < 0.01,
+		"было %.2f стало %.2f" % [cd_before, cu.attack_cooldown])
+
+	# ── СКОРОСТЬ НЕ МЕНЯЕТСЯ: ПРЯМОЙ ЗАПРЕТ ЗАКАЗА ───────────────────────
+	verdict("5 ступень НЕ трогает скорость",
+		absf(float(step.get("bonus_speed", 0.0))) < 0.0001
+		and absf(cu.vet_speed) < 0.0001,
+		"в таблице %.3f, у бойца %.3f" % [
+			float(step.get("bonus_speed", 0.0)), cu.vet_speed])
 
 func button_labels() -> Array:
 	var labels: Array = []
@@ -788,49 +800,55 @@ func _test_ui() -> void:
 	print("  pending=%d, подпись: «%s»" % [GameManager.squad_pending(sid), hud.info_label.text])
 	print("  кнопки: %s" % str(l1))
 	print("  строка статов: «%s»" % hud.progress_label.text)
-	var want_b1: int = _UCfg.veteran_choices("spearman", maxi(GameManager.squad_level(sid) - GameManager.squad_pending(sid) + 1, 1)).size()
-	verdict("6 при pending>0 кнопок столько же, сколько наград в конфиге",
-		l1.size() == want_b1, "кнопок=%d, в конфиге=%d" % [l1.size(), want_b1])
-	verdict("6 стоек [Attack]/[Defend] на панели нет",
-		not ("Attack" in l1) and not ("Defend" in l1), "кнопки=%s" % str(l1))
+	# ── ТРЕБОВАНИЕ РАЗВЁРНУТО (ТЗ 23.09.2026) ─────────────────────────────
+	# Было ДВА вердикта про подмену панели: «кнопок столько же, сколько
+	# наград» и «стоек на панели НЕТ». Обе описывали ручной выбор: получив
+	# ранг, отряд терял кнопки стоек до клика игрока. Теперь ранг приходит
+	# сам, и панель не меняется вовсе — проверяем ровно это
+	verdict("6 ранг не подменяет панель: стойки на месте",
+		("Attack" in l1) and ("Defend" in l1), "кнопки=%s" % str(l1))
+	verdict("6 карточек выбора на панели нет вовсе",
+		GameManager.squad_pending(sid) == 0,
+		"pending=%d, кнопки=%s" % [GameManager.squad_pending(sid), str(l1)])
 	# ── СЛУЖЕБНОЙ СТРОКИ «★ Ветеран N» БОЛЬШЕ НЕТ, А ЗВАНИЕ ОСТАЛОСЬ ───────
 	# Требование развёрнуто владельцем (авг. 2026) и тут же уточнено: убрать
 	# надо было СЛУЖЕБНУЮ подсказку, а название со званием («Отряд опытных
 	# копейщиков») — «не убирать ни в коем случае». Вместо подсказки в панели
 	# стоят знамёна рангов (HUD._show_vet_rank_row)
-	verdict("6 вместо служебной подписи показан ряд флажков ранга",
-		hud._vet_rank_row != null and hud._vet_rank_row.visible
-		and hud._vet_rank_row.get_child_count() > 0
-		and not String(hud.info_label.text).contains("выберите награду"),
-		"флажков=%d, подпись «%s»" % [
-			hud._vet_rank_row.get_child_count() if hud._vet_rank_row != null else -1,
-			hud.info_label.text])
+	# ── ЗВАНИЕ ВИДНО В ПОДПИСИ, А НЕ В СЛУЖЕБНОЙ СТРОКЕ ───────────────────
+	# Ряд флажков ранга (HUD._show_vet_rank_row) заводился ВМЕСТЕ с карточками
+	# выбора и показывался только на время выбора. Выбора больше нет, и
+	# требование сводится к тому, ради чего флажки и делались: игрок обязан
+	# видеть ранг отряда. Видит он его в названии («Отряд опытных копейщиков»)
+	# и на знамени в мире — оба проверяются здесь и в блоке 4
+	verdict("6 звание отряда видно в подписи панели",
+		_UCfg.veteran_rank_name("spearman", GameManager.squad_level(sid))
+			in hud.info_label.text,
+		"подпись «%s», ждали «%s»" % [hud.info_label.text,
+			_UCfg.veteran_rank_name("spearman", GameManager.squad_level(sid))])
 
-	(hud.button_container.get_child(0) as Button).pressed.emit()
 	await frames(3)
 	var l2: Array = button_labels()
-	print("  после ПЕРВОГО выбора: pending=%d, подпись «%s», кнопки %s" % [
-		GameManager.squad_pending(sid), hud.info_label.text, str(l2)])
+	print("  ранг %d: pending=%d, подпись «%s», кнопки %s" % [
+		GameManager.squad_level(sid), GameManager.squad_pending(sid),
+		hud.info_label.text, str(l2)])
 	# Второй уровень виден не подписью, а ВТОРЫМ флажком в ряду: у ранга 2 своё
 	# знамя (две лычки), и узел его так и называется — VetFlag_2
-	var flag2: Node = null
-	if hud._vet_rank_row != null:
-		flag2 = hud._vet_rank_row.get_node_or_null("VetFlag_2")
-	verdict("6 после первого выбора панель предлагает ВТОРУЮ награду",
-		GameManager.squad_pending(sid) == 1
-		and l2.size() == _UCfg.veteran_choices("spearman",
-			maxi(GameManager.squad_level(sid) - GameManager.squad_pending(sid) + 1, 1)).size()
-		and flag2 != null,
-		"pending=%d кнопок=%d флажок 2-го ранга=%s" % [
-			GameManager.squad_pending(sid), l2.size(), str(flag2 != null)])
+	# ДВЕ СТУПЕНИ ОДНИМ ФРАГОМ — обе уже в копилке, ждать нечего
+	var step_a: float = float(_UCfg.vet_auto_step("spearman").get("bonus_attack", 0.0))
+	verdict("6 обе ступени применены сразу, без второго клика",
+		GameManager.squad_level(sid) == 2
+		and absf(GameManager.squad_bonus(sid, "attack") - step_a * 2.0) < 0.01,
+		"уровень=%d, копилка атаки %.2f (ждали %.2f)" % [
+			GameManager.squad_level(sid),
+			GameManager.squad_bonus(sid, "attack"), step_a * 2.0])
 
-	(hud.button_container.get_child(1) as Button).pressed.emit()
 	await frames(3)
 	var l3: Array = button_labels()
-	print("  после ВТОРОГО выбора: pending=%d, подпись «%s», кнопки %s" % [
+	print("  состояние панели: pending=%d, подпись «%s», кнопки %s" % [
 		GameManager.squad_pending(sid), hud.info_label.text, str(l3)])
 	print("  строка статов: «%s»" % hud.progress_label.text)
-	verdict("6 стойки вернулись после выбора всех наград",
+	verdict("6 стойки на панели ветерана есть всегда",
 		# Кнопок теперь три: к двум стойкам добавилась «В ЗАМОК» (отправить
 		# отряд лечиться). Проверяем СОСТАВ, а не точное число — иначе любая
 		# новая команда отряда будет валить эту проверку на ровном месте
@@ -1138,6 +1156,20 @@ func _test_load() -> void:
 # сразу несколько прибавок (так же работает GameManager.apply_veteran_choice).
 # "value" — это короткая ПОДПИСЬ для кнопки, и сверять с ней сумму
 # начисленного — значит сравнивать разные величины
+## Сумма всех прибавок ОДНОЙ ступени авто-лестницы по тем же пяти статам, по
+## которым стенд считает копилку отряда (attack/armor/defense/speed/health)
+## Сумма ВСЕХ прибавок одной ступени — по тем же ключам, какие реально
+## копятся в `sq["bonuses"]`. Список из пяти статов здесь уже стоял и
+## промахнулся на 0.35: у копейщика ступень даёт ещё и −0.05 с к перезарядке,
+## и копилка отряда её считает. Перебираем сам словарь ступени — тогда новый
+## ключ в таблице доедет сюда сам
+func _auto_step_sum(unit_type: String) -> float:
+	var step: Dictionary = _UCfg.vet_auto_step(unit_type)
+	var total := 0.0
+	for k in step:
+		total += float(step[k])
+	return total
+
 func _reward_sum(entry: Dictionary) -> float:
 	var t := 0.0
 	for k in _UCfg.nonzero_modifiers(entry):

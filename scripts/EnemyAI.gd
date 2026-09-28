@@ -643,7 +643,11 @@ func _site_in_progress(build_id: String = "") -> bool:
 ## free_build = true — ресурсы уже не списываются (аварийное восстановление)
 func _start_site(build_id: String, at: Vector3, free_build: bool = false) -> bool:
 	if not free_build:
-		if not ResourceManager.spend(Constants.FACTION_ENEMY, _UCfg.building_cost(build_id)):
+		# ПРОГРЕССИЯ ЦЕН ДЕЙСТВУЕТ И НА ИИ (ТЗ 23.09.2026). Правило партии, а
+		# не интерфейса: оставь ИИ базовую цену — и «нельзя спамить бараками»
+		# означало бы «нельзя ИГРОКУ», то есть одностороннее ограничение
+		if not ResourceManager.spend(Constants.FACTION_ENEMY,
+				GameManager.build_cost_for(Constants.FACTION_ENEMY, build_id)):
 			return false
 	var cfg: Dictionary = _UCfg.building_cfg(build_id)
 	var site: Building = _CSite.new()
@@ -866,7 +870,13 @@ func _research_forge(smithy: Smithy) -> void:
 			if not GameManager.can_research(Constants.FACTION_ENEMY, nid):
 				continue
 			var score := 0.0
+			# У экономических веток (рабочий) считается только экономика: HP и
+			# броня рабочего — не повод для ИИ жечь золото раньше армии
+			# (ТЗ 24.09.2026: живучесть рабочего переехала в его древо)
+			var eco_only: bool = not _AICfg.combat_types().has(uid)
 			for key in _AICfg.AI_FORGE_WEIGHTS:
+				if eco_only and String(key) in ["bonus_health", "bonus_armor", "bonus_attack", "bonus_defense", "bonus_speed"]:
+					continue
 				score += float(node.get(String(key), 0.0)) * float(_AICfg.AI_FORGE_WEIGHTS[key])
 			if score <= 0.0:
 				continue
@@ -2406,6 +2416,17 @@ func _apply_orders() -> void:
 		var ranks: int = red.ranks_for(sq, uid, members)
 		var cols: int = _squad_cols(uid, members.size()) if ranks <= 0 \
 			else maxi(1, int(ceil(float(members.size()) / float(ranks))))
+		# ── ЦЕНТР СТРОЯ — НЕ БЛИЖЕ ПОЛУРАЗМЕРА К КРОМКЕ (ТЗ 25.09.2026) ─────
+		# Точку роли планировщик уже провёл через land_target, но тот зажимает
+		# ЦЕНТР, а слоты от центра расходятся на полширины и всю глубину:
+		# у левой кромки линия заслона из 9+ отрядов и разброс без замка
+		# (_command_scatter_at, третий ряд за краем) ложились каждым бойцом на
+		# бортик в одну нитку, а _posts_intact мерил их против НЕзажатых слотов
+		# и переиздавал приказ каждый такт. Отступ считается тем же cols, по
+		# которому строятся слоты, — одно место на все роли
+		var rows_est: int = maxi(1, int(ceil(float(members.size()) / float(cols))))
+		center = GameManager.squad_inside(center,
+			float(cols) * SQUAD_SPACING * 0.5, float(rows_est) * SQUAD_SPACING * 0.5)
 		var recon_run: bool = role == ROLE_RAID and bool(sq.get("recon", false))
 		if recon_run:
 			threat = null            # разведчик не ввязывается в бой

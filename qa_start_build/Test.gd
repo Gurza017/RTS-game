@@ -144,22 +144,24 @@ func _run() -> void:
 	print("\n═════ C. ЛИМИТЫ И ОБЗОР ═════")
 	var f: int = Constants.FACTION_PLAYER
 	var base_w: int = GameManager.pop_worker_cap(f)
-	var base_s: int = GameManager.pop_squad_cap(f)
-	verdict("C1 без крепости потолки — стартовая бригада (%d рабочих, %d отрядов)" % [
-			_UCfg.POP_BASE_WORKERS, _UCfg.POP_BASE_SQUADS],
-		base_w == _UCfg.POP_BASE_WORKERS and base_s == _UCfg.POP_BASE_SQUADS,
-		"раб. %d, отр. %d" % [base_w, base_s])
+	# ЛИМИТ АРМИИ — В БОЙЦАХ (ТЗ 23.09.2026): прежние POP_BASE_SQUADS /
+	# CASTLE_SQUAD_SLOTS считали ОТРЯДЫ и сняты вместе со счётом в отрядах
+	var base_s: int = GameManager.pop_army_cap(f)
+	verdict("C1 без крепости потолки — стартовая бригада (%d рабочих, %d бойцов)" % [
+			_UCfg.POP_BASE_WORKERS, _UCfg.ARMY_BASE_UNITS],
+		base_w == _UCfg.POP_BASE_WORKERS and base_s == _UCfg.ARMY_BASE_UNITS,
+		"раб. %d, армия %d" % [base_w, base_s])
 	var castle := Castle.new()
 	castle.faction = f
 	main.world_add(castle)
 	var cp: Vector3 = a + Vector3(12.0, 0.0, 6.0)
 	castle.global_position = Vector3(cp.x, GameManager.get_terrain_height(cp.x, cp.z), cp.z)
 	await frames(3)
-	verdict("C2 крепость даёт +%d рабочих и +%d отрядов" % [
-			_UCfg.CASTLE_WORKER_SLOTS, _UCfg.CASTLE_SQUAD_SLOTS],
+	verdict("C2 крепость даёт +%d рабочих и +%d мест в армии" % [
+			_UCfg.CASTLE_WORKER_SLOTS, _UCfg.ARMY_CASTLE_UNITS],
 		GameManager.pop_worker_cap(f) == base_w + _UCfg.CASTLE_WORKER_SLOTS
-			and GameManager.pop_squad_cap(f) == base_s + _UCfg.CASTLE_SQUAD_SLOTS,
-		"раб. %d, отр. %d" % [GameManager.pop_worker_cap(f), GameManager.pop_squad_cap(f)])
+			and GameManager.pop_army_cap(f) == base_s + _UCfg.ARMY_CASTLE_UNITS,
+		"раб. %d, армия %d" % [GameManager.pop_worker_cap(f), GameManager.pop_army_cap(f)])
 	verdict("C3 обзор крепости шире обычной постройки (%.0f против %.0f м)" % [
 			_UCfg.CASTLE_VISION, _UCfg.BUILDING_VISION],
 		is_equal_approx(castle.vision_radius(), _UCfg.CASTLE_VISION)
@@ -345,15 +347,18 @@ func _run() -> void:
 
 	# ══ F. ОВЦА ═══════════════════════════════════════════════════════════════
 	print("\n═════ F. ОВЦА И МЯСО ═════")
-	# ── ЧИСЛА РАЗДЕЛКИ РАЗВЁРНУТЫ СПРИНТОМ 13 ──────────────────────────────
-	# Было «десять ударов на кусок, ПЯТЬ ходок, туша 60 еды». Заказ: «пять
-	# ударов ножом → смерть; с туши 300 еды за 15-30 ходок, то есть 2-3
-	# минуты». Проверяем СВОЙСТВА заказа, а не запомненные числа: пять ударов
-	# до смерти, итог ровно триста, число ходок в заказанной вилке
+	# ── ЧИСЛА РАЗДЕЛКИ РАЗВЁРНУТЫ ДВАЖДЫ, И ВТОРОЙ РАЗ — 23.09.2026 ────────
+	# Спринт 13: «пять ударов → смерть, с туши 300 еды за 15-30 ходок».
+	# Третье письмо 23.09.2026 развернуло ЦЕННОСТЬ туши: кусок урезан с 15 до
+	# 3 (Worker.MEAT_PER_TRIP), то есть туша даёт 60 еды, а не 300 — ферма
+	# сделана ПОТОКОМ, а не кладом (разбор — CLAUDE.md, «Математика еды»).
+	# Что осталось от прежнего требования и проверяется здесь: пять ударов до
+	# смерти и число ходок в заказанной вилке. Сама величина сверяется с
+	# КОНФИГОМ, а не с запомненной константой (правило 10)
 	var per_carcass: float = Worker.MEAT_PER_TRIP * float(Worker.SHEEP_MEAT_TRIPS)
 	verdict("F1 пять ударов до смерти, туша = %.0f еды за %d ходок" % [
 			per_carcass, Worker.SHEEP_MEAT_TRIPS],
-		Worker.SHEEP_KILL_CUTS == 5 and is_equal_approx(per_carcass, 300.0)
+		Worker.SHEEP_KILL_CUTS == 5 and per_carcass > 0.0
 			and Worker.SHEEP_MEAT_TRIPS >= 15 and Worker.SHEEP_MEAT_TRIPS <= 30,
 		"убить %d удара, ходок %d по %.0f еды = %.0f" % [
 			Worker.SHEEP_KILL_CUTS, Worker.SHEEP_MEAT_TRIPS,

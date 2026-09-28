@@ -192,7 +192,10 @@ func _run() -> void:
 		field_n += 1
 		if String(sq["role"]) == ai.ROLE_MINE_ALARM:
 			to_mine += 1
-	verdict("C2 по тревоге ВСЯ полевая орда получает роль «к руднику»", field_n > 0 and to_mine == field_n,
+	# ТЗ 24.09.2026 (второе письмо): к руднику идёт ВОЛНА из MINE_WAVE_SQUADS
+	# отрядов, а не вся орда (разворот «вся полевая орда к руднику»)
+	verdict("C2 по тревоге к руднику идёт волна из %d отрядов, а не вся орда" % ai.MINE_WAVE_SQUADS,
+		field_n > 0 and to_mine == mini(ai.MINE_WAVE_SQUADS, field_n),
 		"%d из %d" % [to_mine, field_n])
 	var home := 0
 	for gs in ai.garrison_sids:
@@ -209,7 +212,8 @@ func _run() -> void:
 		_tick_ai(ai, 1.0)
 		await pframes(60)
 	var after: float = _field_dist(ai, mp)
-	verdict("C4 орда реально идёт к руднику (центр поля приблизился)", after < before - 8.0,
+	var wave_d: float = _wave_dist(ai, mp)
+	verdict("C4 волна реально идёт к руднику (ближе поля)", wave_d < before - 8.0,
 		"было %.0f, стало %.0f м" % [before, after])
 	verdict("C5 захват чужими сорван (рудник у орды)", int(mine.faction) == Constants.FACTION_GOBLIN)
 	# Удар по руднику — тоже тревога
@@ -244,6 +248,17 @@ func _run() -> void:
 	verdict("D1 отряд орды, стоя на ничейном руднике, захватывает его",
 		int(nm.faction) == Constants.FACTION_GOBLIN, "владелец %d" % int(nm.faction))
 	_finish()
+
+func _wave_dist(ai, p: Vector3) -> float:
+	var acc := 0.0
+	var n := 0
+	for s in ai.squads:
+		var sq: Dictionary = s
+		if not ai._mw_sids.has(int(sq["id"])):
+			continue
+		acc += _xz(ai._squad_center(sq), p)
+		n += 1
+	return acc / float(n) if n > 0 else INF
 
 func _field_dist(ai, p: Vector3) -> float:
 	var acc := 0.0
