@@ -486,11 +486,20 @@ func unregister(unit: Unit) -> void:
 	# ── СЛОТ БЕРЁТСЯ У ЯДРА: после переезда ядром (look_core) GDScript-копия
 	# бакета и номера устарела, и освобождение по ней спрятало бы ЧУЖОЙ слот.
 	# Живость — на сырой ссылке (правило 5): сюда приходят и из _exit_tree
+	var by_core: bool = false
 	if is_instance_valid(unit) and unit._soa >= 0:
 		var cb: int = GameManager.army.row_rb_b(unit._soa)
 		if cb >= 0 and cb < _bucket_by_core.size() and _bucket_by_core[cb] != null:
 			b = _bucket_by_core[cb]
 			idx = GameManager.army.row_rb_i(unit._soa)
+			by_core = true
+	# ── КОПИЯ БЕЗ СТРОКИ НЕ ГОДИТСЯ (29.09.2026) ────────────────────────────
+	# Строки уже нет (_soa < 0): её слот освободило само ядро в Release, а
+	# GDScript-копия после переезда ядром могла указывать на ЧУЖОЙ слот —
+	# освобождать по ней значит спрятать соседа и продублировать номер в
+	# свободных. Копия законна только у бойца без строки в ядре вовсе
+	if not by_core and is_instance_valid(unit) and unit._soa < 0 and unit._rb_bound:
+		b = null
 	if b != null and b.mm != null and idx >= 0:
 		# rb_release прячет слот и кладёт номер в свободные ядра
 		GameManager.army.rb_release(b.core_id, idx)

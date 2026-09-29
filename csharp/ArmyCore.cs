@@ -1232,6 +1232,12 @@ public partial class ArmyCore : RefCounted
         _flags[i] = 0;
         _anFrames[i] = 0; _anFrame[i] = -1;
         _ringB[i] = -1; _shB[i] = -1; _hpB[i] = -1;
+        // Слот общей отрисовки принадлежит строке: если его не сняли до
+        // освобождения (Unit._exit_tree делает это первым), снимаем здесь —
+        // иначе спрайт остался бы в буфере стоять с последним кадром
+        // (29.09.2026, «стоячие красные трупы»). GDScript после этого слот
+        // не трогает: у бойца _soa уже -1 (FarUnitRenderer.unregister)
+        if (_rbB[i] >= 0) { RbRelease(_rbB[i], _rbI[i]); _rbB[i] = -1; }
         LkClear(i);
         _st[i] = 0;
         _fac[i] = -1;
