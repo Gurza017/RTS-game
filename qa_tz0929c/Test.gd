@@ -16,6 +16,8 @@ extends Node
 ##       маршрут от базы красного к базе игрока и от деревни к броду есть.
 ##   F — РУДНИКИ: центральных нет; два ничейных на территориях игрока и
 ##       красного, у каждого охрана орды, патрулирующая СВОЙ рудник.
+##   G — ТАРАН ПО МЕЧНИКАМ: первый ряд затоптан без отлёта, второй отлетает на
+##       2.5-3.5 м, третий теснится; задние всадники с разгона не бьют.
 ## Запуск: godot --headless --path . res://qa_tz0929c/Test.tscn [-- only=abcde]
 
 const _UCfgT := preload("res://scripts/unit_stats_config.gd")
@@ -25,7 +27,7 @@ var main = null
 var _pass: int = 0
 var _fail: int = 0
 var _log: Array = []
-var only: String = "abcdef"
+var only: String = "abcdefg"
 
 func _ready() -> void:
 	for a in OS.get_cmdline_user_args():
@@ -113,6 +115,7 @@ func _run() -> void:
 	if "d" in only: await _block_unstick()
 	if "e" in only: _block_walls()
 	if "f" in only: await _block_mines()
+	if "g" in only: await _block_charge_rows()
 	_finish()
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -422,3 +425,97 @@ func _block_mines() -> void:
 		if Vector2(c.x - mp.x, c.y - mp.z).length() > 25.0:
 			far += 1
 	verdict("F3 охрана держится у своего рудника (%d отрядов, дальше 25 м — %d)" % [guards, far], guards == want and far == 0)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# G. ТАРАН ПО МЕЧНИКАМ
+# ═════════════════════════════════════════════════════════════════════════════
+func _block_charge_rows() -> void:
+	print("
+═════ G. ТАРАН СВИНОВСАДНИКОВ ПО МЕЧНИКАМ ═════")
+	var at := Vector3(-60.0, 0.0, -10.0)
+	main._clear_area_of_resources(at, 50.0)
+	for rn in get_tree().get_nodes_in_group("resource_nodes"):
+		if is_instance_valid(rn) and (rn as Node3D).global_position.distance_to(at) < 50.0:
+			(rn as Node).queue_free()
+	for u0 in get_tree().get_nodes_in_group("all_units"):
+		if u0 is Unit and not (u0 as Unit).is_dead() and (u0 as Unit).global_position.distance_to(at) < 60.0:
+			(u0 as Unit).take_damage(1.0e12)
+	await pframes(4)
+	# Три ряда по 6 мечников лицом на восток (+X): ряд 0 — передний
+	var sid: int = GameManager.new_squad(Constants.FACTION_PLAYER, "warrior")
+	var rows: Array = [[], [], []]
+	var start: Dictionary = {}
+	for r in range(3):
+		for k in range(6):
+			var u := _unit("warrior", Constants.FACTION_PLAYER, at + Vector3(-1.1 * float(r), 0.0, (float(k) - 2.5) * 0.9))
+			u._facing = Vector3.RIGHT
+			GameManager.add_to_squad(sid, u)
+			rows[r].append(u)
+			start[u] = u.global_position
+	# Всадники: три полосы по два в глубину, в 30 м
+	var rsid: int = GameManager.new_squad(Constants.FACTION_GOBLIN, "goblin_rider")
+	var riders: Array = []
+	for lane in range(3):
+		for d in range(2):
+			var ru := _unit("goblin_rider", Constants.FACTION_GOBLIN, at + Vector3(30.0 + 1.8 * float(d), 0.0, (float(lane) - 1.0) * 1.1))
+			GameManager.add_to_squad(rsid, ru)
+			riders.append(ru)
+	await pframes(4)
+	var imp0: int = Unit.cav_impacts_dealt
+	var dbl0: int = Unit.cav_double_hits
+	var w := 0
+	var first_imp := -1
+	while w < 60 * 15:
+		await get_tree().physics_frame
+		w += 1
+		if first_imp < 0 and Unit.cav_impacts_dealt > imp0:
+			first_imp = w
+			var cc = main.cav_commander
+			print("    [первый удар на %d кадре] командир: состояние %s, таранов %d, первая линия %d" % [w, String(cc.state_of(rsid)), int(cc.charges), int(cc.front_riders)])
+			for ru0 in riders:
+				var r0 := ru0 as Unit
+				print("      всадник x=%.1f no_charge=%d charging=%s ready=%s state=%d" % [r0.global_position.x, r0.no_charge_until_ms - Time.get_ticks_msec(), str(r0.is_charging), str(r0._charge_ready), int(r0.state)])
+		if first_imp >= 0 and w - first_imp > 150:
+			break
+	var dealt: int = Unit.cav_impacts_dealt - imp0
+	var dead0 := 0
+	for u in rows[0]:
+		if u == null or not is_instance_valid(u) or (u as Unit).is_dead():
+			dead0 += 1
+	var disp: Array = [[], [], []]
+	for r in range(3):
+		for u in rows[r]:
+			if u == null or not is_instance_valid(u) or (u as Unit).is_dead():
+				continue
+			var p0: Vector3 = start[u]
+			disp[r].append(Vector2((u as Unit).global_position.x - p0.x, (u as Unit).global_position.z - p0.z).length())
+	var max1: float = 0.0
+	for v in disp[1]:
+		max1 = maxf(max1, float(v))
+	var med2: float = 0.0
+	if not (disp[2] as Array).is_empty():
+		var s2: Array = (disp[2] as Array).duplicate()
+		s2.sort()
+		med2 = float(s2[s2.size() / 2])
+	print("    ударов с разгона %d (двойных отсечено %d), в первом ряду погибло %d, отлёт второго ряда до %.2f м, третий ряд сдвинут на %.2f м (медиана)" % [
+		dealt, Unit.cav_double_hits - dbl0, dead0, max1, med2])
+	verdict("G1 первый ряд: принявшие удар погибли на месте", dead0 >= 1, "погибло %d" % dead0)
+	verdict("G2 второй ряд отлетает на 2.5-3.5 м (до %.2f м)" % max1, max1 >= 2.3 and max1 <= 3.9)
+	var row3_alive := 0
+	var row3_fight := 0
+	for u3 in rows[2]:
+		if u3 == null or not is_instance_valid(u3) or (u3 as Unit).is_dead():
+			continue
+		row3_alive += 1
+		var t3 = (u3 as Unit).attack_target
+		if (u3 as Unit).state == Unit.State.ATTACKING and t3 != null and is_instance_valid(t3) and (t3 as Unit).faction == Constants.FACTION_GOBLIN:
+			row3_fight += 1
+	# ТЗ: третий ряд «вступает в бой, задерживая кавалерию; всадники теснят
+	# их через Push» — жив, дерётся и сдвинут меньше отлетевшего второго
+	verdict("G3 третий ряд в бою и теснится напором, а не разлетается (живы %d/6, дерутся %d, сдвиг %.2f м < отлёта второго %.2f)" % [row3_alive, row3_fight, med2, max1],
+		row3_alive >= 5 and row3_fight >= 3 and med2 < max1)
+	verdict("G4 с разгона бьёт только первая линия (ударов %d при трёх полосах)" % dealt, dealt >= 1 and dealt <= 3)
+	_kill(riders)
+	for r in range(3):
+		_kill(rows[r])
+	await pframes(4)

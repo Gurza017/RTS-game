@@ -710,9 +710,9 @@ func _c_archers(base: Vector3) -> void:
 		else:
 			at_base += 1
 			angles.append(atan2(bp.z - cp.z, bp.x - cp.x))
-	# ТЗ 19.09.2026 (Garrison Archers): ВСЕ павшие защитники остаются лежать
-	# на площадке, у подножия — никого (прежнее «половина падает» — история)
-	verdict("C4 все тела павших — на крыше, у подножия никого", on_roof > 0 and on_roof == killed and at_base == 0,
+	# РАЗВОРОТ ПО ЯВНОМУ ТЗ 29.09.2026 (третье письмо, п. 4): павшие защитники
+	# ВЫПАДАЮТ с башни на землю вокруг неё (ТЗ 19.09 «все на площадке» — история)
+	verdict("C4 все тела павших — у подножия, на крыше никого", at_base > 0 and at_base >= killed and on_roof == 0,
 		"на крыше %d, у подножия %d (убито %d)" % [on_roof, at_base, killed])
 	var roof_pts: Array = []
 	for body in GameManager.corpses._list:
@@ -728,8 +728,13 @@ func _c_archers(base: Vector3) -> void:
 			for j in range(i + 1, roof_pts.size()):
 				far_pair = maxf(far_pair, (roof_pts[i] as Vector2).distance_to(roof_pts[j]))
 		spread_ok = far_pair > 0.5
-	verdict("C5 тела на площадке лежат на своих местах, не в одной точке", spread_ok,
-		"тел на крыше %d" % roof_pts.size())
+	# Врассыпную вокруг основания, а не в одну точку: разброс углов падения
+	var ang_spread := 0.0
+	for i2 in range(angles.size()):
+		for j2 in range(i2 + 1, angles.size()):
+			ang_spread = maxf(ang_spread, absf(angle_difference(float(angles[i2]), float(angles[j2]))))
+	verdict("C5 тела у подножия лежат врассыпную вокруг здания, не в одной точке (разброс %.0f°)" % rad_to_deg(ang_spread),
+		angles.size() < 2 or ang_spread > deg_to_rad(40.0), "тел у подножия %d" % angles.size())
 	verdict("C6 стены крепости тоже страдают или гарнизон — цель приказа", c.current_health < hp0 or killed > 0)
 	for s in sqs:
 		_kill_all(s[1])

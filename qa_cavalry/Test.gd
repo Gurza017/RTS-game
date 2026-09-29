@@ -30,6 +30,9 @@ var verdicts: Array = []
 var _first_contact_hp: float = 0.0
 
 func _ready() -> void:
+	# Стенд меряет МЕХАНИКУ натиска и массы, а не тактику отряда: командир
+	# конницы (ТЗ 29.09.2026, п. 6) уводил бы стадо от копий в лоб
+	load("res://scripts/perf_config.gd").cav_commander = false
 	call_deferred("_run")
 
 ## Стартовая скорость разлёта на заказанную дальность — та же арифметика, что

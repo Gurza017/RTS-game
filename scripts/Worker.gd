@@ -46,6 +46,8 @@ func _ready() -> void:
 	# Рабочий читает свой блок вручную (у него свои скорости и добыча), но
 	# stat_id обязателен: по нему адресуются бонусы кузницы вида applies_to ["all"]
 	stat_id = "worker"
+	# Список рабочих для командира конницы (затаптывание на пути без сканов)
+	add_to_group("workers")
 	var s: Dictionary = _UStats.get_stats("worker")
 	walk_speed_empty  = s.get("walk_speed_empty", 4.0)
 	walk_speed_loaded = s.get("walk_speed_loaded", 2.8)
@@ -259,8 +261,10 @@ func may_sleep_physics() -> bool:
 	return false
 
 ## Рабочий — лёгкая добыча конницы (ТЗ 18.09.2026, п. 4)
+## ТЗ 29.09.2026 (третье письмо, п. 6): приоритет конницы — лучники, мечники,
+## копейщики; рабочих она не ищет, а затаптывает на пути (CavalryCommander)
 func cav_target_weight() -> float:
-	return 1.4
+	return 0.9
 
 func is_combatant() -> bool:
 	return false

@@ -174,6 +174,9 @@ const STATS := {
 		# ── УДАР ПО РЯДАМ (заказ спринта 15) ──────────────────────────────
 		"charge_row_kill": 1,
 		"charge_row2_frac": 0.3,
+		# Второй ряд отлетает на 2.5-3.5 м (ТЗ 29.09.2026, третье письмо, п. 6);
+		# первый затоптан насмерть без отлёта, третий теснится напором (Push)
+		"charge_row2_knock": 2.8,
 		"charge_row_depth": 1.1,
 		"charge_counter_frac": 0.35,         # доля СВОЕГО запаса за навал на копья
 		"description": "Pig rider. Fast shock cavalry — hits hard, dies fast.",

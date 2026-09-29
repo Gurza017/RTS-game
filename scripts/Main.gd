@@ -238,6 +238,7 @@ const _GoblinAI  := preload("res://scripts/goblin/GoblinAI.gd")
 ## Сценарий глобального ИИ (13.09.2026): дремлющий резерв орды за лагерем и
 ## контроллер гноллов (зона ответственности, охота на рабочих)
 var goblin_reserve: Node = null
+var cav_commander: Node = null
 var gnoll_ai: Node = null
 ## Охрана крепости красного ИИ (15.09.2026): спящие отряды за замком, будит
 ## только штурм. См. scripts/ai/HomeGuard.gd и _spawn_home_defense
@@ -405,6 +406,10 @@ func _ready() -> void:
 	gnoll_ai.name = "GnollAI"
 	add_child(gnoll_ai)
 	gnoll_ai.setup(self)
+	# Командир конницы орды (ТЗ 29.09.2026, третье письмо, п. 6)
+	cav_commander = load("res://scripts/goblin/CavalryCommander.gd").new()
+	cav_commander.name = "CavalryCommander"
+	add_child(cav_commander)
 	_setup_pause_modes()
 	start_game()
 

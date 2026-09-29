@@ -1087,6 +1087,15 @@ static var goblin_village: bool = true
 ## доходят очередью по horde_spawn_budget в физкадр. false — как было
 static var horde_spawn_stagger: bool = true
 static var horde_spawn_budget: int = 40
+## ── КОННИЦА: УДАР С РАЗГОНА ТОЛЬКО ПЕРВОЙ ЛИНИЕЙ (ТЗ 29.09.2026, п. 6) ────
+## false — задние всадники тоже бьют с разгона (прежнее поведение, «двойные
+## удары»); счётчик Unit.cav_double_hits считает их в любом положении
+static var cav_front_only: bool = true
+## ── КОМАНДИР КОННИЦЫ (ТЗ 29.09.2026, третье письмо, п. 6) ─────────────────
+## true — отрядом решает CavalryCommander (один скан на отряд, удар — отход —
+## заход с фланга), всадник — исполнитель со сном и шардами. false — прежняя
+## охота каждого всадника (GoblinPigRider._tick_hunt), тикает каждый кадр
+static var cav_commander: bool = true
 
 ## Худший одиночный вызов ветки (qa_melee_bench, 14.09.2026): среднее прячет
 ## событие — один вызов в 4 мс среди двух тысяч по 9 мкс даёт «11 мкс»

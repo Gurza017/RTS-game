@@ -352,6 +352,9 @@ func _d_aggro(base: Vector3) -> void:
 	var w: Unit = _spawn("warrior", F, base + Vector3(0.0, 0.0, 10.0))
 	var s: Unit = _spawn("spearman", F, base + Vector3(0.0, 0.0, 14.0))
 	var ar: Unit = _spawn("archer", F, base + Vector3(0.0, 0.0, 18.0))
+	# Блок проверяет ЛИЧНУЮ охоту всадника (режим без командира конницы, ТЗ
+	# 29.09.2026 п. 6): командир взял бы отряд и переставил цель
+	load("res://scripts/perf_config.gd").cav_commander = false
 	var r: Unit = _spawn("goblin_rider", Constants.FACTION_GOBLIN, base + Vector3(20.0, 0.0, 14.0))
 	await pframes(3)
 	verdict("D3 мечник — авто-агро 5 м, всадник — 20 м",
@@ -391,6 +394,7 @@ func _d_aggro(base: Vector3) -> void:
 # E. КАСАНИЕ ПО КАДРУ ЗАМАХА
 # ═════════════════════════════════════════════════════════════════════════════
 func _e_hit_delay(base: Vector3) -> void:
+	load("res://scripts/perf_config.gd").cav_commander = true
 	print("\n═════ E. УРОН ПРИХОДИТ ПОЗЖЕ ЗАМАХА ═════")
 	var a: Unit = _spawn("spearman", F, base)
 	var v: Unit = _spawn("spearman", E, base + Vector3(1.2, 0.0, 0.0))

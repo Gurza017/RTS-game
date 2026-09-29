@@ -479,6 +479,8 @@ var push_every: int = PUSH_EVERY
 # войск не конница» (ноль отключает ветку целиком, см. _process_attack).
 var charge_range: float = 0.0
 var charge_min_runup: float = 0.0
+## Отлёт второго ряда при ударе по рядам, м (≤ 0 — как charge_knockback)
+var charge_row2_knock: float = 0.0
 var charge_speed_mult: float = 1.0
 var charge_impact_frac: float = 0.0
 var charge_splash: float = 1.6
@@ -570,6 +572,9 @@ var is_charging: bool = false
 var _charge_from: Vector3 = Vector3.ZERO
 ## Разгон доступен. Гаснет ударом, возвращается отрывом от цели
 var _charge_ready: bool = true
+## До этой отметки разгон не взводится: всадник НЕ первой линии отряда в
+## этой волне тарана (CavalryCommander._go_charge, ТЗ 29.09.2026, п. 6)
+var no_charge_until_ms: int = 0
 
 ## ── НАСКОЛЬКО «В ЛОБ» ПРИШЁЛСЯ НАВАЛ ──────────────────────────────────────
 ## Косинус половины лобового сектора. 0.34 — те же ~70°, по которым фаланга
@@ -1841,6 +1846,7 @@ func _apply_config_stats(unit_id: String) -> void:
 	# всю ветку разгона одним сравнением, поэтому пехоте она не стоит ничего
 	charge_range        = s.get("charge_range", charge_range)
 	charge_min_runup    = s.get("charge_min_runup", charge_min_runup)
+	charge_row2_knock   = s.get("charge_row2_knock", charge_row2_knock)
 	charge_speed_mult   = s.get("charge_speed_mult", charge_speed_mult)
 	charge_impact_frac  = s.get("charge_impact_frac", charge_impact_frac)
 	charge_splash       = s.get("charge_splash", charge_splash)
@@ -6361,7 +6367,8 @@ func _process_attack(delta: float) -> void:
 			# половине запаса с каждого встречного, не сходя с места
 			_charge_ready = true
 			is_charging = false
-		elif _charge_ready and not _stance_holds_ground() 				and not retreating and not _disengaging:
+		elif _charge_ready and not _stance_holds_ground() 				and not retreating and not _disengaging \
+				and now_ms >= no_charge_until_ms:
 			# Точка начала разгона запоминается ОДИН РАЗ, на взводе: по ней
 			# считается, проехал ли всадник свои метры (см. charge_min_runup)
 			if not is_charging:
@@ -7491,6 +7498,43 @@ func _apply_push(target: Unit, dirn: Vector3) -> void:
 # КОПЕЙЩИКА В БРЫЗГАХ УДАР ТОЖЕ НЕ БЕРЁТ, если он стоит лицом: иначе фаланга,
 # устоявшая в точке навала, разлеталась бы в метре левее — стенка копий не
 # бывает дырявой.
+## Стендам и замеру (qa_cav_bench): удары с разгона и «двойные» удары задних
+static var cav_double_hits: int = 0
+static var cav_impacts_dealt: int = 0
+## sid отряда всадников → [мс, x, z] точек, откуда била первая линия
+static var _cav_hits: Dictionary = {}
+const CAV_REAR_WIN_MS := 900
+const CAV_REAR_DEPTH := 6.0
+const CAV_REAR_LANE := 0.8
+## ЗАДНИЙ ли это всадник: в последние CAV_REAR_WIN_MS свой отряд уже ударил
+## с разгона из ТОЙ ЖЕ ПОЛОСЫ (поперёк хода ближе CAV_REAR_LANE) и ВПЕРЕДИ
+## этого всадника (не дальше CAV_REAR_DEPTH). Соседи первой линии идут в
+## 1.1 м друг от друга — они не задние. Удар первой линии пишется здесь же
+func _cav_rear_hit(dirn: Vector3) -> bool:
+	if squad_id <= 0:
+		return false
+	var now: int = Time.get_ticks_msec()
+	var me: Vector3 = global_position
+	var raw: Variant = _cav_hits.get(squad_id)
+	var arr: Array = raw if raw != null else []
+	var keep: Array = []
+	var rear := false
+	for e in arr:
+		var ea: Array = e
+		if now - int(ea[0]) > CAV_REAR_WIN_MS:
+			continue
+		keep.append(ea)
+		var dx: float = float(ea[1]) - me.x
+		var dz: float = float(ea[2]) - me.z
+		var along: float = dx * dirn.x + dz * dirn.z
+		var lat: float = absf(dx * dirn.z - dz * dirn.x)
+		if lat < CAV_REAR_LANE and along > 0.3 and along < CAV_REAR_DEPTH:
+			rear = true
+	if not rear:
+		keep.append([now, me.x, me.z])
+	_cav_hits[squad_id] = keep
+	return rear
+
 func _charge_impact(target: Unit, dirn: Vector3) -> void:
 	GameManager.tm_ability("charge_impact", faction)
 	# Натиск потрачен в любом случае: и удавшийся, и разбившийся о копья.
@@ -7551,6 +7595,15 @@ func _charge_impact(target: Unit, dirn: Vector3) -> void:
 			return
 	if charge_impact_frac <= 0.0:
 		return
+	# ── ПЕРВЫЙ КОНТАКТ — ТОЛЬКО ПЕРВАЯ ЛИНИЯ (ТЗ 29.09.2026, третье письмо, п. 6)
+	# Задний всадник того же отряда в той же полосе, доехавший до смятого ряда
+	# в пределах CAV_REAR_WIN_MS, — не новый таран, а «двойной удар». Удара с
+	# разгона он не наносит: дальше рубка и напор (Push)
+	if _cav_rear_hit(dirn):
+		cav_double_hits += 1
+		if _Opt.cav_front_only:
+			return
+	cav_impacts_dealt += 1
 	var at: Vector3 = target.global_position
 	# ── ТОПТАНИЕ: ПЕРВЫЕ N ПО ХОДУ ГИБНУТ НА МЕСТЕ (заказ 09.09.2026) ────────
 	# «Первые» — ближайшие к точке контакта ВПЕРЕДИ по вектору удара: круг
@@ -7701,9 +7754,12 @@ func _charge_rows(victims: Array, mp: Vector3, dirn: Vector3, at: Vector3,
 		elif row <= 1:
 			v.take_damage(v.max_health * charge_row2_frac * dmg_mult, self)
 			if is_instance_valid(v) and not v.is_dead():
-				v.apply_knockback(dirn, charge_knockback * kb_mult, at)
+				var kb2: float = charge_row2_knock if charge_row2_knock > 0.0 else charge_knockback
+				v.apply_knockback(dirn, kb2 * kb_mult, at)
 				v.knock_down(CHARGE_ROW_KNOCKDOWN_SEC)
-		else:
+		elif row == 2:
+			# ТРЕТИЙ РЯД ВСТУПАЕТ В БОЙ, А НЕ РАЗЛЕТАЕТСЯ (ТЗ 29.09.2026, п. 6):
+			# лёгкий толчок, дальше его теснит напор (Push) рубки. Глубже — никак
 			v.push_smooth(dirn, charge_knockback * 0.5 * kb_mult)
 
 ## Сколько бойцов впереди раздавливает удар с разгона. База — ноль (кабан

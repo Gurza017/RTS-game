@@ -541,6 +541,11 @@ func corpse_spot(idx: int = 0) -> Vector3:
 ## (Garrison Archers): ТРУПЫ ЗАЩИТНИКОВ ОСТАЮТСЯ НА ПЛОЩАДКЕ — все, а не
 ## каждый второй (прежнее чередование FALL_STAY_EVERY 2 — история; 1 = все)
 const FALL_STAY_EVERY := 1
+## ── РАЗВОРОТ ПО ЯВНОМУ ТЗ 29.09.2026 (третье письмо, п. 4) ────────────────
+## «При обстреле вражеской башни находящиеся там лучники при смерти должны
+## физически выпадать с башни на землю вокруг неё». true — все павшие
+## падают к подножию врассыпную (corpse_spot); false — ТЗ 19.09: на площадке
+const BODIES_FALL_FROM_ROOF := true
 
 ## ── ПАРАЛЛЕЛЬНЫЙ УРОН (ТЗ 19.09.2026, Parallel Damage Split) ─────────────
 ## Град стрел по укреплению бьёт ДВУМЯ РУСЛАМИ разом: здание получает свой
@@ -555,7 +560,7 @@ func absorb_ranged_hit(amount: float, attacker: Node) -> bool:
 		return false
 	var idx: int = _fall_index
 	_fall_index += 1
-	var stay_on_roof: bool = (idx % FALL_STAY_EVERY) == 0
+	var stay_on_roof: bool = (idx % FALL_STAY_EVERY) == 0 and not BODIES_FALL_FROM_ROOF
 	var spot: Vector3
 	if stay_on_roof:
 		# Тело остаётся на площадке: точка ног его места, высота — крыши

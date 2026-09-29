@@ -56,9 +56,23 @@ const RIDER_SWAP_EVERY := 4
 var _swap_skip: int = 0
 var _resume_to: Vector3 = Vector3.INF
 
-## Тик идёт всегда (часы охоты): по физике конница не спит
+## Прежде тик шёл всегда (часы охоты у каждого всадника). С командиром
+## конницы (ТЗ 29.09.2026, п. 6) охотится отряд, а всадник спит, как все
 func may_sleep_physics() -> bool:
-	return false
+	return _Opt.cav_commander and not is_withdrawing()
+
+## ── ОТХОД ПО РЕШЕНИЮ КОМАНДИРА ─────────────────────────────────────────
+## Пока срок не вышел, чужие приказы атаки (ответ на удар, ИИ набега,
+## перехват) игнорируются: отряд обязан оторваться и зайти заново
+var _cav_withdraw_until_ms: int = 0
+func is_withdrawing() -> bool:
+	return Time.get_ticks_msec() < _cav_withdraw_until_ms
+
+func command_attack(target: Node3D, forced: bool = true, charge: bool = false,
+		lock: bool = false) -> void:
+	if is_withdrawing():
+		return
+	super.command_attack(target, forced, charge, lock)
 
 func target_prio_mode() -> int:
 	return 2
@@ -71,7 +85,9 @@ func pursuit_limit() -> float:
 
 func tick_physics(delta: float, prof: bool = false, bm: bool = true,
 		bonus_ver: int = -1) -> void:
-	_tick_hunt(delta)
+	# С командиром конницы охоту ведёт отряд (CavalryCommander)
+	if not _Opt.cav_commander:
+		_tick_hunt(delta)
 	super.tick_physics(delta, prof, bm, bonus_ver)
 
 func _target_alive() -> bool:
@@ -85,7 +101,7 @@ func _hunt_scan(r: float) -> Node3D:
 	return _find_nearest_enemy_in_range(r, "rider_hunt")
 
 func _engage(foe: Node3D) -> void:
-	if foe == null or not is_instance_valid(foe) or _panicked or retreating:
+	if foe == null or not is_instance_valid(foe) or _panicked or retreating or is_withdrawing():
 		return
 	var fu := foe as Unit
 	if fu != null and (fu.is_dead() or int(fu.faction) == int(faction)):

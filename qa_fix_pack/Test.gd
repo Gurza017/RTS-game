@@ -128,11 +128,14 @@ func _a_map() -> void:
 					near_ford += 1
 	verdict("A1 на броде рудника нет", near_ford == 0 and not bool(main.FORD_MINE_ENABLED),
 		"рудников у брода %d" % near_ford)
-	# 14.09.2026: плюс рудник красного ИИ на нижней горушке (Main.AI_MINE_ENABLED)
-	var extra: int = 1 + (1 if bool(main.AI_MINE_ENABLED) else 0)
-	verdict("A2 ничейных рудников пути — по числу GOLD_MINE_T (два), плюс рудник орды и рудник ИИ",
-		main.gold_mine_spots().size() == (main.GOLD_MINE_T as Array).size()
-			and all_mines == (main.GOLD_MINE_T as Array).size() + extra,
+	# РАЗВОРОТ (ТЗ 29.09.2026, третье письмо, п. 5): при TERRITORY_MINES два
+	# ничейных рудника на территориях сторон плюс рудник орды; рудника ИИ на
+	# холме нет. Иначе — прежняя раскладка (доли GOLD_MINE_T + орда + ИИ)
+	var want_spots: int = 2 if bool(main.TERRITORY_MINES) else (main.GOLD_MINE_T as Array).size()
+	var extra: int = 1 + (1 if (bool(main.AI_MINE_ENABLED) and not bool(main.TERRITORY_MINES)) else 0)
+	verdict("A2 ничейных рудников — по раскладке (две территории или доли GOLD_MINE_T), плюс рудник орды",
+		main.gold_mine_spots().size() == want_spots
+			and all_mines == want_spots + extra,
 		"точек %d, рудников на карте %d" % [main.gold_mine_spots().size(), all_mines])
 	verdict("A3 центр карты для ИИ — сам брод",
 		_xz(main.ai_rally_point(), fp) < 0.5)
