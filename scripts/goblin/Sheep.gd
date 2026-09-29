@@ -481,6 +481,10 @@ func sprite_texture() -> Texture2D:
 	return _mat.get_shader_parameter("albedo_tex") as Texture2D
 
 func _snap_to_ground() -> void:
+	# Овцу отпускает и рабочий из _exit_tree (гибель, снос): узла в дереве может
+	# уже не быть — global_transform тогда ругается движком (аудит партии 29.09)
+	if not is_inside_tree():
+		return
 	var p: Vector3 = global_position
 	global_position = Vector3(p.x, GameManager.get_terrain_height(p.x, p.z), p.z)
 

@@ -7813,8 +7813,6 @@ func _sweep_morale(delta: float) -> void:
 		panic_rolls += 1
 		sq["panic_rolls"] = int(sq.get("panic_rolls", 0)) + 1
 		if broke:
-			tm_event("panic", {"sid": sid, "type": String(sq.get("type", "")), "fac": int(sq.get("faction", -1)),
-				"alive": alive_n, "full": full_n})
 			# ── ПАНИКА — СТРОГО ОДИН РАЗ (ТЗ 19.09.2026, «One-Shot Panic Run»)
 			# Отряд, уже отбегавший, повторно не пугается: он и так в очереди
 			# на лечение либо получил приказ игрока. Цепочка «сорвался →
@@ -7822,9 +7820,16 @@ func _sweep_morale(delta: float) -> void:
 			# столбом беглецов с белыми флагами (скриншот 1:18:49) и слала
 			# сотни маршрутов в секунду
 			if int(sq.get("panic_runs", 0)) >= _UCfg.PANIC_MAX_RUNS:
+				# Событие — «предел держит», а не «паника»: аудит партии 29.09
+				# насчитал 552 «паники», из них большинство — повторные срывы
+				# порога у уже отбегавшего отряда, которые предел глушил
+				tm_event("panic_capped", {"sid": sid, "type": String(sq.get("type", "")),
+					"fac": int(sq.get("faction", -1)), "alive": alive_n, "full": full_n})
 				if not bool(sq.get("heal_queue", false)):
 					_enter_heal_queue(sid)
 				continue
+			tm_event("panic", {"sid": sid, "type": String(sq.get("type", "")), "fac": int(sq.get("faction", -1)),
+				"alive": alive_n, "full": full_n})
 			_start_panic(sid)
 
 ## ── ОЧЕРЕДЬ НА ЛЕЧЕНИЕ ПОСЛЕ ПАНИКИ (ТЗ 19.09.2026, «Queued Heal») ─────────
