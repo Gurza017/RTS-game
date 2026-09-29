@@ -14,6 +14,7 @@ extends Node
 ## Headless.
 
 var main = null
+const _Opt := preload("res://scripts/perf_config.gd")
 var _pass: int = 0
 var _fail: int = 0
 var _log: Array = []
@@ -102,6 +103,11 @@ func _run() -> void:
 	get_tree().root.add_child(main)
 	GameManager.world_bounds_enabled = false
 	await frames(2)
+	# Туман — прочь: чужой в тумане снимается с отрисовки (_hide_in_fog), и
+	# зонд слотов гигантов орды мерил бы пустоту
+	if GameManager.fog != null:
+		GameManager.fog.enabled = false
+		(GameManager.fog as Node3D).visible = false
 	if main.enemy_ai != null:
 		main.enemy_ai.set_process(false)
 	if main.get("goblin_ai") != null:
@@ -195,12 +201,20 @@ func _run() -> void:
 	print("\n═════ B. ТРОЛЛЬ: ОДИН СПРАЙТ, ПОСЛЕ ГИБЕЛИ — НИ ОДНОГО СЛОТА ═════")
 	var tp := base + Vector3(40.0, 0.0, 0.0)
 	var troll: Unit = _spawn("res://scenes/units/Troll.tscn", Constants.FACTION_GOBLIN, tp)
+	# Камера — к гиганту: в общую отрисовку (mm_render_all) боец попадает из
+	# визуального тика, а тот у невидимого спит; в игре тролль умирает в кадре
+	if not DisplayServer.get_name().to_lower().begins_with("headless"):
+		main.focus_camera_on(tp)
+		await frames(6)
 	await pframes(20)
 	troll.command_move(tp + Vector3(6.0, 0.0, 0.0))
 	await pframes(40)
 	var tpos: Vector3 = troll.global_position
 	var before: int = _slots_near(tpos, 5.0)
-	print("  тролль: _far_registered=%s _rb_bound=%s в реестре=%s" % [str(troll._far_registered), str(troll._rb_bound), str(GameManager.far_units._slot.has(troll))])
+	print("  тролль: _far_registered=%s _rb_bound=%s в реестре=%s sheet=%d mm_only=%s seen=%s draw_on=%s mm_all=%s spr=%s" % [
+		str(troll._far_registered), str(troll._rb_bound), str(GameManager.far_units._slot.has(troll)),
+		troll.sheet_frame().size(), str(troll._mm_only), str(troll._seen), str(troll.draw_on), str(_Opt.mm_render_all),
+		str(troll._active_sprite.visible if troll._active_sprite != null else "-")])
 	# Тролль рисуется своим узлом (гигант), в общей отрисовке его слота нет —
 	# допускаем 0 или 1, но не два
 	verdict("B1 у живого тролля не больше одного слота общей отрисовки", before <= 1, "слотов %d" % before)
@@ -220,4 +234,26 @@ func _run() -> void:
 	print("  у точки гибели тролля: узлов %d %s; тел в слое трупов +%d" % [near.size(), str(near), GameManager.corpses.count() - corpses0])
 	verdict("B3 после гибели тролля у его точки ровно один узел тела и ни одного тела в общем слое трупов",
 		near.size() == 1 and GameManager.corpses.count() - corpses0 == 0, "узлов %d, тел в слое +%d" % [near.size(), GameManager.corpses.count() - corpses0])
+
+	print("
+═════ C. ТУША И ВСАДНИК: ПОСЛЕ ГИБЕЛИ — ОДНО ТЕЛО, НИ ОДНОГО СЛОТА ═════")
+	for spec in [["res://scenes/units/BigGoblin.tscn", "туша"], ["res://scenes/units/GoblinPigRider.tscn", "всадник"]]:
+		var bp := base + Vector3(60.0, 0.0, float(men.size()) * 0.1)
+		var big: Unit = _spawn(String(spec[0]), Constants.FACTION_GOBLIN, bp)
+		if not DisplayServer.get_name().to_lower().begins_with("headless"):
+			main.focus_camera_on(bp)
+			await frames(6)
+		await pframes(20)
+		big.command_move(bp + Vector3(5.0, 0.0, 0.0))
+		await pframes(40)
+		var bpos: Vector3 = big.global_position
+		var b_before: int = _slots_near(bpos, 5.0)
+		var c0: int = GameManager.corpses.count()
+		print("  %s: _far_registered=%s _rb_bound=%s слотов рядом %d" % [String(spec[1]), str(big._far_registered), str(big._rb_bound), b_before])
+		big.take_damage(big.max_health * 10.0 + 1000.0, null)
+		await pframes(8)
+		var b_after: int = _slots_near(bpos, 5.0)
+		var bodies: int = GameManager.corpses.count() - c0
+		verdict("C %s: после гибели у точки ни одного слота, тело в слое ровно одно" % String(spec[1]),
+			b_after == 0 and bodies == 1, "слотов %d, тел +%d" % [b_after, bodies])
 	_finish()
