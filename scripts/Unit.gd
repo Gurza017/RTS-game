@@ -2565,6 +2565,7 @@ func hold_post(p: Vector3, face_dir: Vector3 = Vector3.ZERO) -> void:
 		if dd <= 0.0 or dd * dd < POSE_TURN_COS2:
 			_facing = fd
 			mark_pose_dirty(15)
+			mark_flip_dirty()
 
 func allow_reform_move(secs: float = REFORM_PERMIT_SEC) -> void:
 	wake_physics()
@@ -4386,6 +4387,10 @@ func _mv_tick() -> int:
 	var _mv_want: bool = _mv_now < _mv_until_ms
 	if _mv_want != _mv_moving:
 		_mv_moving = _mv_want
+		# Встал по факту — довернуть в курс строя (ТЗ 29.09.2026, блок 1):
+		# до этого зеркало держало направление последнего шага
+		if not _mv_want and state == State.IDLE:
+			_flip_dirty = true
 		# Ход↔стоп у привязанной строки ленту не меняет — её ведёт ядро
 		if not _look_bound():
 			mark_pose_dirty(4)
@@ -4448,6 +4453,15 @@ func _update_sprite_flip() -> void:
 	if (state == State.IDLE or velocity.length_squared() < 0.01) 			and not _flip_dirty and not _mv_moving:
 		_apply_flip_to_node()
 		return
+	# ── ДОВОРОТ ПОСЛЕ ОСТАНОВКИ — ПО КУРСУ СТРОЯ (ТЗ 29.09.2026, блок 1) ────
+	# Жалоба: «при остановке юниты в центре или с края смотрят не туда».
+	# _mv_moving гаснет через MOVE_ANIM_HOLD_MS после последнего шага, и в кадр
+	# прибытия зеркало считалось по НАПРАВЛЕНИЮ ПОДХОДА к слоту (крайний шёл
+	# наискось наружу), а потом стоящий уже не пересчитывался. Разовый доворот
+	# (_flip_dirty у стоящего) берёт взгляд _facing = курс строя и решает знак
+	# без мёртвой зоны — весь отряд по одному правилу; строке под ядром
+	# зеркало сообщается безусловно
+	var arrive_turn: bool = _flip_dirty and (state == State.IDLE or _settled or not _mv_moving)
 	_flip_dirty = false
 	# ── ЗЕРКАЛО БЕРЁТ ФАКТИЧЕСКОЕ НАПРАВЛЕНИЕ ХОДА, А НЕ ВЗГЛЯД ─────────────
 	# Жалоба владельца: «при резкой смене направления часть спрайтов
@@ -4465,7 +4479,7 @@ func _update_sprite_flip() -> void:
 	# расталкивание соседей, ни толчок в свалке — ровно то, что просил владелец
 	# («опираться на направление движения, а не на локальное расталкивание»).
 	# Стоящему бойцу двигаться некуда, и для него остаётся прежний взгляд
-	var look: Vector3 = _mv_dir if (_mv_moving and _mv_dir.length_squared() > 1e-6) else _facing
+	var look: Vector3 = _facing if arrive_turn else (_mv_dir if (_mv_moving and _mv_dir.length_squared() > 1e-6) else _facing)
 	if look.length_squared() < 1e-6:
 		return
 	# Ось камеры берётся из общего кэша (см. GameManager.camera_right):
@@ -4476,14 +4490,18 @@ func _update_sprite_flip() -> void:
 	var side := GameManager.camera_right().dot(look.normalized())
 	# Переключаем ТОЛЬКО при выходе за мёртвую зону в противоположную сторону
 	var prev_flip: bool = _flip_h_state
-	if _flip_h_state and side > FLIP_DEADZONE:
+	if arrive_turn:
+		_flip_h_state = side < 0.0
+	elif _flip_h_state and side > FLIP_DEADZONE:
 		_flip_h_state = false
 	elif not _flip_h_state and side < -FLIP_DEADZONE:
 		_flip_h_state = true
 	_apply_flip_to_node()
 	# Зеркало идущего у привязанной строки ведёт ядро (LookPass); стоящему —
-	# доворот в курс строя — сообщаем сами (без refresh через словари)
-	if prev_flip != _flip_h_state and not _mv_moving and _look_bound():
+	# доворот в курс строя — сообщаем сами (без refresh через словари).
+	# Доворот прибытия — БЕЗУСЛОВНО: копия могла совпасть с нужным знаком,
+	# пока ядро на ходу выставило другой
+	if _look_bound() and (arrive_turn or (prev_flip != _flip_h_state and not _mv_moving)):
 		GameManager.army.row_look_mirror(_soa, _flip_h_state)
 
 ## ЗЕРКАЛО — ЧИСЛО (_flip_h_state), а в общей отрисовке оно уезжает в MultiMesh
@@ -6384,6 +6402,19 @@ func _process_attack(delta: float) -> void:
 		# что достаёт; к дальнему его ведёт только приказ игрока
 		if not target_lock and not _stance_holds_ground() and not holds_ground_on_aggro() \
 				and _should_pull_up(dist):
+			# ── ЗАСЛОН ВПЛОТНУЮ ВАЖНЕЕ ПОДТЯГИВАНИЯ (ТЗ 29.09.2026, блок 7) ──
+			# Эта ветка выходила раньше перехвата заслона: гоблин в горловине
+			# брода упирался телом в ЧУЖОГО бойца, а его назначенная цель стояла
+			# в трёх метрах за ним — он давил в тело на 55 % скорости и не бил
+			# никого («идут на убой»). Упор в чужое тело — это бой с ним
+			if _enemy_contact and not retreating and not sprinting and not _disengaging:
+				_enemy_contact = false
+				var blk_pull := _find_nearest_enemy_in_range(attack_range + INTERCEPT_MARGIN, "blocker_pull")
+				if blk_pull != null and blk_pull != attack_target:
+					velocity = Vector3.ZERO
+					command_attack(blk_pull, false)
+					_melee_grip = true
+					return
 			dir /= dist
 			_facing  = dir
 			velocity = dir * (_effective_speed() * PULL_UP_SPEED)
@@ -7955,6 +7986,13 @@ func pursuit_limit() -> float:
 ##
 ## Окно прохода приказа (_forced_move_pass) исключено: в нём боец НАМЕРЕННО
 ## идёт сквозь тела, и отвечать там значило бы отменить сам приказ
+## Своя цель не в досягаемости (или её нет): ответ на удар в упор законен
+func _target_out_of_reach() -> bool:
+	if attack_target == null or not is_instance_valid(attack_target):
+		return true
+	var d: float = global_position.distance_to(attack_target.global_position)
+	return d > attack_range + _target_pad + 0.3
+
 func _may_answer_blow(attacker: Node3D) -> bool:
 	if not _disengaging and _move_lock <= 0.0:
 		# ── ПОЧЕМУ ЗДЕСЬ НЕТ РАЗДЕЛИТЕЛЯ «ИДУ ПРОЧЬ» ──────────────────────
@@ -8923,6 +8961,15 @@ func take_damage(amount: float, attacker: Node3D = null) -> void:
 		_slain_by = attacker
 		_die()
 		if _prof_d: _Opt.prof_add("die_rest", Time.get_ticks_usec() - _dt)
+	elif state == State.ATTACKING and attacker is Unit and not target_lock and not retreating \
+			and not sprinting and attack_damage > 0.0 and not (attacker as Unit).is_dead() \
+			and (attacker as Unit).faction != faction and _target_out_of_reach() \
+			and global_position.distance_to(attacker.global_position) <= attack_range + _pad_of(attacker) + 0.3:
+		# ── БЬЮТ В УПОР, А СВОЯ ЦЕЛЬ НЕДОСЯГАЕМА — ОТВЕЧАЕМ ОБИДЧИКУ (ТЗ 29.09.2026,
+		# блок 7). Ответ на удар работал только в IDLE/MOVING: гоблин с далёкой
+		# целью умирал от копья соседа, не отвечая. Замок приказа — прежний приоритет
+		command_attack(attacker, false)
+		_melee_grip = true
 	elif sprinting and (state == State.IDLE or state == State.MOVING) and attacker \
 			and attack_damage > 0.0 and not retreating and attacker is Unit \
 			and not (attacker as Unit).is_dead() \

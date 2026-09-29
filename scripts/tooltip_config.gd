@@ -125,9 +125,10 @@ static var TOOLTIPS: Dictionary = {
 		"display_name": "Мечник",
 		"icon": "res://assets/factions/humans/icons/units/Warrior.png",
 		"description": "Штурмовая пехота. Строится в стену щитов. Эффективен для быстрых атак с флангов, отлично режет копейщиков и стрелков.",
+		# Дальность и темп удара сняты (ТЗ 29.09.2026, блок 4): игрок их не читает
 		"visible_stats": [
 			{"key": "hp"}, {"key": "attack"}, {"key": "armor"},
-			{"key": "move_speed"}, {"key": "range"}, {"key": "cooldown"},
+			{"key": "move_speed"},
 		],
 		"show_cost": true,
 	},
@@ -137,7 +138,7 @@ static var TOOLTIPS: Dictionary = {
 		"description": "Дальнобойный юнит. Может стрелять залпом по скоплениям врагов. Способен занимать башни, крепости и бараки для стрельбы с укрытия (+дальность и урон).",
 		"visible_stats": [
 			{"key": "hp"}, {"key": "attack"}, {"key": "armor"},
-			{"key": "move_speed"}, {"key": "range"}, {"key": "cooldown"},
+			{"key": "move_speed"},
 			{"key": "arrow"},
 		],
 		"show_cost": true,
@@ -152,7 +153,7 @@ static var TOOLTIPS: Dictionary = {
 		# Брони у монаха нет по конфигу — строки в списке тоже нет
 		"visible_stats": [
 			{"key": "hp"}, {"key": "attack"},
-			{"key": "move_speed"}, {"key": "range"},
+			{"key": "move_speed"},
 		],
 		"show_cost": true,
 	},
@@ -173,7 +174,7 @@ static var TOOLTIPS: Dictionary = {
 ## "armor" сюда НЕ входит намеренно: это тот параметр, который чаще всего
 ## оказывается нулевым, и по умолчанию лучше промолчать, чем показать ноль
 static var DEFAULT_VISIBLE_STATS: Array = [
-	{"key": "hp"}, {"key": "attack"}, {"key": "move_speed"}, {"key": "range"},
+	{"key": "hp"}, {"key": "attack"}, {"key": "move_speed"},
 ]
 
 ## Описание карточки объекта. Пустым не возвращается никогда: неизвестный id

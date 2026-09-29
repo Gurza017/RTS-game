@@ -224,6 +224,13 @@ func ruin_sprite_override() -> String:
 func ruin_tint() -> Color:
 	return _GobCfgL.LAIR_RUIN_TINT
 
+## ── ПЕНЬ НЕ ПРОПАДАЕТ (ТЗ 29.09.2026, блок 6) ──────────────────────────────
+## С ТЗ 24.09 руины растворяются через RUIN_LIFETIME_SEC — и снесённый пень
+## исчезал через десять минут, а отара паслась вокруг пустого места.
+## Руина пня лежит вечно: restore_lair снимает её сам, когда пень возвращается
+func ruin_lifetime() -> float:
+	return 0.0
+
 ## Точка прицела стрелка — центр пня, а не 0.8 м над корнями (заказ спринта 15)
 func aim_height() -> float:
 	return _GobCfgL.TROLL_LAIR_AIM_HEIGHT

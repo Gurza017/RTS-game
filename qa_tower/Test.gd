@@ -306,7 +306,9 @@ func _check_tower(keep: Castle) -> void:
 	var a0: Unit = ar[1][0]
 	var ahp: float = a0.current_health
 	var thp: float = tower.current_health
-	a0.take_damage(50.0, foes[1][0])
+	# Правило 5: обидчик мог погибнуть — бьём от живого или без обидчика
+	var hitter = foes[1][0] if (foes[1].size() > 0 and is_instance_valid(foes[1][0])) else null
+	a0.take_damage(50.0, hitter)
 	verdict("B8в урон по укрытому лучнику уходит в запас башни, лучник цел",
 		is_equal_approx(a0.current_health, ahp) and tower.current_health < thp,
 		"лучник %.0f → %.0f, башня %.0f → %.0f" % [ahp, a0.current_health, thp, tower.current_health])

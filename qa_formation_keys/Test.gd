@@ -237,10 +237,11 @@ func _run() -> void:
 		var uw := plan_w["flat"][j] as Unit
 		if GameManager.squad_type(uw.squad_id) != "spearman":
 			other_rows_w = maxi(other_rows_w, int(plan_w["rows"][j]))
-	# Под [2] и копейщики (12 → 3 шеренги), и лучники с мечниками (8 → 3 шеренги)
-	# стоят коробочкой; под [1] прочие лежали в одну-две шеренги
-	ok_rows = sp_rows + 1 == sm.DEEP_ROWS and other_rows_d + 1 == sm.DEEP_ROWS and other_rows_w < other_rows_d
-	verdict("C7 смешанное выделение под [2]: коробочка у ВСЕХ родов (копейщики %d, прочие %d шеренг; под [1] прочих %d)" % [sp_rows + 1, other_rows_d + 1, other_rows_w + 1], ok_rows)
+	# ТЗ 29.09.2026 (блок 5, шестой разворот): под [2] коробочку в DEEP_ROWS
+	# шеренг получают ТОЛЬКО копейщики; лучники и мечники тянутся по линии,
+	# как в [1] — их глубина от режима не зависит
+	ok_rows = sp_rows + 1 == sm.DEEP_ROWS and other_rows_d == other_rows_w
+	verdict("C7 смешанное выделение под [2]: коробочка только у копейщиков (копейщики %d, прочие %d шеренг; под [1] прочих %d)" % [sp_rows + 1, other_rows_d + 1, other_rows_w + 1], ok_rows)
 	# Копейщики с ВЫКЛЮЧЕННЫМ режимом стены — коробочка всё равно (стена копий
 	# по стойке — другая механика, к клавише [2] отношения не имеет)
 	var sp_sid: int = (mixed[0] as Unit).squad_id
@@ -385,8 +386,13 @@ func _e_persist(all: Array, a: Vector3, b: Vector3) -> void:
 	# уже изучена (блок B), и копейщики ложатся в три шеренги при ЛЮБОМ
 	# режиме (_block_formation_slots, спринт 20) — на них два режима
 	# неразличимы по построению, и проверка краснела бы на исправном коде
-	var arch: Array = _squad("archer", a + Vector3(0.0, 0.0, -40.0), 20)
+	# Коробочка теперь только у копейщиков (ТЗ 29.09.2026): второй растяг
+	# меряем на копейщиках с ВЫКЛЮЧЕННОЙ стеной копий — иначе [1] и [2] у них
+	# неразличимы по построению
+	var arch: Array = _squad("spearman", a + Vector3(0.0, 0.0, -40.0), 20)
 	await pframes(4)
+	if not arch.is_empty() and (arch[0] as Unit).squad_id > 0:
+		GameManager.squad_set_ability((arch[0] as Unit).squad_id, "spearman_1d", false)
 	var line_dir: Vector3 = (b - a).normalized()
 	var a2 := a + Vector3(0.0, 0.0, -40.0)
 	var b2 := b + Vector3(0.0, 0.0, -40.0)

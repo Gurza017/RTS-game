@@ -391,6 +391,13 @@ func _garrison_in(b: Building, sq: Array, what: String, round_i: int) -> int:
 		if _inside(men) == men.size():
 			break
 	var n_in: int = _inside(men)
+	if n_in < men.size():
+		for u in men:
+			if u == null or not is_instance_valid(u) or (u as Unit).garrisoned:
+				continue
+			var uu := u as Unit
+			print("    не вошёл: до ворот %.1f м, state=%d retreating=%s stuck=%d moved=%s target=%s incoming=%s" % [
+				_xz(uu.global_position, gate), int(uu.state), str(uu.retreating), uu._stuck_streak, str(uu.moved_recently()), str(uu.attack_target), str(b._incoming.has(int(sq[0])))])
 	verdict("B%d.%d лучники вошли в %s в срок (%d из %d, %.1f с при бюджете %.1f)" % [round_i + 1, 1 if what.begins_with("баш") else 3, what, n_in, men.size(), float(w) / 60.0, float(bound) / 60.0],
 		ok and n_in == men.size())
 	return w
@@ -439,6 +446,17 @@ func _garrison_out(b: Building, sq: Array, what: String, round_i: int, tower: bo
 		elif uu.state != Unit.State.IDLE: n_mov += 1
 		if not uu.garrisoned:
 			far_gate = maxf(far_gate, _xz(uu.global_position, gate))
+	if clear_n < men.size():
+		print("    после высадки: incoming=%s garrison=%d" % [str(b._incoming), b.garrison.size()])
+		var shown := 0
+		for u in men:
+			if u == null or not is_instance_valid(u):
+				continue
+			var uu := u as Unit
+			if shown < 6:
+				print("    боец: до ворот %.1f м, state=%d garrisoned=%s in_bld=%s retreating=%s move_target=%s" % [
+					_xz(uu.global_position, gate), int(uu.state), str(uu.garrisoned), str(_in_bld(uu.global_position)), str(uu.retreating), str(uu.move_target)])
+				shown += 1
 	verdict("B%d.%d лучники вышли из %s и встали у ворот (%d из %d, %.1f с)" % [round_i + 1, 2 if tower else 4, what, clear_n, men.size(), float(w) / 60.0],
 		clear_n == men.size(), "внутри %d, в фундаменте %d, ещё идут %d, дальний от ворот %.1f м" % [n_gar, n_bld, n_mov, far_gate])
 	# Дать отряду встать на точку выхода

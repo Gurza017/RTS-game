@@ -271,9 +271,11 @@ func _c_pick(base: Vector3) -> void:
 	var lair = GameManager.troll_lair
 	if lair != null and is_instance_valid(lair):
 		var expect: Vector3 = lair.global_position + Vector3(lair._draw_cx, lair._draw_base_y, 0.0)
-		verdict("C1 кольцо пня — ровно под основанием рисунка (сдвига к камере нет)",
-			_xz(lair.ring_center(), expect) < 0.05 and _GobCfg.TROLL_LAIR_RING_SHIFT == 0.0,
-			"снос %.2f м" % _xz(lair.ring_center(), expect))
+		# ТЗ 29.09.2026 (блок 3, явный разворот ТЗ 18.09): пень внутри кольца —
+		# сдвиг ОТ камеры (знак минус) и овал шире основания
+		verdict("C1 кольцо пня сдвинуто от камеры под рисунок и шире основания (ТЗ 29.09)",
+			_GobCfg.TROLL_LAIR_RING_SHIFT < 0.0 and _GobCfg.TROLL_LAIR_RING_OVAL.x > 1.0,
+			"сдвиг %.2f R, овал %s, снос центра %.2f м" % [_GobCfg.TROLL_LAIR_RING_SHIFT, str(_GobCfg.TROLL_LAIR_RING_OVAL), _xz(lair.ring_center(), expect)])
 	var t: Building = _TowerS.new()
 	t.faction = F
 	main.world_add(t)

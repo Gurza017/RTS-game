@@ -31,6 +31,9 @@ var _gather_res_type: int  = -1
 ## кусок руды при выработке освобождается насовсем, и спросить его номер потом
 ## уже не у кого — а именно в этот момент он и нужен, чтобы взять СОСЕДНИЙ кусок
 ## В ТОЙ ЖЕ КУЧЕ, а не первый попавшийся на карте (см. _auto_find_resource)
+## Точка ДЕЛЯНКИ — где стояло дерево (ТЗ 29.09.2026, блок 6): следующий ствол
+## ищется от неё, а не от ворот склада, где рабочий стоит после сдачи
+var _gather_origin: Vector3 = Vector3.INF
 var _gather_cluster: int   = 0
 var _gather_timer: float   = 0.0
 var _axe: Node3D           = null
@@ -206,15 +209,21 @@ func _auto_find_resource(res_type: int) -> void:
 	# Недоступная жила исключается ровно на этот поиск (см. _blocked_target)
 	var skip: ResourceNode = _blocked_target
 	_blocked_target = null
+	# ── ОТ ДЕЛЯНКИ, А НЕ ОТ СЕБЯ (ТЗ 29.09.2026, блок 6) ─────────────────────
+	# Дерево кончалось, пока рабочий нёс груз; у ворот склада он искал
+	# следующий ствол в WOOD_NEXT_RADIUS от СЕБЯ — лес стоит дальше, и
+	# бригада вставала кучей у замка. Ищем от точки последнего дерева
+	# Недостижимая жила (skip) — искать от СЕБЯ: к её округе всё равно не дойти
+	var origin: Vector3 = _gather_origin if (_gather_origin.x != INF and skip == null) else global_position
 	# 1. Рядом: свой кластер для руды, соседний ствол для леса
 	var new_target: ResourceNode = GameManager.find_next_resource_nearby(
-		global_position, res_type, _gather_cluster, 1.0, skip)
-	# 1б. Не вышло — ищем ЧУТЬ ШИРЕ. Это случай «следующий ствол перекрыт»:
-	# рядом стволы есть, но до них не дойти, и стоять столбом посреди делянки
-	# рабочий не должен
-	if new_target == null and skip != null:
+		origin, res_type, _gather_cluster, 1.0, skip)
+	# 1б. Не вышло — ищем ШИРЕ. Раньше только при перекрытом стволе; теперь и
+	# когда делянка выработана: стоять столбом рабочий не должен, пока лес
+	# вообще есть (ТЗ 29.09.2026: «рубить непрерывно»)
+	if new_target == null:
 		new_target = GameManager.find_next_resource_nearby(
-			global_position, res_type, _gather_cluster, WIDE_SEARCH_SCALE, skip)
+			origin, res_type, _gather_cluster, WIDE_SEARCH_SCALE, skip)
 	# 2. Рабочий ИИ не имеет права застревать — идёт на следующую кучу
 	if new_target == null and faction != Constants.FACTION_PLAYER:
 		new_target = GameManager.find_next_cluster_resource(
@@ -382,6 +391,7 @@ func command_gather(node: ResourceNode) -> void:
 		_approach_fails = 0
 	gather_target    = node
 	_gather_res_type = node.resource_type
+	_gather_origin   = node.global_position
 	# Номер кучи запоминается ЗДЕСЬ, а не спрашивается у цели потом: к моменту,
 	# когда рабочий доработает кусок, узла уже не будет (руда освобождается
 	# насовсем, см. ResourceNode.extract), и спросить будет не у кого
@@ -1874,6 +1884,23 @@ func _process_gather(delta: float) -> void:
 			var taken       := gather_target.extract(carry_capacity())
 			carrying_amount  = taken
 			carrying_type    = gather_target.resource_type
+			# ── ДЕРЕВО СТАЛО ПНЁМ — СЛЕДУЮЩЕЕ БЕРЁТСЯ СРАЗУ, ОТ ПНЯ ───────────
+			# (ТЗ 29.09.2026, блок 6). Иначе у ворот ветка «remaining > 0» не
+			# сработает, и рабочий пойдёт искать дерево от склада
+			if gather_target.remaining <= 0.0 and gather_target.cluster_id == 0:
+				var here: Vector3 = gather_target.global_position
+				var nxt: ResourceNode = GameManager.find_next_resource_nearby(
+					here, gather_target.resource_type, 0, 1.0, null)
+				if nxt == null:
+					nxt = GameManager.find_next_resource_nearby(
+						here, gather_target.resource_type, 0, WIDE_SEARCH_SCALE, null)
+				if nxt != null and nxt != gather_target:
+					_free_slot()
+					gather_target      = nxt
+					_gather_res_type   = nxt.resource_type
+					_gather_cluster    = nxt.cluster_id
+					_gather_origin     = nxt.global_position
+					_gather_slot_valid = false
 		var drop_off := GameManager.get_nearest_dropoff(faction, global_position)
 		if drop_off:
 			move_target = _dest_point(drop_off)

@@ -98,18 +98,19 @@ func _run() -> void:
 	# Ровно то, ради чего конфиг и заводился: меняем СПИСОК параметров и
 	# смотрим, что окно перестроилось само, без единой правки кода
 	var before: Array = _card_lines("monk")
-	var had_range: bool = _has_line(before, "Дальность")
-	# Убираем «Дальность» у Монаха прямо в рантайме
+	# «Дальность» из карточек снята (ТЗ 29.09.2026, блок 4) — проверяем на «Скорость»
+	var had_range: bool = _has_line(before, "Скорость")
+	# Убираем «Скорость» у Монаха прямо в рантайме
 	var monk_cfg: Dictionary = _TipCfg.TOOLTIPS["monk"]
 	var orig: Array = (monk_cfg["visible_stats"] as Array).duplicate(true)
 	var trimmed: Array = []
 	for r in orig:
-		if String((r as Dictionary).get("key", "")) != "range":
+		if String((r as Dictionary).get("key", "")) != "move_speed":
 			trimmed.append(r)
 	monk_cfg["visible_stats"] = trimmed
 	var after: Array = _card_lines("monk")
 	verdict("B1 убрали параметр из конфига — строка пропала из окна",
-		had_range and not _has_line(after, "Дальность"),
+		had_range and not _has_line(after, "Скорость"),
 		"было %d строк, стало %d" % [before.size(), after.size()])
 
 	# Добавляем параметр, которого у Монаха не было

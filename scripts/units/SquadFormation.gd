@@ -186,12 +186,24 @@ static func close_ranks(members: Array, slots: Array,
 	# Бойцы, которым места не хватило (пополнение из замка встало в хвост),
 	# просто идут за строем — отдельного места для них в разметке нет
 	if left > 0 and slots.size() > 0:
+		# ── ЛИШНИЕ — ДОПОЛНИТЕЛЬНОЙ ШЕРЕНГОЙ, А НЕ В ОДНУ ТОЧКУ (ТЗ 29.09.2026) ──
+		# Все, кому не хватило места, шли в одну точку за последним слотом и
+		# сбивались кучей: разведение не даёт им встать, отряд «не собирается»
+		var pr: int = maxi(_per_row(slots, course), 1)
+		var side := Vector3(-course.z, 0.0, course.x)
+		var lr0: int = ((slots.size() - 1) / pr) * pr
+		var row_mid: Vector3 = ((slots[lr0] as Vector3) + (slots[slots.size() - 1] as Vector3)) * 0.5
+		var k := 0
 		for i in range(nm):
 			if taken[i] == 1:
 				continue
 			var extra = free_men[i]
+			var rk: int = k / pr
+			var ck: int = k % pr
+			var p: Vector3 = row_mid - course * (0.9 + 0.7 * float(rk)) + side * ((float(ck) - float(pr - 1) * 0.5) * 0.7)
 			extra.allow_reform_move()
-			extra.command_move(slots[slots.size() - 1] - course * 1.2, slow, course)
+			extra.command_move(p, slow, course)
+			k += 1
 	return moved
 
 ## Сколько бойцов в одной шеренге. Считается по самой разметке: подряд идущие

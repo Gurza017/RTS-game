@@ -507,10 +507,21 @@ func _d_wood() -> void:
 	w.gather_target = null
 	w.carrying_amount = 0.0
 	w._auto_find_resource(Constants.RESOURCE_WOOD)
-	verdict("D2 за делянкой рабочий игрока встаёт, а не бежит через карту",
-		w.gather_target == null and w.state == Unit.State.IDLE,
-		"цель=%s, до дальнего %.1f м при радиусе делянки %.1f" % [
-			w.gather_target, r * 2.0, r])
+	# ТЗ 29.09.2026 (блок 6): «рабочие рубят непрерывно» — делянка кончилась,
+	# берём ближайший ствол в широком радиусе (WIDE_SEARCH_SCALE × делянка)
+	verdict("D2 делянка кончилась — рабочий берёт ближайший ствол в широком радиусе, а не встаёт",
+		w.gather_target == t_far and w.state != Unit.State.IDLE,
+		"цель=%s, до дальнего %.1f м при радиусе делянки %.1f (широкий ×%.1f)" % [
+			w.gather_target, r * 2.0, r, Worker.WIDE_SEARCH_SCALE])
+	# А совсем без леса в широком радиусе — встаёт
+	t_far.remaining = 0.0
+	w.gather_target = null
+	w.carrying_amount = 0.0
+	w._auto_find_resource(Constants.RESOURCE_WOOD)
+	verdict("D2б леса нет и в широком радиусе — встаёт, а не бежит через карту",
+		w.gather_target == null and w.state == Unit.State.IDLE, "цель=%s" % w.gather_target)
+	# Дальнее дерево возвращаем D3 (рабочий ИИ)
+	t_far.remaining = 500.0
 
 	# ИИ в той же обстановке дальнее дерево возьмёт
 	var ai := _new_worker(base + Vector3(0, 0, 1.5), Constants.FACTION_ENEMY)

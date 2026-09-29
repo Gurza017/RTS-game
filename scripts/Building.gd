@@ -2120,13 +2120,18 @@ func spawn_ruin() -> Node3D:
 	ruin.add_child(slab)
 	parent.add_child(ruin)
 	ruin.global_position = global_position
-	# Срок жизни руин — в конфиге владельца; 0 означает «лежат вечно»
-	var life: float = _UCfgB.RUIN_LIFETIME_SEC
+	# Срок жизни руин — в конфиге владельца; 0 означает «лежат вечно».
+	# Наследник вправе ответить своё (пень — вечно, ТЗ 29.09.2026)
+	var life: float = ruin_lifetime()
 	if life > 0.0:
 		var fade: float = minf(_UCfgB.RUIN_FADE_SEC, life)
 		var t := ruin.get_tree().create_timer(maxf(life - fade, 0.01))
 		t.timeout.connect(Building.ruin_dissolve.bind(ruin, fade))
 	return ruin
+
+## Срок жизни руины этой постройки; 0 — лежит вечно (см. spawn_ruin)
+func ruin_lifetime() -> float:
+	return _UCfgB.RUIN_LIFETIME_SEC
 
 ## Растворить руину за `sec` и освободить. Материал берётся с RuinSprite ПРИ
 ## ЗАПУСКЕ, а не при закладке: загон подменяет спрайт плоским мешем уже после

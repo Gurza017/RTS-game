@@ -3816,6 +3816,10 @@ func _formation_settle(sid: int) -> void:
 		u.post_pos = p
 		u._post_valid = true
 		u._settled = true
+		# Застывший «как есть» смотрит по курсу отряда, а не по ходу (ТЗ 29.09.2026)
+		if course.length_squared() > 1e-6:
+			u._facing = course.normalized()
+			u.mark_flip_dirty()
 		slots.append(p)
 	if slots.is_empty():
 		return
@@ -7747,6 +7751,10 @@ func _sweep_morale(delta: float) -> void:
 		if bool(sq.get("heal_queue", false)):
 			_tick_heal_queue(sid, sq, now)
 			continue
+		# 1в. ИДЁТ В ЗАМОК ПО ЗАЯВКЕ (ТЗ 29.09.2026, блок 5): паника по дороге
+		# снимала отход, и сторож замка отменял поход — раненые «не доходили»
+		if bool(sq.get("to_castle", false)):
+			continue
 		# 2. ВНЕ БОЯ МОРАЛЬ ВОЗВРАЩАЕТСЯ.
 		# «В БОЮ» ДЛЯ МОРАЛИ — ЭТО «НАС БЬЮТ», А НЕ «У НАС ЕСТЬ ЦЕЛЬ» (срочный
 		# багфикс 19.09.2026): squad_in_combat отвечает «да» уже на ПРИКАЗ
@@ -7834,6 +7842,23 @@ func _enter_heal_queue(sid: int) -> void:
 	sq["heal_queue"] = true
 	sq["heal_next_ms"] = 0
 	heal_queue_entries += 1
+
+## Кнопка «в замок» (ТЗ 29.09.2026, блок 5): отряд, которого замок не принял
+## (полно), встаёт в ту же очередь, что и паникующий, и садится сам по мере
+## освобождения мест (_tick_heal_queue)
+func squad_queue_heal(sid: int) -> void:
+	if sid > 0 and squads.has(sid):
+		_enter_heal_queue(sid)
+
+## Отряд идёт в замок по заявке (Castle.request_garrison) — мораль его не судит
+func squad_mark_to_castle(sid: int, on: bool) -> void:
+	var raw: Variant = squads.get(sid)
+	if raw == null:
+		return
+	if on:
+		(raw as Dictionary)["to_castle"] = true
+	else:
+		(raw as Dictionary).erase("to_castle")
 
 func squad_in_heal_queue(sid: int) -> bool:
 	var raw: Variant = squads.get(sid)

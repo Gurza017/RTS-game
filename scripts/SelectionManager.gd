@@ -518,7 +518,10 @@ func _compute_line_slots(line_start: Vector3, line_end: Vector3, count: int) -> 
 	for i in range(count):
 		var rank := i / per_row
 		var file := i % per_row
-		var t    := (float(file) + 0.5) / float(per_row)
+		# Неполный последний ряд — по центру (ТЗ 29.09.2026, блок 1): прижатый к
+		# левому флангу хвост читался как «рваная шеренга»
+		var in_row: int = mini(per_row, count - rank * per_row)
+		var t    := (float(file) + 0.5 + float(per_row - in_row) * 0.5) / float(per_row)
 		var pos  := line_start.lerp(line_end, t) + row_offset * (rank * ROW_DEPTH)
 		pos.y    = 0.0
 		slots.append(pos)
@@ -657,9 +660,23 @@ func _deep_formation_slots(line_start: Vector3, line_end: Vector3, movable: Arra
 	var widths: Array = []
 	var per_rows: Array = []
 	var widest := 0.0
+	var n_all := 0
+	for b0 in blocks:
+		n_all += (b0 as Array).size()
 	for b in blocks:
 		var n: int = (b as Array).size()
-		var per_row: int = maxi(1, int(ceil(float(n) / float(DEEP_ROWS))))
+		var per_row: int
+		if _block_is_spearman(b):
+			per_row = maxi(1, int(ceil(float(n) / float(DEEP_ROWS))))
+		else:
+			# ── КОРОБОЧКА — ТОЛЬКО КОПЕЙЩИКАМ (ТЗ 29.09.2026, блок 5, шестой
+			# разворот) ─────────────────────────────────────────────────
+			# Жалоба: «стена копий по 3 в ряд зажимает лучников и мечников,
+			# их нельзя растянуть». В режиме [2] три шеренги держит только
+			# блок копейщиков; остальным ширина — их доля нарисованной линии,
+			# как в широком фронте: сколько игрок протянул, столько и рядов
+			var share: float = total_len * float(n) / float(maxi(n_all, 1))
+			per_row = clampi(int(floor(share / UNIT_SPACING)), 1, n)
 		per_rows.append(per_row)
 		var w: float = float(per_row) * UNIT_SPACING
 		widths.append(w)
@@ -708,6 +725,19 @@ func _deep_formation_slots(line_start: Vector3, line_end: Vector3, movable: Arra
 			cursor += w + BLOCK_GAP
 		depth_cursor += float(deepest + 1) * ROW_DEPTH + DEEP_ROW_GAP
 	return out
+
+## Блок раскладки — отряд копейщиков? (коробочка [2] — только им, ТЗ 29.09.2026)
+func _block_is_spearman(block: Array) -> bool:
+	for m in block:
+		if m == null or not is_instance_valid(m):
+			continue
+		var u := m as Unit
+		if u == null:
+			continue
+		if u.squad_id > 0:
+			return GameManager.squad_type(u.squad_id) == "spearman"
+		return String(u.stat_id) == "spearman"
+	return false
 
 ## Раскладка ОДНОТИПНОГО выделения по текущему режиму (широкий фронт или
 ## коробочка) — единая точка выбора для превью и приказа
@@ -772,6 +802,13 @@ func _block_formation_slots(line_start: Vector3, line_end: Vector3, movable: Arr
 			per_row = maxi(1, int(ceil(float(block.size()) / float(GameManager.SPEAR_WALL_ROWS))))
 			var sp: float = clampf(share / float(per_row), UNIT_SPACING, UNIT_SPACING * WALL_STRETCH_MAX)
 			var w: float = sp * float(per_row)
+			# ── БЛОК ШИРЕ ДОЛИ — НЕ НАКЛАДЫВАТЬ НА СОСЕДЕЙ (ТЗ 29.09.2026, блок 1) ──
+			# Три шеренги стены на короткой протяжке дают блок шире его доли линии;
+			# курсор шёл только на долю, и блоки ложились друг на друга — бойцы
+			# разных отрядов не могли встать в свои места (разведение 0.67 м)
+			if w > share:
+				b_end = b_start + dir * w
+				share = w
 			var mid_b: Vector3 = (b_start + b_end) * 0.5
 			var w_start: Vector3 = mid_b - dir * (w * 0.5)
 			slots = []
@@ -2437,7 +2474,10 @@ func _handle_right_click(screen_pos: Vector2, run: bool = false) -> void:
 	if target is Castle and target.faction == Constants.FACTION_PLAYER:
 		if _try_garrison(target as Castle):
 			return
-		if _try_release_tower(target):
+		# Выделены бойцы, которых здание ПРИНИМАЕТ, а сесть не вышло (полно,
+		# крыша занята) — это не приказ «выпустить» (ТЗ 29.09.2026, блок 2:
+		# «то садятся, то не садятся» — клик по полной башне выгонял гарнизон)
+		if not _selection_fits(target as Castle) and _try_release_tower(target):
 			return
 
 	# ПКМ ПО РУИНЕ — отстроить заново: на её месте сразу встаёт стройплощадка,
@@ -3176,6 +3216,18 @@ func _try_monk_heal_order(target: Unit) -> bool:
 	return true
 ## Стендам: сколько раз ПКМ монахом прочитан как приказ лечить
 var monk_heal_orders: int = 0
+
+## Есть ли в выделении отряд, который это здание берёт в гарнизон
+func _selection_fits(c: Castle) -> bool:
+	if c == null or not is_instance_valid(c):
+		return false
+	for u in selected_units:
+		if not is_instance_valid(u) or not (u is Unit):
+			continue
+		var sid: int = (u as Unit).squad_id
+		if sid > 0 and c.garrison_accepts(GameManager.squad_type(sid)):
+			return true
+	return false
 
 ## ПКМ по своей башне с гарнизоном — лучники выходят. false — это не башня,
 ## не своя или внутри пусто

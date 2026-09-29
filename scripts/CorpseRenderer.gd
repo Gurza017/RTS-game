@@ -459,7 +459,7 @@ func _wet_frac(unit: Unit, at: Vector3, ground_y: float) -> float:
 	return WET_FRAC_BIG if unit.nav_clearance() >= 3.5 else WET_FRAC
 
 ## Полоса фигуры в кадре (доли высоты) — один раз на мокрый бакет
-func _setup_wet(b, sheet: Texture2D, frames: int, wet: float) -> void:
+func _setup_wet(b, sheet: Texture2D, frames: int, wet: float, fidx: int = 0) -> void:
 	b.wet_ready = true
 	var top := 0.0
 	var bot := 1.0
@@ -477,9 +477,12 @@ func _setup_wet(b, sheet: Texture2D, frames: int, wet: float) -> void:
 		# п. 2): тело погружается боком вдоль всего туловища
 		var x0 := fw
 		var x1 := -1
+		# Кадр, который РИСУЕТСЯ (у тролля — последний кадр гибели), а не нулевой
+		# (ТЗ 29.09.2026, блок 8): полоса фигуры мерилась по стоящей фигуре
+		var ox: int = clampi(fidx, 0, maxi(frames - 1, 0)) * fw
 		for y in range(0, h, 2):
 			for x in range(0, fw, 2):
-				if img.get_pixel(x, y).a > 0.3:
+				if img.get_pixel(ox + x, y).a > 0.3:
 					y0 = mini(y0, y)
 					y1 = maxi(y1, y)
 					x0 = mini(x0, x)
@@ -694,7 +697,7 @@ func spawn(unit: Unit, world_root: Node3D, ground_y: float, live: bool = false) 
 			key += "|wet%.2f" % wet
 	var b := _get_or_make_bucket(key, sheet, frames, px, world_root)
 	if wet > 0.0 and not b.wet_ready:
-		_setup_wet(b, sheet, frames, wet)
+		_setup_wet(b, sheet, frames, wet, int(sf[1]))
 	if b.free.is_empty():
 		b.grow(GROW_STEP)
 

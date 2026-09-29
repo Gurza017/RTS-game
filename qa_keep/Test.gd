@@ -284,7 +284,9 @@ func _check_garrison(keep: Castle) -> void:
 				continue
 			if u.garrisoned:
 				inside += 1
-			elif u.global_position.distance_to(gate) <= keep._door_radius() + 0.05:
+			elif u.global_position.distance_to(gate) <= keep._door_radius() + 0.05 					or keep.at_deposit(u.global_position):
+				# ТЗ 29.09.2026 (блок 2): вход засчитывается и в полосе у стены
+				# (at_deposit) — боец исчезает у самой башни, а не за 5 м
 				vanish.append(u.global_position)
 		if inside == men.size():
 			break
@@ -311,8 +313,12 @@ func _check_garrison(keep: Castle) -> void:
 	var worst: float = 0.0
 	for p in vanish:
 		worst = maxf(worst, (p as Vector3).distance_to(gate))
-	verdict("B2 боец исчезает у дверей, а не за пять метров до них",
-		not vanish.is_empty() and worst <= keep._door_radius() + 0.06,
+	var wall_r: float = keep.ring_radius() + 0.7
+	# Дистанцию зачисления сообщает сам замок (absorb_worst_dist): выборка по
+	# кадрам не ловит бойца, исчезающего в тот же кадр, что вошёл в полосу
+	worst = maxf(worst, keep.absorb_worst_dist)
+	verdict("B2 боец исчезает у дверей или у самой стены, а не за пять метров до них",
+		worst > 0.0 and worst <= maxf(keep._door_radius() + 0.06, wall_r),
 		"худший в %.2f м от ворот при радиусе дверей %.2f (прежний допуск %.1f)" % [
 			worst, keep._door_radius(), _UCfg.GARRISON_ENTER_RADIUS])
 	verdict("C1 колец на карте не осталось", rings == 0,

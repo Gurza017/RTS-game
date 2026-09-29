@@ -4765,24 +4765,32 @@ func _spawn_river() -> void:
 ## вершинным цветом — множитель не умеет СВЕТЛИТЬ, и брод на глаз не читался
 ## мелью. Здесь та же текстура подмешана к светлому бирюзово-зелёному
 ## (SHALLOW_COLOR, доля SHALLOW_MIX): рисунок волн сохраняется, тон — мель
-const SHALLOW_COLOR := Color(0.52, 0.86, 0.78)
-const SHALLOW_MIX := 0.55
+## ТЗ 29.09.2026 (блок 8): «цвет воды на броде слишком глубокий» — тон
+## светлее и теплее (песок сквозь воду), текстура волн только рисунком
+const SHALLOW_COLOR := Color(0.62, 0.90, 0.82)
+const SHALLOW_MIX := 0.62
+const SHALLOW_SAND := Color(0.92, 0.88, 0.68)
 func _ford_water_mat(tex: Texture2D) -> Material:
 	var sh := Shader.new()
 	sh.code = """shader_type spatial;
 render_mode unshaded, cull_disabled;
 uniform sampler2D water_tex : source_color, filter_nearest, repeat_enable;
 uniform vec4 shallow : source_color;
+uniform vec4 sand : source_color;
 uniform float mix_k = 0.55;
 uniform float has_tex = 1.0;
 void fragment() {
 	vec3 w = has_tex > 0.5 ? texture(water_tex, UV).rgb : vec3(0.30, 0.62, 0.86);
-	ALBEDO = mix(w, shallow.rgb, mix_k);
+	// Мель: светлый тон с песком, волны — только светотенью рисунка
+	float lum = dot(w, vec3(0.299, 0.587, 0.114));
+	vec3 shallow_col = mix(sand.rgb, shallow.rgb, 0.72) * (0.84 + 0.36 * lum);
+	ALBEDO = mix(w, shallow_col, mix_k);
 }
 """
 	var m := ShaderMaterial.new()
 	m.shader = sh
 	m.set_shader_parameter("shallow", SHALLOW_COLOR)
+	m.set_shader_parameter("sand", SHALLOW_SAND)
 	m.set_shader_parameter("mix_k", SHALLOW_MIX)
 	m.set_shader_parameter("has_tex", 1.0 if tex != null else 0.0)
 	if tex != null:

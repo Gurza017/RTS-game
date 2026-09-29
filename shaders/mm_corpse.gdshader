@@ -101,6 +101,22 @@ uniform float fig_left = 0.0;
 uniform float fig_right = 1.0;
 uniform vec3 water_tone : source_color = vec3(0.33, 0.66, 0.70);
 uniform float water_mix : hint_range(0.0, 1.0) = 0.72;
+// ── СТОРОНА ВОДЫ — ПО ЭКРАНУ, А НЕ ПО РИСУНКУ (ТЗ 29.09.2026, блок 8) ────
+// Прежде под воду уходила сторона РИСУНКА (u > cut): у тел с yaw+PI или
+// зеркалом она оказывалась ВЕРХНЕЙ по экрану — «вода вверху, тело внизу».
+// Теперь под водой всегда НИЖНЯЯ по экрану половина туловища (ближняя к
+// камере), а верх тела (голова, плечи) торчит над водой: знак берётся у
+// оси ширины квада против взгляда камеры. Голова сухая всегда: линия
+// воды идёт наискось — у головы выше, к ступням тело уходит глубже
+varying float v_axdot;
+
+void vertex() {
+	vec3 ax = normalize(MODEL_MATRIX[0].xyz);
+	vec3 cf = -INV_VIEW_MATRIX[2].xyz;
+	cf.y = 0.0;
+	float l = length(cf);
+	v_axdot = (l > 1e-4) ? dot(ax, cf / l) : 1.0;
+}
 
 void fragment() {
 	float fidx = floor(COLOR.r * 255.0 + 0.5);
@@ -144,15 +160,28 @@ void fragment() {
 		rgb = mix(rgb, earth, rot) * mix(1.0, decay_darkest, rot);
 	}
 	if (submerge > 0.001) {
-		// u — координата ВНУТРИ кадра с учётом зеркала: сторона фигуры,
-		// ушедшая под воду, у зеркального тела та же по рисунку
-		float cut = fig_right - submerge * (fig_right - fig_left);
-		float wobble = 0.012 * sin(UV.y * 40.0);
-		float under = u - (cut + wobble);
+		// Полоса фигуры в СЫРЫХ UV.x (зеркало переворачивает рисунок, не квад)
+		float mr = (COLOR.g > 0.5) ? 1.0 : 0.0;
+		float fl = mix(fig_left, 1.0 - fig_right, mr);
+		float fr = mix(fig_right, 1.0 - fig_left, mr);
+		// «К нижнему краю экрана»: край UV.x=1 лежит дальше от камеры, если
+		// ось ширины смотрит вдоль взгляда (v_axdot > 0)
+		bool plus_up = v_axdot > 0.0;
+		float low = plus_up ? (1.0 - UV.x) : UV.x;
+		float lo_a = plus_up ? (1.0 - fr) : fl;   // верхний по экрану край фигуры
+		float lo_b = plus_up ? (1.0 - fl) : fr;   // нижний по экрану край фигуры
+		// Продольная координата тела: 0 — голова, 1 — ступни
+		float h = clamp((UV.y - fig_top) / max(fig_bot - fig_top, 0.01), 0.0, 1.0);
+		// Линия наискось: у головы над водой остаётся больше, к ступням тело
+		// уходит глубже; голова (первая пятая часть) сухая всегда
+		float sub = submerge * smoothstep(0.12, 0.55, h) * (0.6 + 0.4 * h);
+		float cut = lo_b - sub * (lo_b - lo_a);
+		float wobble = 0.004 * sin(UV.y * 40.0);
+		float under = low - (cut + wobble);
 		if (under > 0.0) {
 			rgb = mix(rgb, water_tone, water_mix);
-		} else if (under > -0.012) {
-			rgb = mix(rgb, vec3(0.85, 0.95, 0.95), 0.55);
+		} else if (under > -0.006) {
+			rgb = mix(rgb, vec3(0.85, 0.95, 0.95), 0.45);
 		}
 	}
 	ALBEDO = rgb;

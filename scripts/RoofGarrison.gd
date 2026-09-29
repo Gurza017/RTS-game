@@ -103,8 +103,15 @@ func setup(p_host: Node3D, p_layout: int, p_cap: int, p_foot: float, p_flank_foo
 ## Массив строится по событию (такт огня, синхронизация) — не покадрово
 func roof_units() -> Array:
 	var out: Array = []
+	# Вошедшие показываются на крыше СРАЗУ, не дожидаясь всего отряда (ТЗ
+	# 29.09.2026, блок 2): идущие (_incoming) с укрытыми бойцами — тоже
+	var sids: Array = []
 	for rec in host.garrison:
-		var sid: int = int((rec as Dictionary).get("sid", 0))
+		sids.append(int((rec as Dictionary).get("sid", 0)))
+	for s0 in host._incoming:
+		if not sids.has(int(s0)):
+			sids.append(int(s0))
+	for sid in sids:
 		if sid <= 0 or not host.roof_accepts(GameManager.squad_type(sid)):
 			continue
 		for m in GameManager.squad_members(sid):

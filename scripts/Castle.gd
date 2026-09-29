@@ -160,10 +160,21 @@ func _door_radius() -> float:
 ## конфига. То есть GARRISON_ENTER_RADIUS не отменён — он стал СТРАХОВКОЙ, а не
 ## обычным путём, и мягкой блокировки, от которой тут однажды уже лечились
 ## (см. «ПРИХОД СЧИТАЕТСЯ ОТ ВОРОТ» ниже), не возвращается
-const DOOR_PATIENCE := 8.0
+## 8.0 → 2.5 (ТЗ 29.09.2026, блок 2): «неадекватная задержка, как будто долго
+## поднимаются по невидимой лестнице» — хвост толпы ждал восемь секунд
+const DOOR_PATIENCE := 2.5
 
 ## Когда отряд встал в очередь ко входу, ticks_msec. Ключ — sid
 var _incoming_at: Dictionary = {}
+
+## Свежий билет застрявшим — не чаще раза в секунду на отряд
+var _kick_ms: Dictionary = {}
+func _kick_due(sid: int) -> bool:
+	var now: int = Time.get_ticks_msec()
+	if now - int(_kick_ms.get(sid, -100000)) < 2000:
+		return false
+	_kick_ms[sid] = now
+	return true
 
 func _enter_radius(squad_id: int) -> float:
 	var door: float = minf(_door_radius(), _UCfg.GARRISON_ENTER_RADIUS)
@@ -222,6 +233,8 @@ func request_garrison(squad_id: int) -> bool:
 		return false
 	_incoming.append(squad_id)
 	_incoming_at[squad_id] = Time.get_ticks_msec()
+	absorb_worst_dist = 0.0
+	GameManager.squad_mark_to_castle(squad_id, true)
 	# РАЗМЕТКА СТРОЯ СНИМАЕТСЯ: отряд отходит, а не марширует квадратом, и
 	# смыкание рядов по дороге к воротам только тормозило бы его
 	GameManager.squad_clear_formation(squad_id)
@@ -269,7 +282,13 @@ func _slot_of(squad_id: int) -> int:
 	return -1
 
 ## Убрать бойца с карты внутрь замка
+## Стендам: самая большая дистанция от ворот, на которой бойца зачислили
+## (сбрасывает request_garrison)
+var absorb_worst_dist: float = 0.0
+
 func absorb_unit(u: Unit) -> void:
+	if u != null and is_instance_valid(u) and not u.garrisoned:
+		absorb_worst_dist = maxf(absorb_worst_dist, u.global_position.distance_to(_gate_position()))
 	if u == null or not is_instance_valid(u) or u.garrisoned:
 		return
 	u.garrisoned = true
@@ -400,10 +419,10 @@ func _release_members(squad_id: int) -> void:
 	var dest := gate + exit_dir * SQUAD_EXIT_DISTANCE
 	if has_rally:
 		dest = rally_point
-		var course := dest - gate
-		course.y = 0.0
-		if course.length() > 0.01:
-			exit_dir = course.normalized()
+	# Оси блока — оси фасада и без разворота к флажку (ТЗ 29.09.2026, блок 2):
+	# поворот давал «ромб», а плотная сетка 0.35 м рвалась разведением —
+	# «выпадает неаккуратной полосой». Интервал — тот же, что у найма
+	var spc: float = spawn_spacing(squad_spacing)
 	var members := GameManager.squad_members(squad_id)
 	# КВАДРАТ, а не полоса шириной в squad_cols замка: вылеченный отряд выходит
 	# тем же строем, каким его нанимали (см. Building.square_cols)
@@ -421,8 +440,8 @@ func _release_members(squad_id: int) -> void:
 		var row: int = i / cols
 		# Смещение считается в ОСЯХ ВЫХОДА, а не в мировых: иначе отряд,
 		# выходящий на восток, разворачивал бы строй боком к направлению марша
-		var off := side * ((float(col) - float(cols - 1) * 0.5) * squad_spacing) \
-			+ exit_dir * (float(row) * squad_spacing)
+		var off := side * ((float(col) - float(cols - 1) * 0.5) * spc) \
+			+ exit_dir * (float(row) * spc)
 		u.formation_row = row
 		release_unit(u, gate + off)
 		# ПРИКАЗ ПОЛУЧАЮТ ВСЕ ЧЛЕНЫ ОТРЯДА, а не только те, кто сидел внутри:
@@ -560,7 +579,14 @@ func _process_garrison(delta: float) -> void:
 			var u: Unit = m
 			if u.garrisoned:
 				continue
-			if u.global_position.distance_to(gate) <= _enter_radius(sid):
+			var up: Vector3 = u.global_position
+			var dg: float = up.distance_to(gate)
+			# ── ДОШЁЛ ДО ДВЕРИ — ВСОСАЛО (ТЗ 29.09.2026, блок 2) ─────────────────
+			# Три двери: радиус у точки ворот; полоса у нарисованной стены (тот же
+			# допуск, что у сдачи ресурсов, at_deposit); упор в чужие тела у самой
+			# башни — враги вокруг не «невидимая стена»
+			if dg <= _enter_radius(sid) or at_deposit(up) \
+					or (u._enemy_contact and dg <= _UCfg.GARRISON_ENTER_RADIUS):
 				absorb_unit(u)
 				continue
 			all_in = false
@@ -588,6 +614,14 @@ func _process_garrison(delta: float) -> void:
 			if u.state == Unit.State.IDLE:
 				u.begin_retreat()
 				u.command_move(gate, false, Vector3.ZERO, true)
+			elif u.retreating and u.state == Unit.State.MOVING and u._stuck_streak >= 3 \
+					and not u.moved_recently() and _kick_due(sid):
+				# Упёрся в чужие тела и НЕ ПРОДВИГАЕТСЯ полторы секунды (детектор
+				# застревания, а не «замер на 200 мс»: медленно текущая к двери толпа
+				# получала бы свежий маршрут каждую секунду и не доходила). Билет
+				# отхода исчерпан — начать отход заново отсюда (ТЗ 29.09.2026)
+				u.begin_retreat()
+				u.command_move(gate, false, Vector3.ZERO, true)
 		if cancelled:
 			# ── ОТМЕНА ВОЗВРАЩАЕТ УЖЕ ВОШЕДШИХ НАРУЖУ ───────────────────────
 			# Здесь было «уже вошедшие остаются внутри», и это создавало
@@ -603,9 +637,11 @@ func _process_garrison(delta: float) -> void:
 			# всем членам отряда — то есть вернул бы отряд к воротам, от которых
 			# игрок его только что увёл
 			_spill_absorbed(sid)
+			GameManager.squad_mark_to_castle(sid, false)
 			continue
 		if all_in:
 			garrison.append({"sid": sid, "type": GameManager.squad_type(sid), "revive": 0.0})
+			GameManager.squad_mark_to_castle(sid, false)
 		else:
 			still.append(sid)
 	_incoming = still

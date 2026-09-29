@@ -1470,7 +1470,7 @@ func _update_top_right(delta: float) -> void:
 		var sm = GameManager.main.selection_manager if GameManager.main != null else null
 		if sm != null:
 			var deep: bool = int(sm.formation_mode) == int(sm.FORM_DEEP)
-			var txt: String = "строй [2] коробочка" if deep else "строй [1] широкий"
+			var txt: String = "строй [2] коробочка (копейщики)" if deep else "строй [1] широкий"
 			if int(sm.formation_front) != 0:
 				txt += " · авангард [3]"
 			if _formation_label.text != txt:
@@ -3024,8 +3024,20 @@ func _on_send_to_castle(sm: SelectionManager) -> void:
 		return
 	# Заявка на вход — ШТАТНЫМ путём замка: он сам примет отряд, когда тот
 	# подойдёт на GARRISON_ENTER_RADIUS, вылечит и выпустит обратно
-	var sid: int = (men[0] as Unit).squad_id
-	var accepted: bool = sid != 0 and best.request_garrison(sid)
+	# ── ВСЕ ВЫДЕЛЕННЫЕ ОТРЯДЫ, А НЕ ПЕРВЫЙ (ТЗ 29.09.2026, блок 5) ──────────
+	# Не принятые (полно) — в очередь лечения: ждут у входа и садятся сами
+	var sids: Array = []
+	for m in men:
+		var s0: int = (m as Unit).squad_id
+		if s0 > 0 and not sids.has(s0):
+			sids.append(s0)
+	var accepted: bool = false
+	for s1 in sids:
+		if best.request_garrison(int(s1)):
+			accepted = true
+		else:
+			GameManager.squad_queue_heal(int(s1))
+			accepted = true
 	# ЗДЕСЬ БЫЛ САМОСАБОТАЖ. После request_garrison() шёл цикл
 	#   for m in men: m.command_move(best.global_position)
 	# без keep_retreat — а такой приказ ПЕРВЫМ ДЕЛОМ зовёт end_retreat()
@@ -3330,8 +3342,8 @@ const GARRISON_SLOT := 56
 ## подпись «Гарнизон» и до GARRISON_MINI_SLOTS маленьких иконок. Сетка панели
 ## двигает её вместе со всем остальным — дёргаться нечему.
 const GARRISON_MINI := 22          # сторона мелкого слота, px
-const GARRISON_MINI_SLOTS := 7     # сколько слотов показываем (заказ)
-const GARRISON_MINI_COLS := 4      # два ряда: 4 + 3 — колонка не шире кнопки
+const GARRISON_MINI_SLOTS := 8     # сколько слотов показываем (ТЗ 29.09.2026: 8)
+const GARRISON_MINI_COLS := 4      # два ряда: 4 + 4 — колонка не шире кнопки
 
 var _garrison_strip: Control = null
 
@@ -3389,7 +3401,7 @@ func _show_garrison(castle: Castle) -> void:
 			shown += 1
 		else:
 			extra += 1
-	# Пустые места ряда рисуются тускло: семь слотов, а не «сколько есть», —
+	# Пустые места ряда рисуются тускло: восемь слотов, а не «сколько есть», —
 	# игрок видит и занятость, и вместимость одним взглядом
 	var free_n: int = mini(GARRISON_MINI_SLOTS, castle.garrison_limit()) - shown
 	for i in range(maxi(free_n, 0)):
@@ -4866,7 +4878,7 @@ func _show_vet_rank_row(lvl: int) -> void:
 ## Флажок ранга: обрезок холста знамени, вписанный по высоте строки.
 ## alpha < 1 — прежний ранг: он уже не новость, и спорить за внимание с новым
 ## флажком ему незачем
-func _vet_flag(lvl: int, alpha: float) -> Control:
+func _vet_flag(lvl: int, alpha: float, h: float = VET_FLAG_H) -> Control:
 	var tr := TextureRect.new()
 	tr.name = "VetFlag_%d" % lvl
 	var full: Texture2D = _BannerArt.texture_for(lvl)
@@ -4879,8 +4891,8 @@ func _vet_flag(lvl: int, alpha: float) -> Control:
 	tr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 	tr.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	tr.modulate.a = alpha
-	var w: float = VET_FLAG_H * (VET_FLAG_CROP.size.x / VET_FLAG_CROP.size.y)
-	tr.custom_minimum_size = Vector2(w, VET_FLAG_H)
+	var w: float = h * (VET_FLAG_CROP.size.x / VET_FLAG_CROP.size.y)
+	tr.custom_minimum_size = Vector2(w, h)
 	return tr
 
 # ── МИНИАТЮРНАЯ ПЛАШКА НАГРАДЫ ───────────────────────────────────────────────
@@ -5421,11 +5433,12 @@ func _train_cmd(bld: Building, unit_id: String, col: Color, size: float = 0.0,
 	# veteran_badge_text, которым рисуется значок ранга в панели отряда и
 	# флажки наград: разойтись с знаменем в мире они так не могут
 	var keep_vet: int = _keep_vet_for(bld, unit_id)
-	if keep_vet > 0:
-		title += "  [ %s ] %s" % [_UCfg.roman(keep_vet),
-			_UCfg.veteran_badge_text(keep_vet)]
 	var card: Dictionary = _unit_card(unit_id, bld.faction, cost, squad)
 	card["title"] = title
+	# Ранг — ФЛАГОМ знамени рядом с названием, а не «[ III ] >>I» текстом
+	# (ТЗ 29.09.2026, блок 4): тот же холст BannerArt, что у знамени в мире
+	if keep_vet > 0:
+		card["vet_flag"] = keep_vet
 	var lines: Array = card.get("lines", [])
 	if GameManager.pop_limit_enabled and bld.faction == Constants.FACTION_PLAYER:
 		if unit_id == "worker":
@@ -8169,6 +8182,9 @@ func _show_card(anchor: Control, data: Dictionary) -> void:
 	title.add_theme_color_override("font_color", Color(0.98, 0.90, 0.55))
 	_fix_label(title, CARD_W - 90, 2)
 	head.add_child(title)
+	var vf: int = int(data.get("vet_flag", 0))
+	if vf > 0:
+		head.add_child(_vet_flag(vf, 1.0, 30.0))
 
 	# 2) Здоровье — ТЕКСТОМ, без полоски (никаких «красных линий» в тултипах)
 	var hp_max: float = data.get("hp_max", 0.0)
@@ -8249,8 +8265,7 @@ func _unit_card(unit_id: String, faction: int, cost: Dictionary, squad: int,
 		var line: String = _tip_row(unit_id, faction, row_v as Dictionary, live)
 		if not line.is_empty():
 			lines.append(line)
-	if squad > 1:
-		lines.append("Отряд: %d" % squad)
+	# Строка «Отряд: N» снята (ТЗ 29.09.2026, блок 4): размер уже в заголовке «×N»
 	var desc: String = String(tip["description"])
 	if not desc.is_empty():
 		lines.append("")   # визуальный отступ перед описанием
