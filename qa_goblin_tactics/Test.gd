@@ -231,6 +231,12 @@ func _run() -> void:
 		min_seen = minf(min_seen, _min_dist_to_castle())
 		for sid in g_sids:
 			if GameManager.squad_engaged(int(sid)) > 0:
+				if not fought:
+					for mm in GameManager.squads[int(sid)]["members"]:
+						var tg = (mm as Unit).attack_target
+						if tg != null and is_instance_valid(tg):
+							print("    бой на сборе: %s (фракция %s) в %s, гоблин в %s" % [tg.name, str(tg.get("faction")), str((tg as Node3D).global_position.round()), str((mm as Node3D).global_position.round())])
+							break
 				fought = true
 	var army_d: float = _xz(cmd._army_center(_field()), castle.global_position)
 	verdict("A3 армия собралась на линии и остановилась (за %d тактов, без боя)" % steps,

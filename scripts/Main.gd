@@ -623,7 +623,7 @@ func _setup_reserved_zones() -> void:
 			_reserve(spot, BASE_ORE_CLEAR)
 	for gm in gold_mine_spots():
 		_reserve(gm, GOLD_MINE_CLEAR)
-	if AI_MINE_ENABLED:
+	if AI_MINE_ENABLED and not TERRITORY_MINES:
 		_reserve(ai_mine_spot(), GOLD_MINE_CLEAR)
 
 func _reserve(center: Vector3, radius: float) -> void:
@@ -1414,7 +1414,9 @@ func _update_hover_cursor(delta: float) -> void:
 	var hovered: ResourceNode = selection_manager.resource_under_cursor(mouse)
 	_update_hover_highlight(hovered)
 	_update_enemy_hover(mouse, hovered != null)
-	var on_res: bool = hovered != null
+	# «Палец» — и над тем, куда ПКМ посадит лучников или поставит рабочих на
+	# загон (ТЗ 29.09.2026, второе письмо, п. 3): тот же разбор, что у клика
+	var on_res: bool = hovered != null or selection_manager.finger_under_cursor(mouse)
 	if on_res == _cursor_on_res:
 		return
 	_cursor_on_res = on_res
@@ -2758,7 +2760,23 @@ func ford_mine_spot() -> Vector3:
 	var z: float = FORD_Z + FORD_MINE_OFFSET_Z
 	return Vector3(river_x(z), 0.0, z)
 
+## ── ДВА РУДНИКА: НА ТЕРРИТОРИИ ИГРОКА И КРАСНОГО (ТЗ 29.09.2026, третье
+## письмо, п. 5) ─────────────────────────────────────────────────────────────
+## «Убрать центральный рудник (напротив брода), оставить два: у Игрока и у
+## Красного, их охраняют гоблины». Центральная пара (доли GOLD_MINE_T у
+## прохода к броду) и рудник-на-холме красного снимаются; вместо них два
+## зеркальных ничейных рудника на территориях сторон (точка холма красного и
+## её отражение по Z), у каждого — охрана орды (GOBLIN_MINE_GUARD), которая
+## патрулирует СВОЙ рудник. Рудник деревни орды — её хозяйство, не трогается.
+## false — прежняя раскладка
+const TERRITORY_MINES := true
+func territory_mine_spots() -> Array:
+	var s0: Array = PLATEAU_SPECS[1]
+	return [Vector3(float(s0[0]), 0.0, -float(s0[1])), Vector3(float(s0[0]), 0.0, float(s0[1]))]
+
 func gold_mine_spots() -> Array:
+	if TERRITORY_MINES:
+		return territory_mine_spots()
 	var out: Array = []
 	# Поперечник пути, направленный к середине карты (к реке)
 	var dir: Vector3 = ENEMY_BASE_ANCHOR - PLAYER_BASE_ANCHOR
@@ -2780,6 +2798,39 @@ func gold_mine_spots() -> Array:
 		out.append(ford_mine_spot())
 	return out
 
+var _territory_mines: Array = []
+
+## Охрана орды у рудников сторон: тот же состав, что у рудника деревни.
+## Зовётся после появления вожака орды (_spawn_goblin_mine) — регистрации
+## нужен goblin_ai
+var territory_guard_squads: int = 0
+func _spawn_territory_guards() -> void:
+	if not TERRITORY_MINES or not _Opt.goblin_village:
+		return
+	for mm in _territory_mines:
+		if mm == null or not is_instance_valid(mm):
+			continue
+		var spot: Vector3 = (mm as Node3D).global_position
+		var guard: Array = _GobCfg.MINE_GUARD
+		for i in range(guard.size()):
+			var row: Dictionary = guard[i]
+			var uid: String = String(row["unit"])
+			var n: int = int(row["count"])
+			if n <= 0:
+				n = int(_GobCfg.SQUAD_SIZE.get(uid, 20))
+			var ang: float = TAU * float(i) / float(maxi(guard.size(), 1))
+			var r: float = GOLD_MINE_CLEAR + _GobCfg.horde_radius(n) + 1.0
+			var base := Vector3(spot.x + cos(ang) * r, 0.0, spot.z + sin(ang) * r)
+			var sid: int = spawn_goblin_squad(uid, n, GameManager.land_target(base))
+			if sid <= 0:
+				continue
+			territory_guard_squads += 1
+			if int(row["vet"]) > 0:
+				grant_squad_veterancy(sid, int(row["vet"]), int(row["picks"]),
+					_GobCfg.VETERAN_PREFERENCE)
+			if goblin_ai != null:
+				goblin_ai.register_mine_guard(sid, mm)
+
 func _spawn_gold_mines() -> void:
 	for p in gold_mine_spots():
 		var spot: Vector3 = GameManager.land_target(p)
@@ -2788,8 +2839,10 @@ func _spawn_gold_mines() -> void:
 		m.faction = Constants.FACTION_NEUTRAL
 		_world.add_child(m)
 		m.global_position = Vector3(spot.x, get_terrain_height(spot.x, spot.z), spot.z)
+		if TERRITORY_MINES:
+			_territory_mines.append(m)
 	# Рудник красного ИИ на нижней горушке (ТЗ 14.09.2026, п. 3)
-	if AI_MINE_ENABLED:
+	if AI_MINE_ENABLED and not TERRITORY_MINES:
 		var ap: Vector3 = GameManager.land_target(ai_mine_spot())
 		_clear_area_of_resources(ap, GOLD_MINE_CLEAR)
 		var am := Mine.new()
@@ -2877,6 +2930,7 @@ func _spawn_goblin_mine() -> void:
 			goblin_ai.register_mine_guard(sid)
 	if goblin_ai != null:
 		goblin_ai.attach_mine(m)
+	_spawn_territory_guards()
 
 func _spawn_troll_lair() -> void:
 	if not _Opt.goblin_village:
@@ -3761,6 +3815,8 @@ func _add_forest_clusters() -> void:
 			randf_range(1.6, 3.4), 1.3, ResourceNode.FOREST_DECOR)
 		placed += 1
 	_add_forest_wall()
+	if FOREST_WALL_ENABLED:
+		_add_base_walls()
 	_add_corner_forests()
 	# Подкова густого леса вокруг каждой базы — ПОВЕРХ общей генерации,
 	# ничего из неё не отменяя
@@ -3831,7 +3887,69 @@ func _in_wall_zone(x: float, z: float, margin: float) -> bool:
 	# Нижняя стена: от левого края карты до угла с правой
 	if x <= xr + _wall_half(x) and absf(z - zb) <= _wall_half(x) + margin:
 		return true
+	# Стены баз красного и орды (ТЗ 29.09.2026, второе письмо, п. 1)
+	for sp in _wall_specs():
+		var zb2: float = _wall_z_of(sp, x)
+		var xr2: float = _wall_x_of(sp, z)
+		var sx: float = float(sp["sx"])
+		var sz: float = float(sp["sz"])
+		if (z - zb2) * sz <= _wall_half(z) and absf(x - xr2) <= _wall_half(z) + margin:
+			return true
+		if (x - xr2) * sx <= _wall_half(x) and absf(z - zb2) <= _wall_half(x) + margin:
+			return true
 	return false
+
+## ── ЛЕС-СТЕНА У БАЗ КРАСНОГО И ОРДЫ (ТЗ 29.09.2026, второе письмо, п. 1) ──
+## «Такая же удобная закрытая зона из деревьев с двумя выходами, как у
+## игрока». Та же полоса (толщина, синусы, шаг, кромка декора), зеркально по
+## углу базы: sx/sz — в какую сторону от якоря стоят стены (игрок: +X, +Z).
+## Красный — угол (−X, +Z): стены справа и сверху, проходы вправо (к броду)
+## и вверх (к игроку). Орда — угол (+X, −Z): стены слева и снизу, проходы
+## влево (к броду) и вниз. ph — свой узор изгибов у каждой базы
+const BASE_WALLS_ALL := true
+func _wall_specs() -> Array:
+	if not BASE_WALLS_ALL:
+		return []
+	var out: Array = [{"a": ENEMY_BASE_ANCHOR, "sx": 1.0, "sz": -1.0, "ph": 1.7}]
+	if _Opt.goblin_village:
+		var vc: Vector3 = goblin_village_center()
+		out.append({"a": Vector3(vc.x, 0.0, vc.z), "sx": -1.0, "sz": 1.0, "ph": 3.1})
+	return out
+
+func _wall_x_of(sp: Dictionary, z: float) -> float:
+	var a: Vector3 = sp["a"]
+	var ph: float = float(sp["ph"])
+	return a.x + float(sp["sx"]) * (WALL_RIGHT_DX + 4.0 * sin(z * 0.071 + ph) + 2.2 * sin(z * 0.19 + 1.3 + ph))
+
+func _wall_z_of(sp: Dictionary, x: float) -> float:
+	var a: Vector3 = sp["a"]
+	var ph: float = float(sp["ph"])
+	return a.z + float(sp["sz"]) * (WALL_BOTTOM_DZ + 4.0 * sin(x * 0.067 + 0.8 + ph) + 2.2 * sin(x * 0.21 + 2.1 + ph))
+
+var base_wall_trees: int = 0
+func _add_base_walls() -> void:
+	base_wall_trees = 0
+	for sp in _wall_specs():
+		var a: Vector3 = sp["a"]
+		var sx: float = float(sp["sx"])
+		var sz: float = float(sp["sz"])
+		var corner_z: float = _wall_z_of(sp, _wall_x_of(sp, a.z + sz * WALL_BOTTOM_DZ))
+		var corner_x: float = _wall_x_of(sp, corner_z)
+		var before: int = wall_trees_placed
+		# Вертикальная полоса: от своей кромки карты по Z до угла
+		var z: float = -MAP_HALF_Z + 1.0 if sz > 0.0 else MAP_HALF_Z - 1.0
+		while (z - corner_z) * sz <= 2.0:
+			if not _wall_gap(z, a.z + sz * WALL_GAP_RIGHT_AT):
+				_wall_row(Vector2(_wall_x_of(sp, z), z), Vector2(1.0, 0.0), _wall_half(z))
+			z += WALL_STEP * sz
+		# Горизонтальная полоса: от своей кромки карты по X до угла
+		var x: float = -MAP_HALF_X + 1.0 if sx > 0.0 else MAP_HALF_X - 1.0
+		while (x - corner_x) * sx <= 2.0:
+			if not _wall_gap(x, a.x + sx * WALL_GAP_DOWN_AT):
+				_wall_row(Vector2(x, _wall_z_of(sp, x)), Vector2(0.0, 1.0), _wall_half(x))
+			x += WALL_STEP * sx
+		base_wall_trees += wall_trees_placed - before
+	wall_trees_placed -= base_wall_trees     # счётчик игрока — прежний смысл (qa_tz0924)
 
 func _wall_gap(along: float, gap_center: float) -> bool:
 	return absf(along - gap_center) < WALL_GAP_W * 0.5

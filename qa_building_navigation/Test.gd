@@ -85,6 +85,7 @@ func verdict(t: String, ok: bool, d: String = "") -> void:
 	print("  ВЕРДИКТ %s: %s%s" % [t, "ПРОШЛО" if ok else "НЕ ПРОШЛО", ("  — " + d) if d != "" else ""])
 
 func _finish() -> void:
+	print("  вызволений застрявших за стенд: %d" % Unit.unstuck_total)
 	print("\n═════ ИТОГ qa_building_navigation: прошло %d, провалов: %d ═════" % [_pass, _fail])
 	for l in _log:
 		if not bool(l[1]):
@@ -112,7 +113,7 @@ func _squad(kind: String, fac: int, at: Vector3, n: int, cols: int = 8) -> Array
 			at.z + float(i % cols) * sp - float(cols - 1) * sp * 0.5))
 		GameManager.add_to_squad(sid, u)
 		men.append(u)
-		if kind == "archer":
+		if kind == "archer" or kind == "spearman":
 			u.died.connect(func(du):
 				var dd := du as Unit
 				print("    [гибель] лучник sid=%d state=%d garrisoned=%s hp=%.1f pos=%s target=%s ходов=%d" % [
@@ -387,7 +388,12 @@ func _run() -> void:
 			var off: Vector3 = (u as Unit).global_position - c0
 			off.y = 0.0
 			(u as Unit).command_move(base + Vector3(-40.0, 0.0, float(zs[i])) + off, false, Vector3.ZERO, false, true)
-	await pframes(60 * 25)
+	# Ожидание построения — тоже с зачисткой площадки (туши восстановленного
+	# пня выбивали отряд 4 до марша: «10 из 24»)
+	for _k in range(25):
+		await pframes(60)
+		_sweep_foes()
+	_foes_report("перед маршем")
 	if not "c" in _skip:
 		print("\n═════ C. МАССОВЫЙ МАРШ СКВОЗЬ ЗАСТРОЙКУ ═════")
 		await _march(squads, base + Vector3(40.0, 0.0, 0.0), "вправо")
@@ -698,8 +704,15 @@ func _march(squads: Array, click: Vector3, tag: String) -> void:
 	var w := 0
 	# Бюджет: прямая по самому медленному роду плюс 20 с на обход и построение
 	var slowest: float = 1e9
+	var dead0 := 0
 	for u in all_men:
+		# ПРАВИЛО 5: сырая ссылка до приведения типа
+		if u == null or not is_instance_valid(u):
+			dead0 += 1
+			continue
 		slowest = minf(slowest, maxf((u as Unit).move_speed, 0.5))
+	if dead0 > 0:
+		print("    ВНИМАНИЕ: до марша погибло %d бойцов" % dead0)
 	var bound: int = int((80.0 / slowest + 20.0) * 60.0)
 	var arrive_frame: Array = []
 	for i in range(n_sq):
@@ -787,6 +800,11 @@ func _march(squads: Array, click: Vector3, tag: String) -> void:
 			if uk != null and is_instance_valid(uk):
 				kind = String((uk as Unit).stat_id)
 				break
+		if int(arrive_frame[i]) < 0 and not men.is_empty():
+			var u4 := men[0] as Unit
+			print("      не дошёл: боец в %s, state=%d цель %s, маршрут %d/%d, скала рядом %s, до цели отряда %.1f м, streak %d" % [
+				str(u4.global_position.round()), int(u4.state), str(u4.move_target.round()), u4._route_i, u4._route.size(),
+				str(GameManager.is_cliff(u4.global_position.x + 1.0, u4.global_position.z)), _xz(c, goals[i]), u4._stuck_streak])
 		print("    отряд %d (%s): крюк ×%.2f, поперечник %.1f → макс %.1f → в конце %.1f, проб с расщеплением %d, ближе всего к стене %.1f м, пришёл на %.1f с"
 			% [i + 1, kind, ratio, float(ext0[i]), float(ext_max[i]), ext_now, int(split_n[i]),
 			float(hug[i]), float(int(arrive_frame[i])) / 60.0 if int(arrive_frame[i]) >= 0 else -1.0])

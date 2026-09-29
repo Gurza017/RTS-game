@@ -1208,6 +1208,37 @@ func _preload_ui() -> void:
 var ui_last: String = ""
 var ui_calls: int = 0
 
+## ── ОДИН ЩЕЛЧОК НА ДВОЙНОЙ КЛИК (ТЗ 29.09.2026, второе письмо, п. 3) ─────
+## Второй клик пары НЕ играет второй щелчок: голос первого глушится и
+## заново звучит тот же щелчок выше (pitch) и чуть громче — на слух это
+## один щелчок, но «другой». Голос у события запоминается (_ui_voice_of)
+var _ui_voice_of: Dictionary = {}
+var ui_variant_calls: int = 0
+func play_ui_variant(event: String, pitch: float = 1.22, db_add: float = 2.0) -> bool:
+	ui_variant_calls += 1
+	ui_last = event + "@run"
+	if not enabled or _ui_pool.is_empty():
+		return false
+	var fname: String = String(UI_BANK.get(event, ""))
+	if fname == "":
+		return false
+	var s: AudioStream = _stream(ui_path(fname))
+	if s == null:
+		return false
+	var lim: Dictionary = UI_LIMITS.get(event, {})
+	var v: AudioStreamPlayer = _ui_voice_of.get(event)
+	if v == null or not is_instance_valid(v):
+		v = _ui_pool[_ui_next]
+		_ui_next = (_ui_next + 1) % _ui_pool.size()
+	v.stop()
+	v.stream = s
+	v.pitch_scale = pitch
+	v.volume_db = float(lim.get("db", -6.0)) + db_add
+	v.play()
+	_ui_voice_of[event] = v
+	_ui_last[event] = float(Time.get_ticks_msec()) * 0.001
+	return true
+
 func play_ui(event: String) -> bool:
 	ui_last = event
 	ui_calls += 1
@@ -1232,8 +1263,10 @@ func play_ui(event: String) -> bool:
 	var v: AudioStreamPlayer = _ui_pool[_ui_next]
 	_ui_next = (_ui_next + 1) % _ui_pool.size()
 	v.stream = s
+	v.pitch_scale = 1.0
 	v.volume_db = float(lim.get("db", -6.0))
 	v.play()
+	_ui_voice_of[event] = v
 	return true
 
 ## ── ГОЛОСА РЕПЛИК ──────────────────────────────────────────────────────────

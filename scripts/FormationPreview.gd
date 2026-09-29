@@ -36,26 +36,44 @@ const PING_SEC := 0.55           # сколько живёт кольцо оди
 const PING_R0 := 5.0             # начальный радиус кольца, px
 const PING_R1 := 22.0            # конечный
 const PING_COL := Color(0.99, 0.94, 0.35, 0.9)
+## ── ДВОЙНОЙ КЛИК (БЕГ) — ОДИН ПУЛЬСАР С ОТТЕНКОМ (ТЗ 29.09.2026, п. 3) ────
+## Второй клик пары не перезапускает вспышку первого (прежде было два
+## пульсара подряд), а перекрашивает её в цвет бега и досчитывает её время
+const RUN_TINT := Color(1.0, 0.50, 0.18)
+var _run_tint: bool = false
+var run_flashes: int = 0          # стендам: сколько вспышек ушло в цвет бега
+var flash_starts: int = 0         # стендам: сколько вспышек стартовало с нуля
 
 ## Показать призрак строя в точке приказа. slots — те же экранные точки, что
 ## и у растяга: раскладку считает вызывающий ТЕМ ЖЕ кодом, каким отдаёт приказ
-func flash_formation(slots: Array, facing_angle_rad: float) -> void:
+func flash_formation(slots: Array, facing_angle_rad: float, run: bool = false) -> void:
 	if slots.is_empty():
 		return
 	_ghost_screen = slots
 	_ghost_angle = facing_angle_rad
-	_ghost_left = GHOST_SEC
+	_set_run_tint(run)
+	if not (run and _ghost_left > 0.0):
+		_ghost_left = GHOST_SEC
+		flash_starts += 1
 	visible = true
 	set_process(true)
 	queue_redraw()
 
 ## Кольцо в точке клика — для одиночек и для случая, когда строя нет
-func flash_ping(screen_pos: Vector2) -> void:
+func flash_ping(screen_pos: Vector2, run: bool = false) -> void:
 	_ping_screen = screen_pos
-	_ping_left = PING_SEC
+	_set_run_tint(run)
+	if not (run and _ping_left > 0.0):
+		_ping_left = PING_SEC
+		flash_starts += 1
 	visible = true
 	set_process(true)
 	queue_redraw()
+
+func _set_run_tint(run: bool) -> void:
+	_run_tint = run
+	if run:
+		run_flashes += 1
 
 func _process(delta: float) -> void:
 	var busy := false
@@ -130,11 +148,13 @@ func _draw() -> void:
 	# ради клика, у которого растяга нет
 	if _ghost_left > 0.0:
 		var k: float = clampf(_ghost_left / GHOST_SEC, 0.0, 1.0)
-		_draw_triangles(_ghost_screen, _ghost_angle, k * k)
+		_draw_triangles(_ghost_screen, _ghost_angle, k * k, _run_tint)
 	if _ping_left > 0.0:
 		var t: float = 1.0 - clampf(_ping_left / PING_SEC, 0.0, 1.0)
 		var r: float = PING_R0 + (PING_R1 - PING_R0) * t
 		var col := PING_COL
+		if _run_tint:
+			col = Color(RUN_TINT.r, RUN_TINT.g, RUN_TINT.b, PING_COL.a)
 		col.a *= (1.0 - t) * (1.0 - t)
 		draw_arc(_ping_screen, r, 0.0, TAU, 24, col, 1.6, true)
 	if not _active or _slot_screen.is_empty():
@@ -142,7 +162,7 @@ func _draw() -> void:
 	_draw_triangles(_slot_screen, _facing_angle, 1.0)
 
 ## Весь строй — два вызова отрисовки (разбор ниже). fade — доля непрозрачности
-func _draw_triangles(slots: Array, angle: float, fade: float) -> void:
+func _draw_triangles(slots: Array, angle: float, fade: float, run: bool = false) -> void:
 	if slots.is_empty() or fade <= 0.01:
 		return
 	var _facing_angle_local := angle
@@ -159,6 +179,8 @@ func _draw_triangles(slots: Array, angle: float, fade: float) -> void:
 	var rx2 := lx2 * ca - ly2 * sa; var ry2 := lx2 * sa + ly2 * ca
 
 	var fill := TRI_FILL
+	if run:
+		fill = Color(RUN_TINT.r, RUN_TINT.g, RUN_TINT.b, TRI_FILL.a)
 	var outline := TRI_OUTLINE
 	fill.a *= fade
 	outline.a *= fade

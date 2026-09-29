@@ -150,8 +150,10 @@ var hill_mine_sid: int = 0
 func register_garrison(sid: int) -> void:
 	garrison_sids[sid] = true
 
-func register_mine_guard(sid: int) -> void:
-	mine_guard_sids[sid] = true
+## mine_node — рудник, который этот отряд сторожит (ТЗ 29.09.2026, третье
+## письмо, п. 5: охрана у рудников игрока и красного). Без него — рудник орды
+func register_mine_guard(sid: int, mine_node: Node = null) -> void:
+	mine_guard_sids[sid] = mine_node if mine_node != null else true
 
 ## ── ДРЕМЛЮЩИЙ РЕЗЕРВ (13.09.2026, DormantReserve.gd) ────────────────────────
 ## Отряды резерва — особые: вне волн, вне планов командира, вне пробуждения
@@ -1417,9 +1419,13 @@ func _raid_plan(sq: Dictionary) -> Dictionary:
 
 ## Охрана рудника: патруль кольцом, на тревоге — бой у рудника
 func _mine_guard_plan(sq: Dictionary, idx: int) -> Dictionary:
-	if mine == null or not is_instance_valid(mine):
+	var own: Variant = mine_guard_sids.get(int(sq["id"]))
+	var guarded: Node = mine
+	if own is Node and is_instance_valid(own):
+		guarded = own
+	if guarded == null or not is_instance_valid(guarded):
 		return {}
-	var mp: Vector3 = (mine as Node3D).global_position
+	var mp: Vector3 = (guarded as Node3D).global_position
 	var c: Vector3 = _squad_center(sq)
 	sq["role"] = ROLE_MINE_GUARD
 	var foe: Node3D = _nearest_foe(mp, _GobCfg.CENTER_RADIUS)

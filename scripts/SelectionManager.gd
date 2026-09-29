@@ -1032,13 +1032,13 @@ func _order_point_of(u: Node) -> Vector3:
 	p.y = 0.0
 	return p
 
-func _flash_destination(movable: Array, center: Vector3) -> void:
+func _flash_destination(movable: Array, center: Vector3, run: bool = false) -> void:
 	if _fp == null or camera == null or movable.is_empty():
 		return
 	var elev := Vector3(0.0, 0.5, 0.0)
 	# ОДИНОЧКА (рабочий, монах, один боец) — кольцо, а не «строй из одного»
 	if movable.size() == 1:
-		_fp.flash_ping(camera.unproject_position(center + elev))
+		_fp.flash_ping(camera.unproject_position(center + elev), run)
 		return
 	# Шаг прореживания: сколько бы ни было выделено, точек не больше потолка
 	var step: int = maxi(int(ceil(float(movable.size()) / float(GHOST_MAX_SLOTS))), 1)
@@ -1049,7 +1049,7 @@ func _flash_destination(movable: Array, center: Vector3) -> void:
 			slots.append(camera.unproject_position(_order_point_of(u) + elev))
 		i += 1
 	if slots.is_empty():
-		_fp.flash_ping(camera.unproject_position(center + elev))
+		_fp.flash_ping(camera.unproject_position(center + elev), run)
 		return
 	# Курс — от центра ВЫДЕЛЕНИЯ к точке приказа; угол считается в ЭКРАННЫХ
 	# координатах, как и у растяга: камера повёрнута, и мировой угол дал бы
@@ -1063,7 +1063,7 @@ func _flash_destination(movable: Array, center: Vector3) -> void:
 	course = course.normalized()
 	var c_scr: Vector2 = camera.unproject_position(center + elev)
 	var f_scr: Vector2 = camera.unproject_position(center + course * 2.0 + elev)
-	_fp.flash_formation(slots, (f_scr - c_scr).angle() + PI * 0.5)
+	_fp.flash_formation(slots, (f_scr - c_scr).angle() + PI * 0.5, run)
 
 func _update_formation_preview(mouse_screen: Vector2) -> void:
 	if _fp == null:
@@ -2340,6 +2340,61 @@ func gather_target_from_pick(pick: Dictionary) -> ResourceNode:
 ## выделении нет рабочего).
 ## Это ЕДИНСТВЕННЫЙ ответ на вопрос «по чему я сейчас кликну»: его рисует
 ## подсветка (Main._update_hover_highlight) и его же исполняет _handle_right_click
+## ── «ПАЛЕЦ»: ПКМ ЗДЕСЬ ПОСАДИТ ИЛИ ПОСТАВИТ НА РАБОТУ (ТЗ 29.09.2026, п. 3) ──
+## Лучники над своей башней, бараком или крепостью, которые их примут;
+## рабочие над своим загоном — по ограде, по овце загона или по земле внутри.
+## Ответ даёт тот же разбор, что и правый клик (_own_pen_for, _selection_fits)
+func finger_under_cursor(screen_pos: Vector2) -> bool:
+	if camera == null or _over_ui(screen_pos):
+		return false
+	_purge_invalid()
+	if selected_units.is_empty():
+		return false
+	var pick := _pick_at(screen_pos, order_pick_mask())
+	var t = pick["target"]
+	if t != null and is_instance_valid(t) and t is Castle \
+			and (t as Castle).faction == Constants.FACTION_PLAYER \
+			and _selection_has_type("archer") and _selection_fits(t as Castle):
+		return true
+	if selection_has_worker() and _own_pen_for(t, pick["position"]) != null:
+		return true
+	return false
+
+func _selection_has_type(uid: String) -> bool:
+	for u in selected_units:
+		if is_instance_valid(u) and u is Unit and (u as Unit).squad_id > 0 \
+				and GameManager.squad_type((u as Unit).squad_id) == uid:
+			return true
+	return false
+
+## Свой загон, в который метит клик: сама ограда, овца ЭТОГО загона или
+## земля внутри ограды (с полуметровым запасом). null — клик не про загон
+var pen_clicks: int = 0     # стендам: сколько кликов прочитано как «на загон»
+func _own_pen_for(target, pos: Vector3) -> Building:
+	if target != null and is_instance_valid(target):
+		if target is Building and (target as Building).has_method("accept_sheep") \
+				and (target as Building).faction == Constants.FACTION_PLAYER:
+			return target as Building
+		if target is Node and (target as Node).is_in_group("sheep"):
+			var pen = (target as Node).get("pen")
+			if pen != null and is_instance_valid(pen) and pen is Building \
+					and (pen as Building).faction == Constants.FACTION_PLAYER:
+				return pen as Building
+			return null
+		if target is Unit or (target is Building and not (target as Building).has_method("accept_sheep")):
+			return null
+	for p in get_tree().get_nodes_in_group("sheep_pens"):
+		if p == null or not is_instance_valid(p) or not (p is Building):
+			continue
+		var b := p as Building
+		if b.faction != Constants.FACTION_PLAYER or b.is_dead():
+			continue
+		var hx: float = b.build_size.x * 0.5 + 0.5
+		var hz: float = b.build_size.z * 0.5 + 0.5
+		if absf(pos.x - b.global_position.x) <= hx and absf(pos.z - b.global_position.z) <= hz:
+			return b
+	return null
+
 func resource_under_cursor(screen_pos: Vector2) -> ResourceNode:
 	if camera == null or _over_ui(screen_pos):
 		return null
@@ -2430,6 +2485,23 @@ func _handle_right_click(screen_pos: Vector2, run: bool = false) -> void:
 	# СПРИНТ 19 (письмо 10): рабочие в приоритете (крадут живую / режут
 	# тушу артелью); нет рабочих — любой боец ИДЁТ И РУБИТ живую овцу одним
 	# ударом (Unit.command_hunt_sheep), туша остаётся мясу
+	# ── КЛИК РАБОЧИМИ ПО ЗАГОНУ — ТРИ СЛУЧАЯ (ТЗ 29.09.2026, второе письмо, п. 3) ─
+	# По овце ЭТОГО загона и по земле внутри ограды — то же, что по самой
+	# ограде: рабочие встают на загон. Прежде земля внутри была маршем в центр
+	# («встают в центре вольера и тупят»), а овца загона — кражей у самого себя.
+	# Бродячая овца (без загона) по-прежнему крадётся — ветка ниже
+	if selection_has_worker():
+		var pen0: Building = _own_pen_for(target, pos)
+		if pen0 != null and not (target is Building):
+			var carrying := false
+			for uc in selected_units:
+				if is_instance_valid(uc) and uc is Worker and (uc as Worker).is_stealing_sheep():
+					carrying = true
+			if not carrying and _assign_pen_farmers(pen0) >= 0:
+				pen_clicks += 1
+				AudioManager.play_ui("order_move")
+				return
+			target = pen0
 	if target != null and target is Node and (target as Node).is_in_group("sheep"):
 		var thieves := 0
 		for u in selected_units:
@@ -2469,6 +2541,7 @@ func _handle_right_click(screen_pos: Vector2, run: bool = false) -> void:
 		# приказа НЕ получают и продолжают прежнюю работу. Уже стоящие на
 		# этом загоне места не занимают заново
 		if _assign_pen_farmers(target as Building) >= 0:
+			pen_clicks += 1
 			return
 
 	if target is Castle and target.faction == Constants.FACTION_PLAYER:
@@ -2688,9 +2761,14 @@ func _issue_formation_move(center: Vector3, run: bool = false) -> void:
 	# ВСЕ ветки приказа на движение (сетка блоков, марш строем, россыпь).
 	# На кнопках мыши его ставить нельзя — щёлкало бы и на промахе по панели,
 	# и на клике, который приказом не стал
-	AudioManager.play_ui("order_move")
+	# Двойной клик (бег): не второй щелчок, а ОДИН изменённый (ТЗ 29.09.2026,
+	# второе письмо, п. 3) — см. AudioManager.play_ui_variant
+	if run:
+		AudioManager.play_ui_variant("order_move")
+	else:
+		AudioManager.play_ui("order_move")
 	_issue_formation_move_body(center, run, movable)
-	_flash_destination(movable, center)
+	_flash_destination(movable, center, run)
 
 func _issue_formation_move_body(center: Vector3, run: bool, movable: Array) -> void:
 	_order_battle_cry(movable)

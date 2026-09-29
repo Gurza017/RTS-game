@@ -120,6 +120,14 @@ func _run() -> void:
 		return
 	var m: Mine = mines[0]
 	var mp: Vector3 = m.global_position
+	# С ТЗ 29.09.2026 (третье письмо, п. 5) у ничейных рудников стоит охрана
+	# орды. Стенд проверяет ПРАВИЛА захвата и дохода, а не бой с охраной —
+	# площадку у рудника он держит сам
+	for u0 in get_tree().get_nodes_in_group("all_units"):
+		if u0 is Unit and not (u0 as Unit).is_dead() and (u0 as Unit).faction != Constants.FACTION_PLAYER \
+				and (u0 as Unit).global_position.distance_to(mp) < 45.0:
+			(u0 as Unit).take_damage(1.0e12)
+	await pframes(4)
 	verdict("A3 ничейный: сторона NEUTRAL, ни в чьей группе, без флага, картинка Inactive",
 		m.faction == Constants.FACTION_NEUTRAL and not m.is_in_group("player_buildings")
 			and not m.is_in_group("enemy_buildings") and not m.flag_visible()

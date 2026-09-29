@@ -285,8 +285,11 @@ func request_garrison(squad_id: int) -> bool:
 	var gate := _gate_position()
 	for m in members:
 		var u := m as Unit
+		# В замок — БЕГОМ, со сброшенными приёмами и поднятыми копьями (ТЗ
+		# 29.09.2026, второе письмо, п. 2)
+		u.drop_abilities()
 		u.begin_retreat()
-		u.command_move(gate, false, Vector3.ZERO, true)
+		u.command_move(gate, false, Vector3.ZERO, true, false, true)
 	set_process(true)
 	return true
 
@@ -490,7 +493,11 @@ func _release_members(squad_id: int) -> void:
 		# часть могла остаться снаружи (сбилась по дороге, отменённый вход), и
 		# без общего приказа отряд остаётся разорванным на две кучки, а знамя
 		# уезжает со знаменосцем в одну из них
-		u.command_move(dest + off, false, exit_dir)
+		# Из замка — БЕГОМ на точку сбора (ТЗ 29.09.2026, второе письмо, п. 2)
+		u.command_move(dest + off, false, exit_dir, false, false, true)
+		# И из «Защиты»: стойка фаланги бег запрещает, выход из замка — нет
+		if not u.sprinting:
+			u._set_sprinting(true)
 		slots.append(dest + off)
 	GameManager.squad_set_formation(squad_id, slots, exit_dir, false)
 
@@ -670,7 +677,7 @@ func _process_garrison(delta: float) -> void:
 				break
 			if u.state == Unit.State.IDLE:
 				u.begin_retreat()
-				u.command_move(gate, false, Vector3.ZERO, true)
+				u.command_move(gate, false, Vector3.ZERO, true, false, true)
 			elif u.retreating and u.state == Unit.State.MOVING and u._stuck_streak >= 3 \
 					and not u.moved_recently() and _kick_due(sid):
 				# Упёрся в чужие тела и НЕ ПРОДВИГАЕТСЯ полторы секунды (детектор
@@ -678,7 +685,7 @@ func _process_garrison(delta: float) -> void:
 				# получала бы свежий маршрут каждую секунду и не доходила). Билет
 				# отхода исчерпан — начать отход заново отсюда (ТЗ 29.09.2026)
 				u.begin_retreat()
-				u.command_move(gate, false, Vector3.ZERO, true)
+				u.command_move(gate, false, Vector3.ZERO, true, false, true)
 		if cancelled:
 			# ── ОТМЕНА ВОЗВРАЩАЕТ УЖЕ ВОШЕДШИХ НАРУЖУ ───────────────────────
 			# Здесь было «уже вошедшие остаются внутри», и это создавало

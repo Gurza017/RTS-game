@@ -867,6 +867,11 @@ var _push_until_ms: int = 0
 var push_hits_done: int = 0
 
 ## Включить натиск. Зовёт SelectionManager по двойному ПКМ
+func drop_abilities() -> void:
+	super.drop_abilities()
+	_push_left = 0
+	_push_until_ms = 0
+
 func start_phalanx_push() -> void:
 	GameManager.tm_ability("phalanx_push", faction)
 	if state == State.DEAD:

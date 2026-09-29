@@ -154,6 +154,12 @@ func start_rage_dash() -> void:
 	# переписывает _update_guard, и прямая запись погасла бы в тот же тик
 	mark_pose_dirty(19)
 
+func drop_abilities() -> void:
+	super.drop_abilities()
+	_rage_left = 0
+	_rage_until_ms = 0
+	_rush_pending = false
+
 func rage_active() -> bool:
 	return _rage_left > 0 and Time.get_ticks_msec() < _rage_until_ms
 

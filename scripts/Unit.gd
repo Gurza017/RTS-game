@@ -527,6 +527,14 @@ var _slow_mult: float = 1.0
 func spear_wall_active() -> bool:
 	return false
 
+## ── СБРОС СПОСОБНОСТЕЙ (ТЗ 29.09.2026, второе письмо, п. 2) ───────────────
+## Отряд, посланный в замок (кнопкой или паникой), бросает всё начатое:
+## натиск, разгон, приёмы подклассов (Яростный Набег мечника, Натиск
+## Фаланги копейщика). Подкласс дополняет и зовёт super
+func drop_abilities() -> void:
+	_charge_order = false
+	is_charging = false
+
 func apply_slow(mult: float, sec: float) -> void:
 	_slow_mult = clampf(mult, 0.05, 1.0)
 	_slow_until_ms = now_ms + int(sec * 1000.0)
@@ -1319,7 +1327,12 @@ func panic_flee(point: Vector3) -> void:
 			GameManager.army.rear_press_clear(_soa)
 			GameManager.army.autopilot_clear(_soa)
 	_panicked = false
+	drop_abilities()
 	command_move(point, false, Vector3.ZERO, false, false, true)
+	# Паника БЕЖИТ и из обороны (ТЗ 29.09.2026, п. 2): command_move стойке
+	# фаланги бег не даёт, бегству — даёт
+	if not sprinting:
+		_set_sprinting(true)
 	set_panicked(true)
 
 ## ── СРОКА У «ВЫХОДА ИЗ БОЯ» НЕТ, И ЭТО ПРОВЕРЕНО ЗАМЕРОМ ────────────────────
@@ -2335,7 +2348,9 @@ func command_move(target_pos: Vector3, slow_march: bool = false, face_dir: Vecto
 	# либо возвращает отряд к обычному шагу (и копейщикам — фалангу).
 	# В стойке «Защита» (фаланга) бега нет вовсе (ТЗ 19.09.2026-3, п. 3):
 	# двойной ПКМ по фаланге — обычный марш с опущенными копьями
-	_set_sprinting(run and not _stance_holds_ground())
+	# ОТХОД В ЗАМОК БЕЖИТ И ИЗ ОБОРОНЫ (ТЗ 29.09.2026, второе письмо, п. 2):
+	# «поднимают копья и БЕГУТ в замок» — стойка фаланги бег не запрещает
+	_set_sprinting(run and (keep_retreat or not _stance_holds_ground()))
 	_player_run = sprinting and player_order
 	_charge_order = false        # просто идём — копья вверх
 	# И РАЗГОН ТОЖЕ. Приказ на движение отменяет натиск: всадник, которого
@@ -5793,7 +5808,69 @@ func _tick_stuck(delta: float, dist: float) -> bool:
 		return false
 	_trunk_ignore = TRUNK_IGNORE_SEC
 	_stuck_streak += 1
+	# ── ВЫЗВОЛЕНИЕ (ТЗ 29.09.2026, второе письмо, п. 1) ─────────────────────
+	# Застрял у леса-стены, скалы или кромки карты и не продвигается
+	# UNSTICK_STREAK проверок подряд — путь и цель сбрасываются, боец
+	# выводится на ближайшую проходимую точку и БЕГОМ догоняет свой отряд
+	if _stuck_streak >= UNSTICK_STREAK and _may_unstick():
+		_unstick()
+		return false
 	return true
+
+## Сколько проверок STUCK_CHECK_SEC без продвижения до вызволения (≈1 с)
+const UNSTICK_STREAK := 2
+## Насколько близко к лесу-стене, скале или кромке надо стоять, чтобы
+## застревание считалось застреванием в препятствии, а не в толпе
+const UNSTICK_NEAR := 4.0
+static var unstuck_total: int = 0
+var unstuck_count: int = 0
+
+func _may_unstick() -> bool:
+	if retreating or _enemy_contact or garrisoned or is_dead() or _panicked:
+		return false
+	if self is Worker:
+		return false             # у рабочего своя смена точки (Worker)
+	# Вдвое дольше без продвижения — вызволяем и без препятствия рядом
+	# (скольжение вдоль стены уводит бойца от неё), но не в бою отряда:
+	# там «не продвигаюсь» — это толпа, а не застревание
+	if _stuck_streak >= UNSTICK_STREAK * 2 and not (squad_id > 0 and GameManager.squad_in_combat(squad_id)):
+		return true
+	var p: Vector3 = global_position
+	var lim: Vector2 = GameManager.clamp_to_map(p.x, p.z)
+	if absf(lim.x - p.x) > 0.01 or absf(lim.y - p.z) > 0.01:
+		return true
+	var edge: Vector2 = GameManager.clamp_to_map(p.x + UNSTICK_NEAR * signf(p.x), p.z + UNSTICK_NEAR * signf(p.z))
+	if absf(edge.x - (p.x + UNSTICK_NEAR * signf(p.x))) > 0.01 or absf(edge.y - (p.z + UNSTICK_NEAR * signf(p.z))) > 0.01:
+		return true
+	for k in range(8):
+		var a: float = TAU * float(k) / 8.0
+		if GameManager.is_cliff(p.x + cos(a) * UNSTICK_NEAR, p.z + sin(a) * UNSTICK_NEAR):
+			return true
+	return false
+
+func _unstick() -> void:
+	unstuck_total += 1
+	unstuck_count += 1
+	_reset_stuck()
+	var p: Vector3 = global_position
+	var free: Vector2 = GameManager.nearest_passable(p.x, p.z)
+	if Vector2(free.x - p.x, free.y - p.z).length() > 0.05:
+		global_position = Vector3(free.x, GameManager.get_terrain_height(free.x, free.y), free.y)
+		sync_row()
+	# Куда: к своему месту в строю, без отряда — к центру отряда, без
+	# того — туда, куда шёл
+	var goal: Vector3 = move_target
+	if squad_id > 0:
+		var c: Vector2 = GameManager.squad_centre_xz(squad_id)
+		if c.x != INF:
+			goal = Vector3(c.x, 0.0, c.y)
+		if post_pos != Vector3.ZERO and Vector2(post_pos.x - goal.x, post_pos.z - goal.z).length() < 12.0:
+			goal = post_pos
+	if attack_target != null and not target_lock:
+		set_attack_target(null)
+	GameManager.tm_event("unstuck", {"sid": squad_id, "type": String(stat_id), "fac": faction,
+		"at": [snappedf(p.x, 0.1), snappedf(p.z, 0.1)]})
+	command_move(GameManager.land_target(goal), false, Vector3.ZERO, false, false, true)
 
 ## Новый приказ — новый отсчёт: иначе «не продвигаюсь» считалось бы от
 ## расстояния до ПРЕЖНЕЙ цели, и свежий приказ объявлялся бы застрявшим сразу

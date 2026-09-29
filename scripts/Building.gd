@@ -1925,7 +1925,11 @@ func _place_spawned(unit: Unit, gate: Vector3, rally: Vector3,
 				and GameManager.main.has_method("grant_squad_veterancy"):
 				GameManager.main.grant_squad_veterancy(squad_id, kvp,
 					kvp * _UCfgB.KEEP_WARRIOR_PICKS_PER_VET, [])
-	unit.command_move(rally, false, exit_dir)
+	# Новобранец БЕЖИТ на точку сбора (ТЗ 29.09.2026, второе письмо, п. 2):
+	# бег снимается сам по прибытии (Unit._set_sprinting)
+	unit.command_move(rally, false, exit_dir, false, false, true)
+	if not unit.sprinting:
+		unit._set_sprinting(true)
 
 ## Прямоугольник площадки: центр, ось вперёд, ось вбок, полуширина, полуглубина.
 ## Считается по уставному отряду здания и покрывает все EXIT_LANES рядов

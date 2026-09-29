@@ -534,7 +534,7 @@ func _physics_process(delta: float) -> void:
 	_Opt.sys_add("gm_physics", Time.get_ticks_usec() - _sys_t0)
 
 func _physics_process_timed(delta: float) -> void:
-	if _forest_nav_dirty:
+	if _forest_nav_dirty and Time.get_ticks_msec() >= _forest_nav_next_ms:
 		_forest_nav_rebuild()
 	# ── ТИК АРМИИ НА ПОЛОВИННОЙ ЧАСТОТЕ (этап C.2) ──────────────────────────
 	# Весь обход армии идёт каждый army_tick_div-й такт движка с НАКОПЛЕННОЙ
@@ -9712,9 +9712,20 @@ func forest_wall_remove(pos: Vector3) -> void:
 	army.forest_remove(pos.x, pos.z)
 	_nav_cache.clear()
 	_squad_route_cache.clear()
+	# ВЫРУБКА ОБЯЗАНА ДОЙТИ ДО A* (ТЗ 29.09.2026, третье письмо, п. 1): маска
+	# шага круг снимала, а сетка A* строилась из неё только при посадке —
+	# просека оставалась «стеной» для маршрутов, и отряд у вырубленного места
+	# стоял с приказом без дороги (qa_building_navigation C, отряд 4).
+	# Пересборка отложенная и не чаще FOREST_NAV_MIN_MS: рубят кромку кучей
+	_forest_nav_dirty = true
 
+const FOREST_NAV_MIN_MS := 1500
+var _forest_nav_next_ms: int = 0
+var forest_nav_rebuilds: int = 0
 func _forest_nav_rebuild() -> void:
 	_forest_nav_dirty = false
+	_forest_nav_next_ms = Time.get_ticks_msec() + FOREST_NAV_MIN_MS
+	forest_nav_rebuilds += 1
 	if army == null or main == null or not bool(main.CLIFFS_ENABLED):
 		return
 	nav_cells_blocked = army.build_nav_grid(NAV_CELL)

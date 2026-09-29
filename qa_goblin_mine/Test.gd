@@ -120,12 +120,19 @@ func _run() -> void:
 		get_tree().get_nodes_in_group("neutral_buildings").size() >= 2)
 
 	print("\n═════ B. ОХРАНА ═════")
-	verdict("B1 охраны три отряда", ai.mine_guard_sids.size() == 3, "%d" % ai.mine_guard_sids.size())
+	# С ТЗ 29.09.2026 (третье письмо, п. 5) охрана орды стоит и у рудников
+	# игрока и красного (значение записи — их рудник). Здесь — охрана рудника
+	# ДЕРЕВНИ: записи без своего рудника
+	var own: Array = []
+	for sid0 in ai.mine_guard_sids:
+		if not (ai.mine_guard_sids[sid0] is Node):
+			own.append(sid0)
+	verdict("B1 охраны три отряда", own.size() == 3, "%d" % own.size())
 	var cav := 0
 	var inf := 0
 	var vets := 0
 	var near := 0
-	for sid in ai.mine_guard_sids:
+	for sid in own:
 		var t: String = GameManager.squad_type(int(sid))
 		if t == "goblin_rider": cav += 1
 		elif t == "goblin_spearman": inf += 1
@@ -143,7 +150,7 @@ func _run() -> void:
 		ai.garrison_sids.size() == _GobCfg.GARRISON_SQUADS, "%d" % ai.garrison_sids.size())
 	# Патруль: за 25 с охрана меняет точки, но не уходит далеко
 	var g0: Array = []
-	for sid in ai.mine_guard_sids:
+	for sid in own:
 		g0.append(GameManager.squad_centroid(int(sid)))
 	for _i in range(12):
 		_tick_ai(ai, 1.0)
@@ -151,7 +158,7 @@ func _run() -> void:
 	var moved := 0
 	var far := 0
 	var k := 0
-	for sid in ai.mine_guard_sids:
+	for sid in own:
 		var c2: Vector3 = GameManager.squad_centroid(int(sid))
 		if _xz(c2, g0[k]) > 2.0:
 			moved += 1

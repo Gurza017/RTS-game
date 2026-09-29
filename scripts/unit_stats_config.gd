@@ -427,8 +427,8 @@ const SMITH_ICONS_DIR := "res://assets/factions/humans/icons/buildings/icons_for
 ## ═════════════════════════════════════════════════════════════════════════════
 ## ═════════════════════════════════════════════════════════════════════════════
 ## ЁМКОСТЬ РУДНИКА (ОДНОЙ КУЧИ ЗОЛОТА ИЛИ КАМНЯ)
-const DEFAULT_CLUSTER_GOLD  := 10000.0
-const DEFAULT_CLUSTER_STONE := 10000.0
+const DEFAULT_CLUSTER_GOLD  := 15000.0
+const DEFAULT_CLUSTER_STONE := 20000.0
 
 ## Ёмкость кучи по виду ресурса ("gold"/"stone"). Строкой, а не числом
 static func cluster_stock(kind: String) -> float:
@@ -715,7 +715,7 @@ const HOUSE_FOOD_INTERVAL := 8.0   # как часто начисляет, се�
 ## ФАКТИЧЕСКУЮ выработку, а не повторять расчёт второй раз своими числами
 const MEAT_PER_SEC_TARGET := 0.44      # еды в секунду с ОДНОГО фермера
 const FARM_WORKERS_REFERENCE := 15     # столько фермеров держит расчёт
-const FARM_SQUADS_SUPPORTED := 45      # столько отрядов они кормят вместе с домами
+const FARM_SQUADS_SUPPORTED := 15      # столько отрядов они кормят вместе с домами
 
 const FOOD_UPKEEP_SQUAD_PER_SEC  := 0.1
 const FOOD_UPKEEP_WORKER_PER_SEC := 1.0 / 30.0
@@ -808,10 +808,10 @@ const HOUSE_WORKER_SLOTS  := 3     # +рабочих за каждый дом
 ## экономика, и запирать её тем же числом, что и войско, значило бы заставлять
 ## игрока выбирать между «добывать» и «воевать» ещё до того, как он построил
 ## первый барак
-const ARMY_BASE_UNITS   := 100   # бойцов без крепости и домов
-const ARMY_CASTLE_UNITS := 100   # +бойцов за каждую крепость
-const ARMY_HOUSE_UNITS  := 45    # +бойцов за каждый дом
-const ARMY_HARD_CAP     := 2000  # потолок, выше которого не поднимает ничто
+const ARMY_BASE_UNITS   := 120   # бойцов без крепости и домов
+const ARMY_CASTLE_UNITS := 120   # +бойцов за каждую крепость
+const ARMY_HOUSE_UNITS  := 60    # +бойцов за каждый дом
+const ARMY_HARD_CAP     := 2500  # потолок, выше которого не поднимает ничто
 
 static func pop_worker_cap(houses: int, castles: int = 0) -> int:
 	return POP_BASE_WORKERS + HOUSE_WORKER_SLOTS * maxi(houses, 0) \
