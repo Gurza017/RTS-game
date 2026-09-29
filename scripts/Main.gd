@@ -2598,12 +2598,93 @@ func _spawn_goblin_village() -> void:
 ## ВЫПУСТИТЬ ОТРЯД ОРДЫ ТОЛПОЙ ВОКРУГ ТОЧКИ. Один путь на стартовую орду и на
 ## «месть гоблинов» (GoblinAI): раскладка по диску (goblin_config.horde_offset),
 ## строка ядра, реестр отряда. Возвращает id отряда, 0 — сцены такого нет
-func spawn_goblin_squad(uid: String, n: int, base: Vector3) -> int:
+## ── ОЧЕРЕДЬ РОЖДЕНИЯ ОРДЫ (ТЗ 29.09.2026, второе письмо, п. 2) ────────────
+## staggered = true — бойцы сверх бюджета кадра (perf_config.horde_spawn_budget)
+## доходят очередью в следующих физкадрах. Отряд (sid) и первые бойцы есть
+## сразу, так что вызывающий код — набег, разметка, регистрация — работает
+## как прежде; опоздавший перенимает у старшего товарища спячку, приказ и
+## награды отряда. По умолчанию — синхронно (стенды и стартовая раздача)
+var _horde_q: Array = []            # {sid, uid, k, n, base}
+var _horde_frame: int = -1
+var _horde_frame_n: int = 0
+var horde_spawn_deferred: int = 0    # сколько бойцов родилось очередью
+var horde_spawn_peak: int = 0        # больше всего рождений орды за кадр
+
+func _horde_budget_left() -> int:
+	var f: int = Engine.get_physics_frames()
+	if f != _horde_frame:
+		_horde_frame = f
+		_horde_frame_n = 0
+	return _Opt.horde_spawn_budget - _horde_frame_n
+
+func horde_spawn_pending() -> int:
+	var n := 0
+	for e in _horde_q:
+		n += int(e["n"]) - int(e["k"])
+	return n
+
+func _physics_process(_delta: float) -> void:
+	if _horde_q.is_empty():
+		return
+	var left: int = _horde_budget_left()
+	while left > 0 and not _horde_q.is_empty():
+		var e: Dictionary = _horde_q[0]
+		var sid: int = int(e["sid"])
+		var raw: Variant = GameManager.squads.get(sid)
+		var scene: PackedScene = Building.PRELOAD_SCENES.get(String(e["uid"]))
+		if raw == null or scene == null or int(e["k"]) >= int(e["n"]):
+			_horde_q.pop_front()        # отряд выбит до конца рождения — хвост не нужен
+			continue
+		var ref: Unit = null
+		for m in (raw as Dictionary)["members"]:
+			if is_instance_valid(m) and not (m as Unit).is_dead():
+				ref = m
+				break
+		var k: int = int(e["k"])
+		var u: Unit = _horde_one(scene, sid, k, int(e["n"]), e["base"])
+		e["k"] = k + 1
+		horde_spawn_deferred += 1
+		left -= 1
+		_horde_late_join(u, sid, ref)
+
+## Опоздавший перенимает у старшего товарища то, что отряд успел получить
+func _horde_late_join(u: Unit, sid: int, ref: Unit) -> void:
+	GameManager.apply_squad_bonuses_to(sid, u)
+	if ref == null:
+		return
+	if ref.dormant:
+		u.set_dormant(true)
+		return
+	if ref.state == Unit.State.ATTACKING and ref.attack_target != null and is_instance_valid(ref.attack_target):
+		u.command_attack(ref.attack_target, false)
+	elif ref.state == Unit.State.MOVING:
+		var off: Vector3 = u.global_position - ref.global_position
+		off.y = 0.0
+		u.command_move(GameManager.land_target(ref.move_target + off.limit_length(12.0)), false, Vector3.ZERO, false, true)
+		u.sprinting = ref.sprinting
+
+func spawn_goblin_squad(uid: String, n: int, base: Vector3, staggered: bool = false) -> int:
 	var scene: PackedScene = Building.PRELOAD_SCENES.get(uid)
 	if scene == null or n <= 0:
 		return 0
 	var sid: int = GameManager.new_squad(Constants.FACTION_GOBLIN, uid)
-	for k in range(n):
+	var now_n: int = n
+	if staggered and _Opt.horde_spawn_stagger:
+		# Хотя бы четверо — сразу: отряд обязан существовать для набега
+		now_n = clampi(_horde_budget_left(), mini(4, n), n)
+		if not _horde_q.is_empty():
+			now_n = mini(n, 4)   # очередь уже есть — встать в её конец
+	for k in range(now_n):
+		_horde_one(scene, sid, k, n, base)
+	if now_n < n:
+		_horde_q.append({"sid": sid, "uid": uid, "k": now_n, "n": n, "base": base})
+	return sid
+
+func _horde_one(scene: PackedScene, sid: int, k: int, n: int, base: Vector3) -> Unit:
+	_horde_budget_left()
+	_horde_frame_n += 1
+	horde_spawn_peak = maxi(horde_spawn_peak, _horde_frame_n)
+	if true:
 		var u: Unit = scene.instantiate()
 		u.faction = Constants.FACTION_GOBLIN
 		_world.add_child(u)
@@ -2618,7 +2699,8 @@ func spawn_goblin_squad(uid: String, n: int, base: Vector3) -> int:
 		u.global_position = Vector3(ux, get_terrain_height(ux, uz), uz)
 		u.sync_row()
 		GameManager.add_to_squad(sid, u)
-	return sid
+		return u
+	return null
 
 ## ═════════════════════════════════════════════════════════════════════════════
 ## ЛОГОВО ТРОЛЛЯ (заказ владельца, 09.09.2026)

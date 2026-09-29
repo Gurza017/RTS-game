@@ -112,7 +112,9 @@ func roof_units() -> Array:
 		if not sids.has(int(s0)):
 			sids.append(int(s0))
 	for sid in sids:
-		if sid <= 0 or not host.roof_accepts(GameManager.squad_type(sid)):
+		# По ПРИЗНАКУ записи, а не по роду войск: стрелки в лазарете (крыша
+		# была полна) на крышу не выходят (ТЗ 29.09.2026, п. 5)
+		if sid <= 0 or not host.squad_on_roof(sid):
 			continue
 		for m in GameManager.squad_members(sid):
 			if not is_instance_valid(m):
@@ -129,10 +131,10 @@ func men() -> int:
 func squads() -> int:
 	var n := 0
 	for rec in host.garrison:
-		if host.roof_accepts(String((rec as Dictionary).get("type", ""))):
+		if bool((rec as Dictionary).get("roof", false)):
 			n += 1
 	for sid in host._incoming:
-		if host.roof_accepts(GameManager.squad_type(int(sid))):
+		if bool(host._incoming_roof.get(int(sid), false)):
 			n += 1
 	return n
 
@@ -143,7 +145,7 @@ func roof_index_of(sid: int) -> int:
 	var k := 0
 	for rec in host.garrison:
 		var r: Dictionary = rec
-		if not host.roof_accepts(String(r.get("type", ""))):
+		if not bool(r.get("roof", false)):
 			continue
 		if int(r.get("sid", 0)) == sid:
 			return k
@@ -373,7 +375,7 @@ func order_fire(t: Node3D) -> bool:
 	# Отряду в режиме залпа — окно сразу: готовые стреляют на своём тике
 	for rec in host.garrison:
 		var sid: int = int((rec as Dictionary).get("sid", 0))
-		if sid > 0 and host.roof_accepts(GameManager.squad_type(sid)):
+		if sid > 0 and bool((rec as Dictionary).get("roof", false)):
 			GameManager.squad_note_order(sid, GameManager.ORDER_ATTACK,
 				(t as Node3D).global_position, t)
 			if GameManager.squad_volley_mode(sid):
@@ -610,7 +612,7 @@ func _stick_arrow_into(u: Unit, spot: Vector3) -> void:
 func release_all() -> bool:
 	var ids: Array = []
 	for rec in host.garrison:
-		if host.roof_accepts(String((rec as Dictionary).get("type", ""))):
+		if bool((rec as Dictionary).get("roof", false)):
 			ids.append(int((rec as Dictionary).get("sid", 0)))
 	for sid in ids:
 		host.release_garrison(int(sid))

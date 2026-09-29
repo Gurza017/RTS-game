@@ -166,6 +166,29 @@ const DOOR_PATIENCE := 2.5
 
 ## Когда отряд встал в очередь ко входу, ticks_msec. Ключ — sid
 var _incoming_at: Dictionary = {}
+## Идущий ко входу сядет НА КРЫШУ (true) или в лазарет (false). Ключ — sid
+var _incoming_roof: Dictionary = {}
+## Кому уже сказано в телеметрию, что терпение у дверей вышло. Ключ — sid
+var _patience_told: Dictionary = {}
+
+## ── КРЫША ИЛИ ЛАЗАРЕТ — ПРИЗНАК ЗАПИСИ, А НЕ РОДА ВОЙСК (ТЗ 29.09.2026) ──
+## Стрелковый отряд при ПОЛНОЙ крыше не отвергается, а садится в лазарет как
+## любой другой: лечится, пополняется и выходит сам. Поэтому «на крыше ли
+## отряд» спрашивают у записи (roof) или у заявки (_incoming_roof), а не у
+## roof_accepts(type): по роду войск оба отряда — лучники
+func squad_on_roof(sid: int) -> bool:
+	var i: int = _slot_of(sid)
+	if i >= 0:
+		return bool((garrison[i] as Dictionary).get("roof", false))
+	return bool(_incoming_roof.get(sid, false))
+
+## Телеметрия гарнизона (ТЗ 29.09.2026, п. 4): заявка, отказ с причиной,
+## терпение у дверей, отмена, вход, выпуск
+func _tm(kind: String, sid: int, extra: Dictionary = {}) -> void:
+	var d: Dictionary = {"bld": building_id, "fac": faction, "sid": sid}
+	for k in extra.keys():
+		d[k] = extra[k]
+	GameManager.tm_event(kind, d)
 
 ## Свежий билет застрявшим — не чаще раза в секунду на отряд
 var _kick_ms: Dictionary = {}
@@ -175,6 +198,13 @@ func _kick_due(sid: int) -> bool:
 		return false
 	_kick_ms[sid] = now
 	return true
+
+## Сколько секунд отряд стоит в очереди ко входу (0 — не в очереди)
+func _queue_secs(squad_id: int) -> float:
+	var since: Variant = _incoming_at.get(squad_id)
+	if since == null:
+		return 0.0
+	return snappedf(float(Time.get_ticks_msec() - int(since)) * 0.001, 0.1)
 
 func _enter_radius(squad_id: int) -> float:
 	var door: float = minf(_door_radius(), _UCfg.GARRISON_ENTER_RADIUS)
@@ -220,20 +250,32 @@ func request_garrison(squad_id: int) -> bool:
 		return false
 	if _slot_of(squad_id) >= 0 or _incoming.has(squad_id):
 		return true                        # уже идёт или уже внутри
-	if garrison.size() + _incoming.size() >= garrison_limit():
-		return false
 	var utype: String = GameManager.squad_type(squad_id)
+	if garrison.size() + _incoming.size() >= garrison_limit():
+		_tm("garrison_refused", squad_id, {"type": utype, "why": "limit",
+			"inside": garrison.size(), "incoming": _incoming.size()})
+		return false
 	if not garrison_accepts(utype):
+		_tm("garrison_refused", squad_id, {"type": utype, "why": "type"})
 		return false
-	# Крыша вмещает ограниченное число стрелковых отрядов (ТЗ 14.09.2026)
-	if roof_accepts(utype) and _roof.squads() >= roof_squads_max():
-		return false
+	# ── КРЫША ПОЛНА — СТРЕЛКИ В ЛАЗАРЕТ, А НЕ ОТКАЗ (ТЗ 29.09.2026, п. 5) ──
+	# Крыша вмещает ROOF_SQUADS стрелковых отрядов (ТЗ 14.09.2026); прежде
+	# третий отряд лучников крепость НЕ ПРИНИМАЛА вовсе, хотя из восьми мест
+	# лазарета заняты были два. Теперь он садится внутрь обычным отрядом:
+	# лечится, пополняется, выходит сам. Башня и бараки этого пути не имеют:
+	# у них garrison_limit == roof_squads_max, полная крыша = полный лимит
+	var on_roof: bool = roof_accepts(utype) and _roof.squads() < roof_squads_max()
 	var members := GameManager.squad_members(squad_id)
 	if members.is_empty():
+		_tm("garrison_refused", squad_id, {"type": utype, "why": "empty"})
 		return false
 	_incoming.append(squad_id)
 	_incoming_at[squad_id] = Time.get_ticks_msec()
+	_incoming_roof[squad_id] = on_roof
+	_patience_told.erase(squad_id)
 	absorb_worst_dist = 0.0
+	_tm("garrison_request", squad_id, {"type": utype, "roof": on_roof, "men": members.size(),
+		"dist": snappedf(GameManager.squad_centre_xz(squad_id).distance_to(Vector2(_gate_position().x, _gate_position().z)), 0.1)})
 	GameManager.squad_mark_to_castle(squad_id, true)
 	# РАЗМЕТКА СТРОЯ СНИМАЕТСЯ: отряд отходит, а не марширует квадратом, и
 	# смыкание рядов по дороге к воротам только тормозило бы его
@@ -262,15 +304,14 @@ func garrison_now(squad_id: int) -> bool:
 	var utype: String = GameManager.squad_type(squad_id)
 	if not garrison_accepts(utype):
 		return false
-	if roof_accepts(utype) and _roof.squads() >= roof_squads_max():
-		return false
+	var on_roof: bool = roof_accepts(utype) and _roof.squads() < roof_squads_max()
 	var members := GameManager.squad_members(squad_id)
 	if members.is_empty():
 		return false
 	GameManager.squad_clear_formation(squad_id)
 	for m in members:
 		absorb_unit(m as Unit)
-	garrison.append({"sid": squad_id, "type": utype, "revive": 0.0})
+	garrison.append({"sid": squad_id, "type": utype, "revive": 0.0, "roof": on_roof})
 	set_process(true)
 	return true
 
@@ -411,6 +452,7 @@ func release_garrison(squad_id: int) -> bool:
 ## снимает ВЫЗЫВАЮЩИЙ — так авто-выход может убрать запись до обхода массива
 func _release_members(squad_id: int) -> void:
 	GameManager.squad_note_healed(squad_id)
+	_tm("garrison_release", squad_id, {"men": GameManager.squad_members(squad_id).size()})
 	var gate := _gate_position()
 	var exit_dir := spawn_offset
 	exit_dir.y = 0.0
@@ -541,6 +583,8 @@ func _evacuate_on_death() -> void:
 				u.end_retreat(true)
 	_incoming.clear()
 	_incoming_at.clear()
+	_incoming_roof.clear()
+	_patience_told.clear()
 
 ## Сколько бойцов не хватает отряду до полного состава
 func garrison_missing(squad_id: int) -> int:
@@ -550,9 +594,21 @@ func garrison_missing(squad_id: int) -> int:
 func _process_garrison(delta: float) -> void:
 	# 1) кто дошёл до ворот — принимаем внутрь
 	var still: Array = []
+	# ── ОЧЕРЕДЬ У ДВЕРЕЙ ЗАСАСЫВАЕТСЯ ЦЕЛИКОМ (ТЗ 29.09.2026, п. 4-5) ──────
+	# Три отряда лучников разом (36 бойцов) вставали кольцом в 5-6 м от ворот:
+	# голова вошла, а хвост держит разбор наложения — шагать ему некуда, и
+	# широкий допуск GARRISON_ENTER_RADIUS (5 м) до него не доставал (стенд
+	# qa_building_navigation D3: «25 из 36 за 20 с»). После терпения у дверей
+	# ВСТАВШИЙ боец входит в пределах радиуса ТОЛПЫ всех идущих: интервал ×
+	# √(бойцов в очереди) поверх допуска. Идущий — не трогаем: он дойдёт сам
+	var queue_men := 0
+	for s0 in _incoming:
+		queue_men += GameManager.squad_members(int(s0)).size()
+	var crowd_r: float = _UCfg.GARRISON_ENTER_RADIUS + squad_spacing * sqrt(float(queue_men)) * 1.2
 	for s in _incoming:
 		var sid: int = s
 		var members := GameManager.squad_members(sid)
+		var patient: bool = _queue_secs(sid) >= DOOR_PATIENCE
 		if members.is_empty():
 			continue
 		var all_in := true
@@ -586,7 +642,8 @@ func _process_garrison(delta: float) -> void:
 			# допуск, что у сдачи ресурсов, at_deposit); упор в чужие тела у самой
 			# башни — враги вокруг не «невидимая стена»
 			if dg <= _enter_radius(sid) or at_deposit(up) \
-					or (u._enemy_contact and dg <= _UCfg.GARRISON_ENTER_RADIUS):
+					or (u._enemy_contact and dg <= _UCfg.GARRISON_ENTER_RADIUS) \
+					or (patient and dg <= crowd_r and not u.moved_recently()):
 				absorb_unit(u)
 				continue
 			all_in = false
@@ -638,18 +695,33 @@ func _process_garrison(delta: float) -> void:
 			# игрок его только что увёл
 			_spill_absorbed(sid)
 			GameManager.squad_mark_to_castle(sid, false)
+			_tm("garrison_cancel", sid, {"secs": _queue_secs(sid)})
 			continue
 		if all_in:
-			garrison.append({"sid": sid, "type": GameManager.squad_type(sid), "revive": 0.0})
+			garrison.append({"sid": sid, "type": GameManager.squad_type(sid), "revive": 0.0,
+				"roof": bool(_incoming_roof.get(sid, false))})
 			GameManager.squad_mark_to_castle(sid, false)
+			_tm("garrison_in", sid, {"roof": bool(_incoming_roof.get(sid, false)),
+				"men": members.size(), "secs": _queue_secs(sid)})
 		else:
 			still.append(sid)
+			# Терпение у дверей вышло — один раз в телеметрию, с числом тех,
+			# кто ещё снаружи (ТЗ 29.09.2026, п. 4: «не дошёл в бюджет»)
+			if _queue_secs(sid) >= DOOR_PATIENCE and not _patience_told.has(sid):
+				_patience_told[sid] = true
+				var outside := 0
+				for m in members:
+					if not (m as Unit).garrisoned:
+						outside += 1
+				_tm("garrison_patience", sid, {"outside": outside, "men": members.size()})
 	_incoming = still
 	# Часы очереди держим ровно на тех, кто ещё идёт: вошедший и отменивший
 	# поход обязаны начать отсчёт заново, если их пошлют в замок снова
 	for sid_key in _incoming_at.keys():
 		if not still.has(sid_key):
 			_incoming_at.erase(sid_key)
+			_incoming_roof.erase(sid_key)
+			_patience_told.erase(sid_key)
 
 	# 2) лечение и пополнение тех, кто уже внутри
 	var keep: Array = []
@@ -680,7 +752,7 @@ func _process_garrison(delta: float) -> void:
 		# заведённый отряд и вручную щёлкать по слоту гарнизона
 		# Отряд на крыше — это ПОСТ, а не лазарет: сам не выходит
 		if _auto_release() and missing <= 0 and healed \
-				and not roof_accepts(String(rec["type"])):
+				and not bool(rec.get("roof", false)):
 			release.append(sid)
 			continue
 		keep.append(rec)

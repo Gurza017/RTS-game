@@ -192,6 +192,18 @@ func _ai_state() -> Dictionary:
 		ai["red_clock"] = snappedf(float(eai.get("clock")), 1.0)
 		ai["red_retaliations"] = int(eai.get("retaliations"))
 		ai["red_retaliation_refusals"] = int(eai.get("retaliation_refusals"))
+		# ТЗ 29.09.2026, п. 1: почему нет армии — видно по еде и найму
+		var field := 0
+		if rs is Array:
+			for s in rs:
+				if String((s as Dictionary).get("role", "")) != "retreat":
+					field += 1
+		ai["red_field"] = field
+		ai["red_food"] = snappedf(ResourceManager.get_amount(Constants.FACTION_ENEMY, Constants.RESOURCE_FOOD), 1.0)
+		ai["red_wood"] = snappedf(ResourceManager.get_amount(Constants.FACTION_ENEMY, Constants.RESOURCE_WOOD), 1.0)
+		ai["red_gold"] = snappedf(ResourceManager.get_amount(Constants.FACTION_ENEMY, Constants.RESOURCE_GOLD), 1.0)
+		ai["red_last_action"] = String(eai.get("last_action"))
+		ai["red_lent"] = int(eai.get("retaliation_lent"))
 	return ai
 
 ## Склад, приток и расход за образец — игрок, красный ИИ, орда

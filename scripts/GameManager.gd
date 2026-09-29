@@ -4313,7 +4313,7 @@ func _refresh_order_marks(delta: float) -> void:
 				if rf != null:
 					for rec in (u as Castle).garrison:
 						var rsid: int = int((rec as Dictionary).get("sid", 0))
-						if rsid > 0 and (u as Castle).roof_accepts(squad_type(rsid)):
+						if rsid > 0 and (u as Castle).squad_on_roof(rsid):
 							sids[rsid] = true
 			continue
 		sids[uu.squad_id] = true

@@ -1477,8 +1477,10 @@ static func veteran_choice_info(unit_type: String, choice_id: String) -> Diction
 ## ГАРНИЗОН ЗАМКА (CASTLE REFILL & HEAL)
 const GARRISON_SQUAD_LIMIT   := 8    # сколько отрядов помещается в один Замок (ТЗ 29.09.2026: 8)
 ## HP в секунду каждой раненой модели, ОДНОВРЕМЕННО у всех моделей отряда
-const GARRISON_HEAL_PER_SEC  := 1.0
-const GARRISON_REVIVE_SECONDS := 5.0  # секунд на одну восстановленную модель
+## ТЗ 29.09.2026 (второе письмо, п. 2): лечение и восстановление в замке на
+## 30 % быстрее — время ×0.7, то есть темп ÷0.7 (1.0 → 1.43 HP/с, 5.0 → 3.5 с)
+const GARRISON_HEAL_PER_SEC  := 1.0 / 0.7
+const GARRISON_REVIVE_SECONDS := 5.0 * 0.7  # секунд на одну восстановленную модель (ТЗ 29.09: −30 %)
 ## Дистанция до Замка, с которой отряд «входит внутрь»
 const GARRISON_ENTER_RADIUS  := 5.0
 const GARRISON_AUTO_RELEASE  := true

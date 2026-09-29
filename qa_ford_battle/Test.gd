@@ -181,6 +181,15 @@ func _run() -> void:
 	var win_contact_far := 0
 	var win_attacking := 0
 	var win_water := 0
+	# ── ПУНКТ 3 ТЗ 29.09.2026 (второе письмо): пробки на броде и нагрузка A* ──
+	# «Застрявший» — тем же правилом, что в телеметрии партии (TelemetryLogger.
+	# unit_stuck: MOVING, до цели > 2 м, не двигался); A* — число построенных
+	# маршрутов в секунду и худший вызов
+	var win_stuck := 0
+	var stuck_worst := 0.0
+	var nav_rate_worst := 0.0
+	var last_nav: int = GameManager.nav_routes_built
+	GameManager.nav_worst_usec = 0
 	var win_start: float = t0
 	var rows: Array = []
 	var last_dmg := {Constants.FACTION_GOBLIN: 0.0, Constants.FACTION_PLAYER: 0.0}
@@ -207,6 +216,8 @@ func _run() -> void:
 			last_strike[u] = sc
 			if main.is_water(u.global_position.x, u.global_position.z):
 				win_water += 1
+			if _TL.unit_stuck(u):
+				win_stuck += 1
 			if u.state != Unit.State.ATTACKING:
 				noshoot_since.erase(u)
 				continue
@@ -247,7 +258,13 @@ func _run() -> void:
 				"contact_far": float(win_contact_far) / float(maxi(win_samples, 1)),
 				"water": float(win_water) / float(maxi(win_samples, 1)),
 				"gob_alive": _alive(gob_sids), "hum_alive": _alive(hum_sids),
+				"stuck": float(win_stuck) / float(maxi(win_samples, 1)),
+				"nav_ps": float(GameManager.nav_routes_built - last_nav) / secs,
 			}
+			last_nav = GameManager.nav_routes_built
+			stuck_worst = maxf(stuck_worst, float(row["stuck"]))
+			nav_rate_worst = maxf(nav_rate_worst, float(row["nav_ps"]))
+			print("        застрявших на марше %.1f; маршрутов A*/с %.1f; худший A* %.2f мс" % [row["stuck"], row["nav_ps"], float(GameManager.nav_worst_usec) / 1000.0])
 			rows.append(row)
 			print("  [%3.0f с] удары/с орда %.0f / люди %.0f; урон/с орда %.0f / люди %.0f; ATTACKING %.0f, в досягаемости %.0f (из них не бьют > 0.3 с: %.1f), в контакте с недосягаемой целью %.0f; в воде %.1f; живых %d / %d" % [
 				row["t"], row["gob_strikes"], row["hum_strikes"], row["gob_dmg"], row["hum_dmg"], row["attacking"], row["inreach"], row["inreach_idle"], row["contact_far"], row["water"], row["gob_alive"], row["hum_alive"]])
@@ -261,6 +278,7 @@ func _run() -> void:
 			win_contact_far = 0
 			win_attacking = 0
 			win_water = 0
+			win_stuck = 0
 	# Интервал ударов против кулдауна — по бившим не меньше трёх раз
 	var ratios: Array = []
 	var missed := 0
@@ -305,6 +323,12 @@ func _run() -> void:
 	verdict("F4 интервал ударов у бивших не больше 1.5 кулдауна", med_ratio > 0.0 and med_ratio <= 1.5, "медиана %.2f" % med_ratio)
 	verdict("F5 промахов отложенного касания меньше 10 %", released == 0 or float(missed) / float(released + missed) < 0.10, "%d из %d" % [missed, released + missed])
 	verdict("F6 никто не стоит в воде", water_max < 0.5, "макс %.1f бойцов в выборке" % water_max)
+	# Партия 29.09 16:06: до 319 застрявших у брода и худший A* 13.3 мс
+	verdict("F7 пробки у брода нет: застрявших на марше меньше 3 %% армии (худшее окно %.1f)" % stuck_worst,
+		stuck_worst < 0.03 * float(all_units.size()))
+	verdict("F8 A* не душит бой: худший вызов меньше 8 мс (%.2f), маршрутов не больше 40/с (%.1f)" % [
+		float(GameManager.nav_worst_usec) / 1000.0, nav_rate_worst],
+		GameManager.nav_worst_usec < 8000 and nav_rate_worst <= 40.0)
 	_finish()
 
 func _dmg_out(fac: int) -> float:
@@ -323,3 +347,4 @@ func _alive(sids: Array) -> int:
 	return n
 
 const _Opt := preload("res://scripts/perf_config.gd")
+const _TL := preload("res://scripts/TelemetryLogger.gd")

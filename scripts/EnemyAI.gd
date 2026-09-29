@@ -241,6 +241,56 @@ var retaliation_target: Vector3 = Vector3.ZERO
 var retaliations: int = 0
 var retaliation_refusals: int = 0
 
+## ── ОХРАНА В ДОЛГ (ТЗ 29.09.2026, п. 1) ──────────────────────────────────
+var _lent_sids: Array = []
+var retaliation_lent: int = 0
+func _guard() -> Node:
+	if main == null:
+		return null
+	var g = main.get("enemy_guard")
+	return g if g != null and is_instance_valid(g) and g.has_method("lend") else null
+
+func _guard_lendable() -> int:
+	var g := _guard()
+	return int(g.lendable(_AICfg.RETALIATION_LEND_MIN_LEVEL)) if g != null else 0
+
+## Бойцы охраны, которые пойдут в долг, — для сравнения силы у цели
+func _lend_pending_men() -> Array:
+	var out: Array = []
+	var g := _guard()
+	if g == null:
+		return out
+	for s in g.squads:
+		var sid: int = int(s["sid"])
+		if int(s.get("level", 0)) >= _AICfg.RETALIATION_LEND_MIN_LEVEL and g.is_asleep(sid):
+			out.append(GameManager.squad_members(sid).size())
+	return out
+
+func _lend_for_retaliation() -> void:
+	var g := _guard()
+	if g == null:
+		return
+	var field := 0
+	for s in squads:
+		if String((s as Dictionary)["role"]) != ROLE_RETREAT:
+			field += 1
+	var need: int = maxi(_AICfg.RETALIATION_MIN_SQUADS - field, 0)
+	if need <= 0:
+		return
+	_lent_sids = g.lend(need, _AICfg.RETALIATION_LEND_MIN_LEVEL)
+	retaliation_lent += _lent_sids.size()
+	# В записи армии — сразу, не дожидаясь такта: удар раздаётся ниже
+	_regroup()
+
+func _return_lent() -> void:
+	if _lent_sids.is_empty():
+		return
+	var g := _guard()
+	if g != null:
+		g.take_back()
+	_lent_sids.clear()
+	_regroup()
+
 ## Почему удар сейчас не идёт; пустая строка — можно. Защита крепости
 ## (источник потерь у дома) — без проверки силы
 func _retaliation_refusal(target: Vector3) -> String:
@@ -252,10 +302,19 @@ func _retaliation_refusal(target: Vector3) -> String:
 			continue
 		field += 1
 		men += (sq["members"] as Array).size()
-	if field < _AICfg.RETALIATION_MIN_SQUADS:
-		return "полевых отрядов %d < %d" % [field, _AICfg.RETALIATION_MIN_SQUADS]
+	# ── ПОРЯДОК ПРОВЕРОК (ТЗ 29.09.2026, п. 1) ─────────────────────────────
+	# Защита своей крепости — БЕЗ проверки силы, и прежде счёта полевых: раньше
+	# «полевых 0 < 8» отвергал и удар у собственного дома, вопреки шапке
+	# spawn_config. Нечем бить вовсе (ни полевых, ни охраны в долг) — отказ
+	var lend_ok: int = _guard_lendable()
 	if _home_pos != Vector3.ZERO and target.distance_to(_home_pos) <= _AICfg.RETALIATION_HOME_R:
-		return ""
+		return "" if field + lend_ok > 0 else "нечем бить: полевых 0, охраны в долг 0"
+	# Полевых мало — добираем спящей охраной линий и периметра (одалживается
+	# при начале удара, возвращается по его концу)
+	if field + lend_ok < _AICfg.RETALIATION_MIN_SQUADS:
+		return "полевых отрядов %d (+охраны в долг %d) < %d" % [field, lend_ok, _AICfg.RETALIATION_MIN_SQUADS]
+	for sid_l in _lend_pending_men():
+		men += int(sid_l)
 	var foes: int = GameManager.unit_grid.enemy_count(target, _AICfg.RETALIATION_SCAN_R, Constants.FACTION_ENEMY)
 	if float(men) < float(foes) * _AICfg.RETALIATION_ADVANTAGE:
 		return "в поле %d против %d у цели" % [men, foes]
@@ -271,6 +330,7 @@ func _update_retaliation() -> void:
 	if retaliation_until >= 0.0 and clock >= retaliation_until:
 		retaliation_until = -1.0
 		_retal_mark = lost
+		_return_lent()
 		# Удар кончился — планы переиздать: отряды стоят на чужой земле
 		for s in squads:
 			(s as Dictionary)["issued"] = false
@@ -294,7 +354,9 @@ func _update_retaliation() -> void:
 		last_action += "|ответный удар отложен: " + why
 		GameManager.tm_event("red_retaliation_skip", {"why": why, "lost": lost - _retal_mark})
 		return
-	GameManager.tm_event("red_retaliation", {"lost": lost - _retal_mark, "at": [snappedf(target.x, 0.1), snappedf(target.z, 0.1)]})
+	_lend_for_retaliation()
+	GameManager.tm_event("red_retaliation", {"lost": lost - _retal_mark, "at": [snappedf(target.x, 0.1), snappedf(target.z, 0.1)],
+		"lent": _lent_sids.size()})
 	retaliation_until = clock + _AICfg.RETALIATION_SEC
 	_retal_next_ok = retaliation_until + _AICfg.RETALIATION_COOLDOWN_SEC
 	_retal_mark = lost
@@ -411,7 +473,10 @@ func _regroup() -> void:
 			# в составе, и ИИ вечно числил бы роль «отход», раздавал бы посты
 			# невидимкам и не набирал бы замену. Вернувшихся из замка подберёт
 			# шаг 3 этой же функции, как обычное пополнение
-			if is_instance_valid(m) and not m.is_dead() and not (m as Unit).garrisoned:
+			if is_instance_valid(m) and not m.is_dead() and not (m as Unit).garrisoned \
+					and not GameManager.squad_is_home_guard((m as Unit).squad_id):
+				# Охрана (в т. ч. одолженная и вернувшаяся, HomeGuard.take_back) —
+				# не армия: её ведёт HomeGuard
 				alive.append(m)
 		if alive.is_empty():
 			continue
@@ -589,6 +654,13 @@ func _economy(castle: Castle) -> void:
 	# Замок занят армией — рабочие ждут, КРОМЕ полного вымирания экономики
 	if not castle.production_queue.is_empty() and workers.size() > 0:
 		return
+	# ── ЕДА — ПОД АРМИЮ (ТЗ 29.09.2026, п. 1) ───────────────────────────────
+	# Рабочий стоит еду, отряд тоже; без резерва рабочие съедали всё к 140-й
+	# секунде, и армия не нанималась до конца партии
+	if workers.size() + queued >= _AICfg.AI_WORKER_FLOOR:
+		var wcost: float = float(_UCfg.TRAINING.get("castle", {}).get("worker", {}).get("cost_food", 50.0))
+		if ResourceManager.get_amount(Constants.FACTION_ENEMY, Constants.RESOURCE_FOOD) - wcost < _AICfg.AI_FOOD_RESERVE:
+			return
 	if castle.train_worker():
 		last_action += "|найм рабочего"
 		return
@@ -602,6 +674,23 @@ func _assign_worker(w: Worker) -> void:
 	var order := [Constants.RESOURCE_WOOD, Constants.RESOURCE_GOLD,
 				  Constants.RESOURCE_WOOD, Constants.RESOURCE_STONE]
 	var start: int = w.get_instance_id() % order.size()
+	# ── НА ТО, ЧЕГО НЕ ХВАТАЕТ (ТЗ 29.09.2026, п. 1) ──────────────────────
+	# Раскладка «по номеру узла» копила золото (5000 к 10-й минуте) при
+	# нуле дерева, а найм упирался в дерево. Первым пробуем ресурс с самым
+	# малым запасом относительно его веса в тратах (дерево 1, золото 0.6,
+	# камень 0.3), дальше — прежний круг
+	var best_r: int = -1
+	var best_v: float = INF
+	for pair in [[Constants.RESOURCE_WOOD, 1.0], [Constants.RESOURCE_GOLD, 0.6], [Constants.RESOURCE_STONE, 0.3]]:
+		var v: float = ResourceManager.get_amount(Constants.FACTION_ENEMY, int(pair[0])) / float(pair[1])
+		if v < best_v:
+			best_v = v
+			best_r = int(pair[0])
+	if best_r >= 0:
+		var t0: ResourceNode = main.find_nearest_resource(w.global_position, best_r)
+		if t0 != null:
+			w.command_gather(t0)
+			return
 	for i in range(order.size()):
 		var res_type: int = order[(start + i) % order.size()]
 		# Тип указан явно: main объявлен как Node3D, поэтому := тут ничего не выводит
@@ -697,6 +786,35 @@ func _towers_count(castle: Castle = null) -> int:
 
 ## Точка очередной башни: на TOWER_BORDER_FRACTION пути от замка к базе игрока,
 ## по очереди слева и справа от оси на TOWER_SIDE
+## Дома и площадки под дома у стороны ИИ
+func _houses_count() -> int:
+	var n := 0
+	for b in main.get_tree().get_nodes_in_group("enemy_buildings"):
+		if not is_instance_valid(b):
+			continue
+		var bld := b as Building
+		if bld == null or bld.is_dead():
+			continue
+		var bid: String = bld.building_id
+		if bld.get("target_id") != null:
+			bid = String(bld.get("target_id"))
+		if _UCfg.HOUSE_IDS.has(bid):
+			n += 1
+	return n
+
+## Точка дома: ряды по четыре ЗА замком (от фронта), шаг 5 м — в тылу, где
+## нет ни линий охраны, ни выхода отрядов из барака
+func _house_spot(castle: Castle, idx: int) -> Vector3:
+	var f := castle.front_dir()
+	var sd := Vector3(-f.z, 0.0, f.x)
+	var col: int = idx % 4
+	var row: int = idx / 4
+	var p: Vector3 = castle.global_position - f * (13.0 + float(row) * 5.0) \
+		+ sd * ((float(col) - 1.5) * 5.0)
+	p.x = clampf(p.x, -main.GEN_HALF_X + 6.0, main.GEN_HALF_X - 6.0)
+	p.z = clampf(p.z, -main.GEN_HALF_Z + 6.0, main.GEN_HALF_Z - 6.0)
+	return GameManager.land_target(p)
+
 func _tower_spot(castle: Castle, idx: int) -> Vector3:
 	var base: Vector3 = _player_base_pos()
 	if base == Vector3.ZERO:
@@ -766,6 +884,15 @@ func _construction(castle: Castle) -> void:
 			last_action += "|заложена стрелковая"
 		return
 
+	# ── ДОМА — ЕДИНСТВЕННЫЙ ИСТОЧНИК ЕДЫ ИИ (ТЗ 29.09.2026, п. 1) ───────────
+	# Первые четыре — сразу за стрелковой, остальные — вперемешку с башнями
+	# (одна стройка за раз, см. выше), пока не наберётся AI_HOUSES
+	var houses: int = _houses_count()
+	if houses < _AICfg.AI_HOUSES and (houses < 4 or _towers_count(castle) >= _AICfg.AI_TOWERS \
+			or ResourceManager.get_amount(Constants.FACTION_ENEMY, Constants.RESOURCE_FOOD) < _AICfg.AI_FOOD_RESERVE):
+		if _start_site("house", _house_spot(castle, houses)):
+			last_action += "|заложен дом (%d)" % (houses + 1)
+			return
 	# ── БАШНИ НА ГРАНИЦЕ (спринт 17) ────────────────────────────────────────
 	# После стрелковой: AI_TOWERS сторожевых башен на доле пути к базе игрока,
 	# разнесённых вбок. Стройка одна за раз (см. выше), поэтому башни идут по
@@ -776,6 +903,10 @@ func _construction(castle: Castle) -> void:
 			last_action += "|заложена башня на границе"
 			return
 
+	# Резерв дерева под найм — и для общих улучшений (см. _army_wood_ok)
+	if not _army_wood_ok():
+		_buy_squad_abilities()
+		return
 	for slot in _UCfg.UPGRADE_SLOTS:
 		var d: Dictionary = slot
 		var uid: String = String(d.get("id", ""))
@@ -842,6 +973,12 @@ func _buy_squad_abilities() -> void:
 # forge_config.get_node(), поэтому ни Smithy.research, ни GameManager.can_research
 # менять не пришлось — доступность, цена, очередь и накопление бонусов работают
 # ровно так же, как у игрока.
+func _army_wood_ok() -> bool:
+	if not _peace_over:
+		return true
+	return ResourceManager.get_amount(Constants.FACTION_ENEMY, Constants.RESOURCE_WOOD) \
+		> _AICfg.AI_RESEARCH_WOOD_RESERVE
+
 func _research_forge(smithy: Smithy) -> void:
 	if not _AICfg.AI_RESEARCH_FORGE or smithy == null:
 		return
@@ -849,6 +986,8 @@ func _research_forge(smithy: Smithy) -> void:
 	# необученной из тридцати
 	if ResourceManager.get_amount(Constants.FACTION_ENEMY, Constants.RESOURCE_GOLD) \
 			<= _AICfg.AI_RESEARCH_GOLD_RESERVE:
+		return
+	if not _army_wood_ok():
 		return
 	var best_id := ""
 	var best_score := 0.0

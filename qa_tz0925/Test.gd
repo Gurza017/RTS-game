@@ -34,6 +34,9 @@ var _log: Array = []
 var _only: String = "abcdefgh"
 
 func _ready() -> void:
+	# Блоки набега проверяют раскладку и приказы СРАЗУ после launch — рождение
+	# бойцов очередью (растяжка спавна, ТЗ 29.09.2026) стережёт qa_horde_spawn
+	load("res://scripts/perf_config.gd").horde_spawn_stagger = false
 	for a in OS.get_cmdline_user_args():
 		var s := String(a)
 		if s.begins_with("only="):

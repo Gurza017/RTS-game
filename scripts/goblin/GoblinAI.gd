@@ -260,7 +260,7 @@ func _tick_revenge() -> void:
 		var a: float = TAU * float(i) / float(_GobCfg.REVENGE_SQUADS)
 		var r: float = _GobCfg.VILLAGE_RADIUS + _GobCfg.horde_radius(n_per) + 4.0
 		var base := Vector3(village.x + cos(a) * r, 0.0, village.z + sin(a) * r)
-		var sid: int = int(main.call("spawn_goblin_squad", _GobCfg.REVENGE_UNIT, n_per, base))
+		var sid: int = int(main.call("spawn_goblin_squad", _GobCfg.REVENGE_UNIT, n_per, base, true))
 		if sid <= 0:
 			continue
 		_revenge_sids[sid] = i

@@ -123,7 +123,9 @@ qa_building_block qa_ai_audit qa_audio_update qa_building_navigation
 qa_garrison_archers_test qa_monk_move qa_reform_idle qa_lair_freeze
 qa_wave_wake qa_scout_raid qa_vet_ui2 qa_sheep_herding qa_attack_move
 qa_tz0923 qa_tz0924 qa_tz0924b qa_economy90 qa_tz0925 qa_tz0928
-qa_sheep_performance_test qa_cliff_and_squad_behavior`
+qa_sheep_performance_test qa_cliff_and_squad_behavior qa_horde_spawn`
+
+**Экономика ИИ без подмоги — `qa_red_economy`** (~15 мин стены, отсоединённо).
 
 **Длинная партия — зонд `qa_ai_loop/Smoke`** (`-- minutes=N`, ускорение ×4,
 ~1.3 мин стены на игровую минуту): гонять после правок ИИ и условий победы,
@@ -330,6 +332,47 @@ SCRIPT ERROR в нём — регрессия.
     (`Vector3.INF`, `Vector2.INF`) — так уже сделано у `squad_centre_xz` и
     `ArmyCore.PosOr`. Разобрано на `squad_enemy_point` против прежнего
     `squad_enemy_pos`.
+
+## ТЗ 29.09.2026 (второе письмо, 5 пунктов): экономика красного, растяжка спавна, брод, гарнизон
+
+Стенды — **`qa_red_economy`** (12 мин партии ×4 БЕЗ накачки склада, мир
+сокращён до 300 с), **`qa_horde_spawn`** (6), `qa_building_navigation` блок D,
+`qa_ford_battle` F7/F8.
+
+- **КРАСНЫЙ БЕЗ АРМИИ — ЭТО ЕДА.** С ТЗ 23.09 отряд и рабочий стоят еду, а у
+  ИИ не было ни одного её источника: 400 стартовой уходили на рабочих к 140-й
+  секунде, дальше ни один заказ не проходил `spend` (логи 23-29.09: еда 0,
+  полевых 0-3). Все стенды ИИ накачивали склад и поломки не видели. Теперь:
+  `AI_HOUSES` 10 домов после стрелковой (`_house_spot` — за замком рядами по
+  4), рабочий не нанимается ниже `AI_FOOD_RESERVE` при бригаде ≥
+  `AI_WORKER_FLOOR`, исследования ждут `AI_RESEARCH_WOOD_RESERVE` дерева
+  после мира, рабочий идёт на самый нехватающий ресурс (веса 1/0.6/0.3).
+  Замер: 13 полевых к 11-й минуте. Поля телеметрии `red_field/food/wood/
+  gold/last_action/lent`.
+- **ОТВЕТНЫЙ УДАР:** защита своей крепости проверяется ПЕРВОЙ (прежде «полевых
+  0 < 8» отвергал и её); недостающие до `RETALIATION_MIN_SQUADS` берутся в
+  долг у спящей охраны уровней 2-3 (`HomeGuard.lend/take_back`, кольцо не
+  отдаётся), по концу удара возвращаются на посты. `_regroup` выкидывает из
+  записей армии бойцов с флагом охраны.
+- **РАСТЯЖКА СПАВНА ОРДЫ** (`Main.spawn_goblin_squad(..., staggered)`,
+  `perf_config.horde_spawn_stagger/budget` 40): отряд и 4 первых — сразу,
+  остальные очередью в `Main._physics_process`; опоздавший перенимает спячку,
+  приказ старшего и награды (`_horde_late_join`). Включено у набегов и мести.
+  Кадр запуска повторного набега 550 → 53 мс. `peak` набега — штат.
+  **Стенд, проверяющий набег сразу после `launch`, выключает растяжку сам**
+  (`qa_tz0925`).
+- **КРЫША ПОЛНА — СТРЕЛКИ В ЛАЗАРЕТ** (разворот `qa_roof_garrison` B1): признак
+  `roof` у записи гарнизона и `_incoming_roof` у заявки; все «на крыше ли» —
+  `Castle.squad_on_roof(sid)`, а не `roof_accepts(type)`. Очередь у дверей
+  засасывается целиком после `DOOR_PATIENCE`: вставший в радиусе толпы
+  (допуск + интервал × √идущих × 1.2) входит. Телеметрия `garrison_request/
+  refused(why)/patience/cancel/in/release`.
+- **Стенд `qa_building_navigation` держит площадку сам:** гасит пни
+  (`process_mode` — таймеры оттепели), чужие постройки и снимает чужих в 70 м
+  на каждом замере — B2 краснел от туш восстановленного пня, а не от кода.
+  Известные красные: C «огибает по краю» (проход через здания по заказу),
+  `qa_goblin_tactics` D1, `qa_goblin` J1, `qa_tz0919` B1/B4 (плато снято) —
+  красные и на HEAD.
 
 ## Этап 1 плана 28.09.2026: визуальный тик армии — лента и переезд в ядре
 

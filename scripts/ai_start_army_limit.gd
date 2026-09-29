@@ -122,6 +122,10 @@ const AI_CAPTURE_MINES := true
 const MINE_SQUADS := _Spawn.AI_MINE_SQUADS
 const AI_BUILD_TOWERS := true
 const AI_TOWERS := _Spawn.AI_TOWERS
+const AI_HOUSES := _Spawn.AI_HOUSES
+const AI_FOOD_RESERVE := _Spawn.AI_FOOD_RESERVE
+const AI_WORKER_FLOOR := _Spawn.AI_WORKER_FLOOR
+const RETALIATION_LEND_MIN_LEVEL := _Spawn.AI_RETALIATION_LEND_MIN_LEVEL
 const TOWER_BORDER_FRACTION := 0.3
 const TOWER_SIDE := 14.0
 # ── СТАРТОВАЯ ОБОРОНА КРЕПОСТИ (15.09.2026, см. spawn_config) ──────────────
@@ -268,6 +272,11 @@ const AI_FORGE_WEIGHTS := {
 const AI_FORGE_EXTRA_BRANCHES := ["worker"]
 
 const AI_RESEARCH_GOLD_RESERVE := 300.0
+## Резерв ДЕРЕВА под найм (ТЗ 29.09.2026, п. 1): узлы кузницы стоят и дерево,
+## и после починки еды армию держало оно — склад дерева сидел у нуля
+## (qa_red_economy: 50-110 с 6-й минуты). После мира исследования ждут, пока
+## на складе не наберётся столько дерева; в мир — не ждут (армии ещё нет)
+const AI_RESEARCH_WOOD_RESERVE := 500.0
 
 ## ── СПОСОБНОСТИ-РЕЖИМЫ ОТРЯДОВ (колонка D древа) ────────────────────────────
 const AI_BUY_SQUAD_ABILITIES := true

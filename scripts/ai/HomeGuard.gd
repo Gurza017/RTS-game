@@ -393,7 +393,60 @@ func _heal(sid: int, dt: float) -> void:
 
 ## Замок снесён: снять отметку, разбудить — дальше их подберёт EnemyAI как
 ## обычное пополнение
+## ── ОДОЛЖИТЬ ОХРАНУ ПОД ОТВЕТНЫЙ УДАР (ТЗ 29.09.2026, п. 1) ──────────────
+## Спящие отряды уровня min_level и выше (линии, периметр) без тревоги. Кольцо
+## (уровень 1) не отдаётся. Одолженный — обычный полевой отряд (флаг снят,
+## разбужен), запись хранится до take_back
+var _lent: Dictionary = {}     # sid → запись охраны
+var lent_total: int = 0
+func lendable(min_level: int) -> int:
+	if alarm:
+		return 0
+	var n := 0
+	for s in squads:
+		if int(s.get("level", 0)) >= min_level and _asleep.has(int(s["sid"])) \
+				and not _members(int(s["sid"])).is_empty():
+			n += 1
+	return n
+
+func lend(n: int, min_level: int) -> Array:
+	var out: Array = []
+	if alarm or n <= 0:
+		return out
+	var kept: Array = []
+	for s in squads:
+		var sid: int = int(s["sid"])
+		if out.size() < n and int(s.get("level", 0)) >= min_level and _asleep.has(sid) \
+				and not _members(sid).is_empty():
+			_set_sleep(sid, false)
+			GameManager.squad_set_home_guard(sid, false)
+			_lent[sid] = s
+			out.append(sid)
+		else:
+			kept.append(s)
+	squads = kept
+	lent_total += out.size()
+	return out
+
+## Вернуть одолженных: снова охрана, приказ на свой пост (уснут по приходу)
+func take_back() -> int:
+	var n := 0
+	for sid in _lent.keys():
+		if not GameManager.squads.has(int(sid)) or _members(int(sid)).is_empty():
+			continue
+		var rec: Dictionary = _lent[sid]
+		GameManager.squad_set_home_guard(int(sid), true)
+		rec["home_ms"] = 0
+		squads.append(rec)
+		_order_home(rec)
+		n += 1
+	_lent.clear()
+	if n > 0:
+		set_process(true)
+	return n
+
 func _disband_to_army() -> void:
+	_lent.clear()
 	for s in squads:
 		var sid: int = int(s["sid"])
 		if _asleep.has(sid):

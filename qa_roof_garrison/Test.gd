@@ -382,8 +382,12 @@ func _b_castle() -> void:
 	var ok2: bool = c.request_garrison(int(a2[0]))
 	var ok3: bool = c.request_garrison(int(a3[0]))
 	var oks: bool = c.request_garrison(int(sp[0]))
-	verdict("B1 два стрелковых на крышу — да, третий — нет, пехота в лазарет — да",
-		ok1 and ok2 and not ok3 and oks, "%s %s %s %s" % [str(ok1), str(ok2), str(ok3), str(oks)])
+	# РАЗВОРОТ (ТЗ 29.09.2026, второе письмо, п. 5): третий стрелковый при
+	# полной крыше не получает отказ, а садится в ЛАЗАРЕТ — не на крышу
+	verdict("B1 два стрелковых на крышу — да, третий — в лазарет (не на крышу), пехота в лазарет — да",
+		ok1 and ok2 and ok3 and oks and c.squad_on_roof(int(a1[0])) and c.squad_on_roof(int(a2[0]))
+			and not c.squad_on_roof(int(a3[0])),
+		"%s %s %s %s, крыша у третьего %s" % [str(ok1), str(ok2), str(ok3), str(oks), str(c.squad_on_roof(int(a3[0])))])
 	_kill_all(a3[1])
 	var men: Array = a1[1] + a2[1]
 	var w: int = await _wait_inside(men, 2400)

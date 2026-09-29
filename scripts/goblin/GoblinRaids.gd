@@ -162,7 +162,8 @@ func _mine_waves(clock: float) -> void:
 			m.global_position, false)
 		r["mine_wave"] = true
 		mine_waves_launched += 1
-		last_mine_wave_men = _alive(r["sids"])
+		# Штат волны, а не рождённые в этот кадр (растяжка спавна, ТЗ 29.09.2026)
+		last_mine_wave_men = maxi(_alive(r["sids"]), int(r["peak"]))
 	# Рудник потерян или снесён — его часы забываются: новый захват = новый отсчёт
 	for id2 in _mine_next.keys():
 		if not seen.has(id2):
@@ -173,6 +174,7 @@ func _mine_waves(clock: float) -> void:
 ## отряды выходят полными, остаток — последним отрядом неполного штата
 func launch(comp: Dictionary, clock: float, target: Vector3, scouts: bool) -> Dictionary:
 	var sids: Array = []
+	var want_men := 0
 	var kinds: Dictionary = {}
 	var k := 0
 	for uid in comp.keys():
@@ -189,9 +191,11 @@ func launch(comp: Dictionary, clock: float, target: Vector3, scouts: bool) -> Di
 				men_i = clampi(int(round(float(men) * frac)), 4, men)
 			var base: Vector3 = village + Vector3(6.0 * float(k % 4) - 9.0, 0.0, 6.0 * float(k / 4))
 			k += 1
-			var sid: int = int(main.spawn_goblin_squad(String(uid), men_i, base))
+			# Растянуто по кадрам (ТЗ 29.09.2026, п. 2): повторный набег — 600+ бойцов
+			var sid: int = int(main.spawn_goblin_squad(String(uid), men_i, base, true))
 			if sid > 0:
 				sids.append(sid)
+				want_men += men_i
 				kinds[sid] = String(uid)
 				owned[sid] = true
 	var has_cav := false
@@ -200,8 +204,10 @@ func launch(comp: Dictionary, clock: float, target: Vector3, scouts: bool) -> Di
 			has_cav = true
 	var tactic: String = TACTIC_B if (has_cav and raids_started % 2 == 1) else TACTIC_A
 	tactic_count[tactic] = int(tactic_count[tactic]) + 1
+	# peak — ШТАТ набега, а не рождённые в этот кадр: бойцы доходят очередью
+	# (Main.spawn_goblin_squad, растяжка спавна, ТЗ 29.09.2026)
 	var r := {"sids": sids, "kinds": kinds, "state": "assemble", "since": clock,
-		"target": target, "peak": _alive(sids), "scout": false, "slots": {},
+		"target": target, "peak": maxi(_alive(sids), want_men), "scout": false, "slots": {},
 		"tactic": tactic, "cav": {}}
 	_layout(r)
 	raids.append(r)

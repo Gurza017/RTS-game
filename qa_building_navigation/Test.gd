@@ -112,6 +112,11 @@ func _squad(kind: String, fac: int, at: Vector3, n: int, cols: int = 8) -> Array
 			at.z + float(i % cols) * sp - float(cols - 1) * sp * 0.5))
 		GameManager.add_to_squad(sid, u)
 		men.append(u)
+		if kind == "archer":
+			u.died.connect(func(du):
+				var dd := du as Unit
+				print("    [гибель] лучник sid=%d state=%d garrisoned=%s hp=%.1f pos=%s target=%s ходов=%d" % [
+					dd.squad_id, int(dd.state), str(dd.garrisoned), dd.current_health, str(dd.global_position), str(dd.attack_target), Engine.get_physics_frames()]))
 	return [sid, men]
 
 func _place(b: Building, at: Vector3, fac: int = F) -> void:
@@ -211,7 +216,24 @@ func _extent(men: Array, axis_x: bool) -> float:
 	return maxf(hi - lo, 0.0)
 
 ## Проба рабочих: застревание и метания на обратной дороге
+## ПЛОЩАДКА СТЕНДА — БЕЗ ЧУЖИХ. Партия восстанавливает пни и выпускает их
+## охрану из туш (GameManager.restore_lair → оттепель) — на раунде 2 пять туш
+## доходили до ворот и рубили лучников («9 из 19»). Стенд про навигацию, а не
+## про бой: всякого чужого в 70 м от площадки снимаем на каждом замере
+var foes_swept: int = 0
+func _sweep_foes() -> void:
+	for u in GameManager._live_units.duplicate():
+		if u == null or not is_instance_valid(u):
+			continue
+		var uu := u as Unit
+		if uu.is_dead() or int(uu.faction) == F or uu.garrisoned:
+			continue
+		if _xz(uu.global_position, base) < 70.0:
+			uu.take_damage(1.0e12)
+			foes_swept += 1
+
 func _sample_workers() -> void:
+	_sweep_foes()
 	_w_samples += 1
 	var dep: Vector3 = _deposit_point()
 	for w in _alive(workers):
@@ -248,11 +270,47 @@ func _run() -> void:
 		main.gnoll_ai.set_process(false)
 	if GameManager.fog != null:
 		GameManager.fog.enabled = false
+	# ПЕНЬ ТРОЛЛЯ ТИКАЕТ САМ и доставляет охрану из туш (TrollLair, пять
+	# голов): на раунде 2 они доходили до ворот и рубили лучников («5 из 19»).
+	# Обнулить ссылку мало — узел гасится ЦЕЛИКОМ. Резерв орды — тоже свой _process
+	for lair0 in GameManager.troll_lairs:
+		if lair0 == null or not is_instance_valid(lair0):
+			continue
+		# Таймеры оттепели и волн — дети пня: гасит их только process_mode
+		(lair0 as Node).process_mode = Node.PROCESS_MODE_DISABLED
+		# Оттепель зовут СНАРУЖИ (Main по дистанции камеры/армии) — узел не
+		# спрашивают: на кадре ~1114 она доставала из запаса отряд туш. Запас — в ноль
+		for k in ["virt_sheep", "virt_trolls", "virt_gnoll_squads", "virt_big_squads"]:
+			if lair0.get(k) != null:
+				lair0.set(k, 0)
+	if main.get("goblin_reserve") != null and is_instance_valid(main.goblin_reserve):
+		main.goblin_reserve.set_process(false)
 	GameManager.troll_lair = null
 	for n in get_tree().get_nodes_in_group("all_units"):
 		if is_instance_valid(n) and n is Unit:
 			(n as Unit).take_damage(1.0e12)
+	# УКРЫТЫХ В ХИЖИНАХ ОРДЫ УДАР НЕ БЕРЁТ (урон уходит зданию): хижина потом
+	# выпускала вылеченную тушу, и та к 25-й секунде рубила лучников у ворот
+	# крепости (B2 краснел «11 из 20»). Выпустить и добить
+	for fac in range(Constants.FACTION_COUNT):
+		for b0 in get_tree().get_nodes_in_group(Constants.building_group(fac)):
+			if is_instance_valid(b0) and b0 is Castle:
+				for rec in (b0 as Castle).garrison.duplicate():
+					(b0 as Castle).release_garrison(int((rec as Dictionary).get("sid", 0)))
+	await pframes(2)
+	for n in get_tree().get_nodes_in_group("all_units"):
+		if is_instance_valid(n) and n is Unit and not (n as Unit).is_dead():
+			(n as Unit).take_damage(1.0e12)
 	await pframes(6)
+	# ЧУЖИЕ ПОСТРОЙКИ НАНИМАЮТ САМИ: хижина орды доделывала заказ и на 18-й
+	# секунде выпускала пять туш, которые к раунду 2 рубили лучников у ворот
+	# крепости (B2 «12 из 19»). Стенду чужая экономика не нужна — гасим
+	for fac in range(Constants.FACTION_COUNT):
+		if fac == F:
+			continue
+		for b1 in get_tree().get_nodes_in_group(Constants.building_group(fac)):
+			if is_instance_valid(b1):
+				(b1 as Node).process_mode = Node.PROCESS_MODE_DISABLED
 	base = _flat_spot(Vector3(-100.0, 0.0, -40.0), 10.0)
 	_clear_trees(base, 70.0)
 	await pframes(2)
@@ -308,6 +366,8 @@ func _run() -> void:
 			var k_in: int = await _garrison_in(keep, arch2, "крепость (крыша)", round_i)
 			var k_out: int = await _garrison_out(keep, arch2, "крепости", round_i, false)
 			print("    раунд %d: башня вход %d / выход %d, крепость вход %d / выход %d физкадров" % [round_i + 1, t_in, t_out, k_in, k_out])
+	if not "d" in _skip:
+		await _lazaret_block()
 	# Отряды лучников — на линию марша
 	await pframes(30)
 
@@ -373,7 +433,129 @@ func _run() -> void:
 		verdict("A4 в конце ни один рабочий не внутри фундамента", inside_w == 0, "внутри %d" % inside_w)
 	_finish()
 
+func _foes_report(where: String) -> void:
+	var by: Dictionary = {}
+	for u in GameManager._live_units:
+		if u == null or not is_instance_valid(u) or (u as Unit).is_dead() or int((u as Unit).faction) == F:
+			continue
+		var k: String = "%s/%d/%s" % [String((u as Unit).stat_id), int((u as Unit).faction), str(((u as Unit).global_position - base).round())]
+		by[k] = int(by.get(k, 0)) + 1
+	print("    [чужие на карте %s] %s" % [where, str(by)])
+
+## ── D. КРЫША ПОЛНА — ЛУЧНИКИ В ЛАЗАРЕТ (ТЗ 29.09.2026, п. 5) ──────────────
+## Крыша крепости держит ROOF_SQUADS["castle"] стрелковых отрядов. Следующий
+## отряд лучников прежде получал отказ при восьми местах лазарета; теперь он
+## садится внутрь обычным отрядом (не на крышу), лечится и выходит сам.
+## Заодно — события телеметрии гарнизона (заявка, вход, выпуск)
+func _lazaret_block() -> void:
+	print("
+═════ D. КРЫША ПОЛНА — ЛУЧНИКИ В ЛАЗАРЕТ ═════")
+	var roof_max: int = keep.roof_squads_max()
+	var sqs: Array = []
+	# Отряд лазарета — ПОЛНОГО штата: неполный лазарет доукомплектовывает по
+	# бойцу раз в GARRISON_REVIVE_SECONDS, и «вышел сам» ждало бы минуты
+	var full_a: int = _UCfg.squad_size("archer")
+	for i in range(roof_max + 1):
+		sqs.append(_squad("archer", F, base + Vector3(-12.0 + float(i) * 9.0, 0.0, 30.0), 12 if i < roof_max else full_a, 4))
+	await pframes(6)
+	# Ранить отряд, который пойдёт в лазарет: выйти сам он обязан ПОСЛЕ лечения
+	var laz: Array = sqs[roof_max]
+	for u in laz[1]:
+		(u as Unit).current_health = (u as Unit).max_health * 0.8
+	var ev0: int = GameManager.tm_events.size()
+	var ok_all := true
+	for sq in sqs:
+		ok_all = ok_all and keep.request_garrison(int(sq[0]))
+	verdict("D1 крепость приняла все %d отряда лучников (крыша %d + лазарет)" % [sqs.size(), roof_max], ok_all)
+	var flags: Array = []
+	for sq in sqs:
+		flags.append(keep.squad_on_roof(int(sq[0])))
+	var want: Array = []
+	for i in range(sqs.size()):
+		want.append(i < roof_max)
+	verdict("D2 первые %d — на крышу, последний — в лазарет" % roof_max, flags == want, str(flags))
+	var men_all: Array = []
+	for sq in sqs:
+		men_all.append_array(sq[1])
+	var w := 0
+	while w < 60 * 20 and _inside(men_all) < men_all.size():
+		await get_tree().physics_frame
+		w += 1
+		if w % SAMPLE_FRAMES == 0:
+			_sample_workers()
+	var gate_d: Vector3 = keep._gate_position()
+	var shown_d := 0
+	for u in men_all:
+		if u == null or not is_instance_valid(u) or (u as Unit).garrisoned or shown_d >= 10:
+			continue
+		shown_d += 1
+		var uu := u as Unit
+		print("    D не вошёл: sid=%d до ворот %.1f м, at_dep=%s state=%d retreating=%s stuck=%d moved=%s contact=%s in_bld=%s" % [
+			uu.squad_id, _xz(uu.global_position, gate_d), str(keep.at_deposit(uu.global_position)), int(uu.state), str(uu.retreating), uu._stuck_streak, str(uu.moved_recently()), str(uu._enemy_contact), str(_in_bld(uu.global_position))])
+	verdict("D3 все вошли (%d из %d за %.1f с)" % [_inside(men_all), men_all.size(), float(w) / 60.0],
+		_inside(men_all) == men_all.size())
+	var roof_n: int = int(keep._roof.men())
+	var roof_want: int = 0
+	for i in range(roof_max):
+		roof_want += _alive(sqs[i][1]).size()
+	verdict("D4 на крыше только стрелки крыши (%d, ждём %d)" % [roof_n, roof_want], roof_n == roof_want)
+	# Лазарет лечит и выпускает сам
+	var lid: int = int(laz[0])
+	w = 0
+	while w < 60 * 60 and keep._slot_of(lid) >= 0:
+		await get_tree().physics_frame
+		w += 1
+		if w % SAMPLE_FRAMES == 0:
+			_sample_workers()
+	var healed := true
+	for u in _alive(laz[1]):
+		healed = healed and (u as Unit).current_health >= (u as Unit).max_health - 0.5
+	verdict("D5 отряд из лазарета вылечен и вышел сам (%.1f с)" % (float(w) / 60.0),
+		keep._slot_of(lid) < 0 and _inside(laz[1]) == 0 and healed)
+	var roof_left := true
+	for i in range(roof_max):
+		roof_left = roof_left and keep._slot_of(int(sqs[i][0])) >= 0
+	verdict("D6 отряды крыши остались на посту", roof_left)
+	keep.release_roof()
+	await pframes(30)
+	var kinds: Dictionary = {}
+	for i in range(ev0, GameManager.tm_events.size()):
+		var k: String = String((GameManager.tm_events[i] as Array)[1])
+		if k.begins_with("garrison_"):
+			kinds[k] = int(kinds.get(k, 0)) + 1
+	print("    события гарнизона: %s" % str(kinds))
+	verdict("D7 телеметрия гарнизона: заявка, вход и выпуск записаны",
+		int(kinds.get("garrison_request", 0)) >= sqs.size() and int(kinds.get("garrison_in", 0)) >= sqs.size()
+		and int(kinds.get("garrison_release", 0)) >= sqs.size(), str(kinds))
+	# Лишний отряд — отказ с причиной «limit»: забить лазарет до предела
+	var full_sqs: Array = []
+	var cap: int = keep.garrison_limit() - keep.garrison.size() - keep._incoming.size()
+	for i in range(cap + 1):
+		full_sqs.append(_squad("spearman", F, base + Vector3(-30.0 + float(i % 6) * 6.0, 0.0, 40.0 + float(i / 6) * 6.0), 4, 2))
+	await pframes(4)
+	var ev1: int = GameManager.tm_events.size()
+	var refused := 0
+	for sq in full_sqs:
+		if not keep.request_garrison(int(sq[0])):
+			refused += 1
+	var why := ""
+	for i in range(ev1, GameManager.tm_events.size()):
+		var e: Array = GameManager.tm_events[i]
+		if String(e[1]) == "garrison_refused":
+			why = String((e[2] as Dictionary).get("why", ""))
+	verdict("D8 лишний отряд сверх мест — отказ с причиной в телеметрии (отказов %d, причина «%s»)" % [refused, why],
+		refused == 1 and why == "limit")
+	for sq in full_sqs:
+		for u in _alive(sq[1]):
+			(u as Unit).take_damage(1.0e12)
+	for sq in sqs:
+		for u in _alive(sq[1]):
+			(u as Unit).take_damage(1.0e12)
+	await pframes(10)
+
 func _garrison_in(b: Building, sq: Array, what: String, round_i: int) -> int:
+	_foes_report(what + " r%d" % round_i)
+	_sweep_foes()
 	var men: Array = _alive(sq[1])
 	var far := 0.0
 	var gate: Vector3 = b._gate_position()
@@ -448,15 +630,23 @@ func _garrison_out(b: Building, sq: Array, what: String, round_i: int, tower: bo
 			far_gate = maxf(far_gate, _xz(uu.global_position, gate))
 	if clear_n < men.size():
 		print("    после высадки: incoming=%s garrison=%d" % [str(b._incoming), b.garrison.size()])
+		print("    урон по источникам: out=%s in=%s" % [str(GameManager.tm_damage_out), str(GameManager.tm_damage_in)])
 		var shown := 0
 		for u in men:
 			if u == null or not is_instance_valid(u):
 				continue
 			var uu := u as Unit
 			if shown < 6:
-				print("    боец: до ворот %.1f м, state=%d garrisoned=%s in_bld=%s retreating=%s move_target=%s" % [
-					_xz(uu.global_position, gate), int(uu.state), str(uu.garrisoned), str(_in_bld(uu.global_position)), str(uu.retreating), str(uu.move_target)])
+				var tg = uu.attack_target
+				print("    боец: до ворот %.1f м, state=%d garrisoned=%s in_bld=%s retreating=%s hp=%.0f target=%s tfac=%s" % [
+					_xz(uu.global_position, gate), int(uu.state), str(uu.garrisoned), str(_in_bld(uu.global_position)), str(uu.retreating), uu.current_health,
+					str(tg), str(tg.get("faction")) if (tg != null and is_instance_valid(tg)) else "-"])
 				shown += 1
+		var dead_n := 0
+		for u in sq[1]:
+			if u == null or not is_instance_valid(u) or (u as Unit).is_dead():
+				dead_n += 1
+		print("    из исходного состава мертвы/освобождены: %d из %d" % [dead_n, (sq[1] as Array).size()])
 	verdict("B%d.%d лучники вышли из %s и встали у ворот (%d из %d, %.1f с)" % [round_i + 1, 2 if tower else 4, what, clear_n, men.size(), float(w) / 60.0],
 		clear_n == men.size(), "внутри %d, в фундаменте %d, ещё идут %d, дальний от ворот %.1f м" % [n_gar, n_bld, n_mov, far_gate])
 	# Дать отряду встать на точку выхода
