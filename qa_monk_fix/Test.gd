@@ -158,6 +158,13 @@ func _run() -> void:
 	GameManager.pop_limit_enabled = false
 	await frames(3)
 	var base: Vector3 = _flat_spot(main.PLAYER_BASE_ANCHOR + Vector3(40.0, 0.0, 30.0))
+	# Охрана орды у рудника игрока (ТЗ 29.09.2026, третье письмо, п. 5) стоит в
+	# 30 м от площадки D и мешает монаху поднимать павших — площадку держим сами
+	for fu in get_tree().get_nodes_in_group("all_units"):
+		if fu is Unit and not (fu as Unit).is_dead() and (fu as Unit).faction != F \
+				and (fu as Unit).global_position.distance_to(base) < 110.0:
+			(fu as Unit).take_damage(1.0e12)
+	await pframes(3)
 	main._clear_area_of_resources(base, 70.0)
 	await _a_border(base)
 	await _b_heal(base + Vector3(0.0, 0.0, 60.0))
@@ -221,9 +228,14 @@ func _b_heal(base: Vector3) -> void:
 	var sq: Array = _squad("spearman", F, base + Vector3(8.0, 0.0, 0.0), 4)
 	await pframes(10)
 	var hurt: Unit = sq[1][1]
+	# Буфер отрисовки читаем ДО того, как монах успеет подлечить: его такт
+	# лечения не привязан к кадру ранения, и три кадра ожидания давали то 0.40,
+	# то 0.52 — в зависимости от фазы монаха. На время замера монах замер
+	monk.set_tick(false)
 	_wound(hurt, 0.4)
 	await pframes(3)
 	var d: Array = _dmg_of(hurt)
+	monk.set_tick(true)
 	verdict("B0 доля жизни раненого в буфере отрисовки ниже 0.5", d.size() == 2 and float(d[1]) < 0.5,
 		"буфер %s" % str(d))
 	# Ждём полного излечения; по дороге считаем кадры «VFX висит на раненом»

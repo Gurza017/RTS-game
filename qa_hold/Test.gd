@@ -41,9 +41,25 @@ func _run() -> void:
 	await pframes(8)
 	if main.enemy_ai != null:
 		main.enemy_ai.set_process(false)
+	# Орда и её охрана рудников стенду про фалангу не нужны (ТЗ 29.09.2026:
+	# охрана орды стоит у рудника в 30 м от площадки стенда)
+	for k in ["goblin_ai", "gnoll_ai", "cav_commander", "goblin_reserve"]:
+		var nn = main.get(k)
+		if nn != null and is_instance_valid(nn):
+			nn.set_process(false)
 	if GameManager.fog != null:
 		GameManager.fog.enabled = false
 	GameManager.world_bounds_enabled = false
+	# Охрана орды у рудников сторон (ТЗ 29.09.2026, п. 5) стоит рядом с
+	# площадками стенда — фаланга реагирует на любого чужого. Площадку держим сами
+	if main.get("_territory_mines") != null:
+		for tm in main._territory_mines:
+			if tm == null or not is_instance_valid(tm):
+				continue
+			for gu in get_tree().get_nodes_in_group("all_units"):
+				if gu is Unit and not (gu as Unit).is_dead() and (gu as Unit).faction == Constants.FACTION_GOBLIN \
+						and (gu as Unit).global_position.distance_to((tm as Node3D).global_position) < 45.0:
+					(gu as Unit).take_damage(1.0e12)
 	await pframes(2)
 
 	await _a_wall()
@@ -177,7 +193,13 @@ func _b_close_ranks() -> void:
 	# Задний боец (последний в списке) стоит дальше всех от врага
 	var back: Unit = men[men.size() - 1]
 	var z0: float = back.global_position.z
-	await pframes(240)
+	# Ждём СВОЙСТВО с потолком, а не 240 кадров: обход смыкания идёт по
+	# отрядам по очереди, и лишние отряды на карте (охрана рудников, ТЗ
+	# 29.09.2026) отодвигали очередь этого отряда за фиксированное окно
+	var wf := 0
+	while wf < 900 and z0 - back.global_position.z < 0.3:
+		await get_tree().physics_frame
+		wf += 1
 	var moved: float = z0 - back.global_position.z    # к врагу — это уменьшение z
 	verdict("B1 задний ряд подтянулся, закрывая брешь",
 		moved > 0.15, "подтянулся на %.2f м" % moved)

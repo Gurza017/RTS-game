@@ -95,9 +95,16 @@ func _process(delta: float) -> void:
 				and int((w as Unit).faction) != Constants.FACTION_GOBLIN and not (w as Unit).garrisoned:
 			_workers.append(w)
 	var alive: Dictionary = {}
+	# Отряды на особых ролях вожака (охрана рудников, гарнизон, резерв,
+	# разведка, месть) командиру не подчиняются: конная охрана рудника с
+	# SEEK_R 34 м уходила от рудника на линию красного ИИ (qa_tz0928 B1)
+	var gai = GameManager.main.get("goblin_ai") if GameManager.main != null else null
+	var gai_ok: bool = gai != null and is_instance_valid(gai) and gai.has_method("is_special_squad")
 	for sid in GameManager.squads.keys():
 		var sq: Dictionary = GameManager.squads[sid]
 		if String(sq.get("type", "")) != "goblin_rider":
+			continue
+		if gai_ok and bool(gai.is_special_squad(int(sid))):
 			continue
 		var men: Array = sq["members"]
 		if men.is_empty():
@@ -234,7 +241,9 @@ func _melee_exit(sid: int, r: Dictionary, men: Array, now: float) -> String:
 				spear_front += 1
 	if alive == 0:
 		return ""
-	if float(spear_front) >= float(alive) * 0.3:
+	# «Не стоять и не ковырять копейщиков в лоб»: хватает одного всадника,
+	# упёршегося в копья лицом, — отряд выходит и заходит с фланга
+	if spear_front >= 1 and now - float(r["since"]) > 1.0:
 		return "копья в лоб"
 	if int(r["men0"]) > 0 and float(int(r["men0"]) - alive) >= float(int(r["men0"])) * LOSS_FRAC:
 		return "потери"

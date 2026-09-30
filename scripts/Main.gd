@@ -2652,10 +2652,27 @@ func _physics_process(_delta: float) -> void:
 		e["k"] = k + 1
 		horde_spawn_deferred += 1
 		left -= 1
-		_horde_late_join(u, sid, ref)
+		_horde_late_join(u, sid, ref, e["base"])
 
 ## Опоздавший перенимает у старшего товарища то, что отряд успел получить
-func _horde_late_join(u: Unit, sid: int, ref: Unit) -> void:
+## Медиана точек приказа идущих бойцов отряда (post_pos), запасной ответ —
+## цель старшего. Зовётся только при дорождении — не покадровый путь
+func _horde_order_centre(sid: int, ref: Unit) -> Vector3:
+	var raw: Variant = GameManager.squads.get(sid)
+	var xs: Array = []
+	var zs: Array = []
+	if raw != null:
+		for m in (raw as Dictionary)["members"]:
+			if is_instance_valid(m) and (m as Unit).state == Unit.State.MOVING:
+				xs.append((m as Unit).post_pos.x)
+				zs.append((m as Unit).post_pos.z)
+	if xs.size() < 3:
+		return ref.move_target
+	xs.sort()
+	zs.sort()
+	return Vector3(float(xs[xs.size() / 2]), 0.0, float(zs[zs.size() / 2]))
+
+func _horde_late_join(u: Unit, sid: int, ref: Unit, base: Vector3) -> void:
 	GameManager.apply_squad_bonuses_to(sid, u)
 	if ref == null:
 		return
@@ -2665,9 +2682,14 @@ func _horde_late_join(u: Unit, sid: int, ref: Unit) -> void:
 	if ref.state == Unit.State.ATTACKING and ref.attack_target != null and is_instance_valid(ref.attack_target):
 		u.command_attack(ref.attack_target, false)
 	elif ref.state == Unit.State.MOVING:
-		var off: Vector3 = u.global_position - ref.global_position
+		# Цель — ЦЕНТР ПРИКАЗА отряда (медиана post_pos идущих) плюс своё
+		# смещение от точки рождения: так толпа приходит своей же формой.
+		# Смещение от СТАРШЕГО не годится — он уже ушёл, и цель ложилась
+		# позади опоздавшего (qa_horde_spawn A6: 87 из 96 «идут»)
+		var gc: Vector3 = _horde_order_centre(sid, ref)
+		var off: Vector3 = u.global_position - base
 		off.y = 0.0
-		u.command_move(GameManager.land_target(ref.move_target + off.limit_length(12.0)), false, Vector3.ZERO, false, true)
+		u.command_move(GameManager.land_target(gc + off.limit_length(12.0)), false, Vector3.ZERO, false, true)
 		u.sprinting = ref.sprinting
 
 func spawn_goblin_squad(uid: String, n: int, base: Vector3, staggered: bool = false) -> int:

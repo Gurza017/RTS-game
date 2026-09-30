@@ -192,6 +192,12 @@ func _wave_squads() -> int:
 			n += 1
 	return n
 
+## Особые роли не входят ни в волны, ни в планы командира. Публичная обёртка —
+## командиру конницы (CavalryCommander): охрана рудников, гарнизон, резерв и
+## разведка ходят по планам вожака, а не по тактике «удар — отход»
+func is_special_squad(sid: int) -> bool:
+	return _is_special(sid)
+
 ## Особые роли не входят ни в волны, ни в планы командира
 func _is_special(sid: int) -> bool:
 	return garrison_sids.has(sid) or mine_guard_sids.has(sid) \
@@ -1418,6 +1424,8 @@ func _raid_plan(sq: Dictionary) -> Dictionary:
 	return {"sq": sq, "goal": base, "center": c, "wake": true}
 
 ## Охрана рудника: патруль кольцом, на тревоге — бой у рудника
+const TERRITORY_GUARD_R := 18.0
+
 func _mine_guard_plan(sq: Dictionary, idx: int) -> Dictionary:
 	var own: Variant = mine_guard_sids.get(int(sq["id"]))
 	var guarded: Node = mine
@@ -1428,7 +1436,10 @@ func _mine_guard_plan(sq: Dictionary, idx: int) -> Dictionary:
 	var mp: Vector3 = (guarded as Node3D).global_position
 	var c: Vector3 = _squad_center(sq)
 	sq["role"] = ROLE_MINE_GUARD
-	var foe: Node3D = _nearest_foe(mp, _GobCfg.CENTER_RADIUS)
+	# Охрана рудников сторон (ТЗ 29.09.2026, п. 5) держит САМ рудник: чужой
+	# ближе TERRITORY_GUARD_R. Охрана деревенского рудника — прежние 30 м
+	var guard_r: float = TERRITORY_GUARD_R if guarded != mine else _GobCfg.CENTER_RADIUS
+	var foe: Node3D = _nearest_foe(mp, guard_r)
 	if foe != null:
 		if GameManager.squad_in_combat(int(sq["id"])):
 			return {}

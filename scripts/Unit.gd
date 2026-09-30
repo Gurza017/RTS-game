@@ -949,6 +949,7 @@ var _proc_sleeping: bool = false
 #     перед кем никого нет, то есть ближайшие к врагу.
 const PHALANX_FRONT_RANKS := 2      # ряды 0 и 1 держат копья горизонтально
 const RANK_RECHECK        := 0.25   # сек между пересчётами ряда
+const RANK_SEEN_PAD       := 4.0    # запас радиуса «врага видит вся шеренга», м
 const FILE_HALF_WIDTH     := 0.45   # половина ширины «своей колонны», м
 # Как далеко вперёд ищем своих, м.
 #
@@ -1704,6 +1705,8 @@ func _end_retreat_now() -> void:
 ## Бег по двойному ПКМ ИГРОКА: упор в чужой строй — бой (ТЗ 19.09.2026-3),
 ## бег ИИ в обход (ROLE_FLANK) чужой строй по-прежнему обтекает
 var _player_run: bool = false
+## Бег в замок отложен до выхода из зоны билета отхода (см. command_move)
+var _sprint_after_pass: bool = false
 
 func _set_sprinting(on: bool) -> void:
 	if sprinting == on:
@@ -2355,8 +2358,16 @@ func command_move(target_pos: Vector3, slow_march: bool = false, face_dir: Vecto
 	# В стойке «Защита» (фаланга) бега нет вовсе (ТЗ 19.09.2026-3, п. 3):
 	# двойной ПКМ по фаланге — обычный марш с опущенными копьями
 	# ОТХОД В ЗАМОК БЕЖИТ И ИЗ ОБОРОНЫ (ТЗ 29.09.2026, второе письмо, п. 2):
-	# «поднимают копья и БЕГУТ в замок» — стойка фаланги бег не запрещает
-	_set_sprinting(run and (keep_retreat or not _stance_holds_ground()))
+	# «поднимают копья и БЕГУТ в замок» — стойка фаланги бег не запрещает.
+	# НО НЕ ИЗ КОНТАКТА: пока боец в зоне билета отхода (PASS_CLEAR_DIST от
+	# точки начала), он ВЫБИРАЕТСЯ из тел шагом — беговой шаг чаще упирается
+	# в чужое тело (qa_spear C9 «5 из 6» с бегом в замок). Выбрался — бежит
+	# (см. _process_move, _sprint_after_pass)
+	var want_run: bool = run and (keep_retreat or not _stance_holds_ground())
+	_sprint_after_pass = want_run and keep_retreat and _retreat_pass()
+	if _sprint_after_pass:
+		want_run = false
+	_set_sprinting(want_run)
 	_player_run = sprinting and player_order
 	_charge_order = false        # просто идём — копья вверх
 	# И РАЗГОН ТОЖЕ. Приказ на движение отменяет натиск: всадник, которого
@@ -5818,7 +5829,7 @@ func _tick_stuck(delta: float, dist: float) -> bool:
 	# Застрял у леса-стены, скалы или кромки карты и не продвигается
 	# UNSTICK_STREAK проверок подряд — путь и цель сбрасываются, боец
 	# выводится на ближайшую проходимую точку и БЕГОМ догоняет свой отряд
-	if _stuck_streak >= UNSTICK_STREAK and _may_unstick():
+	if _Opt.unstick and _stuck_streak >= UNSTICK_STREAK and _may_unstick():
 		_unstick()
 		return false
 	return true
@@ -5836,10 +5847,13 @@ func _may_unstick() -> bool:
 		return false
 	if self is Worker:
 		return false             # у рабочего своя смена точки (Worker)
+	var has_target: bool = attack_target != null and is_instance_valid(attack_target)
 	# Вдвое дольше без продвижения — вызволяем и без препятствия рядом
-	# (скольжение вдоль стены уводит бойца от неё), но не в бою отряда:
-	# там «не продвигаюсь» — это толпа, а не застревание
-	if _stuck_streak >= UNSTICK_STREAK * 2 and not (squad_id > 0 and GameManager.squad_in_combat(squad_id)):
+	# (скольжение вдоль стены уводит бойца от неё), но НЕ с живой целью и не
+	# в бою отряда: там «не продвигаюсь» — это очередь к врагу (толпа у тролля
+	# теряла цель: qa_combat_gate B3 «110 из 120»), а не застревание
+	if _stuck_streak >= UNSTICK_STREAK * 2 and not has_target \
+			and not (squad_id > 0 and GameManager.squad_in_combat(squad_id)):
 		return true
 	var p: Vector3 = global_position
 	var lim: Vector2 = GameManager.clamp_to_map(p.x, p.z)
@@ -5872,10 +5886,17 @@ func _unstick() -> void:
 			goal = Vector3(c.x, 0.0, c.y)
 		if post_pos != Vector3.ZERO and Vector2(post_pos.x - goal.x, post_pos.z - goal.z).length() < 12.0:
 			goal = post_pos
-	if attack_target != null and not target_lock:
-		set_attack_target(null)
 	GameManager.tm_event("unstuck", {"sid": squad_id, "type": String(stat_id), "fac": faction,
 		"at": [snappedf(p.x, 0.1), snappedf(p.z, 0.1)]})
+	# С живой целью (упёрся в препятствие на подходе) — цель НЕ бросаем: вывод
+	# на проходимую точку уже сделан выше, дальше тот же приказ атаки заново
+	# (свежий маршрут). Терять цель по вызволению — это «не держат цель»
+	# (qa_combat_gate B3). Без цели — бегом к своему месту в отряде
+	if attack_target != null and is_instance_valid(attack_target):
+		var tgt: Node3D = attack_target
+		var was_lock: bool = target_lock
+		command_attack(tgt, true, false, was_lock)
+		return
 	command_move(GameManager.land_target(goal), false, Vector3.ZERO, false, false, true)
 
 ## Новый приказ — новый отсчёт: иначе «не продвигаюсь» считалось бы от
@@ -5897,6 +5918,10 @@ func _reset_stuck() -> void:
 
 
 func _process_move(delta: float) -> void:
+	# Выбрался из тел — теперь бегом в замок (ТЗ 29.09.2026, второе письмо)
+	if _sprint_after_pass and not _retreat_pass():
+		_sprint_after_pass = false
+		_set_sprinting(true)
 	# ─── ПЕРЕХВАТ ВРАЖЕСКОЙ ШЕРЕНГОЙ ────────────────────────────────────────
 	# Раньше авто-агро опрашивалось ТОЛЬКО в состоянии IDLE. Идущий по приказу
 	# отряд не проверял вообще ничего: он утыкался в чужой строй, скользил
@@ -8505,7 +8530,14 @@ func _update_live_rank() -> void:
 	# Эта функция — четыре раза в секунду у КАЖДОГО копейщика в обороне, то
 	# есть две сотни вызовов в кадре на трёх тысячах, а нужны из ответа ровно
 	# три float. Vector3.INF означает «врага нет» (см. squad_enemy_point)
-	var ep: Vector3 = GameManager.squad_enemy_point(squad_id, self, AGGRO_RADIUS)
+	# ── РАДИУС — С ЗАПАСОМ НА ГЛУБИНУ СТРОЯ (ТЗ 29.09.2026, третье письмо) ──
+	# Кэш отряда хранит ответ ПЕРВОГО спросившего на весь SQUAD_FACE_TTL. Если
+	# первым спрашивает ЗАДНИЙ ряд, враг в AGGRO_RADIUS от него не найден, и
+	# отрицательный ответ достаётся всей шеренге — передний ряд врага в 4 м
+	# «не видит», брешь не смыкается (qa_hold B1: краснел от ПОРЯДКА тика,
+	# когда на карте появились лишние отряды). Запас RANK_SEEN_PAD покрывает
+	# глубину строя; радиус один на отряд — скан по-прежнему один
+	var ep: Vector3 = GameManager.squad_enemy_point(squad_id, self, AGGRO_RADIUS + RANK_SEEN_PAD)
 	if _rp: _Opt.prof_add("rank_enemypos", Time.get_ticks_usec() - _rt)
 	var off := Vector3.ZERO
 	if ep != Vector3.INF:

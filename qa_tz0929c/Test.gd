@@ -153,15 +153,28 @@ func _block_run() -> void:
 	await pframes(2)
 	var ok: bool = keep.request_garrison(int(sq[0]))
 	await pframes(2)
-	var runners := 0
+	# Бег в замок включается ПОСЛЕ выхода из зоны билета отхода (2.5 м от
+	# точки начала): сразу после заявки боец идёт шагом, но бег ему обещан
+	var promised := 0
 	var charged := 0
 	for m in sq[1]:
-		if (m as Unit).sprinting:
-			runners += 1
+		if (m as Unit).sprinting or (m as Unit)._sprint_after_pass:
+			promised += 1
 		if (m as Unit)._charge_order:
 			charged += 1
-	verdict("A2 в замок — бегом и из «Защиты», приёмы сброшены (%d из %d бегут, с натиском %d)" % [runners, (sq[1] as Array).size(), charged],
-		ok and runners == (sq[1] as Array).size() and charged == 0)
+	var wr := 0
+	var runners := 0
+	while wr < 60 * 6:
+		await get_tree().physics_frame
+		wr += 1
+		runners = 0
+		for m in sq[1]:
+			if is_instance_valid(m) and (m as Unit).sprinting:
+				runners += 1
+		if runners >= (sq[1] as Array).size() / 2:
+			break
+	verdict("A2 в замок — бегом и из «Защиты», приёмы сброшены (бег обещан %d из %d, бегут %d через %.1f с, с натиском %d)" % [promised, (sq[1] as Array).size(), runners, float(wr) / 60.0, charged],
+		ok and promised == (sq[1] as Array).size() and runners >= (sq[1] as Array).size() / 2 and charged == 0)
 	var w := 0
 	while w < 60 * 25 and keep._slot_of(int(sq[0])) < 0:
 		await get_tree().physics_frame

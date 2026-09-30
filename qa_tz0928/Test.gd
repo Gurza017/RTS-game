@@ -184,6 +184,14 @@ func _b_ai_edge() -> void:
 	if sq.is_empty():
 		_kill(men)
 		return
+	# Чужие у кромки (охрана рудника стороны красного, ТЗ 29.09.2026 третье
+	# письмо: до 100 гоблинов в 60 м, патруль плавает) — не наш сюжет: ИИ
+	# честно шлёт линию в атаку, и посты ложатся по врагу, а не по разметке
+	for fu in get_tree().get_nodes_in_group("all_units"):
+		if fu is Unit and not (fu as Unit).is_dead() and (fu as Unit).faction != Constants.FACTION_ENEMY \
+				and (fu as Unit).global_position.distance_to(Vector3(-120.0, 0.0, lz)) < 80.0:
+			(fu as Unit).take_damage(1.0e12)
+	await pframes(3)
 	# Планировщик шлёт ЛИНИЮ ровно на кромку, курсом на север (шеренги вглубь — к югу, за край)
 	var course := Vector3(0.0, 0.0, -1.0)
 	sq["role"] = ai.ROLE_LINE

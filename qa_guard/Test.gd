@@ -68,6 +68,16 @@ func _run() -> void:
 		ResourceManager.add_resource(Constants.FACTION_PLAYER, int(t), 1000000.0)
 	if main.enemy_ai != null:
 		main.enemy_ai.set_process(false)
+	# Охрана орды у рудников сторон (ТЗ 29.09.2026, п. 5) стоит рядом с
+	# площадками стенда — фаланга реагирует на любого чужого. Площадку держим сами
+	if main.get("_territory_mines") != null:
+		for tm in main._territory_mines:
+			if tm == null or not is_instance_valid(tm):
+				continue
+			for gu in get_tree().get_nodes_in_group("all_units"):
+				if gu is Unit and not (gu as Unit).is_dead() and (gu as Unit).faction == Constants.FACTION_GOBLIN \
+						and (gu as Unit).global_position.distance_to((tm as Node3D).global_position) < 45.0:
+					(gu as Unit).take_damage(1.0e12)
 	await frames(3)
 
 	await _a_sprite()

@@ -124,7 +124,9 @@ func _run() -> void:
 	for i in range(early, ms2.size()):
 		var u := ms2[i] as Unit
 		late_n += 1
-		if u.state == Unit.State.MOVING and Vector2(u.move_target.x - goal.x, u.move_target.z - goal.z).length() < 14.0:
+		# Конечная точка хода: у бойца на маршруте move_target — лишь ближайший угол
+		var mt: Vector3 = u._route_goal if u._route.size() > 0 else u.move_target
+		if u.state == Unit.State.MOVING and Vector2(mt.x - goal.x, mt.z - goal.z).length() < 14.0:
 			late_ok += 1
 	verdict("A6 опоздавшие получили приказ старших (%d из %d идут к точке)" % [late_ok, late_n],
 		late_n > 0 and late_ok == late_n)

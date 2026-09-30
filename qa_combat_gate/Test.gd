@@ -204,6 +204,14 @@ func _run() -> void:
 	await pframes(2)
 	var base: Vector3 = _flat_spot(Vector3(-60.0, 0.0, -20.0))
 	print("  площадка %s" % str(base))
+	# Охрана орды у рудника красного (ТЗ 29.09.2026, третье письмо, п. 5)
+	# патрулирует в 20 м от площадки B — копейщики перехватывались на гоблинов и
+	# «не держали тролля» (B3 110 из 120). Площадку держим сами
+	for fu in get_tree().get_nodes_in_group("all_units"):
+		if fu is Unit and not (fu as Unit).is_dead() and (fu as Unit).faction != F \
+				and (fu as Unit).global_position.distance_to(base) < 130.0:
+			(fu as Unit).take_damage(1.0e12)
+	await pframes(3)
 
 	var only_e: bool = "only_e" in OS.get_cmdline_user_args()
 	if not only_e:
