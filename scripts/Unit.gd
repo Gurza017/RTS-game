@@ -2205,6 +2205,41 @@ func _route_advance() -> void:
 	_reset_stuck()
 	_wake_process(15)
 
+## ── ОБХОД — К ЧУЖОМУ ОТРЯДУ, А НЕ К СВОЕЙ ЦЕЛИ (ТЗ 14.10.2026, п. 9) ──────
+## Цели бойцам раздаются по всей ширине чужого строя (squad_pick_member), и
+## дорога «отряда» строилась к ЛИЧНОЙ цели (цель — в ключе кэша): A* от
+## центра к цели слева от рощи обходил её слева, к цели справа — справа, и
+## отряд расходился у кромки на две половины на 15-20 м на десятки секунд
+## (зонд qa_split_probe: широкая линия лучников за рощей, ответ на обстрел,
+## 18/12 на 46 с; с одной общей целью — 0 с). Теперь обход строится к центру
+## чужого отряда — одна дорога на отряд; со своей цели боец сходит, как
+## только прямая до неё свободна. Цель далеко от центра своего отряда (тот
+## сам раскололся) — прежняя дорога к ней, а не в пустоту между половинами
+const ATK_LEG_SHARE_R := 12.0
+
+func _atk_leg_goal(tp: Vector3) -> Vector3:
+	if not _Opt.atk_leg_shared:
+		return tp
+	var t = attack_target
+	if t == null or not is_instance_valid(t) or not (t is Unit):
+		return tp
+	# Только когда идём именно к цели атаки: _atk_waypoint зовётся и из общего
+	# _nav_dir (пост, сбор), и там точка хода — не цель
+	var tpos: Vector3 = (t as Node3D).global_position
+	if Vector2(tpos.x - tp.x, tpos.z - tp.z).length_squared() > 9.0:
+		return tp
+	var fs: int = (t as Unit).squad_id
+	if fs <= 0:
+		return tp
+	var c: Vector2 = GameManager.squad_centre_xz(fs)
+	if c.x == INF:
+		return tp
+	var dx: float = c.x - tp.x
+	var dz: float = c.y - tp.z
+	if dx * dx + dz * dz > ATK_LEG_SHARE_R * ATK_LEG_SHARE_R:
+		return tp
+	return Vector3(c.x, tp.y, c.y)
+
 ## Точка обхода на подходе к цели атаки; Vector3.INF — идти прямо.
 ## Раз в NAV_RECHECK_SEC спрашивается, упирается ли прямая в скалу/воду;
 ## упирается — маршрут от ядра (кэш на физкадр по ячейкам, см. GameManager)
@@ -2217,7 +2252,7 @@ func _atk_waypoint(mp: Vector3, tp: Vector3, delta: float) -> Vector3:
 			# проход колонной, а не гуськом через один и тот же угол
 			GameManager.nav_who = stat_id
 			var lat: Vector2 = _lat_offset()
-			_atk_route = GameManager._nav_spread(mp, GameManager.squad_leg(squad_id, mp, tp, lat, _nav_clear, true), lat, _nav_clear)
+			_atk_route = GameManager._nav_spread(mp, GameManager.squad_leg(squad_id, mp, _atk_leg_goal(tp), lat, _nav_clear, true), lat, _nav_clear)
 			_atk_route_i = 0
 			# Пути нет вовсе (цель на плато без спуска): прямым вектором в
 			# стену не идём — ТЗ 19.09.2026 п. 3, читает _process_attack
@@ -2438,6 +2473,12 @@ func command_move(target_pos: Vector3, slow_march: bool = false, face_dir: Vecto
 	march_slow    = slow_march
 	state         = State.MOVING
 	face_on_arrive = face_dir
+	# КУРС ОТРЯДА ИИ — ПО ЕГО ПРИКАЗУ (ТЗ 12.10.2026): ИИ и орда разметку не
+	# перекладывают, и стоящий строй смотрел туда, куда смотрел при прошлом
+	# смыкании («красные стоят и смотрят вниз»). Взгляд прибытия, выданный
+	# приказом, и есть курс отряда
+	if faction != Constants.FACTION_PLAYER and squad_id > 0 and face_dir.length_squared() > 1e-6:
+		GameManager.squad_set_course(squad_id, face_dir)
 	# Приказ запоминается целиком: если по дороге завяжется бой, после него
 	# боец продолжит путь, а не останется стоять на месте стычки
 	_march_pending = true
@@ -3157,8 +3198,10 @@ func mark_flip_dirty() -> void:
 ## удерживал бы его от освобождения.
 static var _sheet_tables: Dictionary = {}
 
-static func _sheet_table(sf: SpriteFrames) -> Dictionary:
-	var key: int = sf.get_instance_id()
+## walk_mult — темп ленты ходьбы под шаг рода (ТЗ 10.10.2026: шаг пехоты
+## быстрее, ноги обязаны успевать за землёй)
+static func _sheet_table(sf: SpriteFrames, walk_mult: float = 1.0) -> Dictionary:
+	var key: String = "%d|%.3f" % [sf.get_instance_id(), walk_mult]
 	var cached = _sheet_tables.get(key)
 	if cached != null:
 		return cached
@@ -3175,7 +3218,10 @@ static func _sheet_table(sf: SpriteFrames) -> Dictionary:
 			tex = at.atlas
 			var fw: float = maxf(at.region.size.x, 1.0)
 			total = maxi(1, int(round(at.atlas.get_size().x / fw)))
-		table[StringName(a)] = [tex, total, sf.get_animation_speed(a),
+		var fps: float = sf.get_animation_speed(a)
+		if walk_mult != 1.0 and (String(a) == "walk" or String(a).begins_with("run")):
+			fps *= walk_mult
+		table[StringName(a)] = [tex, total, fps,
 			sf.get_animation_loop(a), _anim_bottom_px(first)]
 	_sheet_tables[key] = table
 	return table
@@ -3255,7 +3301,7 @@ func _look_bind() -> void:
 		_sprite_base_y = _look_base_y
 		# Разобранный набор кладём В ПОЛЕ: дальше смена анимации не обращается
 		# к узлу вообще, даже за списком доступных лент
-		_look_table = _sheet_table(asp.sprite_frames)
+		_look_table = _sheet_table(asp.sprite_frames, _UStats.walk_boost(stat_id))
 		# ЭТАЛОН ПРИВЯЗКИ — лента, на которую посажен узел в _ready() подкласса
 		# (как правило "idle"). Все прочие позы выравниваются по ней
 		var ref_row: Variant = _look_table.get(asp.animation)
@@ -5164,7 +5210,7 @@ func _exit_tree() -> void:
 ## Заказ владельца — ровно +35%. Было 1.4; число уменьшено вместе с введением
 ## SPRINT_DAMAGE_MULT: бег стал не только быстрым, но и дорогим, и цена обязана
 ## соответствовать выигрышу
-const SPRINT_SPEED_FACTOR := 1.35
+const SPRINT_SPEED_FACTOR := _UStats.RUN_SPEED_FACTOR
 
 ## ── ЦЕНА БЕГА: ПО БЕГУЩЕМУ БЬЮТ БОЛЬНЕЕ ────────────────────────────────────
 ## Заказ владельца: +35% входящего урона, пока боец бежит. Раньше цена бега
@@ -5199,6 +5245,9 @@ var _spd_cache: float = -1.0
 var _spd_version: int = -1
 var _spd_vet: float   = -1.0
 var _spd_own: float   = -1.0
+## Множитель шага рода (unit_stats_config.walk_boost): бег делится на него,
+## чтобы абсолютная скорость бега осталась прежней
+var _walk_boost: float = 1.0
 
 ## Снимок общих величин тика (см. tick_physics): чтение полей автозагрузки шло
 ## на каждый расчёт скорости и на каждый шаг каждого идущего бойца
@@ -5209,8 +5258,10 @@ func _base_speed() -> float:
 	var ver: int = _bonus_ver if _bonus_ver >= 0 else GameManager.bonus_version
 	if _spd_version == ver and _spd_vet == vet_speed and _spd_own == move_speed:
 		return _spd_cache
-	_spd_cache = maxf(0.5, move_speed
-		+ GameManager.unit_bonus(faction, stat_id, "bonus_speed") + vet_speed)
+	# ШАГ ПЕХОТЫ = БЕГ − 15 % (ТЗ 10.10.2026): множитель рода — в кэше
+	_walk_boost = _UStats.walk_boost(stat_id)
+	_spd_cache = maxf(0.5, (move_speed
+		+ GameManager.unit_bonus(faction, stat_id, "bonus_speed") + vet_speed) * _walk_boost)
 	_spd_version = ver
 	_spd_vet     = vet_speed
 	_spd_own     = move_speed
@@ -5236,7 +5287,11 @@ func _effective_speed() -> float:
 	# БЕГ. Единственный нестандартный темп; включается двойным ПКМ и гаснет
 	# по прибытии (см. sprinting / _arrive_at_target)
 	if sprinting and state == State.MOVING:
-		s *= SPRINT_SPEED_FACTOR
+		# Бег — АБСОЛЮТНЫЙ (прежний шаг × 1.35), шаг пехоты уже включает
+		# множитель рода; отход в замок бежит на RETREAT_RUN_MULT быстрее
+		s *= SPRINT_SPEED_FACTOR / _walk_boost
+		if retreating:
+			s *= _UStats.RETREAT_RUN_MULT
 	# ── РАЗГОН КОННИЦЫ ─────────────────────────────────────────────────────
 	# Только в подходе к цели (State.ATTACKING): на марше по пустому полю
 	# разгоняться не на кого, а флаг там и не взводится (см. _process_attack).
@@ -5264,7 +5319,14 @@ func _effective_speed() -> float:
 	# ПОДТЯГИВАНИЕ ХВОСТА: первые ряды уже на местах — отстающим прибавка
 	if _catch_up and state == State.MOVING:
 		s *= CATCH_UP_FACTOR
+	# ТЕМП КОЛОННЫ (ТЗ 10.10.2026, блок 2): командир Attack-Move придерживает
+	# голову растянутого отряда и подгоняет хвост (SquadCommander._pace)
+	if pace_mult != 1.0 and state == State.MOVING:
+		s *= pace_mult
 	return s
+
+## Множитель темпа колонны; ставит и снимает только SquadCommander
+var pace_mult: float = 1.0
 
 
 ## ── ЗАЯВИТЬ ШАГ, А НЕ ПРОВОДИТЬ ЕГО ─────────────────────────────────────────
@@ -5841,6 +5903,23 @@ const UNSTICK_STREAK := 2
 const UNSTICK_NEAR := 4.0
 static var unstuck_total: int = 0
 var unstuck_count: int = 0
+## ── ВЫЗВОЛЕНИЕ НЕ ЗАЦИКЛИВАЕТСЯ (ТЗ 11.10.2026) ────────────────────────────
+## Вызволение выводило бойца на проходимую точку и СНОВА слало его к той же
+## цели — к слоту, занятому соседями, к точке у кромки леса, к посту в
+## толпе. Цель недостижима — через 1-2 с он застревал опять, и так всю
+## партию (охрана рудника в партии 10.10: 4000 событий за 4 минуты; волна у
+## брода — 244 вызволения одного отряда за полчаса). Теперь второе
+## вызволение того же бойца в окне UNSTICK_REPEAT_SEC значит «цель
+## недостижима»: боец встаёт там, куда его вывели (пост — здесь же, цель
+## снята), и ждёт нового приказа. Счёт сбрасывается вне окна
+const UNSTICK_REPEAT_SEC := 20.0
+static var unstuck_giveups: int = 0
+var _unstick_last_ms: int = -1000000
+var _unstick_repeat: int = 0
+
+## Какая ветка признала застревание (телеметрия «unstuck»: edge / near_edge /
+## cliff / no_progress)
+var _unstick_why: String = ""
 
 func _may_unstick() -> bool:
 	if retreating or _enemy_contact or garrisoned or is_dead() or _panicked:
@@ -5854,17 +5933,21 @@ func _may_unstick() -> bool:
 	# теряла цель: qa_combat_gate B3 «110 из 120»), а не застревание
 	if _stuck_streak >= UNSTICK_STREAK * 2 and not has_target \
 			and not (squad_id > 0 and GameManager.squad_in_combat(squad_id)):
+		_unstick_why = "no_progress"
 		return true
 	var p: Vector3 = global_position
 	var lim: Vector2 = GameManager.clamp_to_map(p.x, p.z)
 	if absf(lim.x - p.x) > 0.01 or absf(lim.y - p.z) > 0.01:
+		_unstick_why = "edge"
 		return true
 	var edge: Vector2 = GameManager.clamp_to_map(p.x + UNSTICK_NEAR * signf(p.x), p.z + UNSTICK_NEAR * signf(p.z))
 	if absf(edge.x - (p.x + UNSTICK_NEAR * signf(p.x))) > 0.01 or absf(edge.y - (p.z + UNSTICK_NEAR * signf(p.z))) > 0.01:
+		_unstick_why = "near_edge"
 		return true
 	for k in range(8):
 		var a: float = TAU * float(k) / 8.0
 		if GameManager.is_cliff(p.x + cos(a) * UNSTICK_NEAR, p.z + sin(a) * UNSTICK_NEAR):
+			_unstick_why = "cliff"
 			return true
 	return false
 
@@ -5872,11 +5955,28 @@ func _unstick() -> void:
 	unstuck_total += 1
 	unstuck_count += 1
 	_reset_stuck()
+	var now_u: int = Time.get_ticks_msec()
+	if now_u - _unstick_last_ms < int(UNSTICK_REPEAT_SEC * 1000.0):
+		_unstick_repeat += 1
+	else:
+		_unstick_repeat = 0
+	_unstick_last_ms = now_u
 	var p: Vector3 = global_position
 	var free: Vector2 = GameManager.nearest_passable(p.x, p.z)
 	if Vector2(free.x - p.x, free.y - p.z).length() > 0.05:
 		global_position = Vector3(free.x, GameManager.get_terrain_height(free.x, free.y), free.y)
 		sync_row()
+	# Повтор в окне — цель недостижима: встать здесь, без нового приказа туда же
+	if _Opt.unstick_giveup and _unstick_repeat >= 1:
+		unstuck_giveups += 1
+		GameManager.tm_event("unstuck_giveup", {"sid": squad_id, "type": String(stat_id), "fac": faction,
+			"at": [snappedf(global_position.x, 0.1), snappedf(global_position.z, 0.1)]})
+		if attack_target != null and is_instance_valid(attack_target) and not target_lock:
+			set_attack_target(null)
+		var here: Vector3 = global_position
+		command_move(here, false, Vector3.ZERO, retreating)
+		hold_post(here)
+		return
 	# Куда: к своему месту в строю, без отряда — к центру отряда, без
 	# того — туда, куда шёл
 	var goal: Vector3 = move_target
@@ -5887,7 +5987,9 @@ func _unstick() -> void:
 		if post_pos != Vector3.ZERO and Vector2(post_pos.x - goal.x, post_pos.z - goal.z).length() < 12.0:
 			goal = post_pos
 	GameManager.tm_event("unstuck", {"sid": squad_id, "type": String(stat_id), "fac": faction,
-		"at": [snappedf(p.x, 0.1), snappedf(p.z, 0.1)]})
+		"at": [snappedf(p.x, 0.1), snappedf(p.z, 0.1)], "st": int(state),
+		"tgt": attack_target != null and is_instance_valid(attack_target),
+		"why": _unstick_why, "goal": [snappedf(goal.x, 0.1), snappedf(goal.z, 0.1)]})
 	# С живой целью (упёрся в препятствие на подходе) — цель НЕ бросаем: вывод
 	# на проходимую точку уже сделан выше, дальше тот же приказ атаки заново
 	# (свежий маршрут). Терять цель по вызволению — это «не держат цель»
@@ -5898,6 +6000,30 @@ func _unstick() -> void:
 		command_attack(tgt, true, false, was_lock)
 		return
 	command_move(GameManager.land_target(goal), false, Vector3.ZERO, false, false, true)
+
+## ── ПРОГРЕСС НА ОБХОДЕ — ДО ТОЧКИ ДОРОГИ, А НЕ ДО ЦЕЛИ (ТЗ 13.10.2026,
+## qa_forest_wall_navigation) ───────────────────────────────────────────────
+## Детектор мерил прямую до цели. Боец, честно идущий по дороге A* вокруг
+## лесной стены к лучникам за ней, удаляется от цели по прямой — «не
+## продвигается»; стена лежит в маске скал ядра — «препятствие рядом»
+## (cliff); два вызволения за 20 с — «цель недостижима», цель снята, боец
+## встал в 20 м от начала (зонд Probe: сброс на 20.7 м от цели, 120 красных
+## без цели за 8 с). Пока дорога активна, прогресс считается до её текущего
+## угла; смена угла — новый отсчёт (расстояние скачет к следующему углу)
+var _stuck_wp_i: int = -1
+func _stuck_dist(dist: float, route: PackedVector3Array, route_i: int, mypos: Vector3) -> float:
+	if route_i >= route.size():
+		if _stuck_wp_i != -1:
+			_stuck_wp_i = -1
+			_stuck_ref_dist = INF
+		return dist
+	if route_i != _stuck_wp_i:
+		_stuck_wp_i = route_i
+		_stuck_ref_dist = INF
+	var w: Vector3 = route[route_i]
+	var dx: float = w.x - mypos.x
+	var dz: float = w.z - mypos.z
+	return sqrt(dx * dx + dz * dz)
 
 ## Новый приказ — новый отсчёт: иначе «не продвигаюсь» считалось бы от
 ## расстояния до ПРЕЖНЕЙ цели, и свежий приказ объявлялся бы застрявшим сразу
@@ -6065,8 +6191,10 @@ func _process_move(delta: float) -> void:
 	# Раз в полсекунды сверяем расстояние до цели с прошлым замером. Не стало
 	# ближе хотя бы на STUCK_PROGRESS — боец наматывает круги (почти всегда
 	# вокруг ствола), и стволы для него на TRUNK_IGNORE_SEC выключаются.
-	# Четыре арифметические операции в кадр: ни одного вызова наружу
-	_tick_stuck(delta, dist)
+	# Четыре арифметические операции в кадр: ни одного вызова наружу.
+	# ПРОГРЕСС — ПО ТЕКУЩЕЙ ТОЧКЕ ДОРОГИ, а не по прямой до цели (см.
+	# _stuck_dist): на обходе препятствия прямая до цели РАСТЁТ
+	_tick_stuck(delta, _stuck_dist(dist, _route, _route_i, mypos))
 	# ПРОСТАЯ ЖЁСТКАЯ ОСТАНОВКА: дошёл в пределах допуска — встал, и всё.
 	# Никаких доводок, проб «а не занято ли место» и попыток подвинуться,
 	# если задел сосед: именно они и превращались в бесконечное топтание.
@@ -6525,6 +6653,18 @@ func _process_attack(delta: float) -> void:
 					_melee_grip = true
 					return
 			dir /= dist
+			# ── ПОДТЯГИВАНИЕ — ТОЖЕ В ОБХОД (ТЗ 12.10.2026, второе письмо) ──
+			# Ветка шла к цели ПРЯМОЙ: стрелки игрока за лесной стеной, и весь
+			# отряд красных, взятый ими в ответ, вставал лбом в стену и стоял
+			# под стрелами (qa_red_ai_aggro E: 18 из 18 у стены 40 с). Прямая
+			# упирается — шаг по углу обхода и полным ходом (это уже не
+			# подшагивание рядов, а дорога к цели); автопилот не взводится
+			var nd: Vector3 = _nav_dir(mp, tp, delta, dir)
+			if nd != dir:
+				_facing = nd
+				velocity = nd * _effective_speed()
+				_commit_step(velocity * delta)
+				return
 			_facing  = dir
 			velocity = dir * (_effective_speed() * PULL_UP_SPEED)
 			_commit_step(velocity * delta)
@@ -6658,7 +6798,7 @@ func _process_attack(delta: float) -> void:
 		# (ветка «гнаться не буду» ниже). Замок приказа при этом цел: выбьют
 		# соседа — _lock_next_victim вернёт бойца к назначенному отряду
 		if not _stance_holds_ground() and not retreating and not sprinting:
-			if _tick_stuck(delta, dist) and _stuck_streak >= STUCK_RETARGET_STREAK:
+			if _tick_stuck(delta, _stuck_dist(dist, _atk_route, _atk_route_i, mp)) 					and _stuck_streak >= STUCK_RETARGET_STREAK:
 				var alt := _find_nearest_enemy_in_range(STUCK_RETARGET_RANGE, "stuck_retarget")
 				if alt != null and alt != attack_target:
 					_reset_stuck()
@@ -6781,12 +6921,21 @@ func _process_attack(delta: float) -> void:
 			# отставание от сектора 8-26 м). Цель обхода — сектор, пока он
 			# ведёт, иначе точка перед стеной по лучу от бойца
 			var ntp: Vector3 = tp
-			if attack_target is Building:
-				if nav_goal.x != INF:
-					ntp = nav_goal
-				elif dist > 0.01:
-					var kk: float = maxf(rng - 0.5, 0.0) / dist
-					ntp = Vector3(tp.x + (mp.x - tp.x) * kk, tp.y, tp.z + (mp.z - tp.z) * kk)
+			if attack_target is Building and nav_goal.x != INF:
+				ntp = nav_goal
+			elif dist > 0.01:
+				# ── И К БОЙЦУ — ДО ТОЧКИ ОСТАНОВКИ (ТЗ 13.10.2026,
+				# qa_forest_wall_navigation A) ───────────────────────────────
+				# Укорочение было только у зданий. Лучник, стоящий в 1.5 м от
+				# стволов лесной стены, лежит в зоне отступа сетки (ячейка
+				# цели — «стена»): прямая к нему «заслонена», A* ведёт к
+				# ближайшей свободной ячейке, дорога кончается в 5 м от цели,
+				# прямой шаг снова «заслонён» — 120 копейщиков стояли в 5.5 м
+				# от блока лучников и дёргались (114 из 120 по три смены
+				# направления в секунду). Боец встаёт на дистанции удара и
+				# ближе не идёт — к этой точке и строится дорога
+				var kk: float = maxf(rng - 0.5, 0.0) / dist
+				ntp = Vector3(tp.x + (mp.x - tp.x) * kk, tp.y, tp.z + (mp.z - tp.z) * kk)
 			var wp: Vector3 = _atk_waypoint(mp, ntp, delta)
 			# ── ЦЕЛЬ ЗА СКАЛОЙ БЕЗ ОБХОДА — В СТЕНУ НЕ ИДЁМ (ТЗ 19.09.2026, п. 3)
 			# Раньше «пути нет» означало «иди прямо»: тролль с целью на плато
@@ -9038,7 +9187,7 @@ func take_damage(amount: float, attacker: Node3D = null) -> void:
 	# Отряд отмечает "меня недавно задели" — держит squad_in_combat() истинным
 	# даже когда враг бьёт издали и никто в отряде не вступает в ближний бой
 	if squad_id > 0:
-		GameManager.squad_mark_hit(squad_id)
+		GameManager.squad_mark_hit(squad_id, attacker)
 	var total_defense: float = defense + armor \
 		+ GameManager.get_upgrade(faction, "defense") \
 		+ GameManager.unit_bonus(faction, stat_id, "bonus_armor") \

@@ -65,9 +65,27 @@ const CENTER_Y := 1.70
 ## оставляла знамя висеть мимо бойца
 static var POLE_OFFSET_X: float = _BannerArt.pole_offset_px() * PIXEL_SIZE
 
+## ── ШТАНДАРТ ЭЛИТЫ — В ПОЛТОРА РАЗА КРУПНЕЕ (ТЗ 13.10.2026, письмо 7) ──────
+## Красный римский штандарт (BannerArt.vexillum_texture) выдаётся только
+## отряду с индивидуальным званием (GameManager.squad_elite) и рисуется на
+## +50 % к обычному знамени: тот же холст, тот же PIXEL_SIZE, квад × 1.5.
+## Растёт ВСЁ полотно с древком, поэтому сдвиг древка от центра квада и
+## высота центра над землёй считаются от ФАКТИЧЕСКОГО размера (pole_offset,
+## _center_y), а не от статических чисел
+const ELITE_SCALE := 1.5
+
 ## Уровень, под который построено знамя. По нему GameManager видит, что отряд
 ## подрос, и перестраивает картинку, не создавая узел заново
 var shown_level: int = 0
+
+## Построено ли знамя как штандарт элиты (см. ELITE_SCALE). GameManager
+## сравнивает с GameManager.squad_elite и перестраивает картинку на смене
+var shown_elite: bool = false
+
+## Сдвиг древка от центра квада и высота центра — под ТЕКУЩИЙ размер квада
+## (у штандарта элиты они в полтора раза больше статических)
+var pole_offset: float = POLE_OFFSET_X
+var _center_y: float = CENTER_Y
 
 ## ── БЕЛЫЙ ФЛАГ — ЭТО СОСТОЯНИЕ ЭТОГО ЖЕ УЗЛА, А НЕ ВТОРОЙ УЗЕЛ ─────────────
 ## ЖАЛОБА ВЛАДЕЛЬЦА СО СКРИНШОТОМ: у копейщика с красным вымпелом ветерана
@@ -82,17 +100,23 @@ var shown_level: int = 0
 ## пересобирая квад каждый кадр
 var shown_white: bool = false
 
-static func create(level: int) -> MeshInstance3D:
+static func create(level: int, elite: bool = false) -> MeshInstance3D:
 	var root := MeshInstance3D.new()
 	root.set_script(load("res://scripts/SquadBanner.gd"))
 	root.name = "SquadBanner"
-	root.build(level)
+	root.build(level, elite)
 	return root
 
-func build(level: int) -> void:
+## elite — индивидуальное звание отряда: красный штандарт × ELITE_SCALE вместо
+## вымпела общего ветеранства (ТЗ 13.10.2026, письмо 7)
+func build(level: int, elite: bool = false) -> void:
 	shown_level = maxi(level, 1)
 	shown_white = false
-	build_texture(_BannerArt.texture_for(shown_level))
+	shown_elite = elite
+	if elite:
+		build_texture(_BannerArt.vexillum_texture(shown_level), ELITE_SCALE)
+	else:
+		build_texture(_BannerArt.texture_for(shown_level))
 
 ## ── ПОКАЗАТЬ БЕЛОЕ ПОЛОТНИЩЕ ВМЕСТО БОЕВОГО ────────────────────────────────
 ## `level` запоминается даже у отряда БЕЗ звания (там он ноль): по нему знамя
@@ -108,13 +132,20 @@ func show_white(level: int) -> void:
 ## Собрать квад под ГОТОВУЮ ленту. Вынесено из build() ради белого флага
 ## паники: у него нет уровня, а всё остальное — размер, ветровой материал,
 ## отключённая тень — обязано совпадать со знаменем до строчки
-func build_texture(tex: Texture2D) -> void:
+## k — множитель размера квада (штандарт элиты: ELITE_SCALE); сдвиг древка и
+## высота центра едут за ним: низ древка остаётся на той же высоте над землёй
+func build_texture(tex: Texture2D, k: float = 1.0) -> void:
 	if tex == null:
 		mesh = null
 		return
 	var sz: Vector2 = tex.get_size()
 	var quad := QuadMesh.new()
-	quad.size = Vector2(sz.x * PIXEL_SIZE, sz.y * PIXEL_SIZE)
+	quad.size = Vector2(sz.x * PIXEL_SIZE * k, sz.y * PIXEL_SIZE * k)
+	pole_offset = POLE_OFFSET_X * k
+	# Центр поднимается на половину прибавки высоты: нижний край квада (низ
+	# древка в руке знаменосца) стоит там же, где у обычного знамени
+	var base_h: float = float(_BannerArt.H) * PIXEL_SIZE
+	_center_y = CENTER_Y + (quad.size.y - base_h) * 0.5
 	# ── МАТЕРИАЛ ВЕТРА, А НЕ НЕПОДВИЖНЫЙ ───────────────────────────────────
 	# Тот же шейдер, что у растительности (cyl_billboard): доворот к камере,
 	# компенсация наклона камеры (V_STRETCH) и срез альфы — всё уже есть, и
@@ -134,5 +165,5 @@ func build_texture(tex: Texture2D) -> void:
 
 ## Поставить знамя над знаменосцем. Точка — НАРИСОВАННАЯ (см. шапку)
 func place_at(draw_pos: Vector3, ground_y: float) -> void:
-	global_position = Vector3(draw_pos.x + POLE_OFFSET_X,
-		ground_y + CENTER_Y, draw_pos.z)
+	global_position = Vector3(draw_pos.x + pole_offset,
+		ground_y + _center_y, draw_pos.z)

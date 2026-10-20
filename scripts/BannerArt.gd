@@ -133,12 +133,151 @@ static func texture_for(level: int) -> Texture2D:
 	var tier: Dictionary = _UCfg.veteran_banner_tier(level)
 	if tier.is_empty():
 		return null
+	# ── ПРЕЖНИЕ ВЫМПЕЛЫ ВОЗВРАЩЕНЫ (ТЗ 13.10.2026, письмо 7) ─────────────────
+	# ТЗ 12.10.2026 подменило ЭТУ функцию римским штандартом, и красное
+	# полотнище получал каждый отряд с рангом — «автоматическая выдача всем
+	# подряд». Общее ветеранство снова рисуется проверенной шкалой из конфига
+	# (вымпел → гвидон → золотой штандарт, VET_BANNER_TIERS); красный
+	# штандарт — ТОЛЬКО у отряда с индивидуальным званием (vexillum_texture,
+	# решает GameManager.squad_elite)
 	var key: int = int(tier.get("key", level))
 	if _cache.has(key):
 		return _cache[key]
 	var tex := _render(tier)
 	_cache[key] = tex
 	return tex
+
+## Прямоугольник холста с полотнищем обычного знамени — обрезок для флажка
+## в панели (HUD._vet_flag). Для штандарта — vexillum_crop()
+static func flag_crop() -> Rect2:
+	return Rect2(6, 12, 92, 52)
+
+static func vexillum_crop() -> Rect2:
+	return Rect2(0, 0, 28, 88)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# РИМСКИЙ ШТАНДАРТ — ЗНАМЯ ИНДИВИДУАЛЬНОГО ЗВАНИЯ (ТЗ 12.10.2026 → 13.10.2026)
+# ═════════════════════════════════════════════════════════════════════════════
+## Заказ: «в стиле римского штандарта — флагшток строго посередине, флаг уже и
+## длиннее вниз, без жёлтого, благородный красный, сверху маленькая звёздочка,
+## на теле флага — цифра ранга». Полотнище висит на ПЕРЕКЛАДИНЕ и центрировано
+## по древку (центр древка остаётся там же, где у прежних вымпелов, — сдвиг
+## знамени над бойцом SquadBanner.POLE_OFFSET_X не меняется). Форма одна на
+## все уровни: ранг читается ЦИФРОЙ, а не формой и цветом. Белый флаг паники и
+## флажок рудника остались вымпелами (это не ранг).
+## С 13.10.2026 это знамя ЭЛИТЫ: выдаётся не по рангу, а по признаку
+## индивидуального звания отряда (GameManager.squad_elite), и в мире рисуется
+## в полтора раза крупнее обычного (SquadBanner.ELITE_SCALE)
+const VEX_KEY_BASE := 1000
+
+## Текстура красного штандарта с цифрой ранга. Ключ кэша — уровень со
+## сдвигом, чтобы не пересечься ни с грейдами вымпелов, ни с ключами цвета
+static func vexillum_texture(level: int) -> Texture2D:
+	var lvl: int = maxi(level, 1)
+	var key: int = VEX_KEY_BASE + lvl
+	if _cache.has(key):
+		return _cache[key]
+	var tex := _render_vexillum(lvl)
+	_cache[key] = tex
+	return tex
+const VEX_HALF := 11                ## полуширина полотнища от оси древка
+const VEX_BAR_HALF := 14            ## полуширина перекладины
+const VEX_BAR_Y := 15               ## верх перекладины
+const VEX_TOP := 17                 ## верх полотнища (под перекладиной)
+const VEX_H := 66                   ## высота полотнища
+const VEX_FRINGE := 4               ## кисти снизу
+const VEX_CLOTH := Color(0.60, 0.07, 0.09)       ## благородный красный
+const VEX_CLOTH_DARK := Color(0.42, 0.04, 0.06)  ## складки и кайма
+const VEX_SIGN := Color(0.96, 0.95, 0.92)        ## звезда и цифра
+const VEX_STAR_R := 6               ## радиус звезды наверху
+## Цифры 3×5, растягиваются повтором пикселя (VEX_DIGIT_K)
+const VEX_DIGIT_K := 3
+const VEX_DIGITS := [
+	["###", "#.#", "#.#", "#.#", "###"],
+	[".#.", "##.", ".#.", ".#.", "###"],
+	["###", "..#", "###", "#..", "###"],
+	["###", "..#", "###", "..#", "###"],
+	["#.#", "#.#", "###", "..#", "..#"],
+	["###", "#..", "###", "..#", "###"],
+	["###", "#..", "###", "#.#", "###"],
+	["###", "..#", ".#.", ".#.", ".#."],
+	["###", "#.#", "###", "#.#", "###"],
+	["###", "#.#", "###", "..#", "###"],
+]
+
+static func _render_vexillum(level: int) -> ImageTexture:
+	var img := Image.create_empty(W, H, false, Image.FORMAT_RGBA8)
+	img.fill(Color(0, 0, 0, 0))
+	var cx: int = POLE_X + POLE_W / 2
+	# Древко — во весь рост, от звезды до низа холста
+	for y in range(VEX_STAR_R * 2, H):
+		for x in range(POLE_X, POLE_X + POLE_W):
+			img.set_pixel(x, y, POLE_SHADE if x == POLE_X + POLE_W - 1 else POLE_COL)
+	# Перекладина
+	for y in range(VEX_BAR_Y, VEX_BAR_Y + 2):
+		for x in range(cx - VEX_BAR_HALF, cx + VEX_BAR_HALF + 1):
+			if x >= 0 and x < W:
+				img.set_pixel(x, y, POLE_COL if y == VEX_BAR_Y else POLE_SHADE)
+	# Полотнище поверх древка: висит с перекладины, центр — ось древка
+	var y1: int = VEX_TOP + VEX_H
+	for y in range(VEX_TOP, y1 + 1):
+		for x in range(cx - VEX_HALF, cx + VEX_HALF + 1):
+			if x < 0 or x >= W:
+				continue
+			var edge: bool = x <= cx - VEX_HALF or x >= cx + VEX_HALF or y >= y1 - 1
+			# Две вертикальные складки — тканью, а не плоской заливкой
+			var fold: bool = (x == cx - VEX_HALF / 2 or x == cx + VEX_HALF / 2) and y > VEX_TOP + 2
+			img.set_pixel(x, y, VEX_CLOTH_DARK if edge or fold else VEX_CLOTH)
+	# Кисти снизу через пиксель
+	for x in range(cx - VEX_HALF, cx + VEX_HALF + 1):
+		if (x - (cx - VEX_HALF)) % 2 == 1:
+			continue
+		for y in range(y1 + 1, y1 + 1 + VEX_FRINGE):
+			if x >= 0 and x < W and y < H:
+				img.set_pixel(x, y, VEX_CLOTH_DARK)
+	# Звезда ранга над перекладиной
+	_draw_star(img, cx, VEX_STAR_R, VEX_STAR_R, VEX_SIGN)
+	# Цифра ранга на теле флага
+	_draw_number(img, cx, VEX_TOP + VEX_H / 2 - 6, maxi(level, 0))
+	_outline(img)
+	return ImageTexture.create_from_image(img)
+
+## Пятиконечная звезда: точка внутри многоугольника из десяти вершин
+static func _draw_star(img: Image, cx: int, cy: int, r: int, col: Color) -> void:
+	var pts := PackedVector2Array()
+	for k in range(10):
+		var a: float = -PI * 0.5 + float(k) * PI / 5.0
+		var rr: float = float(r) if k % 2 == 0 else float(r) * 0.45
+		pts.append(Vector2(float(cx) + 0.5 + cos(a) * rr, float(cy) + 0.5 + sin(a) * rr))
+	for y in range(cy - r - 1, cy + r + 2):
+		for x in range(cx - r - 1, cx + r + 2):
+			if x < 0 or x >= W or y < 0 or y >= H:
+				continue
+			if Geometry2D.is_point_in_polygon(Vector2(float(x) + 0.5, float(y) + 0.5), pts):
+				img.set_pixel(x, y, col)
+
+## Число цифрами 3×5 (VEX_DIGIT_K), центр по cx, верх — y0
+static func _draw_number(img: Image, cx: int, y0: int, n: int) -> void:
+	var txt: String = str(n)
+	var k: int = VEX_DIGIT_K if txt.length() == 1 else 2
+	var dw: int = 3 * k
+	var gap: int = k
+	var total: int = txt.length() * dw + (txt.length() - 1) * gap
+	var x0: int = cx - total / 2
+	for i in range(txt.length()):
+		var d: int = int(txt[i])
+		var rows: Array = VEX_DIGITS[clampi(d, 0, 9)]
+		for r in range(5):
+			var line: String = rows[r]
+			for c in range(3):
+				if line[c] != "#":
+					continue
+				for dy in range(k):
+					for dx in range(k):
+						var x: int = x0 + i * (dw + gap) + c * k + dx
+						var y: int = y0 + r * k + dy
+						if x >= 0 and x < W and y >= 0 and y < H:
+							img.set_pixel(x, y, VEX_SIGN)
 
 ## Сбросить кэш (стенды, смена партии). В игре не нужен: картинки постоянны
 static func clear_cache() -> void:

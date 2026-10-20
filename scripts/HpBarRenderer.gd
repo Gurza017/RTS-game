@@ -23,6 +23,7 @@ extends RefCounted
 
 const _SHADER := preload("res://shaders/mm_hp_bar.gdshader")
 const _Opt := preload("res://scripts/perf_config.gd")
+const _FarR := preload("res://scripts/FarUnitRenderer.gd")
 
 const GROW_STEP := 256
 
@@ -59,6 +60,14 @@ var _layer: Layer = null
 var _slot: Dictionary = {}       # Unit -> индекс слота
 ## Что уже лежит в буфере: повторную такую же запись делать незачем
 var _last: Dictionary = {}       # Unit -> Vector3(x, z, frac)
+
+## Новая сцена: узел слоя ушёл вместе со старым World (см.
+## FarUnitRenderer.reattach_world)
+func reattach_world(world_root: Node3D) -> void:
+	if _layer != null:
+		_layer.mmi = _FarR.reattach_mmi(_layer.mmi, _layer.mm, world_root)
+		if _layer.mmi != null:
+			_layer.mmi.name = "HpBars"
 
 func _ensure(world_root: Node3D) -> void:
 	if _layer != null:

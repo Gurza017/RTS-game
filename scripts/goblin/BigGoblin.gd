@@ -458,6 +458,19 @@ func _strike_damage() -> float:
 		maxf(cd - _GobCfgB.BIG_SCAN_LEAD, 0.0) * 1000.0)
 	var combo: bool = (_swings % _GobCfgB.BIG_COMBO_EVERY) == 0
 	_play_attack_anim("attack1" if not combo else "attack2", 520)
+	# ── ВЗГЛЯД НА ЦЕЛЬ ПЕРЕД ВЗМАХОМ (шлюз 13.10.2026, C2) ────────────────
+	# Сектор свипа берёт _facing, а базовый автомат пишет его стоящему
+	# только в стойке «держать» и на ходу: туша, бившая с места, махала туда,
+	# куда ПРИШЛА (чаще — в спину своей же цели), и из пяти бойцов перед
+	# ней накрывала одного сбоку. Стенд: 5 копейщиков в секторе ±40° —
+	# попаданий по одному за взмах
+	var t := attack_target
+	if t != null and is_instance_valid(t):
+		var tp: Vector3 = (t as Node3D).global_position
+		var mp0: Vector3 = position if _local_xform else global_position
+		var to := Vector3(tp.x - mp0.x, 0.0, tp.z - mp0.z)
+		if to.length_squared() > 1e-4:
+			_facing = to.normalized()
 	_sweep_now(true)
 	if combo:
 		# Двойной взмах: второй удар — отложенный, его выпустит тик

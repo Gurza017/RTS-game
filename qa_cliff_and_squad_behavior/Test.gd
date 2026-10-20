@@ -627,7 +627,9 @@ func _c_stance() -> void:
 		if sp._spear_leveled():
 			march_down += 1
 	print("  на марше: идут %d, копья вперёд у %d из %d" % [marching, march_down, men.size()])
-	verdict("C3 со «Стеной копий» пики вперёд и на марше", march_down == men.size(),
+	# РАЗВОРОТ ТЗ 14.10.2026, п. 6: щетина — по нажатому [S], а не «всегда»;
+	# в «Атаке» на марше копья подняты
+	verdict("C3 с «Фалангой» в «Атаке» на марше пики подняты (ТЗ 14.10)", march_down == 0,
 		"держат %d из %d (идут %d)" % [march_down, men.size(), marching])
 	_free_all(men)
 	await pframes(6)

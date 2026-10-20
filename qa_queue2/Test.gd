@@ -327,10 +327,10 @@ func _filter_slots() -> Array:
 		return out
 	# Ячейки лежат прямо в полосе баннера; ПОСЛЕДНЯЯ — «рабочие без дела»,
 	# к разбивке типов войск она не относится
+	# Плашка «рабочие без дела» давно живёт отдельным виджетом (_build_idle_widget),
+	# в полосе — только роды войск; хвост больше не срезаем
 	for slot in hud._overbar_row.get_children():
 		out.append(slot)
-	if out.size() > 0:
-		out.remove_at(out.size() - 1)
 	return out
 
 func _slot_button(slot: Node) -> Button:
@@ -427,8 +427,10 @@ func _test_regressions() -> void:
 	var keys: Array = hud._train_badges.keys()
 	keys.sort()
 	print("  ярлыки у замка: %s" % str(keys))
+	# Состав найма крепости — из конфига (монах добавлен позже); свойство —
+	# ярлыки ПЕРЕСОБРАНЫ: барачного копейщика нет, крепостной рабочий есть
 	verdict("12b при смене здания ярлыки пересобираются",
-		keys == ["warrior", "worker"], str(keys))
+		keys.has("worker") and not keys.has("spearman"), str(keys))
 	# и ни один ярлык не показывает чужую очередь
 	var w_lbl: Label = hud._train_badges.get("worker")
 	print("  у замка заказов нет: цифра рабочего видима=%s" % str(w_lbl.visible))
@@ -507,10 +509,14 @@ func _test_regressions() -> void:
 	await frames(2)
 	var slots := _filter_slots()
 	var caps: Array = []
+	# РАЗВОРОТ ТЗ 10.10.2026: подпись «N бойцов» под иконкой снята, число
+	# бойцов — в подсказке иконки («Род: N отрядов, M бойцов. …»)
 	for s in slots:
 		for c in s.get_children():
-			if c is Label:
-				caps.append((c as Label).text)
+			if c is Button:
+				var tt: String = String((c as Button).tooltip_text)
+				var m0: int = tt.find("отрядов, ")
+				caps.append(tt.substr(m0 + 9) if m0 >= 0 else tt)
 	print("  подписи ячеек: %s (в отрядах 4 и 3 бойца)" % str(caps))
 	verdict("12j подписи совпадают с составом отрядов",
 		caps.size() == 2 and String(caps[0]).begins_with("4")
@@ -596,10 +602,14 @@ func _test_four_types() -> void:
 	var vp: Vector2 = get_viewport().get_visible_rect().size
 	var slots := _filter_slots()
 	var caps: Array = []
+	# РАЗВОРОТ ТЗ 10.10.2026: подпись «N бойцов» под иконкой снята, число
+	# бойцов — в подсказке иконки («Род: N отрядов, M бойцов. …»)
 	for s in slots:
 		for c in s.get_children():
-			if c is Label:
-				caps.append((c as Label).text)
+			if c is Button:
+				var tt: String = String((c as Button).tooltip_text)
+				var m0: int = tt.find("отрядов, ")
+				caps.append(tt.substr(m0 + 9) if m0 >= 0 else tt)
 	print("  панель: позиция=%s размер=%s, экран=%s" % [
 		str(panel.global_position), str(panel.size), str(vp)])
 	print("  ячеек=%d, подписи=%s" % [slots.size(), str(caps)])
@@ -611,7 +621,7 @@ func _test_four_types() -> void:
 		and panel.global_position.y >= 0.0,
 		"x=%.0f w=%.0f" % [panel.global_position.x, panel.size.x])
 	verdict("14d панель не наезжает на нижнюю панель команд",
-		panel.global_position.y + panel.size.y <= vp.y + float(hud.PANEL_TOP) + 1.0,
+		panel.global_position.y + panel.size.y <= vp.y - float(hud.PANEL_BOTTOM_GAP) + 1.0,
 		"низ %.0f" % (panel.global_position.y + panel.size.y))
 	# Подпись «40 бойцов» обязана влезать в ячейку, а не резаться многоточием
 	var fits := true

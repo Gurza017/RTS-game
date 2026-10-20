@@ -436,6 +436,14 @@ func fog_seen() -> PackedByteArray:
 func fog_rgba() -> PackedByteArray:
 	return _c.FogRgba()
 
+## Кадр мини-карты одним вызовом (см. ArmyCore.MinimapPaint, Minimap.gd)
+func minimap_paint(bg: PackedByteArray, w: int, h: int, half_x: float, half_z: float,
+		fog_on: bool, my_fac: int, pal: PackedByteArray,
+		marks: PackedFloat32Array) -> PackedByteArray:
+	return _c.MinimapPaint(bg, w, h, half_x, half_z, fog_on, my_fac, pal, marks)
+func minimap_dots() -> int:
+	return _c.MinimapDots
+
 func fog_source_count() -> int:
 	return _c.FogSourceCount()
 

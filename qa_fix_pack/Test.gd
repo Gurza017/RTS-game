@@ -156,6 +156,14 @@ func _b_big() -> void:
 			and absf(_GobCfg.BIG_PIXEL_SIZE / 0.0108 - 2.4) < 0.01)
 	var spot: Vector3 = main.PLAYER_BASE_ANCHOR + Vector3(40.0, 0.0, 30.0)
 	main._clear_area_of_resources(spot, 50.0)
+	# ОХРАНА РУДНИКОВ ОРДЫ СНИМАЕТСЯ (ТЗ 11.10.2026): она спит (F_DORMANT), и
+	# вместе с ЗАМОРОЖЕННОЙ стендом тушей (set_tick(false) ниже — в игре туша
+	# по физике не спит никогда) стрела переставала засчитывать попадание.
+	# Стенд держит обстановку сам (ловушка «стенд на случайной карте»)
+	for gg in get_tree().get_nodes_in_group("goblin_units"):
+		if is_instance_valid(gg) and not (gg as Unit).is_dead():
+			(gg as Unit).take_damage(1e12)
+	await pframes(3)
 	var big: Unit = _spawn("BigGoblin", Constants.FACTION_GOBLIN, spot)
 	await pframes(2)
 	verdict("B3 обвод туши — тонкий (fine_ring_radius > 0, овал как у тролля)",
@@ -320,22 +328,31 @@ func _d_panel() -> void:
 	verdict("D1 три иконки найма (рабочий, рыцарь, монах) строго квадратные",
 		train.size() == 3 and square, "иконок %d: %s" % [train.size(), sizes])
 	var pr: Rect2 = hud._bottom_panel.get_global_rect()
-	verdict("D2 панель Крепости заданного размера (%.0f×%.0f)" % [hud.CASTLE_PANEL_W, hud.CASTLE_PANEL_H],
-		absf(pr.size.x - hud.CASTLE_PANEL_W) <= 1.0 and absf(pr.size.y - hud.CASTLE_PANEL_H) <= 1.0,
-		"панель %.0f×%.0f" % [pr.size.x, pr.size.y])
+	# РАЗВОРОТ ТЗ 14.10.2026, п. 2: ширина панели производственного здания — по
+	# содержимому (было жёстко CASTLE_PANEL_W 430: пустота справа), высота не
+	# ниже CASTLE_PANEL_H. Свойство: содержимое влезает, лишнего места нет
+	var cmin: Vector2 = (hud._bottom_panel.find_child("PanelRoot", true, false) as Control).get_combined_minimum_size()
+	verdict("D2 панель Крепости — по содержимому, без пустоты справа (ТЗ 14.10)",
+		pr.size.x <= cmin.x + 2.0 * float(hud.PANEL_PAD_X + hud.PANEL_BORDER_W) + 24.0
+			and pr.size.y >= hud.CASTLE_PANEL_H - 1.0,
+		"панель %.0f×%.0f, содержимое %.0f" % [pr.size.x, pr.size.y, cmin.x])
 	var bc: Rect2 = hud.button_container.get_global_rect()
 	var qr: Rect2 = hud._queue_frame.get_global_rect()
 	var right_gap: float = (pr.position.x + pr.size.x) - (bc.position.x + bc.size.x)
 	var left_gap: float = bc.position.x - (qr.position.x + qr.size.x)
-	verdict("D3 ряд иконок отцентрован в свободном месте, отступ от края ≥ %.0f px" % hud.CASTLE_BTN_PAD,
-		absf(right_gap - left_gap) <= 4.0 and right_gap >= hud.CASTLE_BTN_PAD - 0.5,
-		"слева %.1f, справа %.1f" % [left_gap, right_gap])
+	# ТЗ 14.10.2026: отступ кнопок от правой кромки — тот же, что у иконки
+	# здания от левой (рамка + PANEL_PAD_X), и кнопки не налезают на очередь
+	var port_gap: float = hud._portrait_wrap.get_global_rect().position.x - pr.position.x
+	verdict("D3 отступы слева и справа одинаковые (ТЗ 14.10)",
+		absf(right_gap - port_gap) <= 3.0 and left_gap >= 0.0,
+		"иконка здания от края %.1f, кнопки от края %.1f, от очереди %.1f" % [port_gap, right_gap, left_gap])
 	var top_gap: float = bc.position.y - pr.position.y
 	var bot_gap: float = (pr.position.y + pr.size.y) - (bc.position.y + bc.size.y)
-	verdict("D4 ряд иконок по вертикали с отступами не меньше %.0f px" % hud.CASTLE_BTN_PAD,
-		top_gap >= hud.CASTLE_BTN_PAD - 0.5 and bot_gap >= hud.CASTLE_BTN_PAD - 0.5
-			and absf(top_gap - bot_gap) <= 3.0,
-		"сверху %.1f, снизу %.1f" % [top_gap, bot_gap])
+	# ТЗ 14.10.2026: кнопки найма по нижней кромке — вровень с иконкой здания
+	var pw_r: Rect2 = hud._portrait_wrap.get_global_rect()
+	verdict("D4 кнопки найма вровень с иконкой здания по низу (ТЗ 14.10)",
+		absf((bc.position.y + bc.size.y) - (pw_r.position.y + pw_r.size.y)) <= 3.0 and top_gap >= 0.0,
+		"низ кнопок %.1f, низ иконки %.1f" % [bc.position.y + bc.size.y, pw_r.position.y + pw_r.size.y])
 	var rank: Button = null
 	var knight: Button = null
 	for b in btns:
@@ -401,10 +418,17 @@ func _e_formation() -> void:
 	GameManager.finish_research(F, "spearman_1d")
 	var spears: Array = GameManager.squad_members(sp_sid)
 	var es: Vector2 = _extent(sm._mono_formation_slots(a, b, spears)["slots"], dir)
-	verdict("E2 копейщики со «Стеной копий» — ровно в %d шеренги на любом растяге" % GameManager.SPEAR_WALL_ROWS,
-		GameManager.spear_wall_ready(sp_sid)
-			and absf(es.y - float(GameManager.SPEAR_WALL_ROWS - 1) * sm.ROW_DEPTH) <= 0.05,
-		"глубина %.2f м" % es.y)
+	# РАЗВОРОТ ТЗ 14.10.2026, п. 6: «убрать жёсткое три в ряд при растягивании
+	# ПКМ» — с выключенной ручкой копейщики тянутся свободно, как все
+	if sm.SPEAR_WALL_DRAG_ROWS:
+		verdict("E2 копейщики со «Стеной копий» — ровно в %d шеренги на любом растяге" % GameManager.SPEAR_WALL_ROWS,
+			GameManager.spear_wall_ready(sp_sid)
+				and absf(es.y - float(GameManager.SPEAR_WALL_ROWS - 1) * sm.ROW_DEPTH) <= 0.05,
+			"глубина %.2f м" % es.y)
+	else:
+		verdict("E2 копейщики с «Фалангой» тянутся свободно (не глубже двух шеренг, ТЗ 14.10)",
+			GameManager.spear_wall_ready(sp_sid) and es.y <= sm.ROW_DEPTH * 1.5 + 0.01,
+			"глубина %.2f м" % es.y)
 	var ea2: Vector2 = _extent(sm._mono_formation_slots(a, b, arch)["slots"], dir)
 	verdict("E3 «Стена копий» копейщиков НЕ трогает лучников — те по-прежнему свободны",
 		ea2.y <= sm.ROW_DEPTH * 1.5 + 0.01, "глубина лучников %.2f м" % ea2.y)

@@ -47,6 +47,19 @@ const TRAMPLE_R := 1.5
 const FRONT_DEPTH := 1.2
 const REAR_NO_CHARGE_SEC := 30.0      # до конца волны: снимает отход или новый таран
 const TRAMPLE_ZONE := 20.0        # рабочие дальше от центра отряда не проверяются
+## ── ОДИН ОТХОД ЗА ЗАХОД (ТЗ 11.10.2026) ────────────────────────────────────
+## Жалоба: «подходят-уходят, подходят-уходят бесконечно». Выход из рубки
+## срабатывал на КАЖДОМ заходе (время 4 с, «увязли», копья в лоб), и отряд
+## крутил таран-отход-перегруппировку, пока не кончатся враги. Теперь: первый
+## заход — таран и, если пора, ОДИН отход вбок; второй — заход С ФЛАНГА
+## (разгон через точку сбоку от цели, FLANK_SIDE_K) и рубка до конца:
+## выйти из неё можно только при тяжёлых потерях (FINAL_LOSS_FRAC от штата
+## захода). После второго выхода — передышка REST_SEC: марш волны
+## продолжается, новый таран не раньше
+const MAX_PASSES := 2
+const FINAL_LOSS_FRAC := 0.5
+const FLANK_SIDE_K := 1.6
+const REST_SEC := 20.0
 
 const ST_IDLE := 0
 const ST_RUNUP := 1
@@ -121,7 +134,7 @@ func _rec(sid: int) -> Dictionary:
 	var raw: Variant = _sq.get(sid)
 	if raw == null:
 		raw = {"st": ST_IDLE, "since": 0.0, "target": null, "men0": 0, "side": 1.0, "point": Vector3.ZERO,
-			"resume": Vector3.INF}
+			"resume": Vector3.INF, "passes": 0, "rest_until": 0.0}
 		_sq[sid] = raw
 	return raw
 
@@ -166,9 +179,20 @@ func _tick_squad(sid: int, men: Array, now: float, _dt: float) -> void:
 		ST_IDLE, ST_REFORM:
 			if st == ST_REFORM and now - float(r["since"]) < REFORM_SEC:
 				return
+			# Передышка после второго выхода из рубки: марш продолжается
+			if now < float(r["rest_until"]):
+				if st == ST_REFORM:
+					_to_state(r, ST_IDLE, now)
+					var rs0: Vector3 = r["resume"]
+					if rs0.x != INF:
+						r["resume"] = Vector3.INF
+						resumes += 1
+						_move_squad(men, cen, rs0, now, false)
+				return
 			var foe: Node3D = lead._find_nearest_enemy_in_range(SEEK_R, "cav_seek")
 			scans += 1
 			if foe == null or not _valid_target(foe):
+				r["passes"] = 0
 				if st == ST_REFORM:
 					_to_state(r, ST_IDLE, now)
 				# ── ЧУЖОЙ МАРШ ВОЗВРАЩАЕТСЯ ────────────────────────────────────
@@ -186,7 +210,8 @@ func _tick_squad(sid: int, men: Array, now: float, _dt: float) -> void:
 				r["resume"] = lead._route_goal if lead._route.size() > 0 else lead.move_target
 			r["target"] = foe
 			var d: float = Vector2(foe.global_position.x - c.x, foe.global_position.z - c.y).length()
-			if d < RUNUP_MIN:
+			# Второй заход — всегда через точку сбоку от цели (удар во фланг)
+			if d < RUNUP_MIN or int(r["passes"]) >= 1:
 				_go_runup(sid, r, men, cen, foe as Unit, now)
 			else:
 				_go_charge(sid, r, men, foe as Unit, now)
@@ -217,6 +242,10 @@ func _tick_squad(sid: int, men: Array, now: float, _dt: float) -> void:
 					if m != null and is_instance_valid(m):
 						(m as Unit).set("_cav_withdraw_until_ms", 0)
 				r["side"] = -float(r["side"])        # следующий заход — с другого фланга
+				r["passes"] = int(r["passes"]) + 1
+				if int(r["passes"]) >= MAX_PASSES:
+					r["passes"] = 0
+					r["rest_until"] = now + REST_SEC
 				_to_state(r, ST_REFORM, now)
 
 ## Пора ли выходить из рубки: причина или пустая строка
@@ -240,6 +269,11 @@ func _melee_exit(sid: int, r: Dictionary, men: Array, now: float) -> String:
 			if dir.length() > 0.01 and (t as Unit)._faces_charge(dir.normalized()):
 				spear_front += 1
 	if alive == 0:
+		return ""
+	# Второй заход (с фланга) — рубка до конца, выход только при тяжёлых потерях
+	if int(r["passes"]) >= 1:
+		if int(r["men0"]) > 0 and float(int(r["men0"]) - alive) >= float(int(r["men0"])) * FINAL_LOSS_FRAC:
+			return "тяжёлые потери"
 		return ""
 	# «Не стоять и не ковырять копейщиков в лоб»: хватает одного всадника,
 	# упёршегося в копья лицом, — отряд выходит и заходит с фланга
@@ -300,7 +334,9 @@ func _go_runup(sid: int, r: Dictionary, men: Array, cen: Vector3, foe: Unit, now
 		away = Vector3.BACK
 	away = away.normalized()
 	var side := Vector3(-away.z, 0.0, away.x) * float(r["side"])
-	var p: Vector3 = foe.global_position + (away + side * 0.8).normalized() * RUNUP_DIST
+	# Повторный заход — сильнее вбок: разгон идёт во фланг цели, а не в лоб
+	var sk: float = FLANK_SIDE_K if int(r["passes"]) >= 1 else 0.8
+	var p: Vector3 = foe.global_position + (away + side * sk).normalized() * RUNUP_DIST
 	r["point"] = GameManager.land_target(p)
 	_to_state(r, ST_RUNUP, now)
 	_move_squad(men, cen, r["point"], now, false)

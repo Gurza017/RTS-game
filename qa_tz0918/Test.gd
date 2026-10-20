@@ -310,6 +310,12 @@ func _c_pick(base: Vector3) -> void:
 	fwd = -cam.global_transform.basis.z
 	fwd.y = 0.0
 	fwd = fwd.normalized()
+	# Площадку держит стенд сам: чужой боец в полутора метрах перед A
+	# (остаток прошлых блоков) честно перехватывал клик по ногам
+	for n in get_tree().get_nodes_in_group("all_units"):
+		if n is Unit and not (n as Unit).is_dead() and Vector2((n as Unit).global_position.x - pa.x, (n as Unit).global_position.z - pa.z).length() < 6.0:
+			(n as Unit).take_damage(1e12)
+	await pframes(2)
 	var a: Unit = _spawn("spearman", F, pa)
 	var b: Unit = _spawn("spearman", F, pa + fwd * 1.6)
 	await pframes(3)
@@ -324,7 +330,9 @@ func _c_pick(base: Vector3) -> void:
 		pick["target"] == a, "выбран %s" % who3)
 	var sp2: Vector2 = cam.unproject_position(a.global_position + Vector3(0.0, 0.1, 0.0))
 	var pick2: Dictionary = sm._pick_at(sp2, sm.order_pick_mask())
-	verdict("C4 клик по ногам по-прежнему выбирает бойца", pick2["target"] == a)
+	var t2 = pick2["target"]
+	verdict("C4 клик по ногам по-прежнему выбирает бойца", t2 == a,
+		"" if t2 == a or not (t2 is Node3D) else "%s %s в %s" % [str(t2.get_class()), str(t2.get("building_id")), str((t2 as Node3D).global_position)])
 	a.take_damage(1e12)
 	b.take_damage(1e12)
 	main.set_process(true)
@@ -499,6 +507,8 @@ func _h_barracks(base: Vector3) -> void:
 	await pframes(40)
 	await frames(3)
 	var w6: float = hud._bottom_panel.get_combined_minimum_size().x
+	# ТЗ 14.10.2026: ширина панели — по содержимому, жёсткого CASTLE_PANEL_W
+	# нет; свойство «заказы не раздувают панель» — та же ширина, что без них
 	verdict("H1 после шести заказов панель бараков не шире панели Крепости",
 		w6 <= float(hud.CASTLE_PANEL_W) + 0.5, "содержимое %.0f при %.0f" % [w6, hud.CASTLE_PANEL_W])
 	var ar: Array = _squad("archer", F, base + Vector3(0.0, 0.0, 12.0), 30, 6)
@@ -511,8 +521,14 @@ func _h_barracks(base: Vector3) -> void:
 	await frames(3)
 	var icons: Array = _icons_of(hud)
 	var wr: float = hud._bottom_panel.get_combined_minimum_size().x
-	verdict("H2 с лучниками на крыше панель по-прежнему не шире Крепости",
-		wr <= float(hud.CASTLE_PANEL_W) + 0.5, "содержимое %.0f" % wr)
+	# ТЗ 14.10.2026: к ширине прибавляется ровно одна кнопка «Выгрузить»
+	# и полоса гарнизона (мини-слоты), которая с крышей появляется в ряду
+	var one_btn: float = hud.BTN_SIZE * hud.CASTLE_PANEL_BOOST + hud.CASTLE_BTN_PAD
+	var gs: float = 0.0
+	if hud._garrison_strip != null and is_instance_valid(hud._garrison_strip):
+		gs = hud._garrison_strip.get_combined_minimum_size().x + hud.CASTLE_BTN_PAD
+	verdict("H2 с лучниками на крыше панель шире ровно на кнопку выгрузки и полосу гарнизона",
+		wr <= w6 + one_btn + gs + 1.0, "содержимое %.0f при %.0f + %.0f + %.0f" % [wr, w6, one_btn, gs])
 	verdict("H3 в ряду кнопок бараков нет портрета лучника (найма лучников нет)",
 		not icons.has("Archer.png"), str(icons))
 	verdict("H4 копейщик и мечник в найме есть", icons.has("Lancer.png") and icons.has("Warrior.png"))

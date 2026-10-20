@@ -3739,6 +3739,98 @@ public partial class ArmyCore : RefCounted
     public byte[] FogSeen() => _fogSeen;
     public byte[] FogRgba() => _fogRgba;
 
+    // ── МИНИ-КАРТА (ТЗ 10.10.2026) ─────────────────────────────────────────
+    // Один вызов на обновление (раз в ~0.2 с): подложка + туман по маске
+    // ядра + метки построек (готовым списком) + точки ВСЕХ живых строк по
+    // плотному списку. В GDScript это были бы 3000 узлов и 30 тыс. пикселей
+    // за обновление; здесь — один проход по колонкам и один маршал ответа.
+    // marks — четвёрки [x, z, полуразмер в пикселях, индекс палитры];
+    // pal — RGBA по индексу: 0..3 точки бойцов фракций, 4.. — метки.
+    // Чужие бойцы видны только в освещённой ячейке тумана (fogOn).
+    private byte[] _mmBuf = Array.Empty<byte>();
+    public int MinimapDots;
+
+    public byte[] MinimapPaint(byte[] bg, int w, int h, float halfX, float halfZ,
+        bool fogOn, int myFac, byte[] pal, float[] marks)
+    {
+        int n = w * h * 4;
+        if (w <= 0 || h <= 0 || bg.Length < n) return bg;
+        if (_mmBuf.Length != n) _mmBuf = new byte[n];
+        var buf = _mmBuf;
+        bool fog = fogOn && _fogCols > 0 && _fogLit.Length == _fogCols * _fogRows
+            && _fogSeen.Length == _fogLit.Length;
+        float mx = 2.0f * halfX / w, mz = 2.0f * halfZ / h;
+        if (fog)
+        {
+            float inv = 1.0f / _fogCell;
+            for (int y = 0; y < h; y++)
+            {
+                int cz = (int)((-halfZ + (y + 0.5f) * mz + _fogHalfZ) * inv);
+                if (cz < 0) cz = 0; else if (cz >= _fogRows) cz = _fogRows - 1;
+                int rowF = cz * _fogCols;
+                int o = y * w * 4;
+                for (int x = 0; x < w; x++, o += 4)
+                {
+                    int cx = (int)((-halfX + (x + 0.5f) * mx + _fogHalfX) * inv);
+                    if (cx < 0) cx = 0; else if (cx >= _fogCols) cx = _fogCols - 1;
+                    int fi = rowF + cx;
+                    int k = _fogLit[fi] != 0 ? 256 : (_fogSeen[fi] != 0 ? 150 : 56);
+                    buf[o] = (byte)(bg[o] * k >> 8);
+                    buf[o + 1] = (byte)(bg[o + 1] * k >> 8);
+                    buf[o + 2] = (byte)(bg[o + 2] * k >> 8);
+                    buf[o + 3] = 255;
+                }
+            }
+        }
+        else Buffer.BlockCopy(bg, 0, buf, 0, n);
+        float sx = 1.0f / mx, sz = 1.0f / mz;
+        int palN = pal.Length / 4;
+        for (int k = 0; k + 3 < marks.Length; k += 4)
+        {
+            int ci = (int)marks[k + 3];
+            if (ci < 0 || ci >= palN) continue;
+            int px = (int)((marks[k] + halfX) * sx), py = (int)((marks[k + 1] + halfZ) * sz);
+            int r = Math.Max((int)marks[k + 2], 0);
+            MmRect(buf, w, h, px - r, py - r, px + r, py + r, pal, ci);
+        }
+        int dots = 0, dead = DeadState;
+        for (int q = 0; q < _liveCount; q++)
+        {
+            int i = _liveRows[q];
+            int f = _fac[i];
+            if (f < 0 || f >= palN || f > 3) continue;
+            if ((_flags[i] & FPosValid) == 0 || (_flags[i] & FGarrisoned) != 0 || _st[i] == dead) continue;
+            float wx = _px[i], wz = _pz[i];
+            if (fog && f != myFac)
+            {
+                int fcx = (int)((wx + _fogHalfX) / _fogCell), fcz = (int)((wz + _fogHalfZ) / _fogCell);
+                if (fcx < 0 || fcz < 0 || fcx >= _fogCols || fcz >= _fogRows) continue;
+                if (_fogLit[fcz * _fogCols + fcx] == 0) continue;
+            }
+            int px = (int)((wx + halfX) * sx), py = (int)((wz + halfZ) * sz);
+            MmRect(buf, w, h, px, py, px + 1, py + 1, pal, f);
+            dots++;
+        }
+        MinimapDots = dots;
+        return buf;
+    }
+
+    private static void MmRect(byte[] buf, int w, int h, int x0, int y0, int x1, int y1,
+        byte[] pal, int ci)
+    {
+        if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0;
+        if (x1 >= w) x1 = w - 1; if (y1 >= h) y1 = h - 1;
+        byte r = pal[ci * 4], g = pal[ci * 4 + 1], b = pal[ci * 4 + 2];
+        for (int y = y0; y <= y1; y++)
+        {
+            int o = (y * w + x0) * 4;
+            for (int x = x0; x <= x1; x++, o += 4)
+            {
+                buf[o] = r; buf[o + 1] = g; buf[o + 2] = b; buf[o + 3] = 255;
+            }
+        }
+    }
+
     private Godot.Collections.Array FogFinish()
     {
         int n = _fogCols * _fogRows;
@@ -5291,12 +5383,18 @@ public partial class ArmyCore : RefCounted
                     r.Dirty = true;
                 }
             }
-            // ── ЛЕНТА: принуждение > замок удара > ходьба/покой ─────────────
+            // ── ЛЕНТА: замок удара > принуждение > ходьба/покой ─────────────
+            // ТЗ 12.10.2026 «у рыцарей пропала анимация ударов»: принуждение
+            // (щит мечника) стояло ВЫШЕ замка удара, и строка, у которой щит
+            // поднят (стойка «держать», обстрел, весь Яростный Набег), со
+            // следующего же прохода возвращалась на guard — взмах не был виден
+            // вовсе. RowLookForce и так уважает замок (_lkLock == 0) — проход
+            // теперь говорит то же самое
             int lk = _lkLock[i];
             if (lk > 0 && nowMs >= lk) { _lkLock[i] = 0; lk = 0; }
             int want;
-            if (_lkForce[i] >= 0) want = _lkForce[i];
-            else if (lk > 0) want = _lkCur[i];
+            if (lk > 0) want = _lkCur[i];
+            else if (_lkForce[i] >= 0) want = _lkForce[i];
             else want = (walking && _st[i] != idleSt) ? _lkWalk[i] : _lkIdle[i];
             if (want != _lkCur[i])
             {
@@ -6575,6 +6673,13 @@ public partial class ArmyCore : RefCounted
         // точка сдачи, подтянутый к стене угол нити): пробы в пределах ячейки
         // от такого конца не считаются — иначе к воротам «дороги нет» никогда
         int startOk = -1, endOk = -1;
+        // Концы отрезка в ЯЧЕЙКЕ скалы/леса-стены, но вне самой маски (боец,
+        // вставший в полутора метрах от стволов, и цель, стоящая там же):
+        // пробы в пределах ячейки от такого конца не считаются — иначе к
+        // лучникам у кромки леса «дороги нет», копейщики встают в 5 м и
+        // дёргаются между прямой и обходом (ТЗ 13.10.2026,
+        // qa_forest_wall_navigation A). Вода и середина отрезка — как были
+        int startC = -1, endC = -1;
         int steps = Math.Max((int)Math.Ceiling(len / (_navCell * 0.45f)), 1);
         for (int i = 0; i <= steps; i++)
         {
@@ -6582,7 +6687,23 @@ public partial class ArmyCore : RefCounted
             float x = x0 + dx * t, z = z0 + dz * t;
             float along = len * t;
             int kc = NavKindAt(x, z, clear);
-            if (kc == 1 || kc == 3) return true;
+            if (kc == 3) return true;
+            bool soft = false;
+            if (along < _navCell)
+            {
+                if (startC < 0) startC = IsCliffAt(x0, z0) ? 0 : 1;
+                soft = startC == 1;
+            }
+            if (!soft && len - along < _navCell)
+            {
+                if (endC < 0) endC = IsCliffAt(x1, z1) ? 0 : 1;
+                soft = endC == 1;
+            }
+            if (kc == 1)
+            {
+                if (!soft) return true;
+                continue;
+            }
             bool bld = kc == 2;
             if (!bld && NavBldCells > 0)
             {
@@ -6603,7 +6724,7 @@ public partial class ArmyCore : RefCounted
                 }
                 if (!ex) return true;
             }
-            if (pad > 0.0f && (NavKindAt(x + nx, z + nz, clear) == 1 || NavKindAt(x - nx, z - nz, clear) == 1))
+            if (pad > 0.0f && !soft && (NavKindAt(x + nx, z + nz, clear) == 1 || NavKindAt(x - nx, z - nz, clear) == 1))
                 return true;
             if (padW > 0.0f && (NavKindAt(x + wnx, z + wnz, clear) == 3 || NavKindAt(x - wnx, z - wnz, clear) == 3))
                 return true;

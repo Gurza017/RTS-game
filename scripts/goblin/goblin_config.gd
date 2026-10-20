@@ -130,6 +130,12 @@ const GNOLL_HIDE_HP := 0.45
 const GNOLL_HIDE_RANGE := 4.5
 const GNOLL_HIDE_HEAL_FRAC := 0.12
 const GNOLL_START_SQUADS := _Spawn.GNOLL_START_SQUADS
+## Спавн по часам с общим потолком (ТЗ 14.10.2026, п. 3) — числа в spawn_config
+const GNOLL_SPAWN_SEC := _Spawn.GNOLL_SPAWN_SEC
+const GNOLL_SPAWN_MIN := _Spawn.GNOLL_SPAWN_MIN
+const GNOLL_SPAWN_MAX := _Spawn.GNOLL_SPAWN_MAX
+const GNOLL_SPAWN_RECHECK_SEC := _Spawn.GNOLL_SPAWN_RECHECK_SEC
+const MAX_STUMP_GNOLLS := _Spawn.MAX_STUMP_GNOLLS
 const GNOLL_WAVE_SQUADS := _Spawn.GNOLL_WAVE_SQUADS
 const GNOLL_WAVE_SEC := _Spawn.GNOLL_WAVE_SEC
 const GNOLL_WAVES_MAX := _Spawn.GNOLL_WAVES_MAX
@@ -267,6 +273,8 @@ const HORDE_JITTER := 0.45
 # ── СТАРТОВАЯ ОРДА: ЯВНЫЙ СПИСОК ОТРЯДОВ ────────────────────────────────────
 ## ЗДЕСЬ ЗАДАЁТСЯ, ЧТО ИМЕННО СТОИТ У ДЕРЕВНИ В ПЕРВУЮ СЕКУНДУ ПАРТИИ.
 const START_SQUADS := _Spawn.GOBLIN_START_SQUADS
+## Потолок живых бойцов орды на карту (ТЗ 11.10.2026) — см. spawn_config.HORDE_CAP
+const HORDE_CAP := _Spawn.HORDE_CAP
 
 const VETERAN_PREFERENCE := ["bonus_attack", "bonus_health", "bonus_defense",
 	"bonus_armor", "bonus_speed"]
@@ -431,6 +439,8 @@ const TROLL_GROWL_MAX_SEC := 20.0
 const TROLL_GROWL_MARCH_P := 0.35
 const TROLL_GROWL_FIGHT_P := 0.12
 const LAUGH_SIGHT := 18.0
+## ВСЕ ЧЕТЫРЕ ВАРИАНТА СМЕХА ПРИ УБИЙСТВАХ ВЫКЛЮЧЕНЫ (ТЗ 10.10.2026, блок 3)
+const LAUGH_ENABLED := false
 ## Хор смеха — только в малой стычке: отрядов орды в LAUGH_SIGHT не больше
 const LAUGH_MAX_SQUADS := 3
 const TROLL_HUNGRY_FLOCK := 5
@@ -467,10 +477,13 @@ const NO_RETREAT_IN_MELEE := true
 const DORMANT_SLEEP_PHYSICS := true
 
 ## ── МЕСТО БОЙЦА В ТОЛПЕ ─────────────────────────────────────────────────────
+## РОССЫПЬЮ, А НЕ КУЧЕЙ (ТЗ 12.10.2026): места толпы раздвинуты на долю
+## HORDE_SPREAD — шаг толпы шире, отряды идут заметно реже
+const HORDE_SPREAD := 1.2
 static func horde_offset(idx: int, total: int, seed_id: int) -> Vector2:
 	var n: int = maxi(total, 1)
 	# Радиус диска — из площади на бойца: pi*R^2 = n * SPOT^2
-	var r_max: float = sqrt(float(n) / PI) * HORDE_SPOT
+	var r_max: float = sqrt(float(n) / PI) * HORDE_SPOT * HORDE_SPREAD
 	var ang: float = float(idx) * 2.39996323                      # золотой угол
 	var r: float = sqrt((float(idx) + 0.5) / float(n)) * r_max
 	var h1: float = fposmod(sin(float(idx) * 12.9898 + float(seed_id) * 4.1414) * 43758.5453, 1.0)
@@ -481,7 +494,7 @@ static func horde_offset(idx: int, total: int, seed_id: int) -> Vector2:
 
 ## Габарит толпы отряда, м (нужен обороне и стенду)
 static func horde_radius(total: int) -> float:
-	return sqrt(float(maxi(total, 1)) / PI) * HORDE_SPOT + HORDE_SPOT * HORDE_JITTER
+	return sqrt(float(maxi(total, 1)) / PI) * HORDE_SPOT * HORDE_SPREAD + HORDE_SPOT * HORDE_JITTER
 
 ## ── МЕСТА ХИЖИН ─────────────────────────────────────────────────────────────
 ## Сетка в шахматку вокруг центра. Возвращает смещения от центра деревни

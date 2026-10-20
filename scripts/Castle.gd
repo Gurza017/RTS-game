@@ -245,7 +245,9 @@ func vision_radius() -> float:
 	return _UCfg.CASTLE_VISION
 
 ## Отправить отряд в Замок. false — гарнизон полон или отряд не годится
-func request_garrison(squad_id: int) -> bool:
+## run — бегом (кнопка/клавиша «в замок» [F1]: бег +30 %, ТЗ 10.10.2026);
+## ПКМ по башне/крепости — обычным шагом (бег по двойному клику снят целиком)
+func request_garrison(squad_id: int, run: bool = true) -> bool:
 	if squad_id <= 0:
 		return false
 	if _slot_of(squad_id) >= 0 or _incoming.has(squad_id):
@@ -289,7 +291,7 @@ func request_garrison(squad_id: int) -> bool:
 		# 29.09.2026, второе письмо, п. 2)
 		u.drop_abilities()
 		u.begin_retreat()
-		u.command_move(gate, false, Vector3.ZERO, true, false, true)
+		u.command_move(gate, false, Vector3.ZERO, true, false, run)
 	set_process(true)
 	return true
 

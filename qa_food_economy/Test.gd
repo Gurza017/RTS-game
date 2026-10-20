@@ -150,7 +150,8 @@ func _run() -> void:
 	ResourceManager.set_amount(Constants.FACTION_PLAYER, Constants.RESOURCE_FOOD, 1000.0)
 	var f0: float = _food()
 	await pframes(60 * 5)
-	var rate: float = 3.0 * _UCfg.FOOD_UPKEEP_WORKER_PER_SEC + 2.0 * _UCfg.FOOD_UPKEEP_SQUAD_PER_SEC
+	# ЕДЯТ ГОЛОВЫ (ТЗ 12.10.2026): 6 копейщиков + 6 лучников по ставке бойца
+	var rate: float = 3.0 * _UCfg.FOOD_UPKEEP_WORKER_PER_SEC + 12.0 * _UCfg.FOOD_UPKEEP_SOLDIER_PER_SEC
 	var ate: float = f0 - _food()
 	verdict("B1 три рабочих и два отряда съели ожидаемое за 5 с (±25 %)",
 		ate >= rate * 5.0 * 0.75 and ate <= rate * 5.0 * 1.25 + 0.1,

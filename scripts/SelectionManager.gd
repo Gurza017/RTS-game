@@ -250,6 +250,32 @@ func _unhandled_input(event: InputEvent) -> void:
 	if camera == null:
 		return
 
+	# ── ВЫДАЧА РЕЛИКВИИ ВЗВЕДЕНА (ТЗ 10.10.2026, блок 5) ─────────────────────
+	# ЛКМ по своему отряду — выдача, ПКМ и Esc — отмена. Стоит ПЕРВЫМ: во
+	# взведённом режиме клик не выделяет и не приказывает
+	if GameManager.relic_mgr().armed:
+		if event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE:
+			GameManager.relic_mgr().arm(false)
+			get_viewport().set_input_as_handled()
+			return
+		if event is InputEventMouseButton:
+			var rmb := event as InputEventMouseButton
+			if rmb.button_index == MOUSE_BUTTON_RIGHT and rmb.pressed:
+				GameManager.relic_mgr().arm(false)
+				_rmb_down = false
+				get_viewport().set_input_as_handled()
+				return
+			if rmb.button_index == MOUSE_BUTTON_LEFT and not rmb.pressed:
+				drag_rect_ui.visible = false
+				if _press_over_ui:
+					_press_over_ui = false
+					return
+				if not _over_ui(rmb.position):
+					var rt = _pick_at(rmb.position, Constants.LAYER_UNITS)["target"]
+					GameManager.relic_mgr().click_unit(rt)
+				get_viewport().set_input_as_handled()
+				return
+
 	# ── РАСФОРМИРОВАТЬ ВЫДЕЛЕННОЕ (Delete) ───────────────────────────────────
 	# Заказ владельца: побитый отряд должен убираться с поля одним нажатием, а
 	# не доживать свой век обузой. Стоит ПЕРЕД горячими группами — там разбор
@@ -272,17 +298,29 @@ func _unhandled_input(event: InputEvent) -> void:
 		var pk: int = event.physical_keycode if event.physical_keycode != 0 else event.keycode
 		match pk:
 			KEY_S:
+				set_attack_move_armed(false)
 				_squad_cmd().stand_ground(self)
 				AudioManager.play_ui("order_move")
+				_hud_refresh_cmds()
 				get_viewport().set_input_as_handled()
 				return
 			KEY_C:
+				set_attack_move_armed(false)
 				_squad_cmd().at_ease(self)
 				AudioManager.play_ui("order_move")
+				_hud_refresh_cmds()
 				get_viewport().set_input_as_handled()
 				return
 			KEY_A:
 				set_attack_move_armed(not attack_move_armed)
+				get_viewport().set_input_as_handled()
+				return
+			# [F1] ОТСТУПИТЬ В ЗАМОК (ТЗ 10.10.2026, блок 4): та же точка
+			# входа, что у кнопки с замком на панели
+			KEY_F1:
+				var hud_f1 = GameManager.main.hud if GameManager.main != null else null
+				if hud_f1 != null and hud_f1.has_method("_on_squad_cmd"):
+					hud_f1._on_squad_cmd("F1")
 				get_viewport().set_input_as_handled()
 				return
 			KEY_ESCAPE:
@@ -328,9 +366,14 @@ func _unhandled_input(event: InputEvent) -> void:
 				# Стоит ПОСЛЕ проверки панели и ДО разбора «клик или рамка»:
 				# в режиме атаки рамка выделения не нужна вовсе, а промах по
 				# панели обязан просто снять режим (см. _consume_attack_move_click)
+				# ── ЛКМ ВО ВЗВЕДЁННОМ [A] — ОТМЕНА (ТЗ 12.10.2026, второе письмо)
+				# Было: ЛКМ тоже задавал точку атаки. Теперь ЛКМ по карте
+				# снимает режим И выделение, а точку марша с боем даёт ПКМ
 				if attack_move_armed:
 					drag_rect_ui.visible = false
-					_consume_attack_move_click(drag_end)
+					set_attack_move_armed(false)
+					if not event.shift_pressed:
+						clear_selection()
 					return
 				if drag_start.distance_to(drag_end) < DRAG_THRESHOLD:
 					_handle_single_click(drag_end, event.shift_pressed)
@@ -345,13 +388,16 @@ func _unhandled_input(event: InputEvent) -> void:
 				# а не по отпусканию: иначе нажатие успело бы завести растяг
 				# строя (_rmb_down), и отпускание построило бы шеренгу вместо
 				# приказа
-				if attack_move_armed:
-					_rmb_down = false
-					_rmb_dragging = false
-					_consume_attack_move_click(event.position)
-					return
+				# ── ПКМ ВО ВЗВЕДЁННОМ [A]: КЛИК — ТОЧКА, ПРОТЯЖКА — СТРОЙ С БОЕМ
+				# (ТЗ 12.10.2026, второе письмо). Нажатие больше не расходуется
+				# сразу: жест разбирается при отпускании так же, как обычный ПКМ
+				# (_rmb_am помнит, что это приказ с боем)
+				_rmb_am = attack_move_armed
 				# Нажатие на панели приказом не становится (см. _rmb_press_over_ui)
 				if _rmb_press_over_ui:
+					if _rmb_am:
+						set_attack_move_armed(false)
+						_rmb_am = false
 					return
 				_rmb_down = true
 				_rmb_dragging = false
@@ -375,10 +421,33 @@ func _unhandled_input(event: InputEvent) -> void:
 					_rmb_press_over_ui = false
 					_rmb_down = false
 					return
+				if _rmb_down and _rmb_am:
+					_rmb_am = false
+					var drag_am := _rmb_screen_start.distance_to(event.position)
+					if drag_am < DRAG_THRESHOLD:
+						_consume_attack_move_click(event.position)
+					else:
+						_last_rmb_time = -10.0
+						var hit_am := _screen_ray_hit(event.position, Constants.LAYER_GROUND)
+						set_attack_move_armed(false)
+						if hit_am.has("position"):
+							var we: Vector3 = hit_am["position"]
+							we.y = 0.0
+							attack_move_line(_rmb_world_start, we)
+					_rmb_down = false
+					_rmb_dragging = false
+					return
 				if _rmb_down:
 					var drag_dist := _rmb_screen_start.distance_to(event.position)
 					if drag_dist < DRAG_THRESHOLD:
-						_handle_right_click(event.position, _consume_rmb_double(event.position))
+						# БЕГ ПО ДВОЙНОМУ ПКМ СНЯТ ЦЕЛИКОМ (ТЗ 10.10.2026, п. 1): любой
+						# клик — один стандартный шаг. Двойной ПКМ остаётся только
+						# поводом для КУПЛЕННЫХ приёмов (рывок мечника, натиск
+						# фаланги) — это способности, а не бег
+						var dbl: bool = _consume_rmb_double(event.position)
+						_handle_right_click(event.position, false)
+						if dbl and not selected_units.is_empty():
+							_trigger_double_rmb_abilities()
 					else:
 						# Протяжка сбрасывает счётчик: строй по линии — это не
 						# половина двойного клика
@@ -497,7 +566,8 @@ func _recall_group(idx: int) -> void:
 
 # Вычисляет слоты в мировом пространстве по нарисованной линии.
 # Длина линии определяет количество юнитов в шеренге → количество рядов.
-func _compute_line_slots(line_start: Vector3, line_end: Vector3, count: int) -> Array:
+func _compute_line_slots(line_start: Vector3, line_end: Vector3, count: int,
+		per_row_want: int = 0) -> Array:
 	var slots: Array = []
 	if count == 0:
 		return slots
@@ -511,8 +581,13 @@ func _compute_line_slots(line_start: Vector3, line_end: Vector3, count: int) -> 
 	# Ряды располагаются ПОЗАДИ фронтальной линии (противоположно facing_dir)
 	var row_offset  := -facing_dir
 
-	# Сколько юнитов помещается в один ряд при данной длине линии
+	# Сколько юнитов помещается в один ряд при данной длине линии.
+	# per_row_want — ширина, которую вызывающий уже посчитал (коробочка:
+	# линия блока = per_row × UNIT_SPACING, и floor(20 × 0.58 / 0.58) давал 19
+	# — ряды мест расходились с рядами бойцов на одного, 2.5 % пар крест-накрест)
 	var per_row := maxi(1, int(floor(line_length / UNIT_SPACING)))
+	if per_row_want > 0:
+		per_row = per_row_want
 	var rows    := int(ceil(float(count) / float(per_row)))
 
 	for i in range(count):
@@ -617,13 +692,65 @@ func _blocks_along(movable: Array, dir: Vector3) -> Array:
 # ─────────────────────────────────────────────────────────────────────────────
 func _topo_order(block: Array, line_dir: Vector3, facing_dir: Vector3,
 		per_row: int) -> Array:
+	# ── ШЕРЕНГА — ПО МЕТКЕ РЯДА ТЕКУЩЕГО СТРОЯ, А НЕ ЛОМТЯМИ ПО per_row
+	# (ТЗ 13.10.2026, qa_squad_reordering_fix) ───────────────────────────────
+	# Прежде состав сортировался по глубине и резался на ломти по per_row НОВОЙ
+	# раскладки. Ломоть, захвативший хвост соседней шеренги (неполный задний
+	# ряд при обратной протяжке, коробочка 20×3 против линии 11 в ряд),
+	# сортировался по ширине ВМЕСТЕ с чужими — боковые ранги внутри ломтя
+	# сдвигались, и соседи по шеренге получали места крест-накрест: 2.6-4.5 %
+	# пар бойцов менялись местами, 50+ бойцов шли вбок раньше, чем вперёд
+	# («выворачивается наизнанку»). Округлять глубину в ряды нельзя: в стоящем
+	# строю разброс по глубине ±0.3 м при шаге ряда 0.62 (замер: 13-24 %
+	# инверсий). Ряд бойца ИЗВЕСТЕН — formation_row его текущего строя: группы
+	# по метке, порядок групп — по средней глубине вдоль НОВОГО фронта (так
+	# обратная протяжка не меняет глубину местами), внутри — по ширине.
+	# Метки несогласованы с геометрией (толпа после боя, разброс группы по
+	# глубине шире ROW_DEPTH × 1.5) — прежнее деление ломтями
 	var ordered: Array = block.duplicate()
+	var n: int = ordered.size()
+	if n < 2:
+		return ordered
+	var groups: Dictionary = {}
+	for u in ordered:
+		var r: int = int((u as Unit).formation_row) if u is Unit else 0
+		if not groups.has(r):
+			groups[r] = []
+		(groups[r] as Array).append(u)
+	var by_label: bool = groups.size() >= 2
+	if by_label:
+		for g in groups.values():
+			var lo: float = INF
+			var hi: float = -INF
+			for u2 in (g as Array):
+				var d: float = (u2 as Node3D).global_position.dot(facing_dir)
+				lo = minf(lo, d)
+				hi = maxf(hi, d)
+			if hi - lo > ROW_DEPTH * 1.5:
+				by_label = false
+				break
+	if by_label:
+		var keys: Array = groups.keys()
+		var mean: Dictionary = {}
+		for k in keys:
+			var acc := 0.0
+			for u3 in (groups[k] as Array):
+				acc += (u3 as Node3D).global_position.dot(facing_dir)
+			mean[k] = acc / float((groups[k] as Array).size())
+		keys.sort_custom(func(a, b): return float(mean[a]) > float(mean[b]))
+		var out: Array = []
+		for k2 in keys:
+			var g2: Array = (groups[k2] as Array).duplicate()
+			g2.sort_custom(func(a, b):
+				return (a as Node3D).global_position.dot(line_dir) \
+					< (b as Node3D).global_position.dot(line_dir))
+			out.append_array(g2)
+		return out
 	# По глубине: стоящий ближе к фронту (больше проекция на facing) — раньше
 	ordered.sort_custom(func(a, b):
 		return (a as Node3D).global_position.dot(facing_dir) \
 			> (b as Node3D).global_position.dot(facing_dir))
 	# Внутри каждой шеренги — слева направо вдоль линии
-	var n: int = ordered.size()
 	var step: int = maxi(per_row, 1)
 	var i := 0
 	while i < n:
@@ -632,10 +759,33 @@ func _topo_order(block: Array, line_dir: Vector3, facing_dir: Vector3,
 		rank_slice.sort_custom(func(a, b):
 			return (a as Node3D).global_position.dot(line_dir) \
 				< (b as Node3D).global_position.dot(line_dir))
-		for k in range(rank_slice.size()):
-			ordered[i + k] = rank_slice[k]
+		for k3 in range(rank_slice.size()):
+			ordered[i + k3] = rank_slice[k3]
 		i = last
 	return ordered
+
+## Отряды от переднего к заднему (по проекции центра на фронт): порядок
+## заполнения рядов сетки коробочки
+func _blocks_by_depth(movable: Array, facing: Vector3) -> Array:
+	var blocks := _split_into_blocks(movable)
+	if blocks.size() < 2:
+		return blocks
+	var keys: Array = []
+	for b in blocks:
+		var arr: Array = b
+		var c := Vector3.ZERO
+		for u in arr:
+			c += (u as Node3D).global_position
+		c /= float(maxi(arr.size(), 1))
+		keys.append(c.dot(facing))
+	var idx: Array = []
+	for i in range(blocks.size()):
+		idx.append(i)
+	idx.sort_custom(func(a, b): return float(keys[a]) > float(keys[b]))
+	var out: Array = []
+	for i in idx:
+		out.append(blocks[int(i)])
+	return out
 
 ## ── КОРОБОЧКА (клавиша [2], спринт 17) ──────────────────────────────────────
 ## Каждый отряд — плотный блок в DEEP_ROWS шеренги (ширина блока выводится из
@@ -653,9 +803,22 @@ func _deep_formation_slots(line_start: Vector3, line_end: Vector3, movable: Arra
 	var dir := line_vec / total_len
 	var facing := Vector3(dir.z, 0.0, -dir.x)
 	var back := -facing
-	var blocks := _blocks_along(movable, dir)
+	# ── БЛОКИ — ПО ГЛУБИНЕ, ЗАТЕМ ПО ШИРИНЕ (ТЗ 13.10.2026) ──────────────────
+	# _blocks_along сортирует только по ширине: при двух рядах блоков (12
+	# отрядов на одной линии) передние и задние отряды перемежались, и в
+	# первый ряд сетки попадали задние — целые отряды шли вбок и наискось
+	# сквозь соседей. Теперь порядок заполнения рядов — от переднего, а
+	# внутри собранного ряда — слева направо (см. ниже, после разбивки)
+	var blocks := _blocks_by_depth(movable, facing)
 	if blocks.is_empty():
 		return out
+	var lat_keys: Array = []
+	for b_l in blocks:
+		var c_l := Vector3.ZERO
+		for u_l in (b_l as Array):
+			c_l += (u_l as Node3D).global_position
+		c_l /= float(maxi((b_l as Array).size(), 1))
+		lat_keys.append(c_l.dot(dir))
 	# Ширина каждого блока
 	var widths: Array = []
 	var per_rows: Array = []
@@ -698,6 +861,9 @@ func _deep_formation_slots(line_start: Vector3, line_end: Vector3, movable: Arra
 		cur_w += add
 	if not cur.is_empty():
 		grid_rows.append(cur)
+	# Внутри ряда сетки — по фактической ширине: кто стоял левее, встанет левее
+	for gr0 in grid_rows:
+		(gr0 as Array).sort_custom(func(a, b): return float(lat_keys[int(a)]) < float(lat_keys[int(b)]))
 	var mid := (line_start + line_end) * 0.5
 	var depth_cursor := 0.0
 	for gr in grid_rows:
@@ -715,7 +881,7 @@ func _deep_formation_slots(line_start: Vector3, line_end: Vector3, movable: Arra
 			var per_row: int = int(per_rows[bi])
 			var b_start: Vector3 = mid + dir * cursor + back * depth_cursor
 			var b_end: Vector3 = b_start + dir * w
-			var slots := _compute_line_slots(b_start, b_end, block.size())
+			var slots := _compute_line_slots(b_start, b_end, block.size(), per_row)
 			var ordered: Array = _topo_order(block, dir, facing, per_row)
 			for k in range(ordered.size()):
 				out["slots"].append(slots[k] if k < slots.size() else b_start)
@@ -798,7 +964,10 @@ func _block_formation_slots(line_start: Vector3, line_end: Vector3, movable: Arr
 		# глубина — три шеренги всегда. Выключена — обычный прямоугольник,
 		# как у всех. Прочих родов войск это не касается вовсе
 		var b_sid: int = (block[0] as Unit).squad_id if (block[0] is Unit) else 0
-		if b_sid > 0 and GameManager.spear_wall_ready(b_sid):
+		# ── СНЯТО ПО ТЗ 14.10.2026, п. 6: «убрать жёсткое три в ряд при
+		# растягивании ПКМ» — копейщики тянутся свободным прямоугольником, как
+		# все. Ветка оставлена за ручкой SPEAR_WALL_DRAG_ROWS (false)
+		if SPEAR_WALL_DRAG_ROWS and b_sid > 0 and GameManager.spear_wall_ready(b_sid):
 			per_row = maxi(1, int(ceil(float(block.size()) / float(GameManager.SPEAR_WALL_ROWS))))
 			var sp: float = clampf(share / float(per_row), UNIT_SPACING, UNIT_SPACING * WALL_STRETCH_MAX)
 			var w: float = sp * float(per_row)
@@ -1833,6 +2002,20 @@ func forget_unit(node: Node) -> void:
 		return
 	selected_units.erase(node)
 	_sel_set.erase(node)
+	# ПАЧКОЙ, А НЕ НА КАЖДОГО (ТЗ 12.10.2026, мерцание подсказок): отряд входит
+	# в замок по одному бойцу за кадр, и панель пересобиралась каждый кадр —
+	# кнопка под курсором умирала вместе с подсказкой. Одна пересборка на
+	# FORGET_FLUSH_SEC
+	if _forget_pending:
+		return
+	_forget_pending = true
+	get_tree().create_timer(FORGET_FLUSH_SEC, true).timeout.connect(_flush_forget)
+
+const FORGET_FLUSH_SEC := 0.25
+var _forget_pending: bool = false
+
+func _flush_forget() -> void:
+	_forget_pending = false
 	GameManager.on_selection_changed(selected_units, true)
 
 ## ФИЛЬТР ПО ТИПУ: оставить в выделении только отряды указанного типа.
@@ -2360,6 +2543,46 @@ func finger_under_cursor(screen_pos: Vector2) -> bool:
 		return true
 	return false
 
+## ── КАКОЙ КУРСОР ПОКАЗАТЬ (ТЗ 14.10.2026, п. 4) ───────────────────────────
+## Ответ — вид из CursorArt (NONE/HAND/DOOR/FORBID/HAMMER); атаку (SWORD)
+## решает Main по своему же разбору прицела (_update_enemy_hover), чтобы не
+## бросать второй луч. Условия — те же, что исполнит _handle_right_click:
+##   DOOR   — своё укрепление примет кого-то из выделенных (_selection_fits);
+##   FORBID — выделены лучники, укрепление своё, но не примет (полно);
+##   HAMMER — рабочими по своей стройке, руине или раненой постройке;
+##   HAND   — рабочими по своему загону
+const _CursorArt := preload("res://scripts/CursorArt.gd")
+
+func hover_cursor_kind(screen_pos: Vector2) -> int:
+	if camera == null or _over_ui(screen_pos):
+		return _CursorArt.NONE
+	_purge_invalid()
+	if selected_units.is_empty():
+		return _CursorArt.NONE
+	var pick := _pick_at(screen_pos, order_pick_mask())
+	var t = pick["target"]
+	var has_worker: bool = selection_has_worker()
+	if t != null and is_instance_valid(t):
+		if t is Castle and (t as Castle).faction == Constants.FACTION_PLAYER and not (t as Castle).is_dead():
+			if _selection_fits(t as Castle):
+				return _CursorArt.DOOR
+			if _selection_has_type("archer"):
+				return _CursorArt.FORBID
+		if has_worker:
+			if (t as Node).is_in_group("ruins"):
+				var any_side: bool = bool((t as Node).get_meta("ruin_any_faction", false))
+				if any_side or int((t as Node).get_meta("ruin_faction", -1)) == Constants.FACTION_PLAYER:
+					return _CursorArt.HAMMER
+			if t is Building and (t as Building).faction == Constants.FACTION_PLAYER and not (t as Building).is_dead():
+				var b := t as Building
+				if b.is_in_group("construction_sites"):
+					return _CursorArt.HAMMER
+				if not (b is Mine) and b.has_method("needs_repair") and bool(b.call("needs_repair")):
+					return _CursorArt.HAMMER
+	if has_worker and _own_pen_for(t, pick["position"]) != null:
+		return _CursorArt.HAND
+	return _CursorArt.NONE
+
 func _selection_has_type(uid: String) -> bool:
 	for u in selected_units:
 		if is_instance_valid(u) and u is Unit and (u as Unit).squad_id > 0 \
@@ -2820,6 +3043,12 @@ func _issue_formation_move_body(center: Vector3, run: bool, movable: Array) -> v
 			false, true, run)     # player_order — см. Unit._move_lock
 
 ## Командир отрядных команд — один на менеджер, создаётся при первом спросе
+## Перекрасить ряд A/C/S/F1 на панели (клавиши меняют режим мимо кнопок)
+func _hud_refresh_cmds() -> void:
+	var h = GameManager.main.hud if GameManager.main != null else null
+	if h != null and h.has_method("_refresh_squad_cmd_bar"):
+		h._refresh_squad_cmd_bar()
+
 func _squad_cmd() -> Node:
 	if _squad_commander != null and is_instance_valid(_squad_commander):
 		return _squad_commander
@@ -2843,8 +3072,11 @@ func set_attack_move_armed(on: bool) -> void:
 	attack_move_armed = on
 	_apply_attack_cursor(on)
 	if on:
-		AudioManager.play_ui("order_move")
+		AudioManager.play_ui("order_attack_move")
 	attack_move_changed.emit(on)
+	var hud_am = GameManager.main.hud if GameManager.main != null else null
+	if hud_am != null and hud_am.has_method("_refresh_squad_cmd_bar"):
+		hud_am._refresh_squad_cmd_bar()
 
 signal attack_move_changed(armed: bool)
 
@@ -2852,9 +3084,58 @@ signal attack_move_changed(armed: bool)
 ## Готовой картинки прицела в наборе нет, и заводить ради неё ассет незачем:
 ## встроенная форма CURSOR_CROSS читается как «целься» на любом фоне и не
 ## зависит ни от темы, ни от размера курсора в системе
+## ТЗ 10.10.2026, блок 3: в режиме [A] курсор — ДВА СКРЕЩЁННЫХ МЕЧА (рисуется
+## кодом один раз, 32×32, горячая точка в перекрестии). Снятие режима
+## возвращает ту форму, которую ведёт курсор-палец (_apply_finger_cursor)
+var _swords_cursor: ImageTexture = null
+var swords_cursor_on: bool = false
+
 func _apply_attack_cursor(on: bool) -> void:
-	Input.set_default_cursor_shape(
-		Input.CURSOR_CROSS if on else Input.CURSOR_ARROW)
+	swords_cursor_on = on
+	if on:
+		if _swords_cursor == null:
+			_swords_cursor = _make_swords_cursor()
+		Input.set_custom_mouse_cursor(_swords_cursor, Input.CURSOR_ARROW, Vector2(16, 16))
+		Input.set_custom_mouse_cursor(_swords_cursor, Input.CURSOR_POINTING_HAND, Vector2(16, 16))
+		Input.set_default_cursor_shape(Input.CURSOR_ARROW)
+	else:
+		# Игровые стрелка и палец — обратно (их ставит UIAssets); курсор
+		# наведения Main пересчитает форму на следующем опросе
+		load("res://scripts/UIAssets.gd").install_cursor()
+		Input.set_default_cursor_shape(Input.CURSOR_ARROW)
+		if GameManager.main != null and "_cursor_on_res" in GameManager.main:
+			GameManager.main._cursor_on_res = false
+			GameManager.main._cursor_kind = 0
+
+## Два меча крест-накрест: клинок (светлая сталь с тёмной кромкой), гарда
+## (золото), рукоять (коричневая). Чистая математика по пикселям, без ассета
+static func _make_swords_cursor() -> ImageTexture:
+	var sz := 32
+	var img := Image.create(sz, sz, false, Image.FORMAT_RGBA8)
+	img.fill(Color(0, 0, 0, 0))
+	for diag in [0, 1]:
+		for t in range(2, 30):
+			var x: int = t if diag == 0 else sz - 1 - t
+			var y: int = t
+			var part: Color
+			var w: int = 1
+			if t < 21:
+				part = Color(0.88, 0.90, 0.95)          # клинок
+			elif t < 23:
+				part = Color(0.93, 0.76, 0.24); w = 3   # гарда
+			else:
+				part = Color(0.45, 0.28, 0.14)          # рукоять
+			for o in range(-w - 1, w + 2):
+				var px: int = x + o
+				var py: int = y - o if diag == 0 else y + o
+				if px < 0 or py < 0 or px >= sz or py >= sz:
+					continue
+				var edge: bool = absi(o) > w
+				var c: Color = Color(0.08, 0.08, 0.10) if edge else part
+				if edge and img.get_pixel(px, py).a > 0.5:
+					continue
+				img.set_pixel(px, py, c)
+	return ImageTexture.create_from_image(img)
 
 ## Клик в режиме атаки: точка приказа. true — клик израсходован
 func _consume_attack_move_click(screen_pos: Vector2) -> bool:
@@ -2872,8 +3153,29 @@ func _consume_attack_move_click(screen_pos: Vector2) -> bool:
 	var pos: Vector3 = hit["position"]
 	pos.y = 0.0
 	if _squad_cmd().attack_move(self, pos, false) > 0:
-		AudioManager.play_ui("order_move")
+		AudioManager.play_ui("order_attack_move")
+		_flash_destination(selected_units, pos, false)
 	return true
+
+## Жест ПКМ начат во взведённом [A] (разбирается при отпускании)
+var _rmb_am: bool = false
+
+## ── СТРОЙ ПО ЛИНИИ С БОЕМ (ТЗ 12.10.2026, второе письмо) ──────────────────
+## Протяжка ПКМ во взведённом [A]: та же раскладка, что у обычной протяжки
+## (_execute_line_formation — места, фронт, «никого не забыли»), и те же отряды
+## переходят под командира Attack-Move с конечной точкой в середине линии.
+## Возобновление марша после стычки идёт к местам разметки (_march_to_slots),
+## то есть строй собирается там, где его нарисовали
+func attack_move_line(line_start: Vector3, line_end: Vector3) -> int:
+	_purge_invalid()
+	if selected_units.is_empty():
+		return 0
+	_squad_cmd().prepare_attack_move(self)
+	_execute_line_formation(line_start, line_end)
+	var n: int = _squad_cmd().attack_move(self, (line_start + line_end) * 0.5, false, false)
+	if n > 0:
+		AudioManager.play_ui("order_attack_move")
+	return n
 
 ## ═══════════════════════════════════════════════════════════════════════════
 ## МАРШ ВЫДЕЛЕНИЯ В ТОЧКУ — ПУБЛИЧНЫЙ ВХОД (ТЗ 23.09.2026, Attack-Move)
@@ -2885,6 +3187,25 @@ func _consume_attack_move_click(screen_pos: Vector2) -> bool:
 ## по-разному понимает один и тот же клик»
 func march_selection_to(center: Vector3, run: bool = false) -> void:
 	_issue_formation_move(center, run)
+
+## ПРИКАЗ ТОЧКОЙ МИРА (мини-карта, ТЗ 10.10.2026). ПКМ по мини-карте — марш,
+## ПКМ или ЛКМ во взведённом [A] — Attack-Move. Возвращает true, если приказ
+## ушёл хоть одному отряду. Режим [A] снимается здесь же, как и кликом по полю
+func order_at_world(pos: Vector3, attack_move: bool) -> bool:
+	_purge_invalid()
+	if selected_units.is_empty():
+		return false
+	pos.y = 0.0
+	if attack_move or attack_move_armed:
+		set_attack_move_armed(false)
+		if _squad_cmd().attack_move(self, pos, false) > 0:
+			AudioManager.play_ui("order_attack_move")
+			return true
+		return false
+	if _squad_commander != null and is_instance_valid(_squad_commander):
+		_squad_commander.call("_cancel_for_selection", self)
+	_issue_formation_move(pos, false)
+	return true
 
 # ═════════════════════════════════════════════════════════════════════════════
 # СЕТКА ОТРЯДОВ: НЕСКОЛЬКО БЛОКОВ НЕ СВАЛИВАЮТСЯ В ОДНУ КУЧУ
@@ -3292,6 +3613,10 @@ func _try_monk_heal_order(target: Unit) -> bool:
 		_issue_formation_move(p, false)
 		selected_units = keep
 	return true
+## Протяжка ПКМ строит копейщиков со «Стеной копий» строго в три шеренги.
+## false с ТЗ 14.10.2026, п. 6 (свободный прямоугольник, как у всех)
+const SPEAR_WALL_DRAG_ROWS := false
+
 ## Стендам: сколько раз ПКМ монахом прочитан как приказ лечить
 var monk_heal_orders: int = 0
 
@@ -3334,8 +3659,13 @@ func _try_garrison(castle: Castle) -> bool:
 			continue
 		if members[0] is Worker:
 			continue                       # рабочему в гарнизоне делать нечего
-		if castle.request_garrison(int(sid)):
+		# ПКМ по укреплению — ОБЫЧНЫМ шагом (ТЗ 10.10.2026: ускоренная посадка
+		# лучников в башню снята вместе с бегом по двойному клику)
+		if castle.request_garrison(int(sid), false):
 			sent += 1
+	# Здание «отзывается» светлым морганием (ТЗ 14.10.2026, п. 4)
+	if sent > 0 and castle.has_method("flash_accept"):
+		castle.flash_accept()
 	return sent > 0
 
 ## ПОДКЛЮЧИТЬ РАБОЧИХ К СТРОЙКЕ. Возвращает true, если приказ отдан хотя бы

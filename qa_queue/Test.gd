@@ -451,8 +451,13 @@ func _test_type_filter() -> void:
 		elif c is Label:
 			worker_caption = (c as Label).text
 	print("  ячейка рабочих: отрядов «%s», подпись «%s»" % [worker_badge, worker_caption])
+	# РАЗВОРОТ ТЗ 10.10.2026: подпись «N бойцов» под иконкой рода снята —
+	# число бойцов живёт в подсказке иконки («…: 3 отрядов, 3 бойцов…»)
+	for c in w_slot.get_children():
+		if c is Button:
+			worker_caption = String((c as Button).tooltip_text)
 	verdict("5f рабочий считается отдельным отрядом",
-		worker_badge == "3" and worker_caption.begins_with("3"),
+		worker_badge == "3" and worker_caption.contains("3 отрядов, 3 бойцов"),
 		"«%s» / «%s»" % [worker_badge, worker_caption])
 
 	# Клик по ячейке лучников оставляет только их

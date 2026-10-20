@@ -126,7 +126,8 @@ func _run() -> void:
 	GameManager.world_bounds_enabled = false
 	var node: Dictionary = _UCfg if false else {}
 	verdict("B0 узел spearman_1d — «Стена копий», режим-переключатель",
-		String((load("res://scripts/forge_config.gd").UNITS["spearman"]["1d"] as Dictionary)["name"]) == "Стена копий"
+		# ТЗ 14.10.2026: узел переименован в «Фаланга» (то же поведение)
+		String((load("res://scripts/forge_config.gd").UNITS["spearman"]["1d"] as Dictionary)["name"]) in ["Стена копий", "Фаланга"]
 		and bool((load("res://scripts/forge_config.gd").UNITS["spearman"]["1d"] as Dictionary).get("toggle", false)))
 	var p0 := Vector3(-1300.0, 0.0, -1300.0)
 	# Без исследования: разгон конницы работает как прежде (стены нет)
@@ -172,8 +173,10 @@ func _run() -> void:
 	var rows_max := -1
 	for r in plan.get("rows", []):
 		rows_max = maxi(rows_max, int(r))
-	verdict("B3б растяг ПКМ у стены копий — ТРИ шеренги (SPEAR_WALL_ROWS %d)" % GameManager.SPEAR_WALL_ROWS,
-		slots.size() == men.size() and rows_max + 1 == GameManager.SPEAR_WALL_ROWS,
+	# РАЗВОРОТ ТЗ 14.10.2026, п. 6: протяжка ПКМ без «три в ряд»
+	var want_rows: int = GameManager.SPEAR_WALL_ROWS if sm.SPEAR_WALL_DRAG_ROWS else rows_max + 1
+	verdict("B3б растяг ПКМ у стены копий — шеренг по ручке SPEAR_WALL_DRAG_ROWS (%d)" % want_rows,
+		slots.size() == men.size() and rows_max + 1 == want_rows,
 		"мест %d, шеренг %d" % [slots.size(), rows_max + 1])
 	await pframes(60 * 4)
 	for u in men:

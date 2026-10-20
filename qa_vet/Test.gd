@@ -500,8 +500,7 @@ func _test_star_and_choice() -> void:
 	# нечего, и панель обязана показывать ровно то же, что у любого другого
 	# отряда: стойки и команды
 	verdict("4 панель ветерана показывает стойки, а не карточки выбора",
-		("Attack" in labels) and ("Defend" in labels),
-		"кнопки=%s" % str(labels))
+		_cmd_row_ok(), "кнопки=%s, ряд команд %s" % [str(labels), _cmd_row_str()])
 
 	# ПРИБАВКА ЛЕЖИТ У ВСЕХ МОДЕЛЕЙ — без единого клика. Отряд взял первую
 	# ступень ещё в блоке 2, значит у каждого бойца ровно её прибавка
@@ -806,7 +805,7 @@ func _test_ui() -> void:
 	# ранг, отряд терял кнопки стоек до клика игрока. Теперь ранг приходит
 	# сам, и панель не меняется вовсе — проверяем ровно это
 	verdict("6 ранг не подменяет панель: стойки на месте",
-		("Attack" in l1) and ("Defend" in l1), "кнопки=%s" % str(l1))
+		_cmd_row_ok(), "кнопки=%s, ряд команд %s" % [str(l1), _cmd_row_str()])
 	verdict("6 карточек выбора на панели нет вовсе",
 		GameManager.squad_pending(sid) == 0,
 		"pending=%d, кнопки=%s" % [GameManager.squad_pending(sid), str(l1)])
@@ -852,7 +851,7 @@ func _test_ui() -> void:
 		# Кнопок теперь три: к двум стойкам добавилась «В ЗАМОК» (отправить
 		# отряд лечиться). Проверяем СОСТАВ, а не точное число — иначе любая
 		# новая команда отряда будет валить эту проверку на ровном месте
-		("Attack" in l3) and ("Defend" in l3), "кнопки=%s" % str(l3))
+		_cmd_row_ok(), "кнопки=%s, ряд команд %s" % [str(l3), _cmd_row_str()])
 	verdict("6 в подписи звание второго грейда словами",
 		_UCfg.veteran_rank_name("spearman", 2) in hud.info_label.text
 			and not (_want_badge(2) in hud.info_label.text),
@@ -1175,3 +1174,28 @@ func _reward_sum(entry: Dictionary) -> float:
 	for k in _UCfg.nonzero_modifiers(entry):
 		t += float(_UCfg.nonzero_modifiers(entry)[k])
 	return t
+
+## ── РАЗВОРОТ ТЗ 10.10.2026 (блок 4) ─────────────────────────────────────────
+## Кнопки стоек Attack/Defend сняты из сетки button_container: их заменил ряд
+## команд A · C · S · F1 (HUD._squad_cmd_bar). «Стойки на панели» = ряд виден,
+## в нём все четыре кнопки и ровно одна горит (мета "active")
+func _cmd_row_ok() -> bool:
+	var bar = hud._squad_cmd_bar
+	if bar == null or not is_instance_valid(bar) or not bar.visible:
+		return false
+	var lit := 0
+	for k in ["A", "C", "S", "F1"]:
+		var b = hud._squad_cmd_btns.get(k)
+		if b == null or not is_instance_valid(b):
+			return false
+		if bool((b as Button).get_meta("active", false)):
+			lit += 1
+	return lit == 1
+
+func _cmd_row_str() -> String:
+	var out: Array = []
+	for k in ["A", "C", "S", "F1"]:
+		var b = hud._squad_cmd_btns.get(k)
+		if b != null and is_instance_valid(b):
+			out.append(k + ("*" if bool((b as Button).get_meta("active", false)) else ""))
+	return str(out)

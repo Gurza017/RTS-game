@@ -212,11 +212,19 @@ func _test_group_levels() -> void:
 			var t: String = (l as Label).text
 			if t.is_valid_int() and int(t) > 0:
 				with_count += 1
-			elif rank_glyphs.has(t):
+			elif rank_glyphs.has(t) or t.begins_with("★"):
+				# ТЗ 12.10.2026 (второе письмо): флаг над карточкой снят,
+				# ранг — «★N» в углу карточки
+				with_star += 1
+		# РАЗВОРОТ ТЗ 10.10.2026: лычки в углу карточки заменил ФЛАГ ветеранства
+		# над ней (узел VetFlag_N); шкала опыта (XpBar) — отдельная, считаем
+		# только шкалу здоровья
+		for ch0 in c.get_children():
+			if String(ch0.name).begins_with("VetFlag_"):
 				with_star += 1
 		# Шкала — ColorRect ненулевой ширины внутри карточки
 		for ch in c.get_children():
-			if ch is PanelContainer:
+			if ch is PanelContainer and String(ch.name) != "XpBar":
 				for f in (ch as Node).get_children():
 					if f is ColorRect and (f as ColorRect).custom_minimum_size.x > 0.0:
 						with_bar += 1
@@ -231,7 +239,11 @@ func _test_group_levels() -> void:
 		var sid_txt: String = nm.substr("SquadCard".length())
 		if sid_txt.is_valid_int() and int(sid_txt) == star_sid:
 			target_sid = star_sid
-			(c.get_child(0) as Button).emit_signal("pressed")
+			# Карточка: флаг → кнопка → HP → опыт (ТЗ 10.10.2026) — кнопку ищем
+			for cb in c.get_children():
+				if cb is Button:
+					(cb as Button).emit_signal("pressed")
+					break
 			break
 	await frames(2)
 	var only_one := true
@@ -245,7 +257,20 @@ func _test_group_levels() -> void:
 			GameManager.squad_members(star_sid).size()])
 
 	# ── A7: один тип — обычная панель, полоса групп спрятана
-	verdict("A7 один тип: детальная панель на месте, полоса групп скрыта",
+	# РАЗВОРОТ ТЗ 10.10.2026: сужение из развёрнутой группы (клик по карточке)
+	# держит полосу родов ВИДНОЙ — это навигация назад к армии (_parent_sids).
+	# Прятаться полоса обязана на СВЕЖЕМ выделении одного типа — оно ниже
+	verdict("A7 сужение карточкой: детальная панель на месте, полоса родов — навигация",
+		hud._bottom_panel.visible and hud._overbar.visible,
+		"панель=%s полоса=%s" % [hud._bottom_panel.visible, hud._overbar.visible])
+	sm._clear_selection()
+	GameManager.on_selection_changed(sm.selected_units)
+	await frames(1)
+	for u1 in GameManager.squad_members(star_sid):
+		sm._select_one(u1)
+	GameManager.on_selection_changed(sm.selected_units)
+	await frames(2)
+	verdict("A7а свежее выделение одного типа: детальная панель, полоса групп скрыта",
 		hud._bottom_panel.visible and not hud._overbar.visible,
 		"панель=%s полоса=%s" % [hud._bottom_panel.visible, hud._overbar.visible])
 

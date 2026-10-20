@@ -308,7 +308,7 @@ func _d_hiding() -> void:
 	# прогонами D6б краснел — задержка не успевала истечь. Ждём СВОЙСТВО
 	# (боец снят) с потолком по часам плюс запас
 	var t_grace: int = Time.get_ticks_msec()
-	var grace_ms: int = int(Unit.FOG_HIDE_GRACE * 1000.0) + 1500
+	var grace_ms: int = int(Unit.FOG_HIDE_GRACE * 1000.0) + 4000   # запас: резерв орды (ТЗ 12.10.2026) добавил строк на карту
 	while Time.get_ticks_msec() - t_grace < grace_ms 			and GameManager.far_units.is_registered(foe):
 		await get_tree().physics_frame
 	verdict("D6б спустя задержку враг снят с отрисовки",

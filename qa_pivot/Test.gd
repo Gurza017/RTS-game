@@ -104,7 +104,8 @@ func _check_building(b, nm: String) -> void:
 	var cam: Camera3D = main.get("_camera") as Camera3D
 	main.focus_camera_on(b.global_position)
 	await frames(3)
-	var aim: Vector3 = b.global_position + Vector3(cx, base + (top - base) * 0.78, 0.0)
+	# Плоскость рисунка сдвинута к камере на _draw_z (ТЗ 12.10.2026)
+	var aim: Vector3 = b.global_position + Vector3(cx, base + (top - base) * 0.78, b._draw_z)
 	var scr: Vector2 = cam.unproject_position(aim)
 	var pick: Dictionary = sm._pick_at(scr,
 		Constants.LAYER_UNITS | Constants.LAYER_BUILDINGS)

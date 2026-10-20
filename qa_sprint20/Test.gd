@@ -419,7 +419,10 @@ func _run() -> void:
 		elif u.squad_id == wsid:
 			rows_wr = maxi(rows_wr, int(plan["rows"][i]))
 	verdict("E1 стена включена: копейщики на длинной линии в %d шеренги, мечники — в %d (по линии)" % [rows_sp + 1, rows_wr + 1],
-		GameManager.spear_wall_ready(ssid) and rows_sp + 1 == GameManager.SPEAR_WALL_ROWS and rows_wr + 1 == 1)
+		# РАЗВОРОТ ТЗ 14.10.2026, п. 6: без «три в ряд» копейщики на длинной
+		# линии — одна шеренга, как мечники
+		GameManager.spear_wall_ready(ssid) and rows_wr + 1 == 1
+			and rows_sp + 1 == (GameManager.SPEAR_WALL_ROWS if sm.SPEAR_WALL_DRAG_ROWS else 1))
 	var plan_s: Dictionary = sm._mono_formation_slots(ep + Vector3(-1.5, 0.0, 15.0), ep + Vector3(1.5, 0.0, 15.0), sp)
 	var rows_short := 0
 	for r in plan_s["rows"]:

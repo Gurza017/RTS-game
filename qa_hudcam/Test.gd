@@ -214,6 +214,14 @@ func _test_edge_scroll() -> void:
 	# В headless курсор стоит в (0,0) — это левый ВЕРХНИЙ угол, то есть оба
 	# края сразу. Значит скролл краем можно измерить прямо: гоняем _process
 	# камеры вручную и смотрим, сколько метров прошёл фокус
+	# Кнопка копилки реликвий (ТЗ 10.10.2026) — Control у левого края: в
+	# headless наведённым считается она (курсор не двигается), и скролл краем
+	# честно молчит «над интерфейсом». На время замера её слой убран
+	var rl = main.get_node_or_null("RelicLayer")
+	if rl != null:
+		rl.queue_free()
+		await frames(2)
+		get_viewport().update_mouse_cursor_state()
 	cam.set_bounds(1e6, 1e6)
 	cam._focus = Vector3.ZERO
 	cam._mmb_pressed = false
@@ -571,15 +579,23 @@ func _test_group_banner() -> void:
 	verdict("G5 клик по группе развернул ровно 3 карточки копейщиков",
 		hud._squad_strip.get_child_count() == 3,
 		"карточек %d" % hud._squad_strip.get_child_count())
-	verdict("G6 выделение от разворачивания НЕ меняется",
-		hud._sel_units.size() == all.size(),
-		"было %d, стало %d" % [all.size(), hud._sel_units.size()])
+	# РАЗВОРОТ (ТЗ 24.09 + 10.10.2026): клик по роду СУЖАЕТ выделение до рода
+	# («кликнул на род — управление только им»), а смешанное выделение держит
+	# родитель (_parent_sids): полоса родов видна, повторный клик вернёт всё
+	var only_spear := true
+	for u0 in sm.selected_units:
+		if GameManager.squad_type((u0 as Unit).squad_id) != "spearman":
+			only_spear = false
+	verdict("G6 разворот сужает выделение до рода, а армию держит родитель",
+		only_spear and hud._parent_sids.size() == 5 and hud._overbar.visible,
+		"копейщики только=%s, родитель %d отрядов, полоса %s" % [str(only_spear), hud._parent_sids.size(), str(hud._overbar.visible)])
 
 	# У каждой карточки есть красная шкала
 	var with_bar := 0
 	for card in hud._squad_strip.get_children():
 		for c in card.get_children():
-			if c is PanelContainer and c.get_child_count() > 0 \
+			# Шкала здоровья; тонкая шкала опыта (XpBar, ТЗ 10.10.2026) — отдельно
+			if c is PanelContainer and String(c.name) != "XpBar" and c.get_child_count() > 0 \
 					and c.get_child(0) is ColorRect:
 				with_bar += 1
 	verdict("G7 под каждой карточкой красная шкала", with_bar == 3,

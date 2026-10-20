@@ -288,7 +288,9 @@ func _b_panel() -> void:
 	await frames(1)
 	await _place_click(spot + Vector3(26.0, 0.0, 12.0), true)
 	var sites: Array = _player_sites()
-	var kinds: Array = sites.map(func(s): return String(s.get("target_id")))
+	# Один «Дом» (ТЗ 11.10.2026): ракурс house/house2/house3 выбирает каждая
+	# установка — для проверки состава все три вида считаются домом
+	var kinds: Array = sites.map(func(s): return _house_norm(String(s.get("target_id"))))
 	kinds.sort()
 	verdict("B4 смена типа из панели ставит площадки, не закрывая сессию: 3 дома + кузница + башня",
 		sites.size() == 5 and kinds == ["house", "house", "house", "smithy", "tower"]
@@ -299,9 +301,9 @@ func _b_panel() -> void:
 	var stack_txt := ""
 	for w in crew:
 		var ww := w as Worker
-		var cur: String = String(ww.build_target.get("target_id")) \
+		var cur: String = _house_norm(String(ww.build_target.get("target_id"))) \
 			if ww.build_target != null and is_instance_valid(ww.build_target) else "—"
-		var q: Array = ww._build_queue.map(func(s): return String(s.get("target_id")))
+		var q: Array = ww._build_queue.map(func(s): return _house_norm(String(s.get("target_id"))))
 		stack_txt = "%s + %s" % [cur, str(q)]
 		if cur != "house" or q != ["house", "house", "smithy", "tower"]:
 			stack_ok = false
@@ -354,3 +356,7 @@ func _b_panel() -> void:
 	sm._clear_selection()
 	GameManager.on_selection_changed(sm.selected_units)
 	main._camera.set_process(true)
+
+## Дом любого ракурса — «house» (ТЗ 11.10.2026: одна кнопка, ракурс случайный)
+func _house_norm(id: String) -> String:
+	return "house" if id == "house" or id == "house2" or id == "house3" else id

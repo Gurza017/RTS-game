@@ -181,8 +181,9 @@ func _a_tree() -> void:
 		armor_sum += float((n as Dictionary).get("bonus_armor", 0.0))
 	verdict("A4 сумма напора и брони в древе рыцаря выше прежних (2.4 / 5.0)",
 		push_sum > 2.4 and armor_sum > 5.0, "напор %.1f, броня %.1f" % [push_sum, armor_sum])
-	verdict("A5 узел прокачки серии даёт +2 удара (bonus_rage_hits)",
-		float(_Forge.get_node("warrior_3d").get("bonus_rage_hits", 0.0)) == 2.0)
+	# ТЗ 12.10.2026: 10 базовых + 5 от «Неистовства»
+	verdict("A5 узел прокачки серии даёт +5 ударов (bonus_rage_hits)",
+		float(_Forge.get_node("warrior_3d").get("bonus_rage_hits", 0.0)) == 5.0)
 	verdict("A6 узел рассечения и его прокачка есть (bonus_cleave 2 + 1)",
 		float(_Forge.get_node("warrior_2d").get("bonus_cleave", 0.0)) == 2.0
 		and float(_Forge.get_node("warrior_4d").get("bonus_cleave", 0.0)) == 1.0)
@@ -229,17 +230,18 @@ func _b_rage(base: Vector3) -> void:
 	verdict("B1 без прокачки серия из %d ударов" % Warrior.RAGE_HITS, k.rage_hits_total() == Warrior.RAGE_HITS,
 		"%d" % k.rage_hits_total())
 	_research(["warrior_1d", "warrior_2d", "warrior_3d"])
-	verdict("B2 с «Неистовством» серия из %d ударов" % (Warrior.RAGE_HITS + 2),
-		k.rage_hits_total() == Warrior.RAGE_HITS + 2, "%d" % k.rage_hits_total())
+	verdict("B2 с «Неистовством» серия из %d ударов" % (Warrior.RAGE_HITS + 5),
+		k.rage_hits_total() == Warrior.RAGE_HITS + 5, "%d" % k.rage_hits_total())
 	k.start_rage_dash()
 	k.command_attack(t, true, false, true)
 	for _f in range(60 * 12):
 		await get_tree().physics_frame
-		if k.rage_hits_done >= Warrior.RAGE_HITS + 2 or not k.rage_active():
+		if k.rage_hits_done >= Warrior.RAGE_HITS + 5 or not k.rage_active():
 			break
-	verdict("B3 серия отбита целиком: %d ударов" % (Warrior.RAGE_HITS + 2),
-		k.rage_hits_done == Warrior.RAGE_HITS + 2, "ударов %d, мощных %d" % [k.rage_hits_done, k.rage_strong_done])
-	verdict("B4 ритм обычный/мощный: мощных 3 из 7", k.rage_strong_done == 3, "%d" % k.rage_strong_done)
+	verdict("B3 серия отбита целиком: %d ударов" % (Warrior.RAGE_HITS + 5),
+		k.rage_hits_done == Warrior.RAGE_HITS + 5, "ударов %d, мощных %d" % [k.rage_hits_done, k.rage_strong_done])
+	var n_all: int = Warrior.RAGE_HITS + 5
+	verdict("B4 ритм обычный/мощный: мощных %d из %d" % [n_all / 2, n_all], k.rage_strong_done == n_all / 2, "%d" % k.rage_strong_done)
 	_kill(k); _kill(t)
 	_reset_research()
 	await pframes(3)

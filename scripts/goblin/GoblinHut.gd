@@ -27,7 +27,6 @@ const _GobCfg := preload("res://scripts/goblin/goblin_config.gd")
 
 const SPRITE := "res://assets/factions/Goblin/Goblins building/Goblin Hut.png"
 
-var _food_timer: float = 0.0
 
 ## Замок вынес настройку полей в _configure() именно ради этого наследника:
 ## _ready() у него общий, а всё, что у хижины своё, заменяется здесь
@@ -78,23 +77,19 @@ func _build_visual() -> void:
 	selection_ring = make_selection_marker()
 	add_child(selection_ring)
 
-## ── ДОХОД ХИЖИНЫ ───────────────────────────────────────────────────────────
-## +HUT_FOOD_PER_MIN еды в минуту, начисляется долями раз в HUT_TICK_SEC:
-## непрерывный ручеёк вместо ступеньки на сто единиц раз в минуту. Идёт через
-## gather_resource, а не add_resource, — это ДОБЫЧА, и она обязана попадать в
-## счётчик притока наравне с рудником и домом людей
-func _process(delta: float) -> void:
-	super._process(delta)
-	_food_timer += delta
-	if _food_timer < _GobCfg.HUT_TICK_SEC:
-		return
-	var ticks: float = _food_timer / _GobCfg.HUT_TICK_SEC
-	_food_timer = 0.0
-	ResourceManager.gather_resource(faction, Constants.RESOURCE_FOOD,
-		_Diff.goblin_hut_food_per_min() * (_GobCfg.HUT_TICK_SEC / 60.0) * ticks)
+## ── ДОХОДА И ГАРНИЗОНА У ХИЖИНЫ БОЛЬШЕ НЕТ (ТЗ 11.10.2026, часть 2) ────────
+## Еду теперь начисляет вожак (GoblinAI._economy_tick) по числу ЖИВЫХ хижин и
+## главной хаты — одной формулой с ростом и содержанием, а не десятью
+## таймерами. Гарнизон хижины (приём разбитого отряда, лечение и БЕСПЛАТНОЕ
+## доукомплектование до уставного штата) снят: он рождал бойцов без цены и
+## без потолка и раздувал дозоры из 6 всадников до 50. Механизм замка не
+## тронут — у хижины просто ноль мест
+func garrison_limit() -> int:
+	return 0
 
-## Хижине покадровый тик нужен ВСЕГДА: она капает еду, а не только держит
-## гарнизон. Замковое условие «тикаю, если я игрок или есть гарнизон» здесь
-## оставило бы орду без экономики
+func garrison_accepts(_unit_type: String) -> bool:
+	return false
+
+## Хижине покадровый тик не нужен: ни очереди, ни дохода
 func _needs_tick() -> bool:
-	return true
+	return false

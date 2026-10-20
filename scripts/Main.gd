@@ -181,6 +181,12 @@ const COLOR_PLATEAU := 3
 const COLOR_BANK := 2
 const COLOR_PATCH_A := 4
 const COLOR_PATCH_B := 2
+## ── ЕДИНАЯ ТРАВА (ТЗ 11.10.2026, ч. 1 п. 3) ────────────────────────────────
+## true — вся равнина одним листом GRASS_BASE_SHEET (зелёная трава середины
+## карты); салатовый Tilemap_Flat и пятна grass_shade не рисуются. false —
+## прежняя пятнистая раскладка
+const GRASS_UNIFORM := true
+const GRASS_BASE_SHEET := COLOR_PATCH_B
 ## Сколько метров земли на один тайл воды (Water.png 64×64 тянется повтором)
 const WATER_TILE_M := 2.0
 ## Пена вдоль берегов: шаг по Z, м
@@ -227,6 +233,8 @@ const LAKE_ROCK_RING := 0.88
 const LAKE_MARGIN := 0.6
 
 var hud: HUD
+## Мини-карта в правом нижнем углу (ТЗ 10.10.2026, scripts/Minimap.gd)
+var minimap: CanvasLayer = null
 var selection_manager: SelectionManager
 var enemy_ai: Node             = null     # см. scripts/EnemyAI.gd
 ## ── ТРЕТЬЯ СТОРОНА: ОРДА ГОБЛИНОВ ──────────────────────────────────────────
@@ -239,15 +247,20 @@ const _GoblinAI  := preload("res://scripts/goblin/GoblinAI.gd")
 ## контроллер гноллов (зона ответственности, охота на рабочих)
 var goblin_reserve: Node = null
 var cav_commander: Node = null
+## Штурм базы игрока по часам (scripts/goblin/GoblinFortressAssaultEvent.gd)
+var assault_event: Node = null
+## Автосохранение партии по часам (scripts/Autosave.gd, ТЗ 13.10.2026, письмо 7)
+var autosave: Node = null
 var gnoll_ai: Node = null
 ## Охрана крепости красного ИИ (15.09.2026): спящие отряды за замком, будит
 ## только штурм. См. scripts/ai/HomeGuard.gd и _spawn_home_defense
 var enemy_guard: Node = null
 const _HomeGuard := preload("res://scripts/ai/HomeGuard.gd")
 const _TowerS := preload("res://scripts/Tower.gd")
-const _DormantReserve := preload("res://scripts/goblin/DormantReserve.gd")
 const _GnollAI := preload("res://scripts/goblin/GnollAI.gd")
 const _GoblinHut := preload("res://scripts/goblin/GoblinHut.gd")
+const _GoblinChiefHut := preload("res://scripts/goblin/GoblinChiefHut.gd")
+const _Spawn := preload("res://scripts/spawn_config.gd")
 const _TrollLair := preload("res://scripts/goblin/TrollLair.gd")
 const _GobCfg    := preload("res://scripts/goblin/goblin_config.gd")
 const _Diff := preload("res://scripts/game_difficulty_config.gd")
@@ -374,6 +387,12 @@ func _ready() -> void:
 	# Сами MultiMeshInstance3D уходят вместе со старым World; здесь снимается
 	# только учёт занятых мест, который живёт в автозагрузке
 	GameManager.veg.clear_bookkeeping()
+	# Слои армии (бойцы, кольца/тени, полоски здоровья) тоже живут в
+	# автозагрузке, а их узлы ушли со старым World: без этого «Играть заново»
+	# давало невидимых рабочих (ТЗ 11.10.2026, стенд qa_restart)
+	GameManager.far_units.reattach_world(_world)
+	GameManager.sel_decals.reattach_world(_world)
+	GameManager.hp_bars.reattach_world(_world)
 	# И ядро армии: строки прошлой партии освобождаются в _exit_tree каждого
 	# бойца, но старую сцену выгружают ДО построения новой, поэтому здесь
 	# реестр уже пуст — сброс лишь гарантирует это на случай аварийного выхода
@@ -396,6 +415,12 @@ func _ready() -> void:
 	selection_manager = SelectionManager.new()
 	add_child(selection_manager)
 	selection_manager.setup(_camera, hud.get_drag_rect())
+	minimap = load("res://scripts/Minimap.gd").new()
+	minimap.name = "Minimap"
+	add_child(minimap)
+	# Копилка опыта армии и её кнопка видны с первой секунды партии, а не с
+	# первого убийства (менеджер реликвий иначе создаётся лениво)
+	GameManager.relic_mgr()
 	enemy_ai = _EnemyAI.new()
 	enemy_ai.name = "EnemyAI"
 	add_child(enemy_ai)
@@ -410,8 +435,24 @@ func _ready() -> void:
 	cav_commander = load("res://scripts/goblin/CavalryCommander.gd").new()
 	cav_commander.name = "CavalryCommander"
 	add_child(cav_commander)
+	# Штурм базы игрока от главной хаты орды по часам партии (ТЗ 13.10.2026)
+	assault_event = load("res://scripts/goblin/GoblinFortressAssaultEvent.gd").new()
+	assault_event.name = "GoblinFortressAssaultEvent"
+	add_child(assault_event)
+	assault_event.setup(self)
+	# Автосохранение (ТЗ 13.10.2026, письмо 7): узел ALWAYS, отсчёт стоит на
+	# паузе и вне живой партии (см. Autosave.gd)
+	autosave = load("res://scripts/Autosave.gd").new()
+	autosave.name = "Autosave"
+	add_child(autosave)
+	autosave.setup(self)
 	_setup_pause_modes()
 	start_game()
+
+## Идёт ли живая партия (не расстановка крепости, не победа и не поражение).
+## Спрашивает автосохранение
+func is_playing() -> bool:
+	return _phase == Phase.PLAYING or _phase == Phase.PLACING_BUILDING
 
 # ═════════════════════════════════════════════════════════════════════════════
 # ТАКТИЧЕСКАЯ ПАУЗА: СТОИТ МИР, А НЕ ИГРА
@@ -470,6 +511,9 @@ func start_game() -> void:
 	_cluster_seq = 0
 	_setup_reserved_zones()
 	ResourceManager.reset_resources()
+	# Исследования прошлой партии (автозагрузка их переживает): без сброса
+	# заказ прошлой партии висел «В очереди (-1)» (ТЗ 11.10.2026)
+	GameManager.reset_research()
 	GameManager.reset_squads()
 	_victory_timer       = 0.0
 	_castle_placed       = false
@@ -646,6 +690,15 @@ func _is_reserved(x: float, z: float, margin: float = 0.0) -> bool:
 
 ## Убрать ресурсы, оказавшиеся под зданием. Страховка для замка игрока:
 ## его точку выбирает игрок, и она может не совпасть с якорем базы
+## Срубить деревья (ResourceNode дерева) в круге — посты охраны орды
+func _clear_trees(center: Vector3, radius: float) -> void:
+	for n in get_tree().get_nodes_in_group("resource_nodes"):
+		var rn := n as ResourceNode
+		if rn == null or not is_instance_valid(rn) or rn.resource_type != Constants.RESOURCE_WOOD:
+			continue
+		if Vector2(rn.global_position.x - center.x, rn.global_position.z - center.z).length() < radius:
+			rn.queue_free()
+
 func _clear_area_of_resources(center: Vector3, radius: float) -> void:
 	for n in get_tree().get_nodes_in_group("resource_nodes"):
 		var rn := n as ResourceNode
@@ -901,10 +954,10 @@ func _input(event: InputEvent) -> void:
 	# physical привязан к самой клавише и покрывает и левый, и правый Alt
 	if event is InputEventKey and event.pressed and not event.echo:
 		var k := event as InputEventKey
-		if k.keycode == KEY_ALT or k.physical_keycode == KEY_ALT:
-			GameManager.toggle_hp_bars()
-			get_viewport().set_input_as_handled()
-			return
+		# Alt больше НЕ переключает полоски (ТЗ 14.10.2026, п. 5): у построек
+		# полоска сама живёт от урона до полной починки, у бойцов урон виден
+		# вспышкой и долей жизни на спрайте. API set_hp_bars_forced остался
+		# для стендов
 		# ── F3: ТУМБЛЕР СЧЁТЧИКА FPS ────────────────────────────────────────
 		if (k.keycode == KEY_F3 or k.physical_keycode == KEY_F3) and hud:
 			hud.toggle_fps_counter()
@@ -1090,6 +1143,7 @@ func _create_building_ghost(ghost_size: Vector3, building_id: String = "") -> vo
 				sp.name = "GhostSprite"
 				sp.mesh = quad
 				sp.scale.y = _BBUtil.V_STRETCH
+				sp.position.z = Building.front_shift_for(building_id, tex, quad)
 				sp.position.y = quad.size.y * 0.5 * _BBUtil.V_STRETCH
 				_ghost.add_child(sp)
 				var foot := MeshInstance3D.new()
@@ -1398,6 +1452,9 @@ func _send_worker_to_resource(w, res_type: int) -> void:
 const CURSOR_POLL := 0.08
 var _cursor_timer: float = 0.0
 var _cursor_on_res: bool = false
+## Вид текущего курсора (CursorArt.*); −1 — пересоздать при следующем опросе
+var _cursor_kind: int = -1
+const _CursorArt := preload("res://scripts/CursorArt.gd")
 
 func _update_hover_cursor(delta: float) -> void:
 	_cursor_timer -= delta
@@ -1418,20 +1475,37 @@ func _update_hover_cursor(delta: float) -> void:
 	var mouse := get_viewport().get_mouse_position()
 	var hovered: ResourceNode = selection_manager.resource_under_cursor(mouse)
 	_update_hover_highlight(hovered)
-	_update_enemy_hover(mouse, hovered != null)
-	# «Палец» — и над тем, куда ПКМ посадит лучников или поставит рабочих на
-	# загон (ТЗ 29.09.2026, второе письмо, п. 3): тот же разбор, что у клика
-	var on_res: bool = hovered != null or selection_manager.finger_under_cursor(mouse)
-	if on_res == _cursor_on_res:
+	var aiming: bool = _update_enemy_hover(mouse, hovered != null)
+	# ── ВИД КУРСОРА (ТЗ 14.10.2026, п. 4) ──────────────────────────────────
+	# Жила под рукой — «рука» сбора; иначе разбор того, что сделает ПКМ:
+	# дверь/запрет у укрепления, молоток у стройки и раненой постройки, рука у
+	# загона; прицел на чужом отряде/здании — острие меча вниз
+	var kind: int = _CursorArt.NONE
+	if hovered != null:
+		kind = _CursorArt.HAND
+	else:
+		kind = selection_manager.hover_cursor_kind(mouse)
+		if kind == _CursorArt.NONE and aiming:
+			kind = _CursorArt.SWORD
+	# Режим [A]: курсор — скрещённые мечи, его ведёт SelectionManager
+	if selection_manager.swords_cursor_on:
 		return
-	_cursor_on_res = on_res
+	_cursor_on_res = kind != _CursorArt.NONE
+	if kind == _cursor_kind:
+		return
+	_cursor_kind = kind
 	# Меняем ИМЕННО стрелку: у Godot нет «текущего» курсора, форма выбирается
 	# по состоянию, и подменять надо ту же роль, что стоит по умолчанию
-	var idx: int = 2 if on_res else 1
-	var tex := _UIAssets.cursor(idx)
-	if tex != null:
-		Input.set_custom_mouse_cursor(tex, Input.CURSOR_ARROW,
-			_UIAssets.cursor_hotspot(idx))
+	if kind == _CursorArt.NONE or kind == _CursorArt.HAND:
+		var idx: int = 2 if kind == _CursorArt.HAND else 1
+		var tex := _UIAssets.cursor(idx)
+		if tex != null:
+			Input.set_custom_mouse_cursor(tex, Input.CURSOR_ARROW,
+				_UIAssets.cursor_hotspot(idx))
+		return
+	var ct: Texture2D = _CursorArt.texture(kind)
+	if ct != null:
+		Input.set_custom_mouse_cursor(ct, Input.CURSOR_ARROW, _CursorArt.hotspot(kind))
 
 # ═════════════════════════════════════════════════════════════════════════════
 # ЗЕЛЁНАЯ ПОДСВЕТКА ЦЕЛИ СБОРА
@@ -1461,22 +1535,24 @@ func _update_hover_cursor(delta: float) -> void:
 #
 # Опрос тот же самый, что у подсветки жил (CURSOR_POLL, 12 раз в секунду), а не
 # отдельный: оба ответа нужны в один и тот же момент и оба стоят одного луча
-func _update_enemy_hover(mouse: Vector2, on_resource: bool) -> void:
+## true — под курсором цель атаки (курсор «меч вниз», ТЗ 14.10.2026, п. 4)
+func _update_enemy_hover(mouse: Vector2, on_resource: bool) -> bool:
 	if GameManager.sel_decals == null:
-		return
+		return false
 	# Курсор уже занят жилой — прицел не рисуем: два разных обещания под одним
 	# курсором противоречили бы друг другу
 	if on_resource or selection_manager == null:
 		GameManager.sel_decals.clear_hover()
-		return
+		return false
 	if not selection_manager._selection_can_attack():
 		GameManager.sel_decals.clear_hover()
-		return
+		return false
 	var foes: Array = selection_manager.enemy_squad_under_cursor(mouse)
 	if foes.is_empty():
 		GameManager.sel_decals.clear_hover()
-		return
+		return false
 	GameManager.sel_decals.set_hover_units(foes, world_root())
+	return true
 
 const _RES_HL_SHADER := preload("res://shaders/res_highlight.gdshader")
 
@@ -1815,7 +1891,47 @@ func _player_defeated() -> bool:
 ## живых нет» читалось как разгром. Теперь победа — только над ИИ, у которого
 ## крепость УЖЕ БЫЛА; ИИ без крепости считается разбитым лишь после
 ## AI_WIPED_GRACE_SEC подряд без единого живого и без единой постройки
+## ── ПОБЕДА (ТЗ 12.10.2026): СНЕСЕНЫ ВСЕ ПОСТРОЙКИ КРАСНОГО И ОРДЫ ────────────
+## Жалоба «игра идёт бесконечно»: прежнее условие смотрело только на красного
+## (крепость + живые), а бойцы — бродячие, спящая охрана, гноллы — держали
+## партию вечно. Теперь считаются ТОЛЬКО ПОСТРОЙКИ: у красного и у гоблинов не
+## осталось ни одной. Не считаются: юниты, пни троллей (логово —
+## troll_lair), рудники (не умирают, сбрасываются в ничейные) и руины.
+## Сторона, у которой построек НЕ БЫЛО НИКОГДА (стенд без орды, красный до
+## закладки), условию не мешает; красный без единой постройки за всю партию
+## судится прежним путём (_ai_beaten_legacy) — иначе пустой стенд не кончится.
+var _red_had_buildings: bool = false
+var _gob_had_buildings: bool = false
+
+static func counts_for_victory(b: Node) -> bool:
+	if b == null or not is_instance_valid(b) or not (b is Building):
+		return false
+	var bb := b as Building
+	if bb.is_dead() or bb is Mine:
+		return false
+	return String(bb.building_id) != "troll_lair"
+
+func _victory_buildings(group: String) -> int:
+	var n := 0
+	for b in get_tree().get_nodes_in_group(group):
+		if counts_for_victory(b):
+			n += 1
+	return n
+
 func _ai_beaten() -> bool:
+	var red: int = _victory_buildings(Constants.building_group(Constants.FACTION_ENEMY))
+	var gob: int = _victory_buildings(Constants.building_group(Constants.FACTION_GOBLIN))
+	if red > 0:
+		_red_had_buildings = true
+	if gob > 0:
+		_gob_had_buildings = true
+	if gob > 0 or red > 0:
+		return false
+	if _red_had_buildings:
+		return true
+	return _ai_beaten_legacy()
+
+func _ai_beaten_legacy() -> bool:
 	var beaten: bool = _faction_beaten("enemy_units", "enemy_buildings")
 	if not beaten:
 		_ai_wiped_since = -1.0
@@ -2036,6 +2152,8 @@ func _scatter_clusters(res_type: int, count: int) -> void:
 			continue                      # руда не в воде и не на берегу
 		if _is_reserved(cx, cz, 8.0):
 			continue                      # пятачок базы — не занимать
+		if _in_base_zone(cx, cz, 6.0):
+			continue                      # зона базы — фиксированный паттерн (ТЗ 11.10.2026)
 		var too_close := false
 		for q in centers:
 			if Vector2(cx, cz).distance_to(q) < 16.0:
@@ -2248,7 +2366,23 @@ const BASE_ORE_CLEAR := 4.5
 ## Вынесено в отдельную функцию, чтобы _setup_reserved_zones() могла занять их
 ## ДО посадки леса, а _add_base_resource_clusters() поставила туда же кучи.
 func _base_resource_spots(anchor: Vector3) -> Array:
-	# «Наружу» = от центра карты: у игрока это к своему углу, у ИИ — к своему
+	var out: Array = []
+	for e in _base_resource_plan(anchor):
+		out.append((e as Dictionary)["p"])
+	return out
+
+## ── ФИКСИРОВАННЫЙ ПАТТЕРН РЕСУРСОВ СТАРТОВОЙ ЗОНЫ (ТЗ 11.10.2026, ч. 1 п. 4) ─
+## У каждой базы (игрок и красный) РОВНО 2 золота и 2 камня:
+##   • 1 золото и 1 камень возле крепости (прежнее кольцо BASE_RESOURCE_DIST);
+##   • 2-й камень — в правом верхнем углу зоны базы (у стены, к внешней кромке);
+##   • 2-е золото — в правом нижнем углу зоны (у стены, к центру карты).
+## Зона базы — прямоугольник от углов карты до лесной стены (WALL_RIGHT_DX по
+## X, WALL_BOTTOM_DZ по Z от якоря). Красный — зеркало игрока по Z: «верх»
+## у него — его внешняя кромка, «низ» — к центру карты. Случайные кучи
+## (_scatter_clusters) и угловые кучи карты в зоны баз больше не ложатся
+## (_in_base_zone), поэтому паттерн не размывается розыгрышем
+const BASE_ZONE_CORNER_INSET := 14.0
+func _base_resource_plan(anchor: Vector3) -> Array:
 	var outward := anchor - Vector3.ZERO
 	outward.y = 0.0
 	if outward.length() < 0.01:
@@ -2256,19 +2390,41 @@ func _base_resource_spots(anchor: Vector3) -> Array:
 	outward = outward.normalized()
 	var base_ang := atan2(outward.z, outward.x)
 	var out: Array = []
-	# Две кучи разведены на 70° по кольцу: между ними остаётся проход
+	var near_types := [Constants.RESOURCE_GOLD, Constants.RESOURCE_STONE]
+	var k := 0
+	# Две кучи у крепости разведены на 70° по кольцу: между ними остаётся проход
 	for delta_deg in [-35.0, 35.0]:
 		var ang: float = base_ang + deg_to_rad(delta_deg)
 		var px: float = clampf(anchor.x + cos(ang) * BASE_RESOURCE_DIST, -MAP_CLAMP_X, MAP_CLAMP_X)
 		var pz: float = clampf(anchor.z + sin(ang) * BASE_RESOURCE_DIST, -MAP_CLAMP_Z, MAP_CLAMP_Z)
-		out.append(Vector3(px, 0.0, pz))
+		out.append({"p": Vector3(px, 0.0, pz), "t": near_types[k]})
+		k += 1
+	# Углы зоны у стены: X — у правой стены, Z — у внешней кромки / у нижней
+	# стены (знак — от того, к какой кромке карты прижата база)
+	var sz: float = signf(anchor.z) if absf(anchor.z) > 0.01 else -1.0
+	var wall_x: float = anchor.x + WALL_RIGHT_DX - BASE_ZONE_CORNER_INSET
+	var outer_z: float = sz * (MAP_HALF_Z - BASE_ZONE_CORNER_INSET)
+	var inner_z: float = anchor.z - sz * (WALL_BOTTOM_DZ - BASE_ZONE_CORNER_INSET)
+	out.append({"p": Vector3(wall_x, 0.0, outer_z), "t": Constants.RESOURCE_STONE})
+	out.append({"p": Vector3(wall_x, 0.0, inner_z), "t": Constants.RESOURCE_GOLD})
 	return out
 
+## Точка в стартовой зоне игрока или красного (прямоугольник угол карты — стена)
+func _in_base_zone(x: float, z: float, margin: float = 0.0) -> bool:
+	for anchor in [PLAYER_BASE_ANCHOR, ENEMY_BASE_ANCHOR]:
+		var a: Vector3 = anchor
+		var sz: float = signf(a.z)
+		if x > a.x + WALL_RIGHT_DX + margin:
+			continue
+		var inner: float = a.z - sz * WALL_BOTTOM_DZ
+		if (z - inner) * sz >= -margin:
+			return true
+	return false
+
 func _add_base_resource_clusters(anchor: Vector3) -> void:
-	var spots := _base_resource_spots(anchor)
-	var types := [Constants.RESOURCE_GOLD, Constants.RESOURCE_STONE]
-	for i in range(spots.size()):
-		var p: Vector3 = spots[i]
+	for e in _base_resource_plan(anchor):
+		var p: Vector3 = (e as Dictionary)["p"]
+		var t: int = int((e as Dictionary)["t"])
 		# ── БАЗОВАЯ ЖИЛА СПАВНИТСЯ ВСЕГДА (заказ спринта 17) ────────────────
 		# Точка в воде прежде ПРОПУСКАЛА кучу целиком — партия без золота у
 		# базы. Теперь точка уводится на ближайшую сушу, а после посадки
@@ -2278,10 +2434,10 @@ func _add_base_resource_clusters(anchor: Vector3) -> void:
 		# Пятачок уже зарезервирован (см. _setup_reserved_zones), но чужие
 		# спавнеры могли поставить сюда что-то ДО резерва — подчищаем
 		_clear_area_of_resources(p, BASE_ORE_CLEAR)
-		_spawn_resource_cluster(p, int(types[i]), true)
-		if _resource_pieces_near(p, BASE_ORE_CLEAR * 1.5, int(types[i])) == 0:
+		_spawn_resource_cluster(p, t, true)
+		if _resource_pieces_near(p, BASE_ORE_CLEAR * 1.5, t) == 0:
 			var node := ResourceNode.new()
-			node.resource_type = int(types[i])
+			node.resource_type = t
 			_world.add_child(node)
 			node.global_position = Vector3(p.x, get_terrain_height(p.x, p.z), p.z)
 			node.add_to_group("resource_nodes")
@@ -2352,7 +2508,7 @@ func _add_base_forest_pocket(anchor: Vector3) -> void:
 		placed.append(cand)
 		var tree := ResourceNode.new()
 		tree.resource_type = Constants.RESOURCE_WOOD
-		tree.remaining     = randf_range(480.0, 720.0)
+		tree.remaining     = randf_range(480.0, 720.0) * TREE_WOOD_MULT
 		tree.tree_variant  = randi_range(1, 4)
 		_world.add_child(tree)
 		tree.global_position = Vector3(px, get_terrain_height(px, pz), pz)
@@ -2360,6 +2516,9 @@ func _add_base_forest_pocket(anchor: Vector3) -> void:
 func _add_corner_resource_clusters() -> void:
 	for c in CORNER_RES_CENTERS:
 		var center: Vector3 = c
+		# Углы стартовых зон — фиксированный паттерн 2 + 2 (ТЗ 11.10.2026)
+		if _in_base_zone(center.x, center.z):
+			continue
 		# Угол вражеской базы: отодвигаем кластеры, чтобы не зарасти плац,
 		# откуда выходят отряды (замок ИИ стоит в 55,55)
 		if center.x > 0.0 and center.z > 0.0:
@@ -2522,85 +2681,28 @@ func _spawn_goblin_village() -> void:
 	if not _Opt.goblin_village:
 		return
 	var center := goblin_village_center()
-	# ── ХИЖИНЫ: ПЛОТНЫЙ КЛАСТЕР ─────────────────────────────────────────────
-	# Раскладка — сетка в шахматку с шагом HUT_STEP (goblin_config.hut_offsets),
-	# детерминированная: деревня обязана выглядеть одинаково в двух прогонах.
-	#
-	# ЗДЕСЬ БЫЛО КОЛЬЦО РАДИУСА 26 М, и оно давало ровно то, на что жаловался
-	# владелец: десять домиков, разнесённых на полсотни метров, читались как
-	# случайно разбросанные постройки, а не как деревня. Вдобавок проверка
-	# зазора отсеивала часть точек кольца, и хижин выходило меньше десяти.
-	var spots: Array = []
-	for off in _GobCfg.hut_offsets():
-		var o: Vector2 = off
-		var px: float = center.x + o.x
-		var pz: float = center.z + o.y
-		# Зазор всё равно проверяем: сетка выдерживает его по построению, но
-		# раскладку правят руками, и наложение хижин читалось бы как одно
-		# здание с двойным запасом здоровья
-		var ok := true
-		for prev in spots:
-			if (prev as Vector2).distance_to(Vector2(px, pz)) < _GobCfg.HUT_MIN_GAP:
-				ok = false
-				break
-		if ok:
-			spots.append(Vector2(px, pz))
-	for sp in spots:
-		var v: Vector2 = sp
+	# ── ЛАГЕРЬ ОРДЫ (ТЗ 11.10.2026, часть 2) ────────────────────────────────
+	# В центре — ГЛАВНАЯ ХАТА (вдвое больше хижины, 20 000 запаса, сама
+	# чинится): единственное место, где рождаются войска. Хижины — СЕРПОМ выше
+	# неё (к -Z, вверх по экрану): дуга радиуса CAMP_ARC_R размахом
+	# CAMP_ARC_DEG, они дают еду. Стартовой орды, гарнизона и спящего резерва
+	# больше нет: на старте у орды только охрана рудников, войска покупаются за
+	# еду и уходят волнами (GoblinAI)
+	var chief = _GoblinChiefHut.new()
+	chief.faction = Constants.FACTION_GOBLIN
+	_world.add_child(chief)
+	chief.global_position = Vector3(center.x, get_terrain_height(center.x, center.z), center.z)
+	var n: int = _Spawn.CAMP_HUTS
+	for i in range(n):
+		var t: float = (float(i) / float(maxi(n - 1, 1)) - 0.5) * deg_to_rad(_Spawn.CAMP_ARC_DEG)
+		var px: float = center.x + sin(t) * _Spawn.CAMP_ARC_R
+		var pz: float = center.z - cos(t) * _Spawn.CAMP_ARC_R
 		var hut = _GoblinHut.new()
 		hut.faction = Constants.FACTION_GOBLIN
 		_world.add_child(hut)
-		hut.global_position = Vector3(v.x, get_terrain_height(v.x, v.y), v.y)
-
-	# ── СТАРТОВАЯ ОРДА ──────────────────────────────────────────────────────
-	# Состав, численность и ранг каждого отряда лежат ОДНОЙ ТАБЛИЦЕЙ в
-	# goblin_config.START_SQUADS — здесь только расстановка. Строка таблицы
-	# читается уже нормализованной (start_squads подставляет уставные размеры),
-	# поэтому «0 моделей» и незнакомый род войск сюда не доезжают вовсе
-	# Список идёт ЧЕРЕЗ СЛОЖНОСТЬ: она может сдвинуть ранг стартовых отрядов
-	# (goblin_vet_shift), но не трогает ни состав, ни численность
-	var roster: Array = _Diff.goblin_start_squads()
-	var garrison_ids: Array = []
-	for i in range(roster.size()):
-		var row: Dictionary = roster[i]
-		var uid: String = String(row["unit"])
-		var n: int = int(row["count"])
-		# Отряды стоят КОЛЬЦОМ ВОКРУГ деревни, за околицей: внутри стоят хижины,
-		# и толпа в сто человек влезла бы прямо в них
-		var ang2: float = TAU * float(i) / float(maxi(roster.size(), 1))
-		var ring_r: float = _GobCfg.VILLAGE_RADIUS + _GobCfg.horde_radius(n) + 2.0
-		var base := Vector3(center.x + cos(ang2) * ring_r, 0.0,
-			center.z + sin(ang2) * ring_r)
-		var sid: int = spawn_goblin_squad(uid, n, base)
-		if sid <= 0:
-			continue
-		# ── РАНГ ПРИ РОЖДЕНИИ ───────────────────────────────────────────────
-		# Уровень ставится напрямую, а не «накапливается убийствами»: отряд
-		# обязан ВЫЙТИ ветераном. Награды раздаются тем же путём, каким их
-		# берёт игрок (apply_veteran_choice), поэтому бонусы доходят до бойцов
-		# ровно так же — без второй реализации раздачи
-		if int(row["vet"]) > 0:
-			grant_squad_veterancy(sid, int(row["vet"]), int(row["picks"]),
-				_GobCfg.VETERAN_PREFERENCE)
-		# ── ЭЛИТНЫЙ ГАРНИЗОН (спринт 17): первые GARRISON_SQUADS ветеранских
-		# отрядов копейщиков никогда не покидают деревню
-		if goblin_ai != null and uid == "goblin_spearman" and int(row["vet"]) > 0 \
-				and garrison_ids.size() < _GobCfg.GARRISON_SQUADS:
-			garrison_ids.append(sid)
+		hut.global_position = Vector3(px, get_terrain_height(px, pz), pz)
 	if goblin_ai != null:
-		goblin_ai.setup(self, center)
-		for gid in garrison_ids:
-			goblin_ai.register_garrison(int(gid))
-	# ── ДРЕМЛЮЩИЙ РЕЗЕРВ ЗА ЛАГЕРЕМ (13.09.2026) ────────────────────────────
-	# Загруженная партия везёт свои отряды в слепке — резерв заводится
-	# только в новой (см. DormantReserve)
-	if _GobCfg.RESERVE_ENABLED and GameManager.pending_load.is_empty():
-		goblin_reserve = _DormantReserve.new()
-		goblin_reserve.name = "GoblinReserve"
-		add_child(goblin_reserve)
-		goblin_reserve.spawn(self, center, goblin_ai)
-		if goblin_ai != null:
-			goblin_ai.attach_reserve(goblin_reserve)
+		goblin_ai.setup(self, center, chief)
 
 ## ВЫПУСТИТЬ ОТРЯД ОРДЫ ТОЛПОЙ ВОКРУГ ТОЧКИ. Один путь на стартовую орду и на
 ## «месть гоблинов» (GoblinAI): раскладка по диску (goblin_config.horde_offset),
@@ -2616,6 +2718,7 @@ var _horde_frame: int = -1
 var _horde_frame_n: int = 0
 var horde_spawn_deferred: int = 0    # сколько бойцов родилось очередью
 var horde_spawn_peak: int = 0        # больше всего рождений орды за кадр
+var horde_cap_refusals: int = 0      # отказов спавна по потолку орды (стендам)
 
 func _horde_budget_left() -> int:
 	var f: int = Engine.get_physics_frames()
@@ -2692,9 +2795,31 @@ func _horde_late_join(u: Unit, sid: int, ref: Unit, base: Vector3) -> void:
 		u.command_move(GameManager.land_target(gc + off.limit_length(12.0)), false, Vector3.ZERO, false, true)
 		u.sprinting = ref.sprinting
 
-func spawn_goblin_squad(uid: String, n: int, base: Vector3, staggered: bool = false) -> int:
+## ── ПОТОЛОК ОРДЫ (ТЗ 11.10.2026): живых бойцов фракции орды на карте ────
+## Считается по группе отрядов орды, раз на вызов (спавн редкий, не
+## покадровый путь): павшие ещё в группе до конца кадра — их отсекает is_dead
+func horde_alive() -> int:
+	var n := 0
+	for u in get_tree().get_nodes_in_group(Constants.unit_group(Constants.FACTION_GOBLIN)):
+		if u != null and is_instance_valid(u) and not (u as Unit).is_dead():
+			n += 1
+	return n + horde_spawn_pending()
+
+func spawn_goblin_squad(uid: String, n: int, base: Vector3, staggered: bool = false,
+		cap_bonus: int = 0) -> int:
 	var scene: PackedScene = Building.PRELOAD_SCENES.get(uid)
 	if scene == null or n <= 0:
+		return 0
+	# ЕДИНСТВЕННАЯ ТОЧКА СПАВНА ОРДЫ — и единственное место потолка: охрана,
+	# волны вожака, пни (гноллы, туши) — все идут сюда. Отряд урезается до
+	# остатка потолка; ноль — отряд не рождается вовсе.
+	# cap_bonus — прибавка к потолку для штурма по часам (ТЗ 13.10.2026,
+	# spawn_config.ASSAULT_EVENT_CAP_EXTRA): к 30-й минуте резерв площадки,
+	# охрана и волны вожака держат ~1700 из 1800, и 8-20 отрядов эвента в
+	# потолок не влезали вовсе (стенд: 4 из 8, затем отказы)
+	n = mini(n, _Spawn.HORDE_CAP + cap_bonus - horde_alive())
+	if n <= 0:
+		horde_cap_refusals += 1
 		return 0
 	var sid: int = GameManager.new_squad(Constants.FACTION_GOBLIN, uid)
 	var now_n: int = n
@@ -2837,26 +2962,56 @@ func _spawn_territory_guards() -> void:
 	for mm in _territory_mines:
 		if mm == null or not is_instance_valid(mm):
 			continue
-		var spot: Vector3 = (mm as Node3D).global_position
-		var guard: Array = _GobCfg.MINE_GUARD
-		for i in range(guard.size()):
-			var row: Dictionary = guard[i]
-			var uid: String = String(row["unit"])
-			var n: int = int(row["count"])
-			if n <= 0:
-				n = int(_GobCfg.SQUAD_SIZE.get(uid, 20))
-			var ang: float = TAU * float(i) / float(maxi(guard.size(), 1))
-			var r: float = GOLD_MINE_CLEAR + _GobCfg.horde_radius(n) + 1.0
-			var base := Vector3(spot.x + cos(ang) * r, 0.0, spot.z + sin(ang) * r)
-			var sid: int = spawn_goblin_squad(uid, n, GameManager.land_target(base))
-			if sid <= 0:
-				continue
-			territory_guard_squads += 1
-			if int(row["vet"]) > 0:
-				grant_squad_veterancy(sid, int(row["vet"]), int(row["picks"]),
-					_GobCfg.VETERAN_PREFERENCE)
-			if goblin_ai != null:
-				goblin_ai.register_mine_guard(sid, mm)
+		territory_guard_squads += _spawn_mine_guard(mm, _Spawn.TERRITORY_MINE_GUARD)
+
+## ── ОХРАНА РУДНИКА: ПОСТЫ КОЛЬЦОМ, ДИСКИ НЕ НАКЛАДЫВАЮТСЯ (ТЗ 11.10.2026) ──
+## Радиус кольца — такой, чтобы сумма диаметров толп с зазором уложилась в
+## окружность, и не меньше GUARD_MINE_CLEAR + радиус толпы: ближний боец
+## стоит вне радиуса захвата рудника (Mine.CAPTURE_RADIUS), иначе охрана
+## захватила бы ничейный рудник себе. Отряд встаёт на пост и сразу засыпает
+## (GoblinAI.register_mine_guard): ни патруля, ни переприказов
+func _spawn_mine_guard(mine: Node3D, roster: Array) -> int:
+	var spot: Vector3 = mine.global_position
+	var radii: Array = []
+	var circ := 0.0
+	var rmax := 0.0
+	for row in roster:
+		var uid: String = String((row as Dictionary)["unit"])
+		var cnt: int = int((row as Dictionary)["count"])
+		if cnt <= 0:
+			cnt = int(_GobCfg.SQUAD_SIZE.get(uid, 20))
+		var hr: float = _GobCfg.horde_radius(cnt) * (1.6 if uid == "big_goblin" else 1.0)
+		radii.append(hr)
+		circ += 2.0 * hr + 3.0
+		rmax = maxf(rmax, hr)
+	var ring: float = maxf(_Spawn.GUARD_MINE_CLEAR + rmax, circ / TAU)
+	var made := 0
+	var acc := 0.0
+	for i in range(roster.size()):
+		var row2: Dictionary = roster[i]
+		var uid2: String = String(row2["unit"])
+		var n2: int = int(row2["count"])
+		if n2 <= 0:
+			n2 = int(_GobCfg.SQUAD_SIZE.get(uid2, 20))
+		var hr2: float = float(radii[i])
+		# Посты — по всей окружности, с зазорами в долю суммы диаметров
+		var ang: float = TAU * (acc + hr2 + 1.5) / maxf(circ, 0.001)
+		acc += 2.0 * hr2 + 3.0
+		var base: Vector3 = GameManager.land_target(Vector3(spot.x + cos(ang) * ring, 0.0, spot.z + sin(ang) * ring))
+		# Деревья под постом вырубаются: о стволы толпа не встаёт на свои места
+		# (всадники охраны рудника игрока вызволялись у стволов после каждой
+		# побудки, замер qa_campaign/Long 11.10.2026)
+		_clear_trees(base, hr2 + 2.5)
+		var sid: int = spawn_goblin_squad(uid2, n2, base)
+		if sid <= 0:
+			continue
+		made += 1
+		if int(row2["vet"]) > 0:
+			grant_squad_veterancy(sid, int(row2["vet"]), int(row2["picks"]),
+				_GobCfg.VETERAN_PREFERENCE)
+		if goblin_ai != null:
+			goblin_ai.register_mine_guard(sid, mine, base)
+	return made
 
 func _spawn_gold_mines() -> void:
 	for p in gold_mine_spots():
@@ -2936,25 +3091,8 @@ func _spawn_goblin_mine() -> void:
 	m.global_position = Vector3(spot.x, get_terrain_height(spot.x, spot.z), spot.z)
 	m.set_owner_faction(Constants.FACTION_GOBLIN)
 	GameManager.goblin_mine = m
-	# Охрана — кольцом вокруг рудника, за его площадкой
-	var guard: Array = _GobCfg.MINE_GUARD
-	for i in range(guard.size()):
-		var row: Dictionary = guard[i]
-		var uid: String = String(row["unit"])
-		var n: int = int(row["count"])
-		if n <= 0:
-			n = int(_GobCfg.SQUAD_SIZE.get(uid, 20))
-		var ang: float = TAU * float(i) / float(maxi(guard.size(), 1))
-		var r: float = GOLD_MINE_CLEAR + _GobCfg.horde_radius(n) + 1.0
-		var base := Vector3(spot.x + cos(ang) * r, 0.0, spot.z + sin(ang) * r)
-		var sid: int = spawn_goblin_squad(uid, n, GameManager.land_target(base))
-		if sid <= 0:
-			continue
-		if int(row["vet"]) > 0:
-			grant_squad_veterancy(sid, int(row["vet"]), int(row["picks"]),
-				_GobCfg.VETERAN_PREFERENCE)
-		if goblin_ai != null:
-			goblin_ai.register_mine_guard(sid)
+	# Охрана рудника лагеря (ТЗ 11.10.2026): 2 пехоты, 3 туши, 3 конницы
+	_spawn_mine_guard(m, _Spawn.CAMP_MINE_GUARD)
 	if goblin_ai != null:
 		goblin_ai.attach_mine(m)
 	_spawn_territory_guards()
@@ -3101,7 +3239,7 @@ func _dress_lair_glade(c: Vector3) -> void:
 				continue
 			var tree := ResourceNode.new()
 			tree.resource_type = Constants.RESOURCE_WOOD
-			tree.remaining     = rng.randf_range(480.0, 720.0)
+			tree.remaining     = rng.randf_range(480.0, 720.0) * TREE_WOOD_MULT
 			tree.tree_variant  = rng.randi_range(1, 4)
 			_world.add_child(tree)
 			tree.global_position = Vector3(px, get_terrain_height(px, pz), pz)
@@ -3225,6 +3363,9 @@ func _spawn_squad_block(uid: String, faction: int, origin: Vector3, front: Vecto
 		return 0
 	var sid: int = GameManager.new_squad(faction, uid)
 	var c: int = maxi(cols, 1)
+	var slots: Array = []
+	var f: Vector3 = Vector3(front.x, 0.0, front.z)
+	f = f.normalized() if f.length_squared() > 1e-6 else Vector3.FORWARD
 	for k in range(n):
 		var u: Unit = scene.instantiate()
 		u.faction = faction
@@ -3236,7 +3377,14 @@ func _spawn_squad_block(uid: String, faction: int, origin: Vector3, front: Vecto
 		u.global_position = Vector3(p.x, get_terrain_height(p.x, p.z), p.z)
 		u.sync_row()
 		u.post_pos = u.global_position
+		# ВЗГЛЯД — ПО ФРОНТУ ПОСТА (ТЗ 12.10.2026: «красные стоят и смотрят
+		# вниз»): боец рождался с взглядом по умолчанию, отряд — без курса, и
+		# спящая охрана так и стояла лицом к нижней кромке экрана
+		u._facing = f
+		u.mark_flip_dirty()
+		slots.append(u.global_position)
 		GameManager.add_to_squad(sid, u)
+	GameManager.squad_set_formation(sid, slots, f, false)
 	return sid
 
 ## Точка стартовой обороны: в пределах карты, на суше, без леса вокруг.
@@ -3879,6 +4027,10 @@ const CORNER_CENTERS := [
 ## Выключатель леса-стены: false — ни полосы вокруг зоны игрока, ни стены в
 ## угловых массивах (они сажаются прежней проходимой чащей-«нормалью»)
 const FOREST_WALL_ENABLED := true
+## ЖИВУЧЕСТЬ ДЕРЕВА (ТЗ 12.10.2026): запас древесины ×10 — лесорубы не
+## прорубают стену за минуту, пень появляется намного позже. Множитель к
+## прежнему жребию, число вызовов RNG не меняется (зерно карты то же)
+const TREE_WOOD_MULT := 10.0
 const DECOR_GROVES_PER_UNIT := 34.0
 ## Граница зоны игрока относительно его якоря: правая стена и нижняя стена
 const WALL_RIGHT_DX := 64.0
@@ -4023,7 +4175,7 @@ func _wall_row(mid: Vector2, across: Vector2, half: float) -> void:
 func _plant_tree(p: Vector2, kind: int, scale: float) -> void:
 	var tree := ResourceNode.new()
 	tree.resource_type = Constants.RESOURCE_WOOD
-	tree.remaining     = randf_range(480.0, 720.0)
+	tree.remaining     = randf_range(480.0, 720.0) * TREE_WOOD_MULT
 	tree.tree_variant  = randi_range(1, 4)
 	tree.forest_kind   = kind
 	tree.tree_scale    = scale
@@ -4095,7 +4247,7 @@ func _spawn_tree_cluster(center: Vector3, count: int, radius: float = 5.5, min_g
 			continue
 		var tree := ResourceNode.new()
 		tree.resource_type = Constants.RESOURCE_WOOD
-		tree.remaining     = randf_range(480.0, 720.0)   # 3x ёмкость
+		tree.remaining     = randf_range(480.0, 720.0) * TREE_WOOD_MULT   # 3x ёмкость
 		tree.tree_variant  = randi_range(1, 4)
 		tree.forest_kind   = kind
 		if kind == ResourceNode.FOREST_DECOR:
@@ -4513,6 +4665,14 @@ func _build_flat_terrain() -> void:
 				tile = TILE_SAND
 				target = st_sand
 				sand_quads += 1
+			elif GRASS_UNIFORM and color_st.has(GRASS_BASE_SHEET):
+				# ОДНА ТРАВА НА ВСЮ КАРТУ (ТЗ 11.10.2026, ч. 1 п. 3): основной —
+				# зелёный лист середины карты, салатовый Tilemap_Flat по краям
+				# и ступенчатые пятна оттенков сняты
+				target = color_st[GRASS_BASE_SHEET]
+				cols = COLOR_COLS
+				rows = COLOR_ROWS
+				tile = TILE_COLOR_LOW
 			else:
 				# Пятна травы другого оттенка поверх основного листа
 				var shade: int = grass_shade(cx, cz)

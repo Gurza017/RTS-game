@@ -232,7 +232,7 @@ func _ring_spot(idx: int, total: int) -> Vector3:
 ## Локальная точка ног места idx (для спрайта и для вылета стрелы)
 func slot_local(idx: int) -> Vector3:
 	var s: Vector3 = spot(idx, cap)
-	return Vector3(host._draw_cx + s.x, _sprite_h() * foot_frac + s.y, 0.08 + s.z)
+	return Vector3(host._draw_cx + s.x, _sprite_h() * foot_frac + s.y, 0.08 + s.z + host._draw_z)
 
 ## Мировая точка вылета стрелы с места idx (грудь стрелка над ногами)
 func fire_point(idx: int) -> Vector3:
@@ -240,7 +240,7 @@ func fire_point(idx: int) -> Vector3:
 
 ## Середина площадки (совместимость: Tower.platform_point)
 func platform_point() -> Vector3:
-	return host.global_position + Vector3(host._draw_cx, _sprite_h() * foot_frac, 0.0)
+	return host.global_position + Vector3(host._draw_cx, _sprite_h() * foot_frac, host._draw_z)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # СПРАЙТЫ
@@ -293,7 +293,7 @@ func _build_sprite(idx: int) -> MeshInstance3D:
 	var tex := ImageTexture.create_from_image(frame)
 	var quad := QuadMesh.new()
 	quad.size = Vector2(SPRITE_SIZE_M, SPRITE_SIZE_M)
-	quad.material = _BBUtilR.make_static_material(tex, Color.WHITE, 0.5)
+	quad.material = _BBUtilR.make_building_material(tex, Color.WHITE, 0.5)
 	var mi := MeshInstance3D.new()
 	mi.name = "Sentinel"
 	mi.mesh = quad
@@ -310,7 +310,7 @@ func _build_sprite(idx: int) -> MeshInstance3D:
 	# ближе к стене — порядок рядов между собой цел
 	var mat := quad.material as ShaderMaterial
 	mat.set_shader_parameter("depth_anchor_on", 1.0)
-	mat.set_shader_parameter("depth_anchor", host.global_position + Vector3(host._draw_cx, 0.0, 0.0))
+	mat.set_shader_parameter("depth_anchor", host.global_position + Vector3(host._draw_cx, 0.0, host._draw_z))
 	var s: Vector3 = spot(idx, cap)
 	mat.set_shader_parameter("depth_push", -maxf(ROOF_SORT_LIFT + s.z * ROOF_SORT_ROW, ROOF_SORT_MIN))
 	host.add_child(mi)

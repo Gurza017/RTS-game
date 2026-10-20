@@ -30,6 +30,7 @@ extends RefCounted
 
 const _Vis := preload("res://scripts/units/UnitVisuals.gd")
 const _Opt := preload("res://scripts/perf_config.gd")
+const _FarR := preload("res://scripts/FarUnitRenderer.gd")
 
 const GROW_STEP := 128
 
@@ -114,6 +115,13 @@ func _make_layer(mesh: Mesh, world_root: Node3D) -> Layer:
 	l.mmi.extra_cull_margin = 16384.0
 	world_root.add_child(l.mmi)
 	return l
+
+## Новая сцена: узлы слоёв ушли вместе со старым World, сами слои живут в
+## автозагрузке (см. FarUnitRenderer.reattach_world)
+func reattach_world(world_root: Node3D) -> void:
+	for l in [_rings, _shadows, _hover, _hover_b, _order_ring, _order_ring_b, _dest]:
+		if l != null:
+			(l as Layer).mmi = _FarR.reattach_mmi((l as Layer).mmi, (l as Layer).mm, world_root)
 
 func _ensure(world_root: Node3D) -> void:
 	if _rings == null:

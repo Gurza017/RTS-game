@@ -349,6 +349,8 @@ func spawn_gnoll_squads(n: int) -> int:
 	# давали половину A*): волна выходит только в свободные места
 	var room: int = _DiffL.mob_count(_GobCfgL.GNOLL_MAX_ALIVE) - gnolls_alive() - virt_gnoll_squads * size
 	n = mini(n, int(floor(float(room) / float(maxi(size, 1)))))
+	# ОБЩИЙ ПОТОЛОК ОТРЯДОВ ОТ ВСЕХ ПНЕЙ (ТЗ 14.10.2026, п. 3: MAX_STUMP_GNOLLS)
+	n = mini(n, GameManager.gnoll_squads_room())
 	gnoll_capped += 1 if n <= 0 else 0
 	if n <= 0:
 		return 0
@@ -393,27 +395,43 @@ func _start_gnoll_pack() -> void:
 	# карте уже есть — значит стая своя и восстановлена, новой не надо
 	for sq in GameManager.squads_of_faction(Constants.FACTION_GOBLIN):
 		if String((sq as Dictionary).get("type", "")) == "gnoll":
+			_arm_gnoll_clock(_DiffL.mob_gap(_GobCfgL.GNOLL_SPAWN_SEC))
 			return
 	spawn_gnoll_squads(_DiffL.mob_count(_GobCfgL.GNOLL_START_SQUADS))
+	_arm_gnoll_clock(_DiffL.mob_gap(_GobCfgL.GNOLL_SPAWN_SEC))
 
-## ── ЧАСЫ ВОЛН — УЗЕЛ-ТАЙМЕР, А НЕ СВОЙ ТИК ────────────────────────────────
+## ── ЧАСЫ СПАВНА — УЗЕЛ-ТАЙМЕР, А НЕ СВОЙ ТИК ──────────────────────────────
 ## У логова нет _process вовсе (_needs_tick = false), и заводить его ради
-## одного сложения раз в три минуты незачем — ровно тот же выбор и та же
-## причина, что у таймера стада
+## одного сложения раз в две минуты незачем — ровно тот же выбор и та же
+## причина, что у таймера стада.
+## ── СПАВН ПО ЧАСАМ С ОБЩИМ ПОТОЛКОМ (ТЗ 14.10.2026, п. 3) ─────────────────
+## Прежде часы взводил удар по пню (три волны по 3, откат 10 минут). Теперь
+## часы идут с появления пня: раз в GNOLL_SPAWN_SEC выходят 1-2 отряда
+## (чередуясь), пока живых отрядов гноллов от ВСЕХ пней меньше
+## MAX_STUMP_GNOLLS. У потолка часы СТОЯТ: пень лишь проверяет место раз в
+## GNOLL_SPAWN_RECHECK_SEC и, когда место появилось (часть отрядов выбита),
+## заводит полный интервал заново. Удар по пню больше ничего не ускоряет —
+## он по-прежнему поднимает туши защиты (ниже)
 var _gnoll_timer: Timer = null
+## Стоят ли часы у потолка (стенды)
+var gnoll_clock_paused: bool = false
 
-## Первый удар по пню или по любому его стражу взводит часы волн
-func on_lair_attacked() -> void:
-	if _gnoll_alarmed or is_dead():
+func _arm_gnoll_clock(sec: float) -> void:
+	if is_dead():
 		return
-	_gnoll_alarmed = true
 	if _gnoll_timer == null:
 		_gnoll_timer = Timer.new()
 		_gnoll_timer.one_shot = true
 		add_child(_gnoll_timer)
 		_gnoll_timer.timeout.connect(_on_gnoll_wave)
-	_gnoll_timer.wait_time = _DiffL.mob_gap(_GobCfgL.GNOLL_WAVE_SEC)
+	_gnoll_timer.wait_time = maxf(sec, 0.05)
 	_gnoll_timer.start()
+
+## Первый удар по пню или по любому его стражу — туши защиты (один раз)
+func on_lair_attacked() -> void:
+	if _gnoll_alarmed or is_dead():
+		return
+	_gnoll_alarmed = true
 	# ── ЗАЩИТА ЛОГОВА ТУШАМИ: МГНОВЕННО (заказ 13.09.2026) ────────────────
 	# «При атаке на логово мгновенно спавнятся ещё 2 защитных отряда».
 	# Именно мгновенно, без часов: гноллы приходят волной через GNOLL_WAVE_SEC,
@@ -515,32 +533,49 @@ func gnolls_alive() -> int:
 	gnolls = alive
 	return gnolls.size()
 
-## Сколько секунд до следующей волны (стенды); INF — часы не взведены
+## Сколько секунд до следующего выхода (стенды); INF — часы не идут
 func gnoll_wave_left() -> float:
-	if not _gnoll_alarmed or _gnoll_timer == null:
+	if _gnoll_timer == null or _gnoll_timer.is_stopped():
 		return INF
 	return _gnoll_timer.time_left
 
-## Волна пришла. Стенды зовут это напрямую, не дожидаясь трёх минут
+## Живых ОТРЯДОВ гноллов этого пня (с теми, что ждут разморозки)
+func gnoll_squads_alive() -> int:
+	var keep: Array = []
+	for sid in gnoll_squads:
+		var sq: Variant = GameManager.squads.get(int(sid))
+		if sq == null:
+			continue
+		var any := false
+		for m in (sq as Dictionary)["members"]:
+			if m != null and is_instance_valid(m) and not (m as Unit).is_dead():
+				any = true
+				break
+		if any:
+			keep.append(int(sid))
+	gnoll_squads = keep
+	return keep.size() + virt_gnoll_squads
+
+## Срок часов пришёл. Стенды зовут это напрямую, не дожидаясь двух минут
 func _on_gnoll_wave() -> void:
 	if is_dead():
 		return
-	if gnoll_wave < _GobCfgL.GNOLL_WAVES_MAX:
-		gnoll_wave += 1
-		spawn_gnoll_squads(_DiffL.mob_count(_GobCfgL.GNOLL_WAVE_SQUADS))
-		# Волна «родника»: вместе со стаей выходит один отряд туш (заказ)
-		spawn_big_squads(_GobCfgL.BIG_WAVE_SQUADS)
-		# ПОСЛЕ ТРЕТЬЕЙ ВОЛНЫ — ДЛИННЫЙ ОТКАТ, а не остановка: пень жив,
-		# значит стая когда-нибудь восстановится (прямой заказ)
-		if _gnoll_timer != null:
-			_gnoll_timer.wait_time = _GobCfgL.GNOLL_WAVE_SEC 				if gnoll_wave < _GobCfgL.GNOLL_WAVES_MAX 				else _GobCfgL.GNOLL_COOLDOWN_SEC
-			_gnoll_timer.start()
+	if GameManager.gnoll_squads_room() <= 0:
+		# Потолок: часы стоят, место проверяется коротким шагом
+		gnoll_clock_paused = true
+		gnoll_capped += 1
+		_arm_gnoll_clock(_GobCfgL.GNOLL_SPAWN_RECHECK_SEC)
 		return
-	# Откат истёк — счёт волн начинается заново
-	gnoll_wave = 0
-	if _gnoll_timer != null:
-		_gnoll_timer.wait_time = _DiffL.mob_gap(_GobCfgL.GNOLL_WAVE_SEC)
-		_gnoll_timer.start()
+	if gnoll_clock_paused:
+		# Место появилось — полный интервал с этого момента
+		gnoll_clock_paused = false
+		_arm_gnoll_clock(_DiffL.mob_gap(_GobCfgL.GNOLL_SPAWN_SEC))
+		return
+	gnoll_wave += 1
+	var span: int = maxi(_GobCfgL.GNOLL_SPAWN_MAX - _GobCfgL.GNOLL_SPAWN_MIN + 1, 1)
+	var n: int = _GobCfgL.GNOLL_SPAWN_MIN + (gnoll_wave - 1) % span
+	spawn_gnoll_squads(n)
+	_arm_gnoll_clock(_DiffL.mob_gap(_GobCfgL.GNOLL_SPAWN_SEC))
 
 func _start_flock() -> void:
 	if not _SheepScript.sheets_ok() or is_dead():

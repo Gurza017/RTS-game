@@ -309,7 +309,7 @@ const STANCES := {
 		"push_mult":         0.0,    # своего пуша у фаланги нет вовсе
 		"push_resist":       0.5,    # входящий толчок срезан вдвое (упор щитами)
 		"attack_speed_mult": 1.25,   # +25% скорости атаки
-		"move_speed_mult":   0.65,   # −35% скорости ходьбы (щит/опущенные копья)
+		"move_speed_mult":   0.80,   # −20% к новому шагу (ТЗ 10.10.2026; было 0.65)
 		"morale_mult":       1.30,   # +30% морали
 		"defense_bonus":     5.0,    # +5 защиты
 		"holds_ground":      true,   # с места не сходят (кроме смыкания рядов)
@@ -318,6 +318,25 @@ const STANCES := {
 		"lock_position":     false,
 	},
 }
+
+## ═══════════════════════════════════════════════════════════════════════════
+## ШАГ ПЕХОТЫ = БЕГ − 15 % (ТЗ 10.10.2026, п. 1)
+## ═══════════════════════════════════════════════════════════════════════════
+## Бег по двойному ПКМ снят целиком; стандартный приказ «идти» теперь ведёт
+## копейщиков, лучников, мечников и монахов со скоростью прежнего бега минус
+## 15 %. Бег как АБСОЛЮТНАЯ скорость не меняется (выход из здания, паника,
+## новобранец бегут как прежде), отход в замок по кнопке [F1] — на 30 %
+## быстрее бега. Рабочие, гоблины, конница и туши — без изменений.
+const RUN_SPEED_FACTOR := 1.35          ## бег к прежнему шагу (Unit.SPRINT_SPEED_FACTOR)
+const WALK_FROM_RUN := 0.85             ## новый шаг = бег × 0.85
+const WALK_BOOST_UNITS := ["spearman", "archer", "warrior", "monk"]
+const RETREAT_RUN_MULT := 1.30          ## отход в замок: бег +30 %
+
+## Множитель шага рода войск к его movement_speed (1.0 — без изменений)
+static func walk_boost(unit_id: String) -> float:
+	if unit_id in WALK_BOOST_UNITS:
+		return RUN_SPEED_FACTOR * WALK_FROM_RUN
+	return 1.0
 
 ## Словарь стойки по id; неизвестная стойка → «атака» (стандартные параметры)
 static func get_stance(stance_id: String) -> Dictionary:
@@ -720,7 +739,19 @@ const MEAT_PER_SEC_TARGET := 0.44      # еды в секунду с ОДНОГ�
 const FARM_WORKERS_REFERENCE := 15     # столько фермеров держит расчёт
 const FARM_SQUADS_SUPPORTED := 15      # столько отрядов они кормят вместе с домами
 
-const FOOD_UPKEEP_SQUAD_PER_SEC  := 0.1
+## ── ЕСТ КАЖДЫЙ БОЕЦ (ТЗ 12.10.2026: аудит потребления мяса) ────────────────
+## Было: 0.1 еды/с с ОТРЯДА любого размера, монахи не ели вовсе (не «боевые»).
+## Отряд из шестидесяти копейщиков ел столько же, сколько огрызок из трёх, и
+## армия в 1500 голов стоила 3.4 еды/с — мясо копилось тысячами. Теперь едят
+## ГОЛОВЫ: FOOD_UPKEEP_SOLDIER_PER_SEC с бойца (0.21/мин) × множитель рода
+## (рыцарь — тяжёлый конный доспех — вдвое). 1500 голов ≈ 5.3 еды/с: при
+## прежнем приходе (дома + 2 загона) склад тает, загоны нужно пополнять.
+## Полная армия 2500 голов ≈ 8.8 еды/с.
+const FOOD_UPKEEP_SOLDIER_PER_SEC := 0.0035
+const FOOD_UPKEEP_UNIT_MULT := {"warrior": 2.0}
+## Отрядное число оставлено для модели экономики (economy_model.upkeep_cost):
+## средний отряд микса 50/30/20 — 45 голов
+const FOOD_UPKEEP_SQUAD_PER_SEC  := FOOD_UPKEEP_SOLDIER_PER_SEC * 45.0
 const FOOD_UPKEEP_WORKER_PER_SEC := 1.0 / 30.0
 const FOOD_UPKEEP_TICK := 1.0
 const FOOD_UPKEEP_FACTIONS := [Constants.FACTION_PLAYER]
@@ -744,7 +775,11 @@ const FOOD_UPKEEP_FACTIONS := [Constants.FACTION_PLAYER]
 ## загон может занять работой одновременно. Тридцать мест означали бы, что
 ## одна ферма кормит всю партию, и «развивать фермерство постепенно» (тоже
 ## из заказа) было бы нечем.
-const SHEEP_PEN_CAPACITY  := 5
+## ── ТЗ 12.10.2026: ДЕСЯТЬ МЕСТ И ДЕСЯТЬ РАБОЧИХ ───────────────────────────
+## Загон на 10 овец и 10 рабочих: у каждого фермера своя овца (MAX_BUTCHERS 1),
+## восполнение — по одной каждые SHEEP_PEN_RESPAWN_SEC, пока живых меньше
+## вместимости: туша, которую режут, места не держит, цикл бесконечный
+const SHEEP_PEN_CAPACITY  := 10
 ## Сколько ждать новую овцу. ── ТЗ 24.09.2026: «КАЖДЫЕ 20-30 СЕКУНД» ──────
 ## Пауза ТЯНЕТСЯ ЖРЕБИЕМ в [SHEEP_PEN_RESPAWN_MIN_SEC, SHEEP_PEN_RESPAWN_SEC]
 ## на каждую новую овцу (было ровно 12 с по заказу 23.09 «10-15 с»).
@@ -813,7 +848,11 @@ const HOUSE_WORKER_SLOTS  := 3     # +рабочих за каждый дом
 ## первый барак
 const ARMY_BASE_UNITS   := 120   # бойцов без крепости и домов
 const ARMY_CASTLE_UNITS := 120   # +бойцов за каждую крепость
-const ARMY_HOUSE_UNITS  := 60    # +бойцов за каждый дом
+## ТЗ 14.10.2026 (третье письмо): дома с 10-го дорожают ×1.7, и «2000 за ~40
+## домов» стало недостижимым — место за дом поднято 60 → 90: 120 + 120 (крепость)
+## + 20 домов × 90 = 2040 бойцов. Полный кап 2500 — за 26 домов, то есть только
+## тому, кто готов заплатить «целое состояние» за последние
+const ARMY_HOUSE_UNITS  := 90    # +бойцов за каждый дом
 const ARMY_HARD_CAP     := 2500  # потолок, выше которого не поднимает ничто
 
 static func pop_worker_cap(houses: int, castles: int = 0) -> int:
@@ -899,6 +938,14 @@ const SHEEP_PEN_COST_STEP := 0.50
 const TOWER_FREE_COUNT := 10
 const TOWER_COST_STEP  := 0.75    # 11-я = ×1.75, 12-я = ×2.5, 13-я = ×3.25 …
 const TOWER_COST_MAX   := 8.0     # потолок множителя: цена не уходит в бесконечность
+## ── ДОМА: С 10-ГО — ЭКСПОНЕНТА (ТЗ 14.10.2026, п. 8) ───────────────────────
+## Первые HOUSE_FREE_COUNT домов — по базовой цене; 10-й = ×1.7, 11-й = ×2.9,
+## 12-й = ×4.9, 15-й = ×24, 20-й = ×342 («целое состояние»). Считаются ВСЕ
+## три картинки дома вместе и заложенные площадки (GameManager.house_total).
+## Лимит армии пересчитан под эту цену (ARMY_HOUSE_UNITS 90): ~2000 бойцов
+## при 20 домах
+const HOUSE_FREE_COUNT  := 9
+const HOUSE_COST_GROWTH := 1.7
 
 ## Во сколько раз дороже базовой обойдётся СЛЕДУЮЩЕЕ здание этого типа,
 ## когда у стороны уже стоит existing штук. Одна функция на все законы —
@@ -918,6 +965,11 @@ static func building_cost_mult(building_id: String, existing: int) -> float:
 		return float(n + 1)
 	if building_id == "sheep_pen":
 		return 1.0 + SHEEP_PEN_COST_STEP * float(n)
+	if is_house(building_id):
+		var over_h: int = n - HOUSE_FREE_COUNT + 1
+		if over_h <= 0:
+			return 1.0
+		return pow(HOUSE_COST_GROWTH, float(over_h))
 	return 1.0
 
 ## Цена постройки с учётом уже стоящих у этой стороны
@@ -1329,6 +1381,15 @@ const BANNER_GOLD := Color(0.93, 0.76, 0.24)
 
 const VET_BADGE_OUTLINE := Color(0.08, 0.08, 0.10, 0.9)
 
+## ── КРАСНЫЙ ШТАНДАРТ ЭЛИТЫ И ВЫСШИЙ РАНГ (ТЗ 13.10.2026, письмо 7) ────────
+## Красный римский штандарт (BannerArt.vexillum_texture, в мире × 1.5) носит
+## только отряд с ИНДИВИДУАЛЬНЫМ званием (GameManager.squad_elite): реликвия
+## игрока, награда, выбранная его рукой, признак от системы ачивок. Эта ручка
+## добавляет к ним отряд, дошедший до ВЫСШЕГО ранга шкалы (легендарный перк):
+## true — легендарный отряд несёт штандарт, false — только отмеченные игроком.
+## Общее ветеранство по порогам убийств штандарт НЕ даёт ни при каком значении
+const ELITE_BANNER_AT_TOP_RANK := true
+
 const VET_BANNER_TIERS := [
 	{"rank": "опытных",       "shape": BANNER_PENNANT,  "cloth": Color(0.72, 0.11, 0.13),
 		"chevrons": 1, "chevron_dir":  1, "white_tip": false},
@@ -1538,7 +1599,9 @@ const TRAINING := {
 		# ── МЕЧНИКИ КРЕПОСТИ — ГОТОВАЯ ЭЛИТА (заказ 13.09.2026) ───────────
 		# Крепостной мечник выходит с лычками, поэтому и стоит дороже
 		# барачного при том же составе отряда
-		"warrior":  {"cost_wood": 520.0, "cost_gold": 640.0, "cost_food": 75.0, "time": 70.0, "squad": SQUAD_SIZE_SWORDSMEN, "cols": 5},
+		# ТЗ 14.10.2026, п. 6: элита обучается дольше (70 → 84 с, +20 %);
+		# «Муштра мечников» в кузнице режет время вдвое
+		"warrior":  {"cost_wood": 520.0, "cost_gold": 640.0, "cost_food": 75.0, "time": 84.0, "squad": SQUAD_SIZE_SWORDSMEN, "cols": 5},
 		"monk":     {"cost_wood":  60.0, "cost_gold": 120.0, "cost_food": 20.0, "time": 20.0, "squad": SQUAD_SIZE_MONKS, "cols": 5},
 		# Оставлено для ИИ: он нанимает копейщиков и лучников прямо в замке
 		"spearman": {"cost_wood": 150.0, "cost_gold": 45.0, "cost_food": 35.0, "time": 26.0, "squad": SQUAD_SIZE_SPEARMEN, "cols": 5},
@@ -1569,7 +1632,7 @@ const TRAINING := {
 	# 520/640/75). Расчёт — scripts/economy_model.gd, стенд qa_economy90
 	"barracks": {
 		"spearman": {"cost_wood": 150.0, "cost_gold": 45.0, "cost_food": 35.0, "time": 26.0, "squad": SQUAD_SIZE_SPEARMEN, "cols": 5},
-		"warrior":  {"cost_wood": 380.0, "cost_gold": 420.0, "cost_food": 55.0, "time": 55.0, "squad": SQUAD_SIZE_SWORDSMEN, "cols": 5},
+		"warrior":  {"cost_wood": 380.0, "cost_gold": 420.0, "cost_food": 55.0, "time": 66.0, "squad": SQUAD_SIZE_SWORDSMEN, "cols": 5},   # 55 → 66 с (ТЗ 14.10.2026)
 	},
 	"archery": {
 		"archer":   {"cost_wood": 350.0, "cost_gold": 250.0, "cost_food": 45.0, "time": 32.0, "squad": SQUAD_SIZE_ARCHERS, "cols": 5},
@@ -1851,7 +1914,10 @@ const BONUS_KEYS := ["bonus_attack", "bonus_armor", "bonus_defense",
 					 "bonus_hire_cost", "bonus_train_army",
 					 # Доля долой с отката «Яростной атаки» мечника
 					 # (ТЗ 23.09.2026: ветеранство сокращает откат абилки)
-					 "bonus_rage_cd"]
+					 "bonus_rage_cd",
+					 # «Приём копья» (ТЗ 14.10.2026, п. 6): прибавка к множителю
+					 # РУКОПАШНОГО урона по крупным (конница, туша, тролль)
+					 "bonus_giant_melee"]
 
 ## Шаблон с нулями — КОПИЯ, а не сам словарь: вызывающий волен его править
 static func zero_modifiers() -> Dictionary:

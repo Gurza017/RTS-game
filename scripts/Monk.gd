@@ -383,6 +383,24 @@ func _monk_step() -> void:
 	# Дистанция между монахами — часть того же скана (гистерезис и пауза
 	# после приказа внутри _tick_spacing; delta 0 = «прошёл один такт скана»)
 	_tick_spacing(0.0)
+	# ── ПАЦИЕНТ БЕЖИТ — ЛЕЧЕНИЕ СНИМАЕТСЯ (ТЗ 14.10.2026, п. 7) ───────────
+	# Отряд в панике, в отходе или идёт в замок: монах за ним через всю карту
+	# не бежит. Приказ игрока по такому отряду гаснет, пациент сменяется на
+	# ближайших раненых в ауре
+	if _order_alive() and _squad_fleeing(_order_sid):
+		_order_target = null
+		_order_sid = 0
+		fled_drops += 1
+	if patient_sid > 0 and _squad_fleeing(patient_sid):
+		patient_sid = 0
+		heal_target = null
+		_stop_heal_vfx()
+		fled_drops += 1
+		# Уже шёл за ним — встать здесь (ниже скан выдаст новую работу)
+		if state == State.MOVING and not player_order_active():
+			_step_to = Vector3.INF
+			_step_t = 0.0
+			command_move(global_position)
 	if _order_alive():
 		patient_sid = _order_sid
 	elif not _squad_needs_care(patient_sid):
@@ -411,6 +429,36 @@ func _monk_step() -> void:
 	if state == State.IDLE and not moved_recently() and may_sleep_now():
 		sleeps += 1
 		_scan_t = _scan_period(MONK_IDLE_SCAN_SEC)
+
+## Стендам: сколько раз лечение снято из-за бегства пациента
+var fled_drops: int = 0
+
+## Отряд бежит: паника, заявка в замок с отходом, или больше половины живых
+## в отходе/панике (отход ИИ, бегство). Один обход состава — зовётся раз в
+## скан монаха, не покадрово
+func _squad_fleeing(sid: int) -> bool:
+	if sid <= 0:
+		return false
+	if GameManager.squad_panicked(sid) or GameManager.squad_is_to_castle(sid):
+		return true
+	var raw: Variant = GameManager.squads.get(sid)
+	if raw == null:
+		return false
+	var mv: Variant = (raw as Dictionary).get("members")
+	if mv == null:
+		return false
+	var alive := 0
+	var run := 0
+	for m in (mv as Array):
+		if m == null or not is_instance_valid(m):
+			continue
+		var u := m as Unit
+		if u == null or u.is_dead() or u.garrisoned:
+			continue
+		alive += 1
+		if u.retreating or u._panicked:
+			run += 1
+	return alive > 0 and run * 2 > alive
 
 func may_sleep_now() -> bool:
 	return _res_target == null and _retreat_goal.x == INF and not player_order_active()
@@ -463,6 +511,8 @@ func _pick_patient_squad() -> int:
 		var dx: float = c.x - mp.x
 		var dz: float = c.y - mp.z
 		if dx * dx + dz * dz > r2:
+			continue
+		if _squad_fleeing(sid):
 			continue
 		var hp := 0.0
 		var hpmax := 0.0
@@ -621,6 +671,10 @@ func _care_lone(may_walk: bool = true) -> bool:
 		if _may_heal(self) and (best == null or current_health / max_health < best.current_health / best.max_health):
 			best = self
 	if best == null:
+		return false
+	# Бегущий отряд (паника, отход, в замок) — не пациент (ТЗ 14.10.2026, п. 7):
+	# иначе эта ветка снова ставила его в лечение и вела монаха следом
+	if best.squad_id > 0 and best != self and _squad_fleeing(best.squad_id):
 		return false
 	# Раненый состоит в отряде — ведём его отряд целиком (общий путь)
 	if best.squad_id > 0 and best != self:

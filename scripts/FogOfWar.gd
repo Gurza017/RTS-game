@@ -102,9 +102,19 @@ func setup(half_x: float, half_z: float) -> void:
 		GameManager.veg.set_fog(_tex, Vector2(_half_x, _half_z))
 	_upload()
 
+## ── ПЛОСКОСТЬ ШИРЕ КАРТЫ (ТЗ 11.10.2026, ч. 1 п. 3) ────────────────────────
+## Плоскость была ровно с карту, а спрайт дерева у кромки уходит на экране
+## выше её края: в тумане над верхней кромкой торчал «забор» из макушек, и у
+## края оставалась резкая полоса. Плоскость выносится за карту на
+## EDGE_OVERHANG метров с каждой стороны — больше проекции самого высокого
+## дерева при наклоне камеры 45°. Маска за краем берётся по ближайшей
+## клетке кромки (зажим uv в fog_of_war.gdshader): у разведанной кромки
+## макушки видны, у неразведанной — закрыты целиком
+const EDGE_OVERHANG := 24.0
+
 func _build_plane() -> void:
 	var quad := QuadMesh.new()
-	quad.size = Vector2(2.0 * _half_x, 2.0 * _half_z)
+	quad.size = Vector2(2.0 * (_half_x + EDGE_OVERHANG), 2.0 * (_half_z + EDGE_OVERHANG))
 	_mat = ShaderMaterial.new()
 	_mat.shader = _shader
 	_mat.set_shader_parameter("fog_mask", _tex)

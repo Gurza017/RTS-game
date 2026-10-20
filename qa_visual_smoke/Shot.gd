@@ -703,7 +703,7 @@ func _run() -> void:
 	if keep_quad != null:
 		var kq := keep_quad.mesh as QuadMesh
 		var pk := _probe_billboard(kq, kq.material as ShaderMaterial,
-			keep.global_position, Vector2.ONE, "Замок")
+			keep.global_position + Vector3(0.0, 0.0, keep._draw_z), Vector2.ONE, "Замок")
 		if pk != null:
 			p_props.append(pk)
 	if tree_quad != null:

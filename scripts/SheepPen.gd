@@ -25,7 +25,7 @@ extends Building
 ## ТРЕБОВАНИЕ РАЗВЁРНУТО. Прежде здесь было записано: «овцы привязаны к
 ## загону, а не заперты в нём — заходят и выходят, как и просили». Новый
 ## заказ просит обратного и по пунктам:
-##   • ровно SHEEP_PEN_CAPACITY (5) мест;
+##   • ровно SHEEP_PEN_CAPACITY (10, ТЗ 12.10.2026) мест;
 ##   • на одну овцу один рабочий, то есть не больше пяти на загон;
 ##   • овцы НЕ выходят за ограду;
 ##   • забитую заменяет новая через SHEEP_PEN_RESPAWN_SEC — и только пока
@@ -539,10 +539,57 @@ func pick_sheep_for(worker: Node) -> Node3D:
 
 ## Где фермер ждёт новую овцу: у проёма ограды (нижняя кромка), а не в центре
 func farm_wait_point(worker: Node) -> Vector3:
-	var off: float = 0.0
-	if worker != null:
-		off = (fposmod(float(worker.get_instance_id()) * 0.618, 1.0) - 0.5) * build_size.x * 0.6
-	var p: Vector3 = global_position + Vector3(off, 0.0, build_size.z * 0.5 + 1.0)
+	# ── КОЛЬЦО ВНУТРИ ОГРАДЫ (ТЗ 14.10.2026, п. 3) ───────────────────────
+	# Прежде ждали на одной линии у нижней кромки — вместе с подходом к тушам
+	# «с одной стороны» это и была толпа в точке. Теперь у каждого фермера
+	# свой угол (farmer_slot), а радиус — чуть меньше полуразмера загона
+	var a: float = farmer_angle(worker)
+	var r: float = minf(build_size.x, build_size.z) * 0.5 * FARM_RING_FRAC
+	var p: Vector3 = global_position + Vector3(cos(a) * r, 0.0, sin(a) * r)
+	p.y = GameManager.get_terrain_height(p.x, p.z)
+	return p
+
+## ── МЕСТА ФЕРМЕРОВ (ТЗ 14.10.2026, п. 3) ────────────────────────────────────
+## «Рабочие у загона толкаются в одной точке»: все подходили к туше с той
+## стороны, откуда шли (от склада), и вставали в SHEEP_GRAB_DIST от неё —
+## одной дугой. Теперь каждому фермеру загона выдан свой номер места, номер —
+## угол на круге: у туши он встаёт на этом углу в FARM_AROUND_R от неё, в
+## ожидании — на кольце внутри ограды. Номера раздаются наименьшим свободным,
+## ушедшие с загона их освобождают
+const FARM_RING_FRAC := 0.80
+const FARM_AROUND_R := 1.0
+var _farm_slots: Dictionary = {}
+
+func farmer_slot(worker: Node) -> int:
+	if worker == null or not is_instance_valid(worker):
+		return 0
+	var id: int = worker.get_instance_id()
+	var cur: Variant = _farm_slots.get(id)
+	if cur != null:
+		return int(cur)
+	# Чистка ушедших: не наш фермер или освобождён
+	for k in _farm_slots.keys():
+		var o: Object = instance_from_id(int(k))
+		if o == null or not is_instance_valid(o) or not (o is Worker) or (o as Worker).is_dead() or (o as Worker).farm_pen() != self:
+			_farm_slots.erase(k)
+	var used: Dictionary = {}
+	for v in _farm_slots.values():
+		used[int(v)] = true
+	var slot: int = 0
+	while used.has(slot):
+		slot += 1
+	_farm_slots[id] = slot
+	return slot
+
+func farmer_angle(worker: Node) -> float:
+	var n: int = maxi(_UCfgP.SHEEP_PEN_WORKERS, 1)
+	# Сдвиг на полшага: первый фермер не стоит строго на оси ограды
+	return (float(farmer_slot(worker)) + 0.5) * TAU / float(n)
+
+## Где фермеру стоять у овцы/туши в точке around
+func farm_stand_point(worker: Node, around: Vector3) -> Vector3:
+	var a: float = farmer_angle(worker)
+	var p: Vector3 = around + Vector3(cos(a), 0.0, sin(a)) * FARM_AROUND_R
 	p.y = GameManager.get_terrain_height(p.x, p.z)
 	return p
 

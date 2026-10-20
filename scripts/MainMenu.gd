@@ -189,12 +189,17 @@ func _build_load_page(vbox: VBoxContainer) -> void:
 	err_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	err_lbl.custom_minimum_size = Vector2(420, 0)
 
+	# Автосохранение (слот 0, ТЗ 13.10.2026) — первым: после вылета это то,
+	# что ищут
+	var slots: Array = [_SaveLoad.AUTOSAVE_SLOT]
 	for i in range(_SaveLoad.SLOT_COUNT):
-		var slot: int = i + 1
+		slots.append(i + 1)
+	for s in slots:
+		var slot: int = int(s)
 		var has: bool = _SaveLoad.has_save(slot)
 		var btn := Button.new()
 		btn.name = "Slot%d" % slot
-		btn.text = _SaveLoad.slot_label(slot) if has else "Слот %d — пусто" % slot
+		btn.text = _SaveLoad.slot_label(slot)
 		btn.custom_minimum_size = Vector2(420, 32)
 		btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 		btn.focus_mode = Control.FOCUS_NONE
@@ -311,6 +316,21 @@ func _build_options_page(vbox: VBoxContainer) -> void:
 	vbox.add_child(truce_box)
 	truce_box.toggled.connect(func(on: bool):
 		_GS.set_armistice(on))
+
+	# ── АВТОСОХРАНЕНИЕ (ТЗ 13.10.2026, письмо 7) ───────────────────────────
+	# Та же ручка, что в паузе (HUD._add_autosave_row): game_settings.
+	# autosave_minutes, файл user://settings.cfg
+	_add_spacer(vbox, 6)
+	var as_opt := OptionButton.new()
+	as_opt.name = "AutosaveOption"
+	as_opt.custom_minimum_size = Vector2(170, 36)
+	as_opt.add_theme_font_size_override("font_size", 16)
+	for lbl in _GS.AUTOSAVE_LABELS:
+		as_opt.add_item(String(lbl))
+	as_opt.select(_GS.autosave_choice_index())
+	vbox.add_child(_make_option_row("Автосохранение:", as_opt))
+	as_opt.item_selected.connect(func(idx: int):
+		_GS.set_autosave_minutes(int(_GS.AUTOSAVE_CHOICES[idx])))
 
 	_add_spacer(vbox, 10)
 	vbox.add_child(_back_button())

@@ -286,3 +286,29 @@ static func make_static_material(tex: Texture2D, modulate: Color = Color.WHITE,
 	if phase != 0.0:
 		mat.set_shader_parameter("frame_phase", phase)
 	return mat
+
+## ── РИСУНОК ПОСТРОЙКИ: МЕТКА В ТРАФАРЕТЕ И ВСПЫШКА (ТЗ 14.10.2026, пп. 1, 4) ─
+## Тот же cyl_billboard, но (1) видимый пиксель здания пишет 1 в трафарет —
+## по этой метке второй проход бойца (mm_unit_ghost) рисует силуэт закрытого
+## зданием бойца; (2) uniform `flash` — светлое «моргание» постройки, когда в
+## неё посадили отряд (Building.flash_accept). Шейдер собирается ОДИН раз из
+## кода общего: правка cyl_billboard доезжает и сюда
+static var _bld_shader: Shader = null
+
+static func building_shader() -> Shader:
+	if _bld_shader != null:
+		return _bld_shader
+	var code: String = _SHADER.code
+	code = code.replace("render_mode unshaded, cull_disabled;",
+		"render_mode unshaded, cull_disabled;\nstencil_mode write, compare_always, 1;\nuniform float flash = 0.0;")
+	code = code.replace("ALBEDO = col.rgb;", "ALBEDO = mix(col.rgb, vec3(1.0), clamp(flash, 0.0, 1.0));")
+	var sh := Shader.new()
+	sh.code = code
+	_bld_shader = sh
+	return sh
+
+static func make_building_material(tex: Texture2D, modulate: Color = Color.WHITE,
+		scissor: float = 0.5, fps: float = 0.0, phase: float = 0.0) -> ShaderMaterial:
+	var mat := make_static_material(tex, modulate, scissor, fps, phase)
+	mat.shader = building_shader()
+	return mat

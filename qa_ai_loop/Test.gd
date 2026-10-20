@@ -299,10 +299,30 @@ func _run() -> void:
 			(b as Building).take_damage(1e9)
 	await pframes(3)
 	main._check_victory()
-	verdict("F4 крепость снесена и живых нет — победа", main._phase == main.Phase.VICTORY)
+	# ПОБЕДА — СНЕСЕНЫ ПОСТРОЙКИ КРАСНОГО И ОРДЫ (ТЗ 12.10.2026): пока стоит
+	# лагерь гоблинов, разгром красного ещё не победа
+	var gob_left: int = 0
+	for gb in get_tree().get_nodes_in_group("goblin_buildings"):
+		if main.counts_for_victory(gb):
+			gob_left += 1
+	verdict("F4 красный снесён, лагерь орды стоит — ещё не победа",
+		gob_left == 0 or main._phase == main.Phase.PLAYING, "построек орды %d" % gob_left)
+	for _i in range(6):
+		var rest: Array = []
+		for gb in get_tree().get_nodes_in_group("goblin_buildings"):
+			if main.counts_for_victory(gb):
+				rest.append(gb)
+		if rest.is_empty():
+			break
+		for gb in rest:
+			(gb as Building).take_damage(1e9)
+		await pframes(3)
+	main._check_victory()
+	verdict("F4б снесены и постройки орды — победа", main._phase == main.Phase.VICTORY)
 	# И обратный случай: ИИ БЕЗ крепости (старт партии) с вырезанными рабочими
 	main._phase = main.Phase.PLAYING
 	main._ai_castle_placed = false
+	main._red_had_buildings = false
 	main._ai_wiped_since = -1.0
 	main._match_clock = 280.0
 	main._check_victory()

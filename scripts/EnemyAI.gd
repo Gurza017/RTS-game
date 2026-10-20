@@ -106,6 +106,15 @@ func _mustered(field: Array, rally: Vector3) -> bool:
 ## Была ли у ИИ настоящая армия. Нужно для аварийного барака: на старте армия
 ## тоже равна нулю, и без этого флага ПЕРВЫЙ барак доставался бы бесплатно
 var _had_army: bool      = false
+## ── ПАМЯТЬ О ПИКЕ БАЗЫ (ТЗ 14.10.2026, п. 2) ───────────────────────────────
+## Сколько рабочих и каких построек у ИИ БЫЛО — после потерь он нанимает и
+## отстраивает до пика в приоритете, а не ждёт очереди обычного развития
+var _peak_workers: int = 0
+var _peak_bld: Dictionary = {}     # id → наибольшее число одновременно
+var rebuilding: bool = false       # сейчас восстанавливается ключевая постройка (стенды)
+var workers_short: bool = false    # бригада ниже цели — замок нанимает рабочих первыми
+var worker_priority_hires: int = 0
+var rebuild_sites: int = 0
 ## Диагностика для стенда QA — что ИИ сделал за последний тик
 var last_action: String  = ""
 
@@ -125,6 +134,12 @@ func reset() -> void:
 	_wave_out    = false
 	_home_pos    = Vector3.ZERO
 	_had_army    = false
+	_peak_workers = 0
+	_peak_bld.clear()
+	rebuilding = false
+	workers_short = false
+	worker_priority_hires = 0
+	rebuild_sites = 0
 	_patrol_phase = 0
 	_patrol_timer = 0.0
 	last_stand   = false
@@ -601,13 +616,22 @@ func _no_castle() -> void:
 	# Деньги тут вообще ни при чём: строит здания РАБОЧИЙ (ConstructionSite
 	# набирает бригаду), и без него закладка — это не отсрочка поражения, а
 	# вечно недостроенный камень на карте
-	if not _site_in_progress() and _has_living_units():
+	if not _site_in_progress("castle") and _has_living_units():
 		var cost: Dictionary = _UCfg.building_cost("castle")
-		if ResourceManager.can_afford(Constants.FACTION_ENEMY, cost):
+		# ── БЕЗ ЕДИНОГО СКЛАДА КРЕПОСТЬ ЗАКЛАДЫВАЕТСЯ БЕСПЛАТНО (ТЗ 14.10.2026)
+		# Рабочим некуда нести добычу (склад — только крепость и городской
+		# центр), значит ресурсов на крепость не будет никогда, и ИИ «выключен»
+		# до конца партии. Строит её всё равно рабочий — это не мгновенный
+		# возврат, а шанс. Тот же приём, что REBUILD_BARRACKS_FREE
+		var no_depot: bool = GameManager.get_nearest_dropoff(Constants.FACTION_ENEMY, anchor) == null
+		var free_ok: bool = _AICfg.AI_REBUILD_CASTLE_FREE and no_depot \
+			and not ResourceManager.can_afford(Constants.FACTION_ENEMY, cost)
+		if free_ok or ResourceManager.can_afford(Constants.FACTION_ENEMY, cost):
 			var spot: Vector3 = GameManager.land_target(
 				anchor + Vector3(CASTLE_REBUILD_OFFSET, 0.0, CASTLE_REBUILD_OFFSET))
-			if _start_site("castle", spot):
-				last_action += "|закладывается новая крепость"
+			if _start_site("castle", spot, free_ok, _AICfg.AI_REBUILD_CREW):
+				rebuild_sites += 1
+				last_action += "|закладывается новая крепость%s" % (" (бесплатно: склада нет)" if free_ok else "")
 	# ── 2. ПОСЛЕДНИЙ РУБЕЖ У РУИН ──────────────────────────────────────────
 	last_stand = true
 	# ── БИТЬСЯ НЕ С КЕМ — РАССЕИВАЕМСЯ, А НЕ СТОИМ КУЧЕЙ В УГЛУ ───────────
@@ -646,11 +670,26 @@ func _economy(castle: Castle) -> void:
 		var wk := w as Worker
 		if wk.state == Unit.State.IDLE:
 			_assign_worker(wk)
+	# Пик бригады — цель восстановления после потерь
+	_peak_workers = maxi(_peak_workers, workers.size())
 	if castle == null:
+		workers_short = false
 		return
 	var queued := _queued_count(castle, "worker")
 	if workers.size() + queued >= _Diff.ai_worker_limit():
+		workers_short = false
 		return
+	# ── РАБОЧИЕ ПОСЛЕ ПОТЕРЬ — В ПРИОРИТЕТЕ (ТЗ 14.10.2026, п. 2) ───────────
+	# Бригада ниже цели (пик, но не меньше AI_WORKER_REBUILD_MIN): рабочий
+	# заказывается В ГОЛОВУ очереди замка, мимо занятости армией и мимо резерва
+	# еды — без рабочих еда не придёт никогда
+	var target: int = clampi(maxi(_peak_workers, _AICfg.AI_WORKER_REBUILD_MIN), 0, _Diff.ai_worker_limit())
+	workers_short = workers.size() + queued < target
+	if workers_short:
+		if castle.train_from_config("worker", true):
+			worker_priority_hires += 1
+			last_action += "|рабочий в приоритете (%d/%d)" % [workers.size() + queued + 1, target]
+			return
 	# Замок занят армией — рабочие ждут, КРОМЕ полного вымирания экономики
 	if not castle.production_queue.is_empty() and workers.size() > 0:
 		return
@@ -730,7 +769,8 @@ func _site_in_progress(build_id: String = "") -> bool:
 
 ## Заложить фундамент и послать на него артель.
 ## free_build = true — ресурсы уже не списываются (аварийное восстановление)
-func _start_site(build_id: String, at: Vector3, free_build: bool = false) -> bool:
+func _start_site(build_id: String, at: Vector3, free_build: bool = false,
+		crew_n: int = BUILD_CREW) -> bool:
 	if not free_build:
 		# ПРОГРЕССИЯ ЦЕН ДЕЙСТВУЕТ И НА ИИ (ТЗ 23.09.2026). Правило партии, а
 		# не интерфейса: оставь ИИ базовую цену — и «нельзя спамить бараками»
@@ -747,17 +787,69 @@ func _start_site(build_id: String, at: Vector3, free_build: bool = false) -> boo
 	site.build_size  = _UCfg.building_size(build_id)
 	main.world_add(site)
 	site.global_position = Vector3(at.x, main.get_terrain_height(at.x, at.z), at.z)
-	# Артель: ближайшие к площадке рабочие
+	# Артель: ближайшие к площадке рабочие. ЗАНЯТЫЕ НА ДРУГОЙ СТРОЙКЕ — В
+	# КОНЦЕ списка (ТЗ 14.10.2026): при параллельной перестройке вторая
+	# площадка иначе забирала артель у первой (те же «ближайшие»), и бараки
+	# оставались с двумя строителями
 	var crew: Array = []
 	for n in main.get_tree().get_nodes_in_group("enemy_units"):
 		if is_instance_valid(n) and n is Worker and not (n as Worker).is_dead():
 			crew.append(n)
 	crew.sort_custom(func(a, b):
+		var ba: bool = (a as Worker).build_target != null and is_instance_valid((a as Worker).build_target)
+		var bb: bool = (b as Worker).build_target != null and is_instance_valid((b as Worker).build_target)
+		if ba != bb:
+			return bb
 		return (a as Node3D).global_position.distance_squared_to(site.global_position) \
 			< (b as Node3D).global_position.distance_squared_to(site.global_position))
-	for i in range(mini(BUILD_CREW, crew.size())):
-		(crew[i] as Worker).command_build(site)
+	# Берём СВОБОДНЫХ; не хватило — отнимаем у чужих площадок ПО ОДНОМУ у
+	# самой многолюдной, пока у неё больше, чем станет у нас + 1 (ровная
+	# делёжка). Иначе шесть рабочих на три площадки оставляли первую с одним
+	# строителем, а то и без единого — и она не достраивалась никогда
+	var per_site: Dictionary = {}
+	var free: Array = []
+	var busy: Array = []
+	for w in crew:
+		var bt = (w as Worker).build_target
+		if bt == null or not is_instance_valid(bt):
+			free.append(w)
+		else:
+			busy.append(w)
+			per_site[bt] = int(per_site.get(bt, 0)) + 1
+	var want: int = maxi(crew_n, 1)
+	var mine := 0
+	for w2 in free:
+		if mine >= want:
+			break
+		(w2 as Worker).command_build(site)
+		mine += 1
+	while mine < want:
+		var best = null
+		var best_n := 0
+		for w3 in busy:
+			var bt3 = (w3 as Worker).build_target
+			var n3: int = int(per_site.get(bt3, 0))
+			if n3 > best_n:
+				best_n = n3
+				best = w3
+		if best == null or best_n <= mine + 1:
+			break
+		var bt4 = (best as Worker).build_target
+		per_site[bt4] = best_n - 1
+		busy.erase(best)
+		(best as Worker).command_build(site)
+		mine += 1
 	return true
+
+## Сколько стройплощадок ИИ сейчас (все, или только этого здания)
+func _sites_count(build_id: String = "") -> int:
+	var n := 0
+	for s in main.get_tree().get_nodes_in_group("construction_sites"):
+		if not is_instance_valid(s) or (s as Building).faction != Constants.FACTION_ENEMY:
+			continue
+		if build_id.is_empty() or String(s.target_id) == build_id:
+			n += 1
+	return n
 
 ## Башня ближе этого к замку — стартовая оборона крепости (spawn_config
 ## AI_HOME_TOWERS, до 20 м), а не пограничная: те стоят на трети пути к базе
@@ -843,12 +935,35 @@ func _construction(castle: Castle) -> void:
 		elif b is Building and (b as Building).building_id == "archery":
 			archery = b as Building
 
-	# Одна стройка за раз: иначе ИИ закладывает фундаменты пачкой и снимает
-	# с добычи всю экономику разом
-	if _site_in_progress():
+	# ── ПАМЯТЬ О ПИКЕ И ПЕРЕСТРОЙКА (ТЗ 14.10.2026, п. 2) ───────────────────
+	# Чего у базы БЫЛО больше, чем есть, — восстанавливается в приоритете:
+	# стройки идут параллельно (до AI_REBUILD_SITES), артель больше
+	# (AI_REBUILD_CREW). Обычное развитие — по-прежнему одна стройка за раз:
+	# иначе ИИ закладывает фундаменты пачкой и снимает с добычи всю экономику
+	var houses: int = _houses_count()
+	var towers: int = _towers_count(castle)
+	var now_cnt: Dictionary = {"barracks": 1 if barracks != null else 0, "smithy": 1 if smithy != null else 0,
+		"archery": 1 if archery != null else 0, "house": houses, "tower": towers}
+	for k in now_cnt:
+		_peak_bld[k] = maxi(int(_peak_bld.get(k, 0)), int(now_cnt[k]))
+	var lost: Array = []
+	for k2 in now_cnt:
+		if int(now_cnt[k2]) + _sites_count(String(k2)) < int(_peak_bld.get(k2, 0)):
+			lost.append(String(k2))
+	rebuilding = not lost.is_empty()
+	var crew: int = _AICfg.AI_REBUILD_CREW if rebuilding else BUILD_CREW
+	# Слоты перестройки — СВЕРХ уже идущих обычных строек: стрелковая или дом,
+	# заложенные до удара, не должны отнимать у снесённых бараков их площадку
+	var sites_max: int = 1
+	if rebuilding:
+		var lost_sites := 0
+		for k3 in lost:
+			lost_sites += _sites_count(String(k3))
+		sites_max = _AICfg.AI_REBUILD_SITES + (_sites_count() - lost_sites)
+	if _sites_count() >= sites_max:
 		return
 
-	if barracks == null:
+	if barracks == null and not _site_in_progress("barracks"):
 		# АВАРИЙНЫЙ БАРАК: без него ИИ не может нанимать пехоту вообще, поэтому
 		# при потере армии он ставится в приоритете (и бесплатно, если разрешено)
 		# «Армия потеряна» = она БЫЛА и её выбили. Первый барак партии всегда
@@ -860,46 +975,61 @@ func _construction(castle: Castle) -> void:
 		var fdir := castle.front_dir()
 		var side := Vector3(-fdir.z, 0.0, fdir.x)
 		var spot: Vector3 = castle.global_position + fdir * 2.0 + side * 8.0
-		if _start_site("barracks", spot, free_ok):
+		if _start_site("barracks", spot, free_ok, crew):
+			if "barracks" in lost:
+				rebuild_sites += 1
 			last_action += "|заложен барак%s" % (" (бесплатно)" if free_ok else "")
 		return
 
-	if smithy == null:
+	if smithy == null and not _site_in_progress("smithy"):
 		var fdir2 := castle.front_dir()
 		var side2 := Vector3(-fdir2.z, 0.0, fdir2.x)
 		var spot2: Vector3 = castle.global_position + fdir2 * 2.0 - side2 * 8.0
-		if _start_site("smithy", spot2):
+		if _start_site("smithy", spot2, false, crew):
+			if "smithy" in lost:
+				rebuild_sites += 1
 			last_action += "|заложена кузница"
+		return
+	if smithy == null:
 		return
 
 	# СТРЕЛКОВАЯ — ПОСЛЕ КУЗНИЦЫ (09.09.2026): лучники переехали из бараков,
 	# и без неё ИИ нанимал бы их только в замке. Порядок барак → кузница →
 	# стрелковая оставляет темп первых двух построек прежним (его стережёт
 	# qa_ai); до стрелковой лучники идут из замка (см. _train_army)
-	if archery == null:
+	if archery == null and not _site_in_progress("archery"):
 		var fdir3 := castle.front_dir()
 		var side3 := Vector3(-fdir3.z, 0.0, fdir3.x)
 		var spot3: Vector3 = castle.global_position + fdir3 * 2.0 + side3 * 16.0
-		if _start_site("archery", spot3):
+		if _start_site("archery", spot3, false, crew):
+			if "archery" in lost:
+				rebuild_sites += 1
 			last_action += "|заложена стрелковая"
+		return
+	if archery == null:
 		return
 
 	# ── ДОМА — ЕДИНСТВЕННЫЙ ИСТОЧНИК ЕДЫ ИИ (ТЗ 29.09.2026, п. 1) ───────────
 	# Первые четыре — сразу за стрелковой, остальные — вперемешку с башнями
-	# (одна стройка за раз, см. выше), пока не наберётся AI_HOUSES
-	var houses: int = _houses_count()
-	if houses < _AICfg.AI_HOUSES and (houses < 4 or _towers_count(castle) >= _AICfg.AI_TOWERS \
+	# (одна стройка за раз, см. выше), пока не наберётся AI_HOUSES.
+	# Снесённый дом (houses ниже пика) отстраивается первым
+	var houses_q: int = houses + _sites_count("house")
+	if houses_q < _AICfg.AI_HOUSES and ("house" in lost or houses < 4 or towers >= _AICfg.AI_TOWERS \
 			or ResourceManager.get_amount(Constants.FACTION_ENEMY, Constants.RESOURCE_FOOD) < _AICfg.AI_FOOD_RESERVE):
-		if _start_site("house", _house_spot(castle, houses)):
-			last_action += "|заложен дом (%d)" % (houses + 1)
+		if _start_site("house", _house_spot(castle, houses_q), false, crew):
+			if "house" in lost:
+				rebuild_sites += 1
+			last_action += "|заложен дом (%d)" % (houses_q + 1)
 			return
 	# ── БАШНИ НА ГРАНИЦЕ (спринт 17) ────────────────────────────────────────
 	# После стрелковой: AI_TOWERS сторожевых башен на доле пути к базе игрока,
 	# разнесённых вбок. Стройка одна за раз (см. выше), поэтому башни идут по
 	# одной, а между ними — исследования кузницы по обычному кругу
-	if _AICfg.AI_BUILD_TOWERS and _towers_count(castle) < _AICfg.AI_TOWERS:
-		var spot4: Vector3 = _tower_spot(castle, _towers_count(castle))
-		if _start_site("tower", spot4):
+	if _AICfg.AI_BUILD_TOWERS and towers + _sites_count("tower") < _AICfg.AI_TOWERS:
+		var spot4: Vector3 = _tower_spot(castle, towers + _sites_count("tower"))
+		if _start_site("tower", spot4, false, crew):
+			if "tower" in lost:
+				rebuild_sites += 1
 			last_action += "|заложена башня на границе"
 			return
 
@@ -1072,7 +1202,8 @@ func _train_army(castle: Castle) -> void:
 		if aneed != "" and archery.train_from_config(aneed):
 			last_action += "|заказ отряда %s (стрелковая)" % aneed
 
-	if _queued_orders(castle) < _AICfg.MAX_QUEUED_ORDERS:
+	# Пока бригада ниже цели, очередь замка — рабочим (см. _economy)
+	if not workers_short and _queued_orders(castle) < _AICfg.MAX_QUEUED_ORDERS:
 		var kinds: Array = ["warrior"] if archery != null else ["warrior", "archer"]
 		var wneed := _most_needed(kinds, castle)
 		if wneed != "" and castle.train_from_config(wneed):

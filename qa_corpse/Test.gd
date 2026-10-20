@@ -548,8 +548,7 @@ func _test_no_blood() -> void:
 	# Одна-единственная текстура — сама лента бойца. Второй sampler2D означал
 	# бы наложение поверх неё, а накладывать в первой очереди нечего
 	var samplers := 0
-	for line in src.split("
-"):
+	for line in src.split("\n"):
 		var l: String = line
 		if l.begins_with("uniform sampler2D"):
 			samplers += 1

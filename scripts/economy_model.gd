@@ -44,7 +44,9 @@ const ARMY_START_MIN := 8.0
 const ARMY_FULL_MIN := 45.0
 ## Постройки партии (сверх стартового замка). Бараки и стрелковая дорожают
 ## линейно, загон — своим законом: цена считается building_cost_scaled
-const BUILD_PLAN := {"house": 40, "barracks": 3, "archery": 2, "tower": 6,
+## Дома: 14, а не 40 — с 10-го дом дорожает ×1.7 за штуку (ТЗ 14.10.2026, п. 8),
+## 40 домов стоили бы миллионы
+const BUILD_PLAN := {"house": 14, "barracks": 3, "archery": 2, "tower": 6,
 	"sheep_pen": 3, "smithy": 1}
 ## Дома растут вместе с армией (лимит бойцов): от стартовых до плана к ARMY_FULL_MIN
 const START_HOUSES := 3

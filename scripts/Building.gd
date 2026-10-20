@@ -410,8 +410,9 @@ func _maybe_load_building_sprite() -> void:
 	# вращение постройки на месте вокруг своей оси. Теперь ориентация мировая:
 	# спрайт зафиксирован фасадом на +Z (исходное направление взгляда камеры,
 	# _orbit_yaw = 0) и с камерой не связан вообще.
-	quad.material = _BBUtil.make_static_material(tex, Color.WHITE, 0.5,
+	quad.material = _BBUtil.make_building_material(tex, Color.WHITE, 0.5,
 		sprite_fps(), sprite_frame_phase())
+	_sprite_mat = quad.material as ShaderMaterial
 	var billboard := MeshInstance3D.new()
 	billboard.name = "BuildingSprite"
 	billboard.mesh = quad
@@ -422,6 +423,14 @@ func _maybe_load_building_sprite() -> void:
 	# будет видно из кода — фасад смотрит строго по мировому +Z
 	billboard.rotation = Vector3.ZERO
 	add_child(billboard)
+	# ── РИСУНОК ПО ЦЕНТРУ ЛОГИЧЕСКОЙ ЗОНЫ (ТЗ 12.10.2026) ───────────────────
+	# Низ рисунка стоял В НАЧАЛЕ КООРДИНАТ здания, а всё логическое — кольцо
+	# трупов башни, кольцо штурма, гарнизон у ворот, прицел — считается от
+	# начала координат как от ЦЕНТРА: на экране кольцо павших лучников ложилось
+	# перед башней и сбоку, а не вокруг неё. Рисунок съезжает к камере на
+	# sprite_front_shift(): нарисованное основание встаёт вокруг центра зоны
+	_draw_z = sprite_front_shift(tex, quad)
+	billboard.position.z = _draw_z
 	# Рамка выделения переезжает НА РИСУНОК: пока её строили в _build_visual,
 	# обмерять было нечего (см. _fit_marker_to_sprite)
 	_fit_marker_to_sprite(tex, quad)
@@ -482,7 +491,7 @@ func _fit_marker_to_sprite(tex: Texture2D, sprite_quad: QuadMesh) -> void:
 	# растягивается вокруг своего центра, поэтому и центр поднимается на него же
 	selection_ring.scale = Vector3(1.0, _BBUtil.V_STRETCH, 1.0)
 	selection_ring.position = Vector3(cx,
-		((bottom - mh) + (frame_top + mh)) * 0.5 * _BBUtil.V_STRETCH, MARKER_Z_LIFT)
+		((bottom - mh) + (frame_top + mh)) * 0.5 * _BBUtil.V_STRETCH, MARKER_Z_LIFT + _draw_z)
 	selection_ring.rotation = Vector3.ZERO
 	# ── РАМКА ПОВЕРХ КРОН (ТЗ 24.09.2026, п. 4) ─────────────────────────────
 	# Глубину рамка и так не писала, но ТЕСТ глубины был включён: дерево перед
@@ -557,7 +566,7 @@ func _fit_pick_to_sprite(tex: Texture2D, sprite_quad: QuadMesh) -> void:
 	# там же — иначе она снова окажется ниже картинки, только меньше
 	var vs: float = _BBUtil.V_STRETCH
 	box.size = Vector3(w, maxf((top - bottom) * vs, 0.2), PICK_SLAB_DEPTH)
-	_pick_shape.position = Vector3(cx, (bottom + top) * 0.5 * vs, 0.0)
+	_pick_shape.position = Vector3(cx, (bottom + top) * 0.5 * vs, _draw_z)
 	_pick_shape.rotation = Vector3.ZERO
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -574,6 +583,68 @@ func _fit_pick_to_sprite(tex: Texture2D, sprite_quad: QuadMesh) -> void:
 # Постройка без спрайта (процедурная коробка) отвечает по-старому: там есть
 # настоящий объём, и коробка для него правильна
 # ═════════════════════════════════════════════════════════════════════════════
+
+## Сдвиг рисунка к камере (по +Z) от начала координат здания, метры
+var _draw_z: float = 0.0
+
+## ── «ОТКЛИК» ПОСТРОЙКИ НА ПОСАДКУ (ТЗ 14.10.2026, п. 4) ────────────────────
+## Лучники выделены, ПКМ по башне/баракам/крепости — рисунок коротко и мягко
+## светлеет (uniform `flash` шейдера постройки, BillboardUtil.building_shader),
+## как тролль краснеет от удара. Твин на свойстве — без покадрового тика
+var _sprite_mat: ShaderMaterial = null
+var _accept_tween: Tween = null
+const ACCEPT_FLASH_PEAK := 0.38
+const ACCEPT_FLASH_SEC := 0.45
+## Стендам: сколько раз здание моргнуло
+var accept_flashes: int = 0
+
+func flash_accept() -> void:
+	accept_flashes += 1
+	if _sprite_mat == null or not is_inside_tree():
+		return
+	if _accept_tween != null and _accept_tween.is_valid():
+		_accept_tween.kill()
+	_accept_tween = create_tween()
+	_accept_tween.tween_method(_set_accept_flash, 0.0, ACCEPT_FLASH_PEAK, ACCEPT_FLASH_SEC * 0.3)
+	_accept_tween.tween_method(_set_accept_flash, ACCEPT_FLASH_PEAK, 0.0, ACCEPT_FLASH_SEC * 0.7)
+
+func _set_accept_flash(v: float) -> void:
+	if _sprite_mat != null:
+		_sprite_mat.set_shader_parameter("flash", v)
+
+## Сила моргания сейчас (стендам)
+func accept_flash_level() -> float:
+	if _sprite_mat == null:
+		return 0.0
+	var v: Variant = _sprite_mat.get_shader_parameter("flash")
+	return float(v) if v != null else 0.0
+## Доля НАРИСОВАННОЙ ширины, на которую рисунок съезжает к камере. Подобрано
+## оконным снимком qa_tz1012/Shot: основание башни, крепости, бараков,
+## стрелковой и домов встаёт в середину кольца павших/окружения
+const SPRITE_FRONT_FRAC := {
+	"castle": 0.30, "tower": 0.30, "barracks": 0.30, "archery": 0.30,
+	"house": 0.30, "house2": 0.30, "house3": 0.30,
+}
+## Включатель (стенды, A/B на глаз)
+static var sprite_front_on: bool = true
+
+func sprite_front_shift(tex: Texture2D, quad: QuadMesh) -> float:
+	return front_shift_for(String(building_id), tex, quad)
+
+## То же для фантома размещения и стройки: рисунок обязан встать туда же
+static func front_shift_for(id: String, tex: Texture2D, quad: QuadMesh) -> float:
+	if not sprite_front_on or tex == null or quad == null:
+		return 0.0
+	var k: Variant = SPRITE_FRONT_FRAC.get(id)
+	if k == null:
+		return 0.0
+	var r: Rect2 = _BBUtil.opaque_rect(tex)
+	return float(k) * quad.size.x * r.size.x
+
+## Точка рисунка на земле (середина основания) — для того, что живёт НА
+## картинке (стрелки на крыше, глубина крыши)
+func draw_anchor() -> Vector3:
+	return global_position + Vector3(_draw_cx, 0.0, _draw_z)
 
 ## Полуширина НАРИСОВАННОЙ постройки, метры. −1 — рисунка нет, спрашивать нечего
 var _draw_half_w: float = -1.0
@@ -651,7 +722,9 @@ func work_position(from: Vector3) -> Vector3:
 		hx = minf(hx, _draw_half_w)
 		if o.z > 0.0:
 			var cx: float = clampf(o.x, -hx, hx)
-			return global_position + Vector3(cx, 0.0, REPAIR_FRONT_EDGE + REPAIR_WORK_PAD)
+			# Перед основанием СДВИНУТОГО рисунка (ТЗ 14.10): иначе ремонтник
+			# стоит за картинкой и его не видно
+			return global_position + Vector3(cx, 0.0, maxf(REPAIR_FRONT_EDGE, _draw_z) + REPAIR_WORK_PAD)
 	var dir: Vector3 = o.normalized()
 	return global_position + dir * (edge_distance(dir) + REPAIR_WORK_PAD)
 
@@ -749,16 +822,19 @@ func _update_hp_bar() -> void:
 	var frac: float = 0.0
 	if max_health > 0.0:
 		frac = clampf(current_health / max_health, 0.0, 1.0)
-	# Тумблер Alt имеет АБСОЛЮТНЫЙ приоритет — см. Unit._update_hp_bar()
-	var forced: bool = GameManager.hp_bars_forced
+	# ── ПОЛОСКА ПОСТРОЙКИ ЖИВЁТ ОТ УРОНА (ТЗ 14.10.2026, п. 5) ─────────────
+	# Появляется с первой раной и висит, пока запас не полон (ремонт рабочими
+	# доводит до 100 % — полоска гаснет). Клавиша Alt больше ни при чём;
+	# флаг hp_bars_forced оставлен стендам — он показывает и целые постройки
+	var show: bool = GameManager.hp_bars_forced or frac < 0.999
 	if _hp_bar_fill == null:
-		if not forced:
+		if not show:
 			return
 		_build_hp_bar()
 		if _hp_bar_fill == null:
 			return
 	if _hp_bar_root:
-		_hp_bar_root.visible = forced
+		_hp_bar_root.visible = show
 	var q := _hp_bar_fill.mesh as QuadMesh
 	if q == null:
 		return
@@ -816,7 +892,10 @@ const MAX_SQUAD_SIZE := _UCfgB.SQUAD_SIZE_HARD_CAP
 ## ЗАКАЗ НАЙМА ПО КОНФИГУ (unit_stats_config.TRAINING[building_id][unit_id]).
 ## Цена, время и размер отряда лежат в одном месте, а не разбросаны по
 ## train_* методам — HUD показывает в карточке ровно те же числа.
-func train_from_config(unit_id: String) -> bool:
+## front — заказ встаёт В ГОЛОВУ очереди (ИИ восстанавливает рабочих после
+## потерь, ТЗ 14.10.2026): текущий заказ отодвигается, его прогресс лежит в
+## его же записи и не теряется
+func train_from_config(unit_id: String, front: bool = false) -> bool:
 	var c: Dictionary = _UCfgB.train_cfg(building_id, unit_id)
 	if c.is_empty():
 		return false
@@ -833,6 +912,9 @@ func train_from_config(unit_id: String) -> bool:
 	var ok := queue_unit(unit_id,
 		_UCfgB.train_cost_discounted(building_id, unit_id, disc),
 		float(c.get("time", 10.0)))
+	if ok and front and production_queue.size() > 1:
+		var order: Dictionary = production_queue.pop_back()
+		production_queue.push_front(order)
 	squad_size = old_size
 	squad_cols = old_cols
 	return ok
@@ -2098,6 +2180,14 @@ func spawn_ruin() -> Node3D:
 	mi.name = "RuinSprite"
 	mi.mesh = quad
 	mi.position.y = quad.size.y * 0.5
+	# Руина лежит там же, где стоял рисунок здания (сдвиг к камере, ТЗ 12.10.2026)
+	mi.position.z = _draw_z
+	# …но глубину пепелище берёт у ЦЕНТРА зоны, а не у сдвинутого рисунка:
+	# руина — декор под ногами, боец на ней рисуется поверх (qa_visual_smoke
+	# «Копейщик на руине»); со сдвигом точка глубины ушла к камере на _draw_z
+	if _draw_z != 0.0:
+		rmat.set_shader_parameter("depth_anchor_on", 1.0)
+		rmat.set_shader_parameter("depth_anchor", global_position)
 	ruin.add_child(mi)
 	var col := CollisionShape3D.new()
 	var box := BoxShape3D.new()
@@ -2120,7 +2210,7 @@ func spawn_ruin() -> Node3D:
 	sbox.size = Vector3(maxf(sw, 0.2), maxf((st - sb) * vs, 0.2), PICK_SLAB_DEPTH)
 	slab.shape = sbox
 	slab.position = Vector3(quad.size.x * (r.position.x + r.size.x * 0.5 - 0.5),
-		(sb + st) * 0.5 * vs, 0.0)
+		(sb + st) * 0.5 * vs, _draw_z)
 	ruin.add_child(slab)
 	parent.add_child(ruin)
 	ruin.global_position = global_position

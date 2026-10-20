@@ -299,14 +299,10 @@ func _run() -> void:
 	var ai = main.goblin_ai
 	verdict("D4 первого контакта на старте не было", ai != null and not bool(ai.first_contact))
 	if ai != null:
-		# Орда увидела игрока: боец игрока у центра отряда орды
-		ai._regroup()
-		var any_sq: Dictionary = {}
-		for s in ai.squads:
-			if not ((s as Dictionary)["members"] as Array).is_empty():
-				any_sq = s
-				break
-		var c: Vector3 = ai._squad_center(any_sq)
+		# Орда увидела игрока: боец игрока у центра отряда охраны (ТЗ 11.10.2026:
+		# стартовой орды нет, на карте с первой секунды — только охрана рудников)
+		var gsid: int = int(ai.guards.keys()[0]) if not ai.guards.is_empty() else 0
+		var c: Vector3 = ai._centre(gsid) if gsid > 0 else ai.village
 		var spy := _spawn("spearman", Constants.FACTION_PLAYER, c + Vector3(6.0, 0.0, 0.0))
 		spy.set_tick(false)
 		await pframes(3)
@@ -323,12 +319,12 @@ func _run() -> void:
 			# Орда «переезжает» в тёмный угол: настоящая деревня к этому моменту
 			# уже освещена бойцами стенда, а проверяется именно ПЕЛЕНА
 			var saved_village: Vector3 = ai.village
-			var saved_squads: Array = ai.squads
-			var saved_mine = ai.mine
+			var saved_guards: Dictionary = ai.guards
+			var saved_mine = GameManager.goblin_mine
 			var dark := Vector3(-150.0, 0.0, 100.0)
 			ai.village = dark
-			ai.squads = []
-			ai.mine = null
+			ai.guards = {}
+			GameManager.goblin_mine = null
 			fog.enabled = true
 			fog.refresh()
 			var dark_before: bool = not bool(fog.is_lit(dark.x, dark.z))
@@ -342,22 +338,18 @@ func _run() -> void:
 				str(dark_before), str(still_no), str(ai.first_contact), ai.horn_blows, hb0 + 2])
 			fog.enabled = false
 			ai.village = saved_village
-			ai.squads = saved_squads
-			ai.mine = saved_mine
+			ai.guards = saved_guards
+			GameManager.goblin_mine = saved_mine
 		verdict("D6б игрок открыл туман над деревней орды — первый контакт", d6b,
 			"горнов %d" % ai.horn_blows)
 		spy.take_damage(1e9)
 		await pframes(2)
-		# Наступление: мир кончился — выход к центру
+		# Волна выходит — горн (ТЗ 11.10.2026: выход волны вожака)
 		var hb1: int = ai.horn_blows
-		ai._awake = true
-		ai.phase = ai.PHASE_PEACE
-		ai.clock = ai._Diff.goblin_peace_sec() + 1.0
-		ai.tick()
-		verdict("D7 выход армии к центру — горн", String(ai.phase) == ai.PHASE_CENTER and ai.horn_blows == hb1 + 1,
-			"фаза %s, горнов %d → %d" % [String(ai.phase), hb1, ai.horn_blows])
-		ai.phase = ai.PHASE_PEACE
-		ai.clock = 0.0
+		var wsid: int = main.spawn_goblin_squad("goblin_spearman", 10, ai.village + Vector3(0.0, 0.0, 30.0))
+		ai._launch("small_b", [wsid])
+		verdict("D7 выход волны — горн", ai.horn_blows == hb1 + 1 and ai.waves.size() >= 1,
+			"волн %d, горнов %d → %d" % [ai.waves.size(), hb1, ai.horn_blows])
 
 	print("\n═════ E. ХОР СМЕХА НАД ВЫБИТЫМ ОТРЯДОМ ═════")
 	var pe := p0 + Vector3(0.0, 0.0, 30.0)
@@ -379,11 +371,16 @@ func _run() -> void:
 	verdict("E1 первый павший из двух — смеха нет", GameManager.laugh_events == le0)
 	(sq_e[1][1] as Unit).take_damage(1e9, gob2)
 	await frames(2)
-	verdict("E2 последний воин отряда погиб от гоблина в его обзоре — хор", GameManager.laugh_events == le0 + 1
-		and AudioManager.laugh_chorus_count == lc0 + 1)
+	# РАЗВОРОТ ТЗ 10.10.2026 (блок 3): смех при убийствах выключен целиком
+	# (goblin_config.LAUGH_ENABLED). Событие по-прежнему считается, хор — нет
+	var _laugh_on: bool = bool(preload("res://scripts/goblin/goblin_config.gd").LAUGH_ENABLED)
+	verdict("E2 последний воин отряда погиб от гоблина в его обзоре — событие; хор только при LAUGH_ENABLED",
+		GameManager.laugh_events == le0 + 1
+		and AudioManager.laugh_chorus_count == lc0 + (1 if _laugh_on else 0))
 	await get_tree().create_timer(0.3).timeout
 	var laughing: int = _cat_playing("goblin_laugh")
-	verdict("E3 все четыре смеха звучат РАЗОМ", laughing == 4, "голосов %d" % laughing)
+	verdict("E3 смех звучит четырьмя голосами разом, а выключенный — молчит",
+		laughing == (4 if _laugh_on else 0), "голосов %d" % laughing)
 	verdict("E4 микро-задержки голосов заданы (эффект толпы)", AudioManager.LAUGH_STAGGER_MAX > 0.0 and AudioManager.LAUGH_STAGGER_MAX <= 0.25)
 	# Рабочий — не воин
 	AudioManager._laugh_last = -999.0

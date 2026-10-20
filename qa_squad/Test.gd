@@ -757,7 +757,9 @@ func _test_ui() -> void:
 	var grp: int = sm.current_group_index()
 	print("  подпись панели: «%s»" % hud.info_label.text)
 	print("  кнопки: %s ; горячая группа: %d" % [str(labels), grp])
-	var has_stances: bool = ("Attack" in labels) and ("Defend" in labels)
+	# РАЗВОРОТ ТЗ 10.10.2026: стойки — это ряд команд A/C/S/F1, а не кнопки
+	# Attack/Defend в сетке
+	var has_stances: bool = _cmd_row_ok()
 	verdict("6 кнопки стоек видны сразу при current_group_index()==-1",
 		has_stances and grp == -1, "кнопки=%s, группа=%d" % [str(labels), grp])
 	# ── ЧИСЛЕННОСТЬ УШЛА ИЗ ПОДПИСИ В БЕЙДЖ ПОРТРЕТА ────────────────────────
@@ -830,7 +832,7 @@ func _test_ui() -> void:
 		"копейщиков=%d, текст «%s», бейдж «%s»" % [spear_men, hud.info_label.text,
 			hud._portrait_count_lbl.text if hud._portrait_count_lbl != null else "—"])
 	verdict("6 стойки доступны и на нескольких отрядах",
-		("Attack" in labels2) and ("Defend" in labels2), "кнопки=%s" % str(labels2))
+		_cmd_row_ok(), "кнопки=%s, ряд команд виден=%s" % [str(labels2), str(hud._squad_cmd_bar.visible)])
 
 	# ── СМЕШАННОЕ ВЫДЕЛЕНИЕ С РАБОЧИМ: стоек быть не должно ──────────────────
 	var worker: Node = null
@@ -1287,3 +1289,18 @@ func _median_xz(pts: Array) -> Vector3:
 	zs.sort()
 	var h: int = xs.size() / 2
 	return Vector3(xs[h], 0.0, zs[h])
+
+## РАЗВОРОТ ТЗ 10.10.2026 (блок 4): ряд команд A · C · S · F1 виден, все
+## четыре кнопки на месте, горит ровно одна
+func _cmd_row_ok() -> bool:
+	var bar = hud._squad_cmd_bar
+	if bar == null or not is_instance_valid(bar) or not bar.visible:
+		return false
+	var lit := 0
+	for k in ["A", "C", "S", "F1"]:
+		var b = hud._squad_cmd_btns.get(k)
+		if b == null or not is_instance_valid(b):
+			return false
+		if bool((b as Button).get_meta("active", false)):
+			lit += 1
+	return lit == 1

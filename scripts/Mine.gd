@@ -422,6 +422,13 @@ func _die() -> void:
 	razed += 1
 	current_health = max_health
 	_update_hp_bar()
+	# ── АТАКУЮЩИЕ ОТПУСКАЮТ РУДНИК (ТЗ 14.10.2026, п. 9) ──────────────────
+	# Рудник не умирает, а сбрасывается в ничейный с полным запасом — и
+	# сигнала гибели прежде не было: стрелки держали его целью вечно и
+	# «зацикливались», осыпая ничейный рудник стрелами (каждый «снос» снова
+	# сбрасывал запас). Подписчик died — только атакующий боец
+	# (Unit._on_attack_target_died): он снимает цель и ищет живую
+	died.emit(self)
 	if f != Constants.FACTION_NEUTRAL:
 		_capture(Constants.FACTION_NEUTRAL)
 	if f == Constants.FACTION_ENEMY or f == Constants.FACTION_GOBLIN:

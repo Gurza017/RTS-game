@@ -3,6 +3,7 @@ class_name Worker
 
 ## Потолок выпаса у замка и прочие числа стада — в конфиге владельца
 const _UCfgW := preload("res://scripts/unit_stats_config.gd")
+const _SpawnW := preload("res://scripts/spawn_config.gd")   # темп добычи красного ИИ
 
 const _SSParser := preload("res://scripts/SpriteSheetParser.gd")
 ## Только ради константы F_WORKING: сами массивы живут полем GameManager.army
@@ -923,6 +924,41 @@ func _face_spot(p: Vector3) -> void:
 	if to.length() > 0.01:
 		_facing = to.normalized()
 
+## ── СВОЙ УГОЛ У ТУШИ (ТЗ 14.10.2026, п. 3) ──────────────────────────────
+## Фермер загона встаёт у овцы на своём месте круга (SheepPen.
+## farm_stand_point), а не там, куда пришёл: иначе вся бригада, идущая от
+## склада, вставала одной дугой с одной стороны. Прочие (кража, пастух,
+## одиночный ПКМ по туше) — прежнее «дошёл на длину руки»
+var _farm_near_t: float = 0.0
+const FARM_STAND_TOL := 0.35
+## Сколько можно толкаться у туши, не попав на угол (занят соседом,
+## расталкивание): дальше работаем оттуда, где стоим
+const FARM_STAND_PATIENCE := 1.2
+
+func _farm_goal(around: Vector3) -> Vector3:
+	var pen: Node3D = farm_pen()
+	if pen == null or not pen.has_method("farm_stand_point"):
+		return around
+	return pen.call("farm_stand_point", self, around)
+
+func _farm_arrived(goal: Vector3, dist_to_sheep: float, delta: float,
+		reach: float = SHEEP_GRAB_DIST) -> bool:
+	if farm_pen() == null:
+		return dist_to_sheep <= reach
+	var g: Vector3 = goal - global_position
+	g.y = 0.0
+	if g.length() <= FARM_STAND_TOL:
+		_farm_near_t = 0.0
+		return true
+	if dist_to_sheep <= reach:
+		_farm_near_t += delta
+		if _farm_near_t >= FARM_STAND_PATIENCE:
+			_farm_near_t = 0.0
+			return true
+	else:
+		_farm_near_t = 0.0
+	return false
+
 func _process_sheep(delta: float) -> void:
 	if _sheep_phase == SheepPhase.WAIT:
 		_process_farm_wait(delta)
@@ -948,7 +984,9 @@ func _process_sheep(delta: float) -> void:
 			var d: Vector3 = _sheep.global_position - global_position
 			d.y = 0.0
 			var dist: float = d.length()
-			if dist <= SHEEP_GRAB_DIST:
+			# Фермер загона идёт на СВОЙ угол у овцы (ТЗ 14.10.2026, п. 3)
+			var goal: Vector3 = _farm_goal(_sheep.global_position)
+			if _farm_arrived(goal, dist, delta):
 				# ── К ЛЕЖАЩЕЙ ТУШЕ — СРАЗУ НОЖ (артель, спринт 19) ───────────
 				if body:
 					if int(_sheep.get("meat_left")) <= 0 or not bool(_sheep.call("butcher_join", self)):
@@ -975,6 +1013,7 @@ func _process_sheep(delta: float) -> void:
 				if bool(_sheep.call("is_owned")):
 					_sheep.call("captured_by", self)
 					_sheep_spot = _sheep.global_position
+					_face_spot(_sheep_spot)
 					_sheep_phase = SheepPhase.KILL
 					_sheep_cut_t = _sheep_cut_sec()
 					state = State.GATHERING
@@ -996,11 +1035,14 @@ func _process_sheep(delta: float) -> void:
 				state = State.RETURNING
 				_wake_process()
 				return
-			move_target = _sheep.global_position
-			var nd: Vector3 = _nav_dir(global_position, move_target, delta, d / maxf(dist, 0.001))
+			move_target = goal
+			var dg: Vector3 = goal - global_position
+			dg.y = 0.0
+			var distg: float = maxf(dg.length(), 0.001)
+			var nd: Vector3 = _nav_dir(global_position, move_target, delta, dg / distg)
 			_facing = nd
 			velocity = nd * move_speed
-			_tick_stuck(delta, dist)
+			_tick_stuck(delta, distg)
 			_move_blocked(velocity * delta)
 		SheepPhase.CARRY:
 			if _sheep_dest_node == null or not is_instance_valid(_sheep_dest_node):
@@ -1182,7 +1224,8 @@ func _process_sheep(delta: float) -> void:
 			var db: Vector3 = _sheep_spot - global_position
 			db.y = 0.0
 			var distb: float = db.length()
-			if distb <= SHEEP_GRAB_DIST + SHEEP_BACK_PAD:
+			var goalb: Vector3 = _farm_goal(_sheep_spot)
+			if _farm_arrived(goalb, distb, delta, SHEEP_GRAB_DIST + SHEEP_BACK_PAD):
 				velocity = Vector3.ZERO
 				var to_body: Vector3 = _sheep_spot - global_position
 				to_body.y = 0.0
@@ -1193,17 +1236,25 @@ func _process_sheep(delta: float) -> void:
 				state = State.GATHERING
 				_wake_process()
 				return
-			var ndb: Vector3 = _nav_dir(global_position, _sheep_spot, delta, db / maxf(distb, 0.001))
+			var dgb: Vector3 = goalb - global_position
+			dgb.y = 0.0
+			var distgb: float = maxf(dgb.length(), 0.001)
+			var ndb: Vector3 = _nav_dir(global_position, goalb, delta, dgb / distgb)
 			_facing = ndb
 			velocity = ndb * move_speed
-			_tick_stuck(delta, distb)
+			_tick_stuck(delta, distgb)
 			_move_blocked(velocity * delta)
 
 # Зовёт ConstructionSite, когда здание достроено
-func on_construction_finished() -> void:
+## stand — куда выйти из-за рисунка готового здания (ConstructionSite.
+## front_stands); Vector3.INF — стоять где стоял
+func on_construction_finished(stand: Vector3 = Vector3.INF) -> void:
 	build_target = null
 	state = State.IDLE
 	if _advance_build_queue():
+		return
+	if stand != Vector3.INF:
+		super.command_move(stand)
 		return
 	_wake_process()
 
@@ -1645,6 +1696,11 @@ func _cycle_time() -> float:
 		if pct > 0.0:
 			t *= 1.0 - minf(pct, _UCfgW.GATHER_PCT_CAP)
 	t -= GameManager.unit_bonus(faction, stat_id, "bonus_gather") + vet_gather
+	# ── АГРЕССИВНЫЙ СБОР КРАСНОГО (ТЗ 14.10.2026, п. 2) ─────────────────────
+	# Рабочие ИИ собирают быстрее — множитель к циклу, а не вторая таблица
+	# темпов: ветки кузницы и ветеранство действуют поверх него как у всех
+	if faction == Constants.FACTION_ENEMY:
+		t *= _SpawnW.AI_GATHER_CYCLE_MULT
 	return maxf(t, MIN_CYCLE_TIME)
 
 ## ── ЛЕСОРУБ СТЕНЫ ИДЁТ НАПРЯМИК (ТЗ 24.09.2026, п. 13) ─────────────────────
@@ -1682,7 +1738,7 @@ func nominal_income_per_sec() -> float:
 	if res < 0:
 		return 0.0
 	if res == Constants.RESOURCE_FOOD:
-		return _UCfgW.MEAT_PER_SEC_TARGET if (_sheep_phase != SheepPhase.NONE or farm_pen() != null) else 0.0
+		return farmer_meat_per_sec(faction) if (_sheep_phase != SheepPhase.NONE or farm_pen() != null) else 0.0
 	var arm: float = INCOME_NOMINAL_ARM
 	if gather_target != null and is_instance_valid(gather_target):
 		var gp: Vector3 = gather_target.global_position
@@ -1696,14 +1752,25 @@ func nominal_income_per_sec() -> float:
 	var trip: float = arm / maxf(walk_speed_empty * wk, 0.5) + arm / maxf(walk_speed_loaded * wkl, 0.5)
 	return carry_capacity() / maxf(_cycle_time() + trip, 0.5)
 
+## РАСЧЁТНОЕ МЯСО С ОДНОГО ФЕРМЕРА в секунду с учётом кузницы (ТЗ 12.10.2026):
+## ветка «Мясо» (bonus_gather_food) срезает время разделки долей — темп растёт
+## как 1 / (1 − доля). Читают панель загона и приток еды на плашке
+static func farmer_meat_per_sec(f: int) -> float:
+	var pct: float = GameManager.unit_bonus(f, "worker", "bonus_gather_food")
+	return _UCfgW.MEAT_PER_SEC_TARGET / maxf(1.0 - clampf(pct, 0.0, _UCfgW.GATHER_PCT_CAP), 0.1)
+
 ## Сколько ресурса рабочий уносит за одну ходку. База из конфига плюс ветка
 ## вместимости в кузнице (bonus_carry)
 func carry_capacity() -> float:
 	# Груз — ДОЛЕЙ от базового (ТЗ 24.09.2026, п. 11: «всё в процентах»);
 	# прежний штучный bonus_carry оставлен сложением для старых сохранений
-	return maxf(1.0, gather_amount
-		* (1.0 + GameManager.unit_bonus(faction, stat_id, "bonus_carry_pct"))
-		+ GameManager.unit_bonus(faction, stat_id, "bonus_carry"))
+	var cap: float = gather_amount \
+		* (1.0 + GameManager.unit_bonus(faction, stat_id, "bonus_carry_pct")) \
+		+ GameManager.unit_bonus(faction, stat_id, "bonus_carry")
+	# Рабочие красного носят больше (ТЗ 14.10.2026, п. 2; см. _cycle_time)
+	if faction == Constants.FACTION_ENEMY:
+		cap *= _SpawnW.AI_GATHER_CARRY_MULT
+	return maxf(1.0, cap)
 
 ## Время одного удара ножом при разделке: ветка «Мясо» — доля долой
 ## (bonus_gather_food, потолок тот же GATHER_PCT_CAP)

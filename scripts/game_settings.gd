@@ -201,3 +201,65 @@ static func armistice() -> bool:
 static func set_armistice(on: bool) -> void:
 	_armistice = on
 	save_view_settings()
+
+## ═══════════════════════════════════════════════════════════════════════════
+## АВТОСОХРАНЕНИЕ (ТЗ 13.10.2026, письмо 7)
+## ═══════════════════════════════════════════════════════════════════════════
+## Интервал автосохранения в МИНУТАХ: 0 — выключено, иначе одно из
+## AUTOSAVE_CHOICES. Живёт в user://settings.cfg (имя по ТЗ), секция
+## [gameplay]; читается лениво тем же порядком, что ручки вида: партия может
+## стартовать и без меню (стенды, --path прямо в Main.tscn). Сам таймер и
+## запись — scripts/Autosave.gd (узел Main.autosave), слот —
+## SaveLoadManager.AUTOSAVE_SLOT, файл один и перезаписывается
+const SETTINGS_CFG := "user://settings.cfg"
+const AUTOSAVE_CHOICES := [0, 5, 10, 15]
+const AUTOSAVE_LABELS := ["Выключено", "5 минут", "10 минут", "15 минут"]
+## Умолчание — 10 минут: ТЗ пришло после вылета на 45-й минуте, и партия без
+## единого автосохранения — ровно то, от чего эта система заведена
+const AUTOSAVE_DEFAULT_MIN := 10
+
+static var _autosave_loaded: bool = false
+static var _autosave_min: int = AUTOSAVE_DEFAULT_MIN
+
+static func load_settings() -> void:
+	_autosave_loaded = true
+	var cfg := ConfigFile.new()
+	if cfg.load(SETTINGS_CFG) != OK:
+		return
+	_autosave_min = normalize_autosave(int(cfg.get_value("gameplay", "autosave_minutes", _autosave_min)))
+
+static func save_settings() -> void:
+	var cfg := ConfigFile.new()
+	# Файл перечитывается перед записью: другие секции (если появятся) не
+	# должны стираться записью одной ручки
+	cfg.load(SETTINGS_CFG)
+	cfg.set_value("gameplay", "autosave_minutes", _autosave_min)
+	cfg.save(SETTINGS_CFG)
+
+## Чужое число (правка файла руками) схлопывается в ближайший допустимый
+## вариант, а не ломает список в меню
+static func normalize_autosave(minutes: int) -> int:
+	if minutes in AUTOSAVE_CHOICES:
+		return minutes
+	if minutes <= 0:
+		return 0
+	var best: int = int(AUTOSAVE_CHOICES[1])
+	for c in AUTOSAVE_CHOICES:
+		if int(c) > 0 and absi(int(c) - minutes) < absi(best - minutes):
+			best = int(c)
+	return best
+
+static func autosave_minutes() -> int:
+	if not _autosave_loaded:
+		load_settings()
+	return _autosave_min
+
+static func set_autosave_minutes(minutes: int) -> void:
+	_autosave_min = normalize_autosave(minutes)
+	_autosave_loaded = true
+	save_settings()
+
+## Номер варианта в списке меню для текущего значения
+static func autosave_choice_index() -> int:
+	var i: int = AUTOSAVE_CHOICES.find(autosave_minutes())
+	return maxi(i, 0)

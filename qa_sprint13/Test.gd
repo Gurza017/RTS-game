@@ -549,13 +549,17 @@ func _f_abilities() -> void:
 	for _i in range(Warrior.RAGE_HITS):
 		seq.append(w._strike_damage() > (w.attack_damage + strong) * 0.5)
 	print("  серия набега (true = мощный): %s" % str(seq))
-	verdict("F7 серия ровно «обычный-мощный-обычный-мощный-обычный»",
-		seq == [false, true, false, true, false], str(seq))
+	# Длина серии — RAGE_HITS (ТЗ 12.10.2026: 10), ритм — чередование
+	var want_seq: Array = []
+	for i in range(Warrior.RAGE_HITS):
+		want_seq.append(i % 2 == 1)
+	verdict("F7 серия — чередование «обычный-мощный-…» на RAGE_HITS ударов",
+		seq == want_seq, str(seq))
 	verdict("F8 серия исчерпана — набег кончился", not w.rage_active(),
 		"осталось %d" % w.rage_left())
 	verdict("F9 после набега ротация вернулась к обычной 3+1",
 		int(w.rage_hits_done) == Warrior.RAGE_HITS
-			and int(w.rage_strong_done) == 2,
+			and int(w.rage_strong_done) == Warrior.RAGE_HITS / 2,
 		"ударов %d, мощных %d" % [int(w.rage_hits_done), int(w.rage_strong_done)])
 
 	# ── НАТИСК ФАЛАНГИ ───────────────────────────────────────────────────

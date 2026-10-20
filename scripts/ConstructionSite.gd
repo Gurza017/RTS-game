@@ -222,12 +222,17 @@ func _build_site_sprite() -> bool:
 	# в долю — BUILDINGS[*].construction_scale, по умолчанию 1.0
 	quad.size = sprite_quad_size(tex, build_size) \
 		* _UCfg.building_stat(target_id, "construction_scale", 1.0)
-	quad.material = _BBUtil2.make_static_material(tex)
+	quad.material = _BBUtil2.make_building_material(tex)
 	_site_sprite = MeshInstance3D.new()
 	_site_sprite.name = "ConstructionSprite"
 	_site_sprite.mesh = quad
 	# Низ на грунте, как у любой постройки (см. Building._maybe_load_building_sprite)
 	_site_sprite.position.y = quad.size.y * 0.5
+	# Стройка стоит там же, где встанет рисунок готового здания (ТЗ 12.10.2026)
+	_site_sprite.position.z = Building.front_shift_for(String(target_id), tex, quad)
+	# Передняя стена для строителей — основание СДВИНУТОГО рисунка (ТЗ 14.10):
+	# у FRONT_EDGE 0.6 рабочий стоял за картинкой, под её глубиной
+	_draw_z = _site_sprite.position.z
 	add_child(_site_sprite)
 	_site_tex = tex
 	# Обмер рисунка — для точек стояния строителей (edge_distance): нарисованный
@@ -269,7 +274,7 @@ func edge_distance(dir: Vector3) -> float:
 	if _draw_half_w >= 0.0:
 		hx = minf(hx, _draw_half_w)
 		if dir.z > 0.0:
-			hz = minf(hz, FRONT_EDGE)
+			hz = maxf(FRONT_EDGE, _draw_z)
 	var dx: float = absf(dir.x)
 	var dz: float = absf(dir.z)
 	var n: float = sqrt(dx * dx + dz * dz)
@@ -299,7 +304,7 @@ func work_position(from: Vector3) -> Vector3:
 		hx = minf(hx, _draw_half_w)
 		if o.z > 0.0:
 			var cx: float = clampf(o.x, -hx, hx)
-			return global_position + Vector3(cx, 0.0, FRONT_EDGE + WORK_PAD)
+			return global_position + Vector3(cx, 0.0, maxf(FRONT_EDGE, _draw_z) + WORK_PAD)
 	var dir: Vector3 = o.normalized()
 	return global_position + dir * (edge_distance(dir) + WORK_PAD)
 
@@ -348,12 +353,67 @@ func _complete() -> void:
 		parent.add_child(made)
 		made.global_position = pos
 		built.emit(made)
-	# Рабочих отпускаем: стройка кончилась, пусть возвращаются к делам
+	# Рабочих отпускаем: стройка кончилась, пусть возвращаются к делам.
+	# Кто стоял ЗА рисунком готового здания — выходит на линию перед ним
+	# (ТЗ 14.10.2026, п. 1: «после постройки замка рабочих не видно»)
+	var live: Array = []
 	for b in _builders:
-		if is_instance_valid(b) and b.has_method("on_construction_finished"):
-			b.on_construction_finished()
+		if is_instance_valid(b):
+			live.append(b)
+	# Идущие к стройке (ещё не встали в артель) — тоже: их цель исчезает, и
+	# встали бы они там, где их застал конец стройки, — часто за рисунком
+	for w in get_tree().get_nodes_in_group(Constants.unit_group(f)):
+		if w == null or not is_instance_valid(w) or not (w is Worker) or live.has(w):
+			continue
+		if (w as Worker).build_target == self:
+			live.append(w)
+	var stands: Dictionary = front_stands(made, live) if made != null else {}
+	for b in live:
+		if b.has_method("on_construction_finished"):
+			b.on_construction_finished(stands.get(b, Vector3.INF))
 	_builders.clear()
 	queue_free()
+
+## ── ЛИНИЯ ПЕРЕД ГОТОВЫМ ЗДАНИЕМ (ТЗ 14.10.2026, п. 1) ──────────────────────
+## Рисунок постройки сдвинут к камере (Building._draw_z), и рабочий, стучавший
+## у задней или боковой стены коробки, после закладки готового здания
+## оказывается ЗА картинкой: на скриншоте у достроенной крепости виден один
+## рабочий из пяти. Спрятанных (позади линии основания рисунка и в пределах
+## его ширины с запасом) ставим в ряд перед основанием, по порядку их X —
+## пути не пересекаются; кто и так виден, остаётся на месте.
+## Ответ: рабочий → точка; кого не трогаем, в словаре нет
+const FRONT_STAND_GAP := 1.3     # от основания рисунка к камере, м
+const FRONT_STAND_STEP := 0.9    # шаг рабочих в ряду, м
+const FRONT_HIDE_PAD := 0.6      # запас ширины рисунка: край силуэта тоже прячет
+
+static func front_stands(bld: Building, workers: Array) -> Dictionary:
+	var out: Dictionary = {}
+	if bld == null or not is_instance_valid(bld) or bld._draw_half_w < 0.0:
+		return out
+	var o: Vector3 = bld.global_position
+	var cx: float = o.x + bld._draw_cx
+	var hw: float = bld._draw_half_w
+	var line_z: float = o.z + bld._draw_z
+	var hidden: Array = []
+	for w in workers:
+		if w == null or not is_instance_valid(w) or not (w is Node3D):
+			continue
+		var p: Vector3 = (w as Node3D).global_position
+		if p.z < line_z + 0.3 and absf(p.x - cx) < hw + FRONT_HIDE_PAD:
+			hidden.append(w)
+	if hidden.is_empty():
+		return out
+	hidden.sort_custom(func(a, b): return (a as Node3D).global_position.x < (b as Node3D).global_position.x)
+	var per_row: int = maxi(1, int(floor(hw * 2.0 / FRONT_STAND_STEP)) + 1)
+	var n: int = hidden.size()
+	for i in range(n):
+		var row: int = i / per_row
+		var in_row: int = mini(per_row, n - row * per_row)
+		var k: int = i - row * per_row
+		var x: float = cx + (float(k) - float(in_row - 1) * 0.5) * FRONT_STAND_STEP
+		var z: float = line_z + FRONT_STAND_GAP + float(row) * FRONT_STAND_STEP
+		out[hidden[i]] = Vector3(x, o.y, z)
+	return out
 
 ## ── ФАБРИКА ЗДАНИЙ ОДНА НА ПРОЕКТ ─────────────────────────────────────────
 ## Мгновенная постройка (unit_stats_config `instant_build`) обходит стадию

@@ -399,7 +399,8 @@ func _e_pen_well() -> void:
 	await pframes(4)
 
 	verdict("E1 в загоне ровно %d мест" % _UCfg.SHEEP_PEN_CAPACITY,
-		pen.capacity() == _UCfg.SHEEP_PEN_CAPACITY and _UCfg.SHEEP_PEN_CAPACITY == 5,
+		# ТЗ 12.10.2026 (третье письмо): 10 мест (было 5)
+		pen.capacity() == _UCfg.SHEEP_PEN_CAPACITY and _UCfg.SHEEP_PEN_CAPACITY == 10,
 		"мест %d" % pen.capacity())
 
 	# ── ЗАГОН НАПОЛНЯЕТСЯ САМ ────────────────────────────────────────────

@@ -122,7 +122,20 @@ const UI_BANK := {
 	# play_ui выходит на пустом имени, а окно повтора и громкость берёт
 	# отсюда же, как у всех прочих событий
 	"order_move":  ORDER_CLICK_ID,
+	# ── ТЗ 10.10.2026, блок 3 ────────────────────────────────────────────
+	# Attack-Move: НИЗКИЙ ОБЪЁМНЫЙ щелчок (процедурный, стерео со сдвигом
+	# каналов — «объём» без ревербератора). Взвод [A] и приказ — он же
+	"order_attack_move": ATTACK_CLICK_ID,
+	# Менюшные щелчки: вкладки кузницы и Tab по родам, кнопки режимов,
+	# закрытие панели здания. Файлы — из той же папки интерфейса
+	"menu_tab":    "click1.ogg",
+	"menu_button": "click3.ogg",
+	"menu_close":  MENU_CLOSE_ID,
 }
+
+## Процедурные щелчки ТЗ 10.10.2026 (см. _proc_click_stream)
+const ATTACK_CLICK_ID := "@proc_attack_click"
+const MENU_CLOSE_ID := "@proc_menu_close"
 
 ## Имя-метка процедурного щелчка. Не «res://…» и не имя файла: в ui_path оно
 ## превратилось бы в DIR_UI + метка, то есть в заведомо отсутствующий путь —
@@ -144,6 +157,10 @@ const UI_LIMITS := {
 	# отдаются десятками в минуту, и щелчок такой частоты обязан быть на
 	# грани слышимости — иначе он перекроет бой, ради которого его и жмут
 	"order_move":    {"gap": 0.04, "db": -13.0},
+	"order_attack_move": {"gap": 0.06, "db": -8.0},
+	"menu_tab":      {"gap": 0.04, "db": -9.0},
+	"menu_button":   {"gap": 0.04, "db": -10.0},
+	"menu_close":    {"gap": 0.08, "db": -10.0},
 }
 
 ## ── ПОЧЕМУ У ИНТЕРФЕЙСА СВОИ ГОЛОСА, А НЕ ОБЩИЙ ПУЛ ─────────────────────────
@@ -311,7 +328,8 @@ const MARCH_VOICES := 2
 ## вернуть, но в границах 5-10 %. Питч по-прежнему тянет и высоту тона, и
 ## именно поэтому число меньше прежнего: на 8 % сапоги слышны как «пошли
 ## в ногу», а не как ускоренная плёнка. Единица возвращает чистый луп
-const MARCH_WALK_PITCH := 1.08
+## ТЗ 10.10.2026: шаг пехоты +15 % быстрее — темп у верхней границы 5-10 %
+const MARCH_WALK_PITCH := 1.10
 ## ── БЕГ ЗВУЧИТ БЫСТРЕЕ ШАГА (заказ владельца) ────────────────────────────
 ## Применяется ТОЛЬКО к беговому лупу и ТОЛЬКО потому, что его об этом
 ## просили: у бега свой сэмпл, и он уже несёт свою поступь. Питч тянет не
@@ -1873,36 +1891,49 @@ func _big_step_stream(id: String) -> AudioStream:
 	var have: Variant = _big_step.get(id)
 	if have != null:
 		return have
-	# Две ноты: первая нога ниже второй. Скольжение вниз — та же доля у обеих
-	var f0: float = 64.0 if id == BIG_STEP_ID_A else 72.0
-	var f1: float = f0 * 0.75
-	var n: int = int(BIG_STEP_HZ * BIG_STEP_SEC_LEN)
+	# ── ШАГ ПО ЗЕМЛЕ, А НЕ ТОН (ТЗ 12.10.2026: «звук кастрюли») ───────────
+	# Прежний шаг был СИНУСОМ 64/72 Гц со спадом: чистый тон на мелких
+	# динамиках раскрывается обертонами и читается как удар по кастрюле,
+	# повторённый раз в 1.45 с метрономом. Теперь основа — БУРЫЙ ШУМ
+	# (проинтегрированный белый, сглаженный двумя полюсами): глухое «тх» земли
+	# под тяжёлой ступнёй; под ним — короткий низ без высоты (полпериода
+	# 45 Гц), который даёт вес, но не ноту. Ноги различает зерно шума и длина
+	var foot_b: bool = id == BIG_STEP_ID_B
+	var n: int = int(BIG_STEP_HZ * (BIG_STEP_SEC_LEN if not foot_b else BIG_STEP_SEC_LEN * 0.85))
 	var data := PackedByteArray()
 	data.resize(n * 2)
 	var tail_from: int = int(float(n) * (1.0 - BIG_STEP_TAIL))
 	# ШУМ БЕРЁТСЯ ИЗ СВОЕГО ГЕНЕРАТОРА, А НЕ ИЗ randf(): партия сеется, и
 	# лишний жребий в общем потоке сдвинул бы ВСЕ прочие (см. CLAUDE.md)
 	var nrng := RandomNumberGenerator.new()
-	nrng.seed = 20260923 if id == BIG_STEP_ID_A else 20260924
-	var phase := 0.0
+	nrng.seed = 20261012 if not foot_b else 20261013
+	var brown := 0.0
+	var lp1 := 0.0
+	var lp2 := 0.0
+	var peak := 0.0
+	var buf := PackedFloat32Array()
+	buf.resize(n)
 	for i in range(n):
 		var t: float = float(i) / float(BIG_STEP_HZ)
-		var k: float = t / BIG_STEP_SEC_LEN
-		# Мгновенная частота ползёт вниз — фаза копится, а не считается от t
-		phase += TAU * lerpf(f0, f1, k) / float(BIG_STEP_HZ)
+		brown = clampf(brown * 0.995 + nrng.randf_range(-1.0, 1.0) * 0.12, -1.0, 1.0)
+		lp1 += (brown - lp1) * 0.18
+		lp2 += (lp1 - lp2) * 0.18
 		var env: float = 0.0
-		if t < BIG_STEP_ATTACK:
-			# Атака по синусной четверти: без излома на стыке с спадом
-			env = sin(t / BIG_STEP_ATTACK * PI * 0.5)
+		if t < BIG_STEP_ATTACK * 0.4:
+			env = sin(t / (BIG_STEP_ATTACK * 0.4) * PI * 0.5)
 		else:
-			env = exp(-BIG_STEP_DECAY * (t - BIG_STEP_ATTACK))
+			env = exp(-BIG_STEP_DECAY * 1.4 * (t - BIG_STEP_ATTACK * 0.4))
 		if i >= tail_from:
 			env *= float(n - i) / float(maxi(n - tail_from, 1))
-		var w: float = sin(phase)
-		# Шум гаснет вчетверо быстрее тона: это касание, а не шипение
-		w += BIG_STEP_NOISE * nrng.randf_range(-1.0, 1.0) * exp(-4.0 * BIG_STEP_DECAY * t)
-		var v: int = clampi(int(w * env * 0.70 * 32767.0), -32767, 32767)
-		data.encode_s16(i * 2, v)
+		var w: float = lp2 * env
+		# Вес без ноты: одна полуволна 45 Гц в первые 11 мс
+		if t < 0.011:
+			w += 0.35 * sin(t / 0.011 * PI)
+		buf[i] = w
+		peak = maxf(peak, absf(w))
+	var g: float = 0.70 / maxf(peak, 1e-4)
+	for i in range(n):
+		data.encode_s16(i * 2, clampi(int(buf[i] * g * 32767.0), -32767, 32767))
 	var w_stream := AudioStreamWAV.new()
 	w_stream.format = AudioStreamWAV.FORMAT_16_BITS
 	w_stream.mix_rate = BIG_STEP_HZ
@@ -1935,6 +1966,53 @@ func _order_click_stream() -> AudioStream:
 	_order_click = w_stream
 	return _order_click
 
+## ── ПРОЦЕДУРНЫЕ ЩЕЛЧКИ ТЗ 10.10.2026 ──────────────────────────────────────
+## Attack-Move — низкий «тук» (140 + 210 Гц, мягкая атака, хвост 0.17 с) в
+## СТЕРЕО: правый канал опаздывает на 9 мс (эффект Хааса) — звук шире, а не
+## громче. Закрытие панели — короткий нисходящий тон 520 → 300 Гц
+var _proc_clicks: Dictionary = {}
+
+func _proc_click_stream(id: String) -> AudioStream:
+	var have: Variant = _proc_clicks.get(id)
+	if have != null:
+		return have
+	var hz: int = 22050
+	var attack: bool = id == ATTACK_CLICK_ID
+	var sec: float = 0.17 if attack else 0.07
+	var n: int = int(float(hz) * sec)
+	var lag: int = int(0.009 * float(hz)) if attack else 0
+	var mono := PackedFloat32Array()
+	mono.resize(n)
+	var ph1 := 0.0
+	var ph2 := 0.0
+	for i in range(n):
+		var t: float = float(i) / float(hz)
+		var env: float
+		if attack:
+			env = minf(t / 0.004, 1.0) * exp(-22.0 * t)
+			ph1 += TAU * 140.0 / float(hz)
+			ph2 += TAU * 210.0 / float(hz)
+			mono[i] = (sin(ph1) + 0.45 * sin(ph2) + 0.12 * sin(ph1 * 3.0)) * env * 0.62
+		else:
+			env = minf(t / 0.002, 1.0) * exp(-45.0 * t)
+			var f: float = lerpf(520.0, 300.0, t / sec)
+			ph1 += TAU * f / float(hz)
+			mono[i] = (sin(ph1) + 0.25 * sin(ph1 * 2.0)) * env * 0.55
+	var data := PackedByteArray()
+	data.resize(n * 4)
+	for i in range(n):
+		var l: float = mono[i]
+		var r: float = mono[i - lag] if i >= lag else 0.0
+		data.encode_s16(i * 4, clampi(int(l * 32767.0), -32767, 32767))
+		data.encode_s16(i * 4 + 2, clampi(int(r * 32767.0), -32767, 32767))
+	var w := AudioStreamWAV.new()
+	w.format = AudioStreamWAV.FORMAT_16_BITS
+	w.mix_rate = hz
+	w.stereo = true
+	w.data = data
+	_proc_clicks[id] = w
+	return w
+
 func _stream(path: String) -> AudioStream:
 	# ПРОЦЕДУРНЫЕ ЗВУКИ ПЕРЕХВАТЫВАЮТСЯ ЗДЕСЬ, А НЕ У КАЖДОГО ВЫЗЫВАЮЩЕГО:
 	# сюда сходятся ВСЕ пути загрузки (бой, интерфейс, предзагрузка банка), и
@@ -1945,6 +2023,8 @@ func _stream(path: String) -> AudioStream:
 			return _big_step_stream(path)
 		if path == ORDER_CLICK_ID:
 			return _order_click_stream()
+		if path == ATTACK_CLICK_ID or path == MENU_CLOSE_ID:
+			return _proc_click_stream(path)
 		return null
 	if _streams.has(path):
 		return _streams[path]

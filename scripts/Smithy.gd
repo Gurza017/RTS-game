@@ -113,6 +113,20 @@ func cancel_research(upgrade_id: String) -> bool:
 		return true
 	return false
 
+## СНЕСЛИ ПОСРЕДИ ИССЛЕДОВАНИЯ (ТЗ 11.10.2026): все заказы этой кузницы
+## снимаются с полным возвратом. Иначе отметка «в работе» в GameManager
+## переживала здание, и новая кузница показывала слот «В очереди (-1)» —
+## ни заказать, ни отменить
+func _die() -> void:
+	if not _dead:
+		for id in queued_ids():
+			GameManager.cancel_research(faction, String(id))
+		research_queue.clear()
+		research_id = ""
+		research_time = 0.0
+		research_timer = 0.0
+	super._die()
+
 ## Место слота в очереди: 0 — исследуется сейчас, 1.. — ждёт, -1 — не заказан
 func queue_position(upgrade_id: String) -> int:
 	if upgrade_id == research_id:

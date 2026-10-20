@@ -23,6 +23,10 @@
 // который уже разбирает SpriteSheetParser, новый арт не нужен.
 shader_type spatial;
 render_mode unshaded, cull_disabled, depth_draw_opaque;
+// ВИДИМЫЙ боец стирает метку здания в трафарете (ТЗ 14.10.2026, п. 1):
+// силуэт сквозь постройку (mm_unit_ghost) рисуется только там, где метка
+// осталась, — то есть где здание действительно закрывает бойца
+stencil_mode write, compare_always, 0;
 
 uniform sampler2D albedo_tex : source_color, filter_nearest;
 uniform float frame_count = 1.0;
@@ -98,6 +102,10 @@ uniform float depth_lift = 0.35;
 // собственной точки, и это безопасное умолчание для всех, кто ручку не ставит
 uniform float foot_drop = 0.0;
 varying float v_base_vz;
+// Мировая точка вершины и высота земли под бойцом — для пикселей НИЖЕ ног
+// (наконечник копья в листе «вниз», ТЗ 12.10.2026)
+varying vec3 v_wpos;
+varying float v_ground_y;
 
 void vertex() {
 	v_pulse_phase = MODEL_MATRIX[3].x * 0.7 + MODEL_MATRIX[3].z * 1.3;
@@ -130,6 +138,8 @@ void vertex() {
 	vec3 ground_world = MODEL_MATRIX[3].xyz - vec3(0.0, foot_drop * scl.y, 0.0);
 	// Вид смотрит вдоль -Z, поэтому «ближе к камере» — это ПЛЮС (см. depth_lift)
 	v_base_vz = (VIEW_MATRIX * vec4(ground_world, 1.0)).z + depth_lift;
+	v_wpos = (world * vec4(VERTEX, 1.0)).xyz;
+	v_ground_y = ground_world.y;
 }
 
 // ── ВПЕЧАТАННАЯ В АРТ ТЕНЬ ПОД НОГАМИ СМЕШИВАЕТСЯ С ЦВЕТОМ ЗЕМЛИ ────────────
@@ -337,7 +347,22 @@ void fragment() {
 	// Стоит ПОСЛЕ обеих веток (тень и сам боец): глубина у них одна, а различие
 	// только в цвете. Разбор — в cyl_billboard.gdshader
 	if (ground_depth > 0.5) {
-		vec4 dc = PROJECTION_MATRIX * vec4(0.0, 0.0, v_base_vz, 1.0);
+		// ── НИЖЕ НОГ — ГЛУБИНА ЗЕМЛИ ПОД ЭТИМ ПИКСЕЛЕМ (ТЗ 12.10.2026) ─────
+		// Лист «вниз» рисует наконечник копья НИЖЕ подошвы (к зрителю). С
+		// глубиной точки под ногами земля перед бойцом (она ближе к камере)
+		// закрывала всё, что ниже ног, — «спиленные палки». Пиксель ниже ног
+		// берёт глубину той точки грунта, которую он закрывает на экране
+		// (луч камеры через пиксель до плоскости земли), и не дальше точки ног
+		float vz = v_base_vz;
+		if (v_wpos.y < v_ground_y) {
+			vec3 cam = CAMERA_POSITION_WORLD;
+			vec3 dir = v_wpos - cam;
+			if (dir.y < -1e-4) {
+				vec3 hit = cam + dir * ((v_ground_y - cam.y) / dir.y);
+				vz = max(vz, (VIEW_MATRIX * vec4(hit, 1.0)).z + depth_lift);
+			}
+		}
+		vec4 dc = PROJECTION_MATRIX * vec4(0.0, 0.0, vz, 1.0);
 		DEPTH = (dc.z / dc.w) * 0.5 + 0.5;
 	}
 }

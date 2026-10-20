@@ -173,7 +173,7 @@ const UNITS := {
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	# ── ЯРОСТНАЯ АТАКА (заказ спринта 13, переименована ТЗ-B 19.09.2026) ───
 	"1d": {"icon": "icon_dual_sword.png", "prereq": [], "link": [],
-		"name": "Яростная Атака", "desc": "Двойной ПКМ: рывок под щитами и серия из 5 быстрых ударов; после рывка мечники сами вступают в бой с ближайшим врагом",
+		"name": "Яростная Атака", "desc": "Двойной ПКМ: рывок под щитами и серия из 10 быстрых ударов (15 с «Неистовством»), затем обычный темп; после рывка мечники сами вступают в бой с ближайшим врагом",
 		"cost_gold": 200.0, "cost_wood": 300.0, "cost_stone": 0.0, "research_time": 25.0, "squad_unlock_cost": 400.0,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
@@ -239,19 +239,20 @@ const UNITS := {
 		"bonus_health": 16.0, "bonus_speed": 0.0, "bonus_range": 0.0,
 		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
-	# ── НЕИСТОВСТВО — прокачка «Яростной Атаки»: +2 удара (итого 7) ───────
+	# ── НЕИСТОВСТВО — прокачка «Яростной Атаки»: +5 ударов (итого 15, ТЗ 12.10.2026)
 	"3d": {"icon": "icon_dual_sword.png", "prereq": ["2d"], "link": [],
-		"name": "Неистовство", "desc": "«Яростная Атака»: серия длиннее на 2 удара (5 → 7)",
+		"name": "Неистовство", "desc": "«Яростная Атака»: серия длиннее на 5 ударов (10 → 15)",
 		"cost_gold": 507.5, "cost_wood": 710.5, "cost_stone": 203.0, "research_time": 45.0,
-		"bonus_rage_hits": 2.0,
+		"bonus_rage_hits": 5.0,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
 		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
 		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"4a": {"icon": "icon_trader.png", "prereq": ["3a"], "link": [],
-		"name": "Обозы", "desc": "+16 к морали",
-		"cost_gold": 988.0, "cost_wood": 1235.0, "cost_stone": 370.5, "research_time": 60.0,
+		"name": "Муштра мечников", "desc": "Найм мечников вдвое быстрее (−50 % времени), +16 к морали",
+		"cost_gold": 2400.0, "cost_wood": 2800.0, "cost_stone": 600.0, "research_time": 60.0,
+		"bonus_train": 1.0,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
 		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
@@ -309,9 +310,9 @@ const UNITS := {
 		"bonus_morale": 16.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	# ── КРОВЬ БЕРСЕРКА — раненый мечник бьёт сильнее ─────────────────────
 	"5d": {"icon": "icon_demon.png", "prereq": ["4d"], "link": [],
-		"name": "Кровь берсерка", "desc": "При запасе ниже половины удары мечника сильнее на 25 %",
+		"name": "Кровь берсерка", "desc": "«Яростная Атака»: серия 20 стремительных ударов (15 → 20), затем обычный темп; при запасе ниже половины удары сильнее на 25 %",
 		"cost_gold": 1440.0, "cost_wood": 1872.0, "cost_stone": 576.0, "research_time": 75.0,
-		"bonus_berserk": 0.25,
+		"bonus_berserk": 0.25, "bonus_rage_hits": 5.0,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
 		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
@@ -345,7 +346,7 @@ const UNITS := {
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	# ── СПРИНТ 18: «СТЕНА КОПИЙ» — режим-переключатель (как залп у лучников).
 	"1d": {"icon": "icon_trap_spikes.png", "prereq": [], "link": [], "toggle": true,
-		"name": "Стена копий", "desc": "В «Защите» три шеренги и копья вперёд: разгон врага гасится — 300% урона, остановка, замедление конницы.",
+		"name": "Фаланга", "desc": "«Держать строй» [S] опускает копья — строй становится фалангой: разгон врага гасится (300% урона, остановка конницы). Без улучшения [S] только держит строй",
 		"cost_gold": 200.0, "cost_wood": 300.0, "cost_stone": 0.0, "research_time": 25.0, "squad_unlock_cost": 400.0,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
@@ -377,8 +378,9 @@ const UNITS := {
 		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.6,
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"2d": {"icon": "icon_shield.png", "prereq": ["1d"], "link": [],
-		"name": "Приём копья", "desc": "Контрудар по коннице",
-		"cost_gold": 345.0, "cost_wood": 474.4, "cost_stone": 129.4, "research_time": 40.0, "squad_unlock_cost": 700.0,
+		"name": "Приём копья", "desc": "Контрудар: урон копейщиков ×2.5 по коннице, тушам и троллям",
+		"cost_gold": 345.0, "cost_wood": 474.4, "cost_stone": 129.4, "research_time": 40.0,
+		"bonus_giant_melee": 1.5,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
 		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
@@ -409,10 +411,10 @@ const UNITS := {
 		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"3d": {"icon": "icon_trap.png", "prereq": ["2d"], "link": [],
-		"name": "Еж", "desc": "Круговая оборона",
-		"cost_gold": 507.5, "cost_wood": 710.5, "cost_stone": 203.0, "research_time": 45.0, "squad_unlock_cost": 900.0,
+		"name": "Тяжёлые латы", "desc": "+5 к броне: копейщик становится тяжёлой пехотой",
+		"cost_gold": 507.5, "cost_wood": 710.5, "cost_stone": 203.0, "research_time": 45.0,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
-		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
+		"bonus_attack": 0.0, "bonus_armor": 5.0, "bonus_defense": 0.0,
 		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
 		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
 		"bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
@@ -474,8 +476,9 @@ const UNITS := {
 		"bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0,
 		"bonus_morale": 16.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"5d": {"icon": "icon_trap_spikes.png", "prereq": ["4d"], "link": [],
-		"name": "Фаланга", "desc": "Неприступный строй",
-		"cost_gold": 1440.0, "cost_wood": 1872.0, "cost_stone": 576.0, "research_time": 75.0, "squad_unlock_cost": 1600.0,
+		"name": "Муштра копейщиков", "desc": "Найм копейщиков вдвое быстрее (−50 % времени)",
+		"cost_gold": 2400.0, "cost_wood": 2800.0, "cost_stone": 600.0, "research_time": 75.0,
+		"bonus_train": 1.0,
 		# ── МОДИФИКАТОРЫ: полный список, ненужное — нулём ─────────────────
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0,
 		"bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0,
@@ -574,8 +577,9 @@ const UNITS := {
 		"bonus_attack": 2.5,
 		"bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"4d": {"icon": "icon_drop.png", "prereq": ["3d"], "link": [], "squad_unlock_cost": 1200.0,
-		"name": "Отравленные", "desc": "Урон по времени",
-		"cost_gold": 988.0, "cost_wood": 1235.0, "cost_stone": 370.5, "research_time": 60.0,
+		"name": "Школа лучников", "desc": "Найм лучников вдвое быстрее (−50 % времени)",
+		"cost_gold": 2400.0, "cost_wood": 2800.0, "cost_stone": 600.0, "research_time": 60.0,
+		"bonus_train": 1.0,
 		"bonus_attack": 0.0, "bonus_armor": 0.0, "bonus_defense": 0.0, "bonus_health": 0.0, "bonus_speed": 0.0, "bonus_range": 0.0, "bonus_cooldown": 0.0, "bonus_spread": 0.0, "bonus_push": 0.0, "bonus_morale": 0.0, "bonus_carry": 0.0, "bonus_gather": 0.0},
 	"5a": {"icon": "icon_skull.png", "prereq": ["4a"], "link": [],
 		"name": "Бронебойные II", "desc": "Стрела игнорирует 50 % брони цели",

@@ -372,6 +372,14 @@ func _c_corpses(base: Vector3) -> void:
 # ═════════════════════════════════════════════════════════════════════════════
 func _d_troll(base: Vector3) -> void:
 	print("\n═════ D. СТРЕЛЫ ПО ТУШЕ ТРОЛЛЯ ═════")
+	# ПЛОЩАДКА ЧИСТИТСЯ ОТ ЧУЖИХ (ТЗ 11.10.2026): посты охраны ничейного
+	# рудника игрока (−75, −80) легли в десяток метров от тролля, и после его
+	# гибели лучники били охрану (D2 «выстрелов после гибели 52»)
+	for gg in get_tree().get_nodes_in_group("all_units"):
+		if is_instance_valid(gg) and (gg as Unit).faction != F and not (gg as Unit).is_dead() \
+				and (gg as Node3D).global_position.distance_to(base) < 70.0:
+			(gg as Unit).take_damage(1e12)
+	await pframes(3)
 	var s1: Array = _squad("archer", F, base, 24)
 	var troll: Unit = _spawn("troll", G, base + Vector3(15.0, 0.0, 0.0))
 	troll.set_tick(false)

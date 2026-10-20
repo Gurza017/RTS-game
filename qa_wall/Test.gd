@@ -192,9 +192,17 @@ func _block_wall() -> void:
 			front += 1
 			if bool(sp.call("_spear_leveled")):
 				down += 1
-	verdict("A0 фаланга выставила копья с первого переключения стойки",
-		front > 0 and down >= int(float(front) * 0.9),
-		"опустили %d из %d передних (весь строй %d)" % [down, front, _wall_men.size()])
+	# РАЗВОРОТ ТЗ 14.10.2026, п. 6: фаланга (опущенные копья) — улучшение
+	# spearman_1d. Без него [S] только держит строй, копья стоят
+	var phal: bool = GameManager.spear_wall_ready((_wall_men[0] as Unit).squad_id)
+	if phal:
+		verdict("A0 фаланга выставила копья с первого переключения стойки",
+			front > 0 and down >= int(float(front) * 0.9),
+			"опустили %d из %d передних (весь строй %d)" % [down, front, _wall_men.size()])
+	else:
+		verdict("A0 без «Фаланги» [S] держит строй с поднятыми копьями (ТЗ 14.10)",
+			front > 0 and down == 0,
+			"опустили %d из %d передних (весь строй %d)" % [down, front, _wall_men.size()])
 
 	# Три отряда врага идут на ЛУЧНИКОВ за строем
 	var bait: Unit = arch[0]

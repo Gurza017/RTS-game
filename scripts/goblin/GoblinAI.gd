@@ -1,2020 +1,1108 @@
 extends Node
 
 ## ═══════════════════════════════════════════════════════════════════════════
-## ВОЖАК ОРДЫ ГОБЛИНОВ
+## ВОЖАК ОРДЫ — ЭКОНОМИКА, ВОЛНЫ, ОХРАНА (ТЗ 11.10.2026, часть 2: снос и новая)
 ## ═══════════════════════════════════════════════════════════════════════════
-## Третья сторона, враждебная ВСЕМ. Живёт по расписанию, а не по разведке:
+## ЧТО СНЕСЕНО. Прежний вожак (2000 строк) и его спутники рождали бойцов из
+## шести источников без общего потолка: стартовая орда в 11 отрядов, спящий
+## резерв, набеги по часам (GoblinRaids, без конца), волны на каждый рудник
+## игрока раз в 240 с, «месть» по 1000 копейщиков раз в 10 минут, бесплатная
+## разведка и бесплатное доукомплектование в хижинах. Выжившие не
+## распускались — к 40-й минуте партии владельца на карте было ~5800
+## гоблинов. Охрана рудников патрулировала кольцо 9 м вокруг самого рудника,
+## куда толпа не помещалась, — вызволение (unstuck) крутилось вечно (4000
+## событий за первые 4 минуты), а переприказ «держать точку» раз в 8 с будил
+## всех стоящих.
 ##
-##   00:00-30:00  СПЯЧКА. Орда стоит в деревне и не тикает вовсе — ни движения,
-##                ни поиска целей, ни пересчёта поз. Её можно убить, она
-##                блокирует шаг, но кадра не ест.
-##   30:00        ВОЛНА В ЦЕНТР. Все отряды идут в середину карты и дерутся
-##                там со всеми, кто попался: синими, красными, друг с другом их
-##                никто не разводит.
-##   волна выбита ОБОРОНА ДЕРЕВНИ. Уцелевшие и свежие держат хижины, орда копит
-##                еду и нанимает армию заново до полного штата орды
-##                (goblin_config.army_squads()).
-##   набрали      СНОВА В ЦЕНТР. Зачистили центр — идём на САМОГО СЛАБОГО
-##                игрока (по здоровью зданий и числу бойцов) и добиваем его.
-##   и по кругу.
+## ЧТО ТЕПЕРЬ. Один источник войск — ГЛАВНАЯ ХАТА лагеря:
+##   1) ЭКОНОМИКА (_economy_tick): хижины и хата дают еду, бойцы волн её
+##      едят (содержание), копилка с потолком; рост дохода со временем;
+##   2) ПРОИЗВОДСТВО (_production_tick): план следующей волны по шаблону
+##      (spawn_config.WAVE_PATTERN), отряды покупаются за еду по одному и
+##      рождаются в СВОБОДНОМ слоте площадки сбора (шаг больше диаметра
+##      толпы), сразу засыпают (F_DORMANT: ни тика, ни расталкивания);
+##      потолки HORDE_CAP (вся фракция) и HORDE_FIELD_CAP (волны);
+##   3) ВОЛНА (_launch / _wave_tick): набранная волна просыпается и уходит
+##      по СЦЕНАРИЮ (разведка, рудник игрока / красного, база игрока /
+##      красного, патруль и штурм брода) с ТАКТИКОЙ (в лоб, фланг, тыл,
+##      ложный отход и повторный удар). Приказ отряду — ОДИН на этап, а не
+##      раз в 8 с; переприказ только отряду, который стоит без дела или
+##      застрял (25 с без продвижения, не больше трёх раз). Кончилась волна
+##      — выжившие возвращаются на площадку сбора и засыпают, вливаясь в
+##      следующую волну (покупать их заново не нужно);
+##   4) ОХРАНА РУДНИКОВ (_guards_tick): стационарная, спит; будит удар по
+##      руднику или чужой ближе GUARD_WAKE_R; отбилась — домой одним приказом
+##      и снова спать;
+##   5) ТРЕВОГА ЛАГЕРЯ (_camp_tick): чужой у хижин — будится площадка сбора.
+## Последняя хижина снесена — производство встаёт навсегда (орда разбита).
 ##
-## ── ЧТО ЗДЕСЬ НАМЕРЕННО НЕ НАПИСАНО ────────────────────────────────────────
-## Ни своей боёвки, ни своего движения, ни своей блокировки строем. Гоблин —
-## обычный Unit, и всё это он получает от базы; вожак только раздаёт приказы
-## РАЗ В THINK_INTERVAL И ПО ОТРЯДУ, а не по бойцу (правило проекта: решение
-## отряда, принятое на каждого из сотни, стоит в сто раз дороже и не меняет
-## ничего — отряд наступает, отходит и лечится как тело).
+## Все приказы идут ОЧЕРЕДЬЮ с бюджетом ORDER_BUDGET бойцов на кадр
+## (_drain_orders): раздача пятисот приказов одним кадром давала пики 30-60 мс.
+## Числа — scripts/spawn_config.gd (блок «НОВАЯ ОРДА»).
 
 const _GobCfg := preload("res://scripts/goblin/goblin_config.gd")
-const _Diff := preload("res://scripts/game_difficulty_config.gd")
-const _OptGA := preload("res://scripts/perf_config.gd")
-const _UCfg   := preload("res://scripts/unit_stats_config.gd")
-const _Commander := preload("res://scripts/goblin/GoblinAttackCommander.gd")
+const _Spawn  := preload("res://scripts/spawn_config.gd")
+const _Diff   := preload("res://scripts/game_difficulty_config.gd")
+const _OptGA  := preload("res://scripts/perf_config.gd")
+const _UCfgA  := preload("res://scripts/unit_stats_config.gd")
 
-## Командир штурма базы (заказ 10.09.2026): сбор на дистанции, паттерны,
-## отход и лечение. Ведёт полевые отряды в фазе охоты, см. _issue_orders
-var commander = _Commander.new()
-## Сбор перед ударом (ТЗ 24.09.2026, п. 8): атака волной, а не гуськом
-const _Stager := preload("res://scripts/goblin/WaveStager.gd")
-var stager = _Stager.new()
-## Набеги по расписанию (ТЗ 24.09.2026, второе письмо): свои отряды, свой строй
-const _RaidsM := preload("res://scripts/goblin/GoblinRaids.gd")
-var raids = _RaidsM.new()
+const THINK_SEC := 1.0
+## Бойцов, получающих приказ за кадр (очередь _drain_orders)
+const ORDER_BUDGET := 40
+## Отряд «застрял на марше»: центр сдвинулся меньше STUCK_M за STUCK_SEC
+const STUCK_SEC := 25.0
+const STUCK_M := 3.0
+const STUCK_REISSUE_MAX := 3
+## Отряд дошёл до своей точки этапа
+const ARRIVE_M := 12.0
+## Радиус поиска чужого отряда у цели волны
+const ENGAGE_R := 45.0
+## Поводок охраны: дальше от рудника — домой, даже если враг рядом
+const GUARD_LEASH := 45.0
 
-## Куда идут набеги: КРЕПОСТЬ игрока (ТЗ 25.09.2026, п. 1).
-## Прежде здесь стояло СРЕДНЕЕ всех построек игрока — вместе с отбитыми
-## рудниками и башнями по всей карте. К 90-й минуте такая «база» уезжала
-## к середине карты, а то и к лагерю красного ИИ, и набег строил линию
-## сбора у ЧУЖОЙ базы: владелец видел это как «у красного ИИ отспавнились
-## отряды гоблинов». Крепостей несколько — ближайшая к деревне; нет ни
-## одной — медиана построек (медиана, а не среднее: см. _centroid_of)
-func _player_base() -> Vector3:
-	var best := Vector3.ZERO
-	var bd := INF
-	var xs: Array = []
-	var zs: Array = []
-	for b in main.get_tree().get_nodes_in_group(Constants.building_group(Constants.FACTION_PLAYER)):
-		if not is_instance_valid(b) or (b as Building).is_dead():
-			continue
-		var p: Vector3 = (b as Node3D).global_position
-		# Рудники в медиану не идут: они стоят по всей карте и тянут «базу»
-		# прочь от неё — ровно та болезнь, от которой эта функция лечится
-		if not (b is Mine):
-			xs.append(p.x)
-			zs.append(p.z)
-		if String((b as Building).building_id) == "castle":
-			var d: float = p.distance_squared_to(village)
-			if d < bd:
-				bd = d
-				best = p
-	if bd < INF:
-		return best
-	if xs.is_empty():
-		return Vector3.ZERO
-	xs.sort()
-	zs.sort()
-	return Vector3(float(xs[xs.size() / 2]), 0.0, float(zs[zs.size() / 2]))
-## Стенд: цель охоты вместо _weakest_target (INF — не задана)
-var hunt_target_override: Vector3 = Vector3.INF
+const PHASE_PEACE := "peace"
+const PHASE_WAR := "war"
+const PHASE_DEFEATED := "defeated"
 
-# ── РОЛИ ОТРЯДА ─────────────────────────────────────────────────────────────
-const ROLE_DORMANT := "dormant"   # спит в деревне
-const ROLE_CENTER  := "center"    # штурмует центр карты
-const ROLE_HUNT    := "hunt"      # добивает самого слабого игрока
-const ROLE_DEFEND  := "defend"    # держит деревню
-const ROLE_HEAL    := "heal"      # разбит, уходит в хижину лечиться
-const ROLE_REVENGE := "revenge"   # месть: держит дерево тролля
-# ── РОЛИ ГЛАВНОГО ЦИКЛА (спринт 17) ─────────────────────────────────────────
-const ROLE_GARRISON   := "garrison"   # элитный гарнизон деревни, не выходит никогда
-const ROLE_MINE_GUARD := "mine_guard" # охрана рудника орды, патруль кольцом
-const ROLE_MINE_ALARM := "mine_alarm" # тревога: вся орда идёт к своему руднику
-const ROLE_MINE_HOLD  := "mine_hold"  # резерв на захваченном руднике холма
-const ROLE_SCOUT      := "scout"      # разведчик, обходит точки интереса
-const ROLE_RAID       := "raid"       # рейд по экономике противника
-
-# ── ФАЗА ОРДЫ ───────────────────────────────────────────────────────────────
-const PHASE_DORMANT := "dormant"
-const PHASE_CENTER  := "center"
-const PHASE_HUNT    := "hunt"
-const PHASE_DEFEND  := "defend"
-## Разведка и рейды между экспансией и генеральным наступлением (спринт 17)
-const PHASE_HARASS  := "harass"
-## Мирная фаза: отстройка и патруль границ деревни (0 — PEACE_SEC)
-const PHASE_PEACE   := "peace"
-const ROLE_BORDER   := "border"     # патруль границ деревни в мире
+const ROLE_GUARD := "mine_guard"
+const ROLE_MUSTER := "muster"
+const ROLE_WAVE := "wave"
 
 var main: Node3D = null
 var village: Vector3 = Vector3.ZERO
-## Отряды орды: [{ "id", "type", "members", "role", "target", "peak" }]
+var chief: Node = null
+var phase: String = PHASE_PEACE
+var clock: float = 0.0
+## Отражение для телеметрии и стендов: [{id, type, role}] — логика его не читает
 var squads: Array = []
-var phase: String = PHASE_DORMANT
-var clock: float = 0.0            # игровое время партии, сек
-var last_action: String = ""      # диагностика для стенда
 
-var _think: float = 0.0
-var _awake: bool = false
+## sid → {mine, post, st ("sleep" / "fight" / "home"), calm, t}
+var guards: Dictionary = {}
+## Рудник → время последнего удара по нему (сигнал Mine.attacked)
+var _mine_hit: Dictionary = {}
+## Слот площадки сбора → sid; и обратно
+var muster: Dictionary = {}
+var _muster_slot: Dictionary = {}
+## Отряды площадки, разбуженные тревогой лагеря
+var _camp_awake: bool = false
+var _camp_calm: float = 0.0
+## План следующей волны: {tpl, comp: [род…], have: [sid…], t0}
+var _plan: Dictionary = {}
+var _pattern_i: int = 0
+var _last_spawn: float = -1.0e9
+## Волны в поле
+var waves: Array = []
+var _wave_seq: int = 0
+## Очередь приказов
+var _oq: Array = []
+var _t: float = 0.0
+var _rng := RandomNumberGenerator.new()
 
-# ── СОСТОЯНИЕ ГЛАВНОГО ЦИКЛА (спринт 17) ────────────────────────────────────
-var garrison_sids: Dictionary = {}
-var mine_guard_sids: Dictionary = {}
-var mine: Node = null                 # рудник орды у деревни
-var mine_alarm_until: float = -1.0e9  # часы вожака; пока не истекли — тревога
-var mine_alarms: int = 0
-var scout_sid: int = 0
-var _scout_wp: int = 0
-var _scout_at: float = -1.0e9
-## Состояние разведчика: "out" — обход, "harass" — точечный укол у найденной
-## базы, "home" — отход в деревню и передышка
-var scout_state: String = "out"
-var _scout_state_at: float = -1.0e9
-var scout_sorties: int = 0
-var scout_harasses: int = 0
-var known_bases: Dictionary = {}      # фракция → точка чужой базы, что нашла разведка
-var raid_sids: Dictionary = {}        # sid → часы начала рейда
-var _raid_last: float = -1.0e9
+## ── СЧЁТЧИКИ (стенды, телеметрия, зонд длинной партии) ─────────────────────
+var waves_launched: int = 0
+var waves_returned: int = 0
+var squads_bought: int = 0
+var food_spent: float = 0.0
+var income_min: float = 0.0
+var upkeep_min: float = 0.0
+var field_units: int = 0
+var orders_issued: int = 0
+var stuck_reissues: int = 0
+var guard_wakes: int = 0
+var scenario_counts: Dictionary = {}
+var tactic_counts: Dictionary = {}
+var last_action: String = ""
+## Совместимость с зондом qa_ai_loop/Smoke (поля прежнего вожака)
 var raids_launched: int = 0
 var raid_retreats: int = 0
-var raid_returns: int = 0             # рейдов, вернувшихся без добычи (спринт 20)
-var _harass_since: float = 0.0
-## ── ГОРН ОРДЫ (спринт 18) ────────────────────────────────────────────────
-## Триггер 1 — первый контакт сторон: игрок впервые видит отряд или деревню
-## орды (точка освещена его туманом) ЛИБО орда впервые видит войска игрока
-## (боец игрока в обзоре какого-нибудь отряда). Один раз за партию.
-## Триггер 2 — начало общего наступления: выход всей армии к центру или на
-## базу (переходы фаз → CENTER / → HUNT)
+var scout_sorties: int = 0
+var scout_harasses: int = 0
+var known_bases: Array = []
+## ПЕРВЫЙ КОНТАКТ (горн орды, qa_audio18): орда увидела войска игрока или
+## игрок открыл туман над лагерем, рудником или отрядом орды — один раз за
+## партию. Горн трубит и на выходе каждой волны (horn_blows — стендам)
 var first_contact: bool = false
 var horn_blows: int = 0
-var hill_mine_sid: int = 0
 
-## Регистрация из Main: гарнизон и охрана рудника
-func register_garrison(sid: int) -> void:
-	garrison_sids[sid] = true
+# ═════════════════════════════════════════════════════════════════════════════
+# ПОДКЛЮЧЕНИЕ
+# ═════════════════════════════════════════════════════════════════════════════
+func setup(main_node: Node3D, center: Vector3, chief_hut: Node = null) -> void:
+	main = main_node
+	village = center
+	chief = chief_hut
+	# Свой генератор: общий сеяный поток партии не сдвигается (ловушка
+	# «новый потребитель randi() сдвигает лотереи»), а партия с тем же зерном
+	# выбирает те же сценарии
+	var ws: Variant = main.get("world_seed") if main != null else null
+	_rng.seed = int(ws) if ws != null else 1
 
-## mine_node — рудник, который этот отряд сторожит (ТЗ 29.09.2026, третье
-## письмо, п. 5: охрана у рудников игрока и красного). Без него — рудник орды
-func register_mine_guard(sid: int, mine_node: Node = null) -> void:
-	mine_guard_sids[sid] = mine_node if mine_node != null else true
+## Прежний вожак держал гарнизон деревни и спящий резерв — их больше нет
+func register_garrison(_sid: int) -> void:
+	pass
 
-## ── ДРЕМЛЮЩИЙ РЕЗЕРВ (13.09.2026, DormantReserve.gd) ────────────────────────
-## Отряды резерва — особые: вне волн, вне планов командира, вне пробуждения
-## орды. Спят и просыпаются своим контроллером; вожак берёт у него конницу
-## на вылазку (borrow_cavalry) и ведёт её обычным рейдом
-var reserve = null
-var reserve_sids: Dictionary = {}
-var reserve_raids: int = 0
+func attach_reserve(_r: Node) -> void:
+	pass
 
-func register_reserve(sid: int) -> void:
-	reserve_sids[sid] = true
+## Отряд охраны рудника: пост — где стоит сейчас (или заданная точка); сразу
+## засыпает. Рудник по умолчанию — рудник лагеря
+func register_mine_guard(sid: int, mine: Node = null, post: Vector3 = Vector3.INF) -> void:
+	var m: Node = mine
+	if m == null:
+		m = GameManager.goblin_mine
+	var p: Vector3 = post
+	if p.x == INF:
+		var c: Vector2 = GameManager.squad_centre_xz(sid)
+		p = Vector3(c.x, 0.0, c.y) if c.x != INF else village
+	guards[sid] = {"mine": m, "post": p, "st": "sleep", "calm": 0.0, "t": clock}
+	if m != null and is_instance_valid(m):
+		attach_mine(m)
+	_sleep_squad(sid)
 
-func attach_reserve(r) -> void:
-	reserve = r
-
+## Удар по руднику будит его охрану (сигнал Mine.attacked)
 func attach_mine(m: Node) -> void:
-	mine = m
-	if m != null and m.has_signal("attacked"):
-		m.connect("attacked", _on_mine_attacked)
+	if m == null or not is_instance_valid(m) or not m.has_signal("attacked"):
+		return
+	var cb := Callable(self, "_on_mine_attacked").bind(m)
+	if not m.is_connected("attacked", cb):
+		m.connect("attacked", cb)
 
-## Тревога рудника: продлевается каждым ударом
-func _on_mine_attacked(_by: int, _at: Vector3) -> void:
-	mine_alarm_until = clock + _GobCfg.MINE_ALARM_SEC
-	mine_alarms += 1
+func _on_mine_attacked(_by_faction, _at, m: Node) -> void:
+	_mine_hit[m] = clock
 
-func mine_alarm_active() -> bool:
-	return clock < mine_alarm_until and mine != null and is_instance_valid(mine) \
-		and not bool(mine.call("is_dead"))
-
-## Отряды ВОЛНЫ — без гарнизона, охраны рудника и мести: по ним считается
-## «армия набрана» (найм и переход в наступление)
-func _wave_squads() -> int:
-	var n := 0
-	for s in squads:
-		if not _is_special(int((s as Dictionary)["id"])):
-			n += 1
-	return n
-
-## Особые роли не входят ни в волны, ни в планы командира. Публичная обёртка —
-## командиру конницы (CavalryCommander): охрана рудников, гарнизон, резерв и
-## разведка ходят по планам вожака, а не по тактике «удар — отход»
+## Отряд на особой роли (охрана, площадка сбора): командир конницы его не
+## берёт — спящих и стоящих на посту нельзя уводить в набег
 func is_special_squad(sid: int) -> bool:
-	return _is_special(sid)
+	if guards.has(sid) or _muster_slot.has(sid):
+		return true
+	# Отряды штурма по часам ведёт свой маршрут (GoblinFortressAssaultEvent)
+	var ev = main.get("assault_event") if main != null else null
+	return ev != null and is_instance_valid(ev) and bool(ev.call("owns", sid))
 
-## Особые роли не входят ни в волны, ни в планы командира
-func _is_special(sid: int) -> bool:
-	return garrison_sids.has(sid) or mine_guard_sids.has(sid) \
-		or _revenge_sids.has(sid) or (sid > 0 and sid == scout_sid) \
-		or scouts.has(sid) or reserve_sids.has(sid)
-
-func setup(p_main: Node3D, p_village: Vector3) -> void:
-	main = p_main
-	village = p_village
-	reset()
-	raids.setup(p_main, p_village)
-
-func reset() -> void:
-	stager.reset()
-	raids.reset()
-	squads.clear()
-	commander.reset()
-	hunt_target_override = Vector3.INF
-	phase = PHASE_DORMANT
-	clock = 0.0
-	_think = 0.0
-	_awake = false
-	last_action = ""
-	_order_queue.clear()
-	_order_at = 0
-	_revenge_sids.clear()
-	_revenge_last = -1.0e9
-	revenge_waves = 0
-	garrison_sids.clear()
-	mine_guard_sids.clear()
-	mine_alarm_until = -1.0e9
-	scout_sid = 0
-	scout_state = "out"
-	_scout_state_at = -1.0e9
-	scout_sorties = 0
-	scout_harasses = 0
-	scouts.clear()
-	_scout_rest_at = -1.0e9
-	known_bases.clear()
-	raid_sids.clear()
-	_raid_last = -1.0e9
-	_harass_since = 0.0
-	hill_mine_sid = 0
+## Сводка для телеметрии (TelemetryLogger.goblin_gate)
+func assault_gate() -> Dictionary:
+	return {"food": int(ResourceManager.get_amount(Constants.FACTION_GOBLIN, Constants.RESOURCE_FOOD)),
+		"income": snappedf(income_min, 0.1), "upkeep": snappedf(upkeep_min, 0.1),
+		"plan": String(_plan.get("tpl", "")), "have": (_plan.get("have", []) as Array).size(),
+		"need": (_plan.get("comp", []) as Array).size(), "ready": _ready_q.size(), "waves": waves.size(),
+		"field": field_units, "guards": guards.size(), "launched": waves_launched}
 
 # ═════════════════════════════════════════════════════════════════════════════
-# МЕСТЬ ГОБЛИНОВ (заказ владельца, 09.09.2026)
+# ТАКТ
 # ═════════════════════════════════════════════════════════════════════════════
-# Логово тролля зачищено → раз в REVENGE_INTERVAL_SEC из деревни выходят
-# REVENGE_SQUADS отрядов пехоты и маршируют через всю карту окружать и держать
-# дерево тролля. Идут НЕЗАВИСИМО от спячки и волн орды: это не волна, а
-# отдельное расписание, и роль у них своя (ROLE_REVENGE) — раздача целей по
-# фазе их не трогает. Спящими они не засыпают (см. _regroup)
-var _revenge_sids: Dictionary = {}
-var _revenge_last: float = -1.0e9
-## Сколько волн мести вышло (диагностика стенда)
-var revenge_waves: int = 0
-
-func _tick_revenge() -> void:
-	if not GameManager.troll_lair_cleared():
-		return
-	if clock - _revenge_last < _GobCfg.REVENGE_INTERVAL_SEC:
-		return
-	_revenge_last = clock
-	revenge_waves += 1
-	var lair: Node3D = GameManager.troll_lair as Node3D
-	var n_per: int = int(_GobCfg.SQUAD_SIZE.get(_GobCfg.REVENGE_UNIT, 20))
-	for i in range(_GobCfg.REVENGE_SQUADS):
-		var a: float = TAU * float(i) / float(_GobCfg.REVENGE_SQUADS)
-		var r: float = _GobCfg.VILLAGE_RADIUS + _GobCfg.horde_radius(n_per) + 4.0
-		var base := Vector3(village.x + cos(a) * r, 0.0, village.z + sin(a) * r)
-		var sid: int = int(main.call("spawn_goblin_squad", _GobCfg.REVENGE_UNIT, n_per, base, true))
-		if sid <= 0:
-			continue
-		_revenge_sids[sid] = i
-	last_action += "|месть: %d отрядов идут к дереву тролля" % _GobCfg.REVENGE_SQUADS
-	if lair == null:
-		return
-	# Реестр подхватит их в следующем _regroup; роль ставится там же
-
-## Точка отряда мести на кольце вокруг дерева
-func _revenge_goal(sid: int) -> Vector3:
-	var lair: Node3D = GameManager.troll_lair as Node3D
-	if lair == null or not is_instance_valid(lair):
-		return village
-	var idx: int = int(_revenge_sids.get(sid, 0))
-	var a: float = TAU * float(idx) / float(maxi(_GobCfg.REVENGE_SQUADS, 1))
-	return lair.global_position + Vector3(cos(a) * _GobCfg.REVENGE_RING, 0.0,
-		sin(a) * _GobCfg.REVENGE_RING)
-
 func _process(delta: float) -> void:
-	# Часы подсистемы (perf_config.sys_meter, qa_bigstand): одна проверка bool
-	if not _OptGA.sys_meter:
-		_process_timed(delta)
-		return
-	var _sys_t0: int = Time.get_ticks_usec()
-	_process_timed(delta)
-	_OptGA.sys_add("goblin_ai", Time.get_ticks_usec() - _sys_t0)
-
-func _process_timed(delta: float) -> void:
 	if main == null:
 		return
-	clock += delta
-	# Недоразданные приказы прошлого такта — по порции за кадр (см. _drain_orders)
-	if _OptGA.sys_meter:
-		var td: int = Time.get_ticks_usec()
-		_drain_orders()
-		_OptGA.sys_add("ga_drain", Time.get_ticks_usec() - td)
-	else:
-		_drain_orders()
-	_think -= delta
-	if _think > 0.0:
+	_drain_orders()
+	_t += delta
+	if _t < THINK_SEC:
 		return
-	_think = _GobCfg.THINK_INTERVAL
-	tick()
+	var dt: float = _t
+	_t = 0.0
+	clock += dt
+	_prune()
+	if not _reserve_done:
+		_spawn_start_reserve()
+	_economy_tick(dt)
+	_production_tick()
+	_guards_tick(dt)
+	_camp_tick(dt)
+	_waves_tick(dt)
+	_maybe_launch()
+	_check_first_contact()
+	_reflect()
 
-# ═════════════════════════════════════════════════════════════════════════════
-# ОДИН ТАКТ
-# ═════════════════════════════════════════════════════════════════════════════
-func tick() -> void:
-	if _OptGA.sys_meter:
-		_tick_timed()
+## ── СТАРТОВЫЙ РЕЗЕРВ (spawn_config.START_RESERVE) ─────────────────────────
+## Один раз, на первом такте вожака (лагерь и охрана уже стоят): по отряду в
+## свободный слот площадки, разметка толпой, сразу сон — как купленный, но
+## даром. Первые планы волн забирают их через «вернувшихся с прошлой волны»
+var _reserve_done: bool = false
+var reserve_spawned: int = 0
+var _last_launch_clock: float = -1.0
+
+func _spawn_start_reserve() -> void:
+	_reserve_done = true
+	if main == null or phase == PHASE_DEFEATED:
 		return
-	_tick_body()
-
-## Тот же такт с часами по этапам (аудит 19.09.2026: qa_bigstand/Owner
-## показывал худший вызов goblin_ai 40-65 мс — надо знать, ЧТО в такте дорого)
-func _tick_timed() -> void:
-	var t0: int = Time.get_ticks_usec()
-	last_action = ""
-	_regroup()
-	var t1: int = Time.get_ticks_usec(); _OptGA.sys_add("ga_regroup", t1 - t0)
-	_tick_revenge()
-	if not _awake:
-		var wake_at: float = _Diff.goblin_dormant_sec()
-		if clock < wake_at and not _attacked():
-			last_action = "спит (%.0f с до подъёма)" % (wake_at - clock)
-			if not _revenge_sids.is_empty():
-				_issue_orders(true)
-			return
-		_wake_horde()
-	var t2: int = Time.get_ticks_usec()
-	_economy()
-	_retreat_broken()
-	_sweep_heal()
-	var t3: int = Time.get_ticks_usec(); _OptGA.sys_add("ga_econ_heal", t3 - t2)
-	_tick_raids()
-	raids.tick(clock, _player_base())
-	var t4: int = Time.get_ticks_usec(); _OptGA.sys_add("ga_raids", t4 - t3)
-	if not first_contact:
-		_check_first_contact()
-	var was: String = phase
-	_decide_phase()
-	var t5: int = Time.get_ticks_usec(); _OptGA.sys_add("ga_decide", t5 - t4)
-	if phase != was:
-		GameManager.tm_event("goblin_phase", {"from": was, "to": phase, "wave": _wave_squads()})
-	if phase != was and (phase == PHASE_CENTER or phase == PHASE_HUNT):
-		_blow_horn("наступление: " + phase)
-	_issue_orders()
-	_OptGA.sys_add("ga_issue", Time.get_ticks_usec() - t5)
-
-func _tick_body() -> void:
-	last_action = ""
-	_regroup()
-	# Месть идёт по своим часам, спячка орды ей не указ
-	_tick_revenge()
-	if not _awake:
-		# ── СПЯЧКА ──────────────────────────────────────────────────────────
-		# Просыпаемся по часам ИЛИ раньше, если орду пришли бить: спящий боец
-		# не отвечает на удар вовсе, и без этой оговорки разведчик игрока
-		# вырезал бы деревню бесплатно за полчаса до её пробуждения
-		# Срок спячки крутит сложность: на Hard орда просыпается раньше
-		var wake_at: float = _Diff.goblin_dormant_sec()
-		if clock < wake_at and not _attacked():
-			last_action = "спит (%.0f с до подъёма)" % (wake_at - clock)
-			# Месть не спит: её отрядам приказы раздаются и в спячке орды
-			if not _revenge_sids.is_empty():
-				_issue_orders(true)
-			return
-		_wake_horde()
-	_economy()
-	_retreat_broken()
-	_sweep_heal()
-	_tick_raids()
-	raids.tick(clock, _player_base())
-	if not first_contact:
-		_check_first_contact()
-	var was: String = phase
-	_decide_phase()
-	if phase != was:
-		GameManager.tm_event("goblin_phase", {"from": was, "to": phase, "wave": _wave_squads()})
-	if phase != was and (phase == PHASE_CENTER or phase == PHASE_HUNT):
-		_blow_horn("наступление: " + phase)
-	_issue_orders()
-
-# ── ПРОБУЖДЕНИЕ ─────────────────────────────────────────────────────────────
-## Спящий боец выключен ровно в двух местах: физический тик и визуальный.
-## GameManager перед вызовом обоих спрашивает is_physics_processing()/
-## is_processing(), поэтому «сон» — это отсутствие вызова, а не отдельная ветка
-## в каждом автомате. Картинка при этом не пропадает: слот общей отрисовки
-## хранит последнюю записанную позу, а стоящий боец её и не меняет
-func _set_dormant(u: Unit, on: bool) -> void:
-	if not _GobCfg.DORMANT_SLEEP_PHYSICS:
-		return
-	# Само тело — Unit.set_dormant (15.09.2026): тем же путём спит охрана
-	# крепости красного ИИ, здесь остался только гоблинский выключатель
-	# и разбор ниже — почему гасится ровно то, что гасится
-	u.set_dormant(on)
-	# ── ВИЗУАЛЬНЫЙ ТИК СПЯЩЕМУ НЕ ГАСИМ ────────────────────────────────────
-	# Здесь стояло set_draw(not on), и это была дыра в тумане войны. Гоблин
-	# прячется от чужих глаз САМ, веткой внутри tick_visual (Unit._hide_in_fog):
-	# погасив ему визуальный тик, мы отняли у него единственный способ это
-	# сделать — и семьсот спящих в деревне продолжали рисоваться игроку сквозь
-	# неразведанную черноту. Ровно это владелец и увидел: «отряды орков в
-	# тумане продолжают рендериться».
-	#
-	# Платы за это почти нет: стоящий боец гасит свой визуальный тик сам, через
-	# пару кадров (Unit._proc_sleeping), а будит его редкий общий обход
-	# GameManager._wake_returned_far_units — раз в пятнадцать физкадров и ровно
-	# на один кадр. Тот же путь, которым живут все прочие стоящие войска.
-	# Выключенным остаётся ФИЗИЧЕСКИЙ тик и бит F_DORMANT в солвере — то есть
-	# вся та экономия, ради которой спячка и заводилась.
-	# И ПАКЕТНЫЕ ПРОХОДЫ ТОЖЕ. Тик бойца можно отключить снаружи, а вот
-	# расталкивание союзников идёт по КОЛОНКАМ и о выключенном тике не знает:
-	# семьсот спящих продолжали разводиться каждый кадр. Замер (qa_mass_battle,
-	# 3000 бойцов + деревня): свалка 16.5 -> 11.5 мс на одном этом бите
-
-## Длина мирной фазы: по сложности, а при выключенном чекбоксе «Перемирие»
-## (game_settings.armistice, ТЗ 14.09.2026 п. 2) — ноль: орда сразу в поле
-func _peace_sec() -> float:
-	if not GameManager.truce_enabled():
-		return 0.0
-	return _Diff.goblin_peace_sec()
-
-func _wake_horde() -> void:
-	_awake = true
-	# Проснулись — сначала мирная фаза (патруль границ), если она ещё идёт
-	phase = PHASE_PEACE if clock < _peace_sec() else PHASE_CENTER
-	for s in squads:
-		# Резерв спит своим сном — его будит только штурм лагеря
-		if reserve_sids.has(int((s as Dictionary)["id"])):
+	for t in _Spawn.START_RESERVE:
+		var want: String = String(t)
+		var n: int = int(_GobCfg.SQUAD_SIZE.get(want, 50))
+		if field_units + n > _Spawn.HORDE_FIELD_CAP or horde_alive() + n > _Spawn.HORDE_CAP:
+			break
+		var slot: int = _free_slot()
+		if slot < 0:
+			break
+		var base: Vector3 = _slot_pos(slot)
+		if main.has_method("_clear_trees"):
+			main.call("_clear_trees", base, 9.0)
+		var sid: int = int(main.call("spawn_goblin_squad", want, n, base, false))
+		if sid <= 0:
 			continue
-		for m in (s as Dictionary)["members"]:
-			var u := m as Unit
-			if u != null and is_instance_valid(u):
-				_set_dormant(u, false)
-				u.wake_for_lod()
-	last_action = "ОРДА ПРОСНУЛАСЬ"
-
-## Кого-то из орды бьют прямо сейчас? Спрашиваем бухгалтерию боя, а не
-## обходим бойцов: она и так ведёт отметку удара по отряду
-func _attacked() -> bool:
-	for s in squads:
-		var sid: int = int((s as Dictionary)["id"])
-		if sid > 0 and GameManager.squad_in_combat(sid):
-			return true
-	return false
-
-# ═════════════════════════════════════════════════════════════════════════════
-# СОСТАВ
-# ═════════════════════════════════════════════════════════════════════════════
-## Выбитых — вон, пустые отряды — расформировать, новых бойцов — в свои отряды.
-## Гарнизонные выбывают из состава наравне с павшими: они живы, но с карты сняты
-## (Castle.absorb_unit), и оставь их в списке — вожак вечно числил бы роль
-## «лечится» и не набирал бы замену. Та же ошибка была допущена и исправлена
-## в EnemyAI._regroup
-func _regroup() -> void:
-	var kept: Array = []
-	for s in squads:
-		var sq: Dictionary = s
-		var alive: Array = []
-		for m in sq["members"]:
-			if is_instance_valid(m) and not (m as Unit).is_dead() \
-					and not (m as Unit).garrisoned:
-				alive.append(m)
-		if alive.is_empty():
-			continue
-		sq["members"] = alive
-		kept.append(sq)
-	squads = kept
-
-	# Свежие бойцы орды, ещё не попавшие ни в один отряд. Отряд у них уже есть
-	# (его завёл барак-хижина при найме) — просто заносим его в реестр вожака
-	var known: Dictionary = {}
-	for s in squads:
-		known[int((s as Dictionary)["id"])] = s
-	for n in main.get_tree().get_nodes_in_group("goblin_units"):
-		if not is_instance_valid(n):
-			continue
-		var u := n as Unit
-		if u == null or u.is_dead() or u.garrisoned or u.squad_id <= 0:
-			continue
-		# ТРОЛЛИ — СТРАЖИ ЛОГОВА, А НЕ ВОЛНА: вожак их не водит и не усыпляет
-		if u.stat_id == "troll":
-			continue
-		var rec: Variant = known.get(u.squad_id)
-		if rec == null:
-			var role: String = ROLE_REVENGE if _revenge_sids.has(u.squad_id) else ROLE_DEFEND
-			rec = {"id": u.squad_id, "type": u.stat_id, "members": [],
-				"role": role, "target": village, "peak": 0}
-			known[u.squad_id] = rec
-			squads.append(rec)
-		var arr: Array = (rec as Dictionary)["members"]
-		if not arr.has(u):
-			arr.append(u)
-			# Спящему бойцу сон ставится в момент зачисления: свежий выходит
-			# из хижины уже проснувшимся, стартовый — спящим. Отряд мести
-			# не спит никогда — он вышел по своим часам
-			if not _awake and not _revenge_sids.has(u.squad_id):
-				_set_dormant(u, true)
-
-	# ПИК СЧИТАЕТСЯ ЧЕТВЁРТЫМ ПРОХОДОМ, после пополнения. Отряд, собранный в
-	# этот такт, до пополнения не существовал, и записанный раньше пик остался
-	# бы единицей — разбитым такой отряд считался бы никогда
-	for s in squads:
-		var sq2: Dictionary = s
-		var n2: int = (sq2["members"] as Array).size()
-		if n2 > int(sq2.get("peak", 0)):
-			sq2["peak"] = n2
-
-func army_squads() -> int:
-	return squads.size()
-
-func army_size() -> int:
-	var n := 0
-	for s in squads:
-		n += ((s as Dictionary)["members"] as Array).size()
-	return n
-
-# ═════════════════════════════════════════════════════════════════════════════
-# ЭКОНОМИКА: ЕДА КОПИТСЯ ХИЖИНАМИ, ОРДА НАНИМАЕТ
-# ═════════════════════════════════════════════════════════════════════════════
-## Найм идёт ПО ОДНОМУ заказу за такт и только пока армия не полна. Заказ
-## ставится в хижину как обычный заказ найма — со всей штатной механикой:
-## списание в момент заказа, выход шеренга за шеренгой, свой squad_id.
-## Ранга новобранцам не полагается (заказ владельца): знамя есть только у тех
-## стартовых отрядов, которым его выдала goblin_config.START_SQUADS
-func _economy() -> void:
-	if _wave_squads() >= _GobCfg.army_squads():
-		return
-	var huts := _huts()
-	if huts.is_empty():
-		return
-	# Уже строится — второй заказ не ставим: орда должна накопить, а не
-	# заморозить всю еду в очереди
-	for h in huts:
-		if not (h as Building).production_queue.is_empty():
-			return
-	var cost: Dictionary = {Constants.RESOURCE_FOOD: _GobCfg.SQUAD_FOOD_COST}
-	if not ResourceManager.can_afford(Constants.FACTION_GOBLIN, cost):
-		return
-	# Чего не хватает по составу — того и нанимаем
-	var want: String = _missing_type()
-	var hut: Building = huts[randi() % huts.size()]
-	hut.squad_size   = int(_GobCfg.SQUAD_SIZE.get(want, 20))
-	hut.squad_cols   = int(_GobCfg.SQUAD_COLS.get(want, 5))
-	hut.squad_spacing = _GobCfg.SQUAD_SPACING
-	if hut.queue_unit(want, cost, _GobCfg.SQUAD_BUILD_SEC):
-		last_action += "|найм %s" % want
-
-## Какого рода войск не хватает против эталонного состава орды
-func _missing_type() -> String:
-	var have: Dictionary = {}
-	for s in squads:
-		var t: String = String((s as Dictionary)["type"])
-		have[t] = int(have.get(t, 0)) + 1
-	var want: Dictionary = {}
-	for t in _GobCfg.army_composition():
-		want[String(t)] = int(want.get(String(t), 0)) + 1
-	for t in want:
-		if int(have.get(String(t), 0)) < int(want[t]):
-			return String(t)
-	return String(_GobCfg.army_composition()[0])
-
-func _huts() -> Array:
-	var out: Array = []
-	for b in main.get_tree().get_nodes_in_group("goblin_buildings"):
-		if is_instance_valid(b) and not (b as Building).is_dead():
-			out.append(b)
-	return out
-
-# ═════════════════════════════════════════════════════════════════════════════
-# ОТХОД РАЗБИТЫХ В ХИЖИНУ
-# ═════════════════════════════════════════════════════════════════════════════
-## Порог — доля от ПИКА отряда, а не от уставного размера. Орда пополняется
-## постепенно, и по уставному числу свежий отряд из десяти бойцов вечно
-## читался бы как «разбит» и разворачивался бы у ворот обратно внутрь.
-##
-## Отход выполняет сама хижина (request_garrison): она уже умеет снять
-## разметку строя, перевести отряд в режим отхода, довести до ворот, спрятать,
-## лечить и доукомплектовать. Своего «идти домой» здесь нет намеренно — оно
-## было бы худшей копией.
-func _retreat_broken() -> void:
-	for s in squads:
-		var sq: Dictionary = s
-		if String(sq["role"]) == ROLE_HEAL:
-			continue
-		var peak: int = maxi(int(sq.get("peak", 1)), 1)
-		var alive: int = (sq["members"] as Array).size()
-		if float(alive) > float(peak) * _GobCfg.RETREAT_STRENGTH:
-			continue
-		# ИЗ РУКОПАШНОЙ НЕ ОТХОДЯТ. Отряд, повернувший спину в контакте, не
-		# отступает, а гибнет: режим отхода глушит и авто-агро, и ответный удар
-		if _GobCfg.NO_RETREAT_IN_MELEE and GameManager.squad_engaged(int(sq["id"])) > 0:
-			continue
-		var hut := _nearest_hut(_squad_center(sq))
-		if hut == null:
-			continue
-		if hut.request_garrison(int(sq["id"])):
-			sq["role"] = ROLE_HEAL
-			sq["issued"] = true
-			last_action += "|отряд %d уходит в хижину" % int(sq["id"])
-
-## ОТРЯД, НЕ ДОШЕДШИЙ ДО ХИЖИНЫ, ВОЗВРАЩАЕТСЯ В ПОЛЕ (спринт 17). Роль HEAL
-## ставится по request_garrison, а поход к воротам сторож хижины ОТМЕНЯЕТ,
-## если боец дерётся без режима отхода (Castle._process_garrison). Отряд
-## оставался в HEAL навсегда: приказов ему не раздают, в поле он не считается
-## — зонд длинной партии показал орду из 18 отрядов с пустым полем, которая
-## 16 минут переключала «центр»/«оборона», не сделав ни шагу. Отряд, которого
-## нет ни в очереди, ни внутри ни одной хижины, снова полевой; если он всё ещё
-## разбит, _retreat_broken пошлёт его лечиться заново
-func _sweep_heal() -> void:
-	var huts: Array = _huts()
-	for s in squads:
-		var sq: Dictionary = s
-		if String(sq["role"]) != ROLE_HEAL:
-			continue
-		var sid: int = int(sq["id"])
-		var pending := false
-		for h in huts:
-			var c := h as Castle
-			if c != null and (c._slot_of(sid) >= 0 or c._incoming.has(sid)):
-				pending = true
-				break
-		if pending:
-			continue
-		sq["role"] = ROLE_DEFEND
-		sq["issued"] = false
-		last_action += "|отряд %d не дошёл до хижины, снова в поле" % sid
-
-func _nearest_hut(from: Vector3) -> Castle:
-	var best: Castle = null
-	var bd := INF
-	for h in _huts():
-		var c := h as Castle
-		if c == null:
-			continue
-		var d: float = from.distance_squared_to(c.global_position)
-		if d < bd:
-			bd = d
-			best = c
-	return best
-
-# ═════════════════════════════════════════════════════════════════════════════
-# ФАЗА ОРДЫ
-# ═════════════════════════════════════════════════════════════════════════════
-func _decide_phase() -> void:
-	match phase:
-		PHASE_PEACE:
-			if clock >= _peace_sec():
-				phase = PHASE_CENTER
-				last_action += "|мир кончился, экспансия к центру"
-		PHASE_CENTER:
-			# Волна кончилась, когда орда в поле выбита; уцелевшие возвращаются
-			# держать деревню и копить на новую армию
-			if _field_squads() == 0:
-				phase = PHASE_DEFEND
-				last_action += "|волна выбита, оборона деревни"
-			elif _horde_at_center() and _center_clear():
-				# ЦЕНТР СЧИТАЕТСЯ ВЗЯТЫМ, ТОЛЬКО КОГДА ОРДА ДО НЕГО ДОШЛА.
-				# Без первой половины условия волна «брала» центр в тот же
-				# такт, в который выходила из деревни: в середине карты просто
-				# никого не было, и штурм отменялся, не начавшись.
-				# ── СПРИНТ 17: после центра — разведка и рейды, а не сразу
-				# штурм: генеральное наступление ждёт полной армии
-				phase = PHASE_HARASS
-				_harass_since = clock
-				last_action += "|центр взят, разведка и рейды"
-		PHASE_HARASS:
-			if _field_squads() == 0:
-				phase = PHASE_DEFEND
-				last_action += "|поле пусто, оборона деревни"
-			elif _village_threatened():
-				phase = PHASE_DEFEND
-				last_action += "|деревню атакуют, все домой"
-			elif _assault_ready():
-				phase = PHASE_HUNT
-				last_action += "|кулак собран, генеральное наступление"
-		PHASE_HUNT:
-			if _field_squads() == 0:
-				phase = PHASE_DEFEND
-				last_action += "|волна выбита, оборона деревни"
-		PHASE_DEFEND:
-			if _wave_squads() >= _GobCfg.army_squads() and not _village_threatened():
-				phase = PHASE_CENTER
-				last_action += "|орда собрана, новая волна в центр"
+		field_units += n
+		muster[slot] = sid
+		_muster_slot[sid] = slot
+		_set_horde_formation(sid, base, n, Vector3.FORWARD)
+		_sleep_squad(sid)
+		reserve_spawned += 1
+	last_action = "стартовый резерв: %d отрядов" % reserve_spawned
 
 func _blow_horn(why: String) -> void:
 	horn_blows += 1
-	last_action += "|горн (%s)" % why
-	AudioManager.play_horn()
+	last_action = why
+	if AudioManager.has_method("play_horn"):
+		AudioManager.play_horn()
 
-## Первый контакт: точка орды на свету у игрока или боец игрока в обзоре орды
+## Точки, по которым судится первый контакт: лагерь, рудник лагеря, центры
+## отрядов охраны, площадки и волн. Свет тумана игрока над точкой или боец
+## игрока в обзоре гоблина — горн, один раз за партию
 func _check_first_contact() -> void:
 	if first_contact:
 		return
 	var fog = GameManager.fog
 	var lit_ok: bool = fog != null and is_instance_valid(fog) and bool(fog.enabled)
-	var sight: float = _UCfg.vision_radius(float(_UCfg.STATS["goblin_spearman"]["attack_range"]))
+	var sight: float = _UCfgA.vision_radius(float(_UCfgA.STATS["goblin_spearman"]["attack_range"]))
 	var pts: Array = [village]
-	if mine != null and is_instance_valid(mine):
-		pts.append((mine as Node3D).global_position)
-	for s in squads:
-		var sq: Dictionary = s
-		if (sq["members"] as Array).is_empty():
-			continue
-		pts.append(_squad_center(sq))
+	if GameManager.goblin_mine != null and is_instance_valid(GameManager.goblin_mine):
+		pts.append((GameManager.goblin_mine as Node3D).global_position)
+	for sid in guards:
+		pts.append(_centre(int(sid)))
+	for sid2 in _muster_slot:
+		pts.append(_centre(int(sid2)))
+	for w in waves:
+		for sid3 in (w["sids"] as Array):
+			pts.append(_centre(int(sid3)))
 	for p in pts:
 		var c: Vector3 = p
+		if c.x == INF:
+			continue
 		if lit_ok and fog.is_lit(c.x, c.z):
 			first_contact = true
 			_blow_horn("первый контакт: орду увидели")
 			return
-		var seen = GameManager.army.nearest_of_side(c.x, c.z, Constants.FACTION_PLAYER, sight)
-		if seen != null:
+		if GameManager.army.nearest_of_side(c.x, c.z, Constants.FACTION_PLAYER, sight) != null:
 			first_contact = true
 			_blow_horn("первый контакт: орда увидела игрока")
 			return
 
-## Генеральное наступление: армия набрана, поле не пустое, рейды шли не меньше
-## HARASS_MIN_SEC, и есть куда идти (база найдена разведкой либо известна по
-## постройкам)
-func _assault_ready() -> bool:
-	var field: int = _wave_squads()
-	var in_harass: float = clock - _harass_since
-	if in_harass < _GobCfg.HARASS_MIN_SEC:
-		return false
-	# Не раньше 35-й минуты (уточнение владельца): до того — центр, рудники,
-	# точечные рейды
-	if clock < _GobCfg.ASSAULT_EARLIEST_SEC:
-		return false
-	if field < _GobCfg.army_squads():
-		# ── ПОТОЛОК БЕСПОКОЙСТВА (аудит партий 19.09.2026) ────────────────
-		# Полная армия не набиралась никогда: рейды таяли, раненые сидели в
-		# хижинах, и орда 27 минут ходила микро-рейдами. После HARASS_MAX_SEC
-		# наступление идёт тем, что есть, — не меньше ASSAULT_MIN_SQUADS
-		if in_harass < _GobCfg.HARASS_MAX_SEC or field < _GobCfg.ASSAULT_MIN_SQUADS:
-			return false
-	return _assault_target() != Vector3.ZERO
+func _peace_sec() -> float:
+	if not GameManager.truce_enabled():
+		return 0.0
+	return _Diff.goblin_peace_sec()
 
-## Состояние ворот наступления — телеметрии и стендам
-func assault_gate() -> Dictionary:
-	return {
-		"wave": _wave_squads(), "need": _GobCfg.army_squads(), "field": _field_squads(),
-		"harass_sec": snappedf(maxf(clock - _harass_since, 0.0), 1.0) if phase == PHASE_HARASS else 0.0,
-		"clock_ok": clock >= _GobCfg.ASSAULT_EARLIEST_SEC,
-		"target_ok": _assault_target() != Vector3.ZERO,
-	}
+## Живые бойцы отряда (состав читается напрямую: squad_members — не читатель)
+func _alive(sid: int) -> Array:
+	var out: Array = []
+	var sq: Variant = GameManager.squads.get(sid)
+	if sq == null:
+		return out
+	for m in (sq as Dictionary)["members"]:
+		if m != null and is_instance_valid(m) and not (m as Unit).is_dead():
+			out.append(m)
+	return out
 
-## Чужие у деревни (тот же радиус, что у обороны командира)
-func _village_threatened() -> bool:
-	var r: float = _GobCfg.DEFEND_RADIUS + _GobCfg.DEFEND_ALERT_PAD
-	return _nearest_foe(village, r) != null
-
-## Сколько отрядов реально в поле (не лечатся)
-func _field_squads() -> int:
+func _alive_n(sid: int) -> int:
 	var n := 0
-	for s in squads:
-		var sq: Dictionary = s
-		if String(sq["role"]) == ROLE_HEAL or _is_special(int(sq["id"])):
-			continue
-		n += 1
-	return n
-
-## Орда уже дошла до центра? Считаем по центру масс всех полевых отрядов
-func _horde_at_center() -> bool:
-	var acc := Vector3.ZERO
-	var n := 0
-	for s in squads:
-		var sq: Dictionary = s
-		if String(sq["role"]) == ROLE_HEAL or _is_special(int(sq["id"])):
-			continue
-		# Пустой отряд пропускаем ЯВНО, а не по «центр равен нулю»: ноль — это
-		# законная точка на карте (ровно её середина), и как признак «не знаю»
-		# он однажды уже соврал бы именно здесь
-		if (sq["members"] as Array).is_empty():
-			continue
-		acc += _squad_center(sq)
-		n += 1
-	if n == 0:
-		return false
-	acc /= float(n)
-	return Vector2(acc.x, acc.z).length() <= _GobCfg.CENTER_RADIUS
-
-## Центр карты свободен от чужих? Спрашиваем сетку соседей одним запросом,
-## а не обходим группы: это тот же скан, которым пользуется красный ИИ
-func _center_clear() -> bool:
-	for f in [Constants.FACTION_PLAYER, Constants.FACTION_ENEMY]:
-		var seen = GameManager.army.nearest_of_side(0.0, 0.0, f, _GobCfg.CENTER_RADIUS)
-		if seen != null:
-			return false
-	return true
-
-## Куда идёт генеральное наступление (спринт 17: «скрипт 30-й минуты» с
-## охотой на слабейшего снят). База, которую НАШЛА РАЗВЕДКА, ближайшая к
-## деревне; разведка ничего не нашла — ближайшая по постройкам. ZERO — идти
-## некуда
-func _assault_target() -> Vector3:
-	var best := Vector3.ZERO
-	var bd := INF
-	for f in known_bases:
-		if not _target_faction_allowed(int(f)):
-			continue
-		var p: Vector3 = known_bases[f]
-		var d: float = village.distance_squared_to(p)
-		if d < bd:
-			bd = d
-			best = p
-	if best != Vector3.ZERO:
-		return best
-	for f in [Constants.FACTION_PLAYER, Constants.FACTION_ENEMY]:
-		if not _target_faction_allowed(f):
-			continue
-		var anchor := Vector3.ZERO
-		var n := 0
-		for b in main.get_tree().get_nodes_in_group(Constants.building_group(f)):
-			if not is_instance_valid(b) or (b as Building).is_dead():
-				continue
-			anchor += (b as Node3D).global_position
+	var sq: Variant = GameManager.squads.get(sid)
+	if sq == null:
+		return 0
+	for m in (sq as Dictionary)["members"]:
+		if m != null and is_instance_valid(m) and not (m as Unit).is_dead():
 			n += 1
-		if n == 0:
-			continue
-		anchor /= float(n)
-		var d2: float = village.distance_squared_to(anchor)
-		if d2 < bd:
-			bd = d2
-			best = anchor
-	return best
-
-## Рудники, не принадлежащие орде (ничьи и чужие)
-func _foreign_mines() -> Array:
-	var out: Array = []
-	for grp in ["neutral_buildings", Constants.building_group(Constants.FACTION_PLAYER),
-			Constants.building_group(Constants.FACTION_ENEMY)]:
-		for b in main.get_tree().get_nodes_in_group(grp):
-			if b == null or not is_instance_valid(b):
-				continue
-			if b is Mine and not (b as Building).is_dead():
-				out.append(b)
-	return out
-
-## Рудник на холме — ближайший к центру карты рудник, КРОМЕ рудника деревни.
-## Захваченный ордой рудник холма остаётся «холмом» (14.09.2026): прежде
-## брались только чужие, и резерв, захватив рудник, тут же уходил к
-## следующему чужому за полкарты — «держит его» не выполнялось никогда
-func _hill_mine() -> Node3D:
-	var best: Node3D = null
-	var bd := INF
-	var mines: Array = _foreign_mines()
-	for b in main.get_tree().get_nodes_in_group(Constants.building_group(Constants.FACTION_GOBLIN)):
-		if b != null and is_instance_valid(b) and b is Mine and not (b as Building).is_dead() and b != GameManager.goblin_mine:
-			mines.append(b)
-	for m in mines:
-		var d: float = Vector2((m as Node3D).global_position.x,
-			(m as Node3D).global_position.z).length_squared()
-		if d < bd:
-			bd = d
-			best = m
-	return best
-
-# ═════════════════════════════════════════════════════════════════════════════
-# РАЗВЕДКА И РЕЙДЫ (спринт 17)
-# ═════════════════════════════════════════════════════════════════════════════
-## Точки интереса разведчика: центр, рудники, углы противников
-func _scout_waypoints() -> Array:
-	var pts: Array = [Vector3.ZERO]
-	for m in _foreign_mines():
-		pts.append((m as Node3D).global_position)
-	if main.has_method("gold_mine_spots"):
-		for p in main.gold_mine_spots():
-			pts.append(p)
-	pts.append(main.PLAYER_BASE_ANCHOR)
-	pts.append(main.ENEMY_BASE_ANCHOR)
-	return pts
-
-## Разведчик увидел чужую постройку — база этой стороны известна
-func _scout_look(sq: Dictionary) -> void:
-	var c: Vector3 = _squad_center(sq)
-	for f in [Constants.FACTION_PLAYER, Constants.FACTION_ENEMY]:
-		for b in main.get_tree().get_nodes_in_group(Constants.building_group(f)):
-			if b == null or not is_instance_valid(b) or (b as Building).is_dead():
-				continue
-			if c.distance_to((b as Node3D).global_position) <= _GobCfg.SCOUT_SIGHT:
-				if not known_bases.has(f):
-					last_action += "|разведка нашла базу стороны %d" % f
-				known_bases[f] = (b as Node3D).global_position
-				break
-
-# ═════════════════════════════════════════════════════════════════════════════
-# РАЗВЕДКА ВСАДНИКОВ — ПОЛНЫЕ ОТРЯДЫ, ВЕЕР, ОХОТА (ТЗ 19.09.2026, блок 3.4)
-# ═════════════════════════════════════════════════════════════════════════════
-# Прежняя разведка — два всадника, обход точек, укол и домой. Теперь:
-#   • пул до SCOUT_MAX_SQUADS ПОЛНЫХ конных отрядов (scout_units), в вылазку
-#     выходят 1 / 2 / 3 разом по весам SCOUT_SORTIE_WEIGHTS (жребий —
-#     AudioManager.rng, общий поток партии не трогается);
-#   • веер: у каждого отряда своя ДОРОЖКА (lane) — орбита радиусом
-#     SCOUT_ORBIT_R вокруг базы (известной или PLAYER_BASE_ANCHOR), дорожки
-#     разнесены по углу на треть круга и идут в разные стороны: один режет
-#     снизу, второй сверху, третий — по центру;
-#   • охота: на орбите отряд ищет добычу в SCOUT_HUNT_R — рабочих, затем
-#     ОДИНОКИЙ стрелковый отряд (без пехоты в SCOUT_LONE_R) — налёт на
-#     SCOUT_HARASS_SEC, потом ОТХОД (hit-and-run) на следующую точку орбиты
-#     SCOUT_RUN_SEC в режиме отхода, и снова орбита;
-#   • домой — при потерях (RAID_RETREAT_HP), сопротивлении (RAID_FLEE_*) или
-#     по сроку вылазки SCOUT_SORTIE_MAX_SEC; дома передышка SCOUT_SORTIE_SEC.
-# Совместимость: scout_sid / scout_state — ПЕРВЫЙ живой разведотряд (стенды).
-## sid → {"state": out|harass|run|home, "at": clock, "lane": int, "wp": int,
-##        "wp_at": clock, "out_at": clock, "prey": Node|null}
-var scouts: Dictionary = {}
-var _scout_rest_at: float = -1.0e9
-var scout_spawned: int = 0
-var scout_kills_prey: int = 0
-
-## Первый живой разведотряд (совместимость со стендами спринта 17)
-func _sync_scout_compat() -> void:
-	scout_sid = 0
-	for sid in scouts:
-		scout_sid = int(sid)
-		scout_state = String((scouts[sid] as Dictionary)["state"])
-		return
-	scout_state = "out"
-
-## Сколько отрядов идёт в вылазку: 1 / 2 / 3 по весам SCOUT_SORTIE_WEIGHTS
-func _scout_sortie_size() -> int:
-	var w: Array = _GobCfg.SCOUT_SORTIE_WEIGHTS
-	var r: float = AudioManager.rng.randf()
-	var acc: float = 0.0
-	for i in range(w.size()):
-		acc += float(w[i])
-		if r <= acc:
-			return mini(i + 1, _GobCfg.SCOUT_MAX_SQUADS)
-	return mini(w.size(), _GobCfg.SCOUT_MAX_SQUADS)
-
-## Точка орбиты дорожки lane: центр — известная база (игрока в приоритете),
-## иначе якорь базы игрока; направление обхода чередуется по дорожке
-func _scout_orbit_center() -> Vector3:
-	if known_bases.has(Constants.FACTION_PLAYER):
-		return known_bases[Constants.FACTION_PLAYER]
-	for f in known_bases:
-		return known_bases[f]
-	return main.PLAYER_BASE_ANCHOR
-
-func _scout_orbit_point(lane: int, wp: int) -> Vector3:
-	var c: Vector3 = _scout_orbit_center()
-	var n: int = maxi(_GobCfg.SCOUT_ORBIT_POINTS, 3)
-	var dir_sign: float = -1.0 if (lane % 2 == 1) else 1.0
-	var a: float = TAU * float(lane) / 3.0 + dir_sign * TAU * float(wp % n) / float(n)
-	var p := Vector3(c.x + cos(a) * _GobCfg.SCOUT_ORBIT_R, 0.0, c.z + sin(a) * _GobCfg.SCOUT_ORBIT_R)
-	return GameManager.land_target(p)
-
-## Добыча разведки от точки c: рабочий чужой стороны в SCOUT_HUNT_R, иначе
-## ОДИНОКИЙ стрелковый отряд (в SCOUT_LONE_R от его центра нет чужой пехоты)
-func _scout_prey(c: Vector3) -> Node3D:
-	var r2: float = _GobCfg.SCOUT_HUNT_R * _GobCfg.SCOUT_HUNT_R
-	var best: Node3D = null
-	var bd: float = INF
-	for f in [Constants.FACTION_PLAYER, Constants.FACTION_ENEMY]:
-		if not _target_faction_allowed(f):
-			continue
-		for n in main.get_tree().get_nodes_in_group(Constants.unit_group(f)):
-			if n == null or not is_instance_valid(n):
-				continue
-			var u := n as Unit
-			if u == null or u.is_dead() or u.garrisoned or not (u is Worker):
-				continue
-			var d: float = c.distance_squared_to(u.global_position)
-			if d < bd and d <= r2:
-				bd = d
-				best = u
-	if best != null:
-		return best
-	# Одинокие стрелки: отряд лучников, у центра которого нет своей пехоты
-	for f2 in [Constants.FACTION_PLAYER, Constants.FACTION_ENEMY]:
-		if not _target_faction_allowed(f2):
-			continue
-		for sq in GameManager.squads_of_faction(f2):
-			var rec: Dictionary = sq
-			if String(rec.get("type", "")) != "archer":
-				continue
-			var sid: int = int(rec.get("id", 0))
-			var sc: Vector3 = GameManager.squad_centroid(sid)
-			if sc == Vector3.ZERO:
-				continue
-			var d2: float = c.distance_squared_to(sc)
-			if d2 > r2 or d2 >= bd:
-				continue
-			if _lone_squad(sid, f2, sc):
-				var mem: Array = GameManager.squad_members(sid)
-				if not mem.is_empty():
-					bd = d2
-					best = mem[0]
-	return best
-
-## Нет ли у стрелкового отряда пехотного прикрытия своей стороны рядом
-func _lone_squad(sid: int, f: int, c: Vector3) -> bool:
-	var r2: float = _GobCfg.SCOUT_LONE_R * _GobCfg.SCOUT_LONE_R
-	for sq in GameManager.squads_of_faction(f):
-		var rec: Dictionary = sq
-		var osid: int = int(rec.get("id", 0))
-		if osid == sid:
-			continue
-		var t: String = String(rec.get("type", ""))
-		if t == "archer" or t == "worker" or t == "monk":
-			continue
-		var oc: Vector3 = GameManager.squad_centroid(osid)
-		if oc != Vector3.ZERO and c.distance_squared_to(oc) <= r2:
-			return false
-	return true
-
-## Планы всех разведотрядов (по одному на отряд) — см. шапку раздела
-func _scout_plans() -> Array:
-	var out: Array = []
-	# Реестр: выбитые — вон; записи вожака по sid
-	var by_id: Dictionary = {}
-	for s in squads:
-		by_id[int((s as Dictionary)["id"])] = s
-	for sid in scouts.keys():
-		if not by_id.has(int(sid)):
-			scouts.erase(sid)
-	# Новая вылазка: никто не в поле, передышка прошла — выходят 1-3 отряда
-	var in_field := 0
-	var at_home: Array = []
-	for sid in scouts:
-		var st: Dictionary = scouts[sid]
-		if String(st["state"]) == "home":
-			at_home.append(int(sid))
-		else:
-			in_field += 1
-	if in_field == 0 and clock - _scout_rest_at >= _GobCfg.SCOUT_SORTIE_SEC \
-			and main != null and main.has_method("spawn_goblin_squad"):
-		var want: int = _scout_sortie_size()
-		var lane := 0
-		var launched: Array = []
-		for sid_h in at_home:
-			if launched.size() >= want:
-				break
-			launched.append(sid_h)
-		while launched.size() < want and scouts.size() < _GobCfg.SCOUT_MAX_SQUADS:
-			var nsid: int = main.spawn_goblin_squad("goblin_rider", _GobCfg.scout_units(), village)
-			if nsid <= 0:
-				break
-			scout_spawned += 1
-			scouts[nsid] = {"state": "home", "at": clock, "lane": 0, "wp": 0,
-				"wp_at": -1.0e9, "out_at": clock, "prey": null}
-			launched.append(nsid)
-		if not launched.is_empty():
-			_regroup()
-			by_id.clear()
-			for s in squads:
-				by_id[int((s as Dictionary)["id"])] = s
-			for sid_l in launched:
-				var st2: Dictionary = scouts[sid_l]
-				st2["state"] = "out"
-				st2["at"] = clock
-				st2["out_at"] = clock
-				st2["lane"] = lane
-				st2["wp"] = 0
-				st2["wp_at"] = -1.0e9
-				lane += 1
-			scout_sorties += 1
-			last_action += "|вышла разведка: %d конных отрядов веером" % launched.size()
-	for sid in scouts.keys():
-		var sq: Dictionary = by_id.get(int(sid), {})
-		if sq.is_empty():
-			continue
-		var st: Dictionary = scouts[sid]
-		sq["role"] = ROLE_SCOUT
-		var c: Vector3 = _squad_center(sq)
-		_scout_look(sq)
-		var peak: int = maxi(int(sq.get("peak", 1)), 1)
-		var alive: int = (sq["members"] as Array).size()
-		var weak: bool = float(alive) < float(peak) * _GobCfg.RAID_RETREAT_HP
-		var state: String = String(st["state"])
-		match state:
-			"home":
-				if c.distance_to(village) > _GobCfg.SCOUT_ARRIVE + 4.0:
-					if clock - float(st["at"]) > 1.0 and (sq.get("ordered_goal", Vector3.INF) as Vector3).distance_to(village) > 2.0:
-						sq["target"] = village
-						out.append({"sq": sq, "goal": village, "center": c, "retreat": true})
-					continue
-				_scout_rest_at = maxf(_scout_rest_at, float(st["at"]))
-				continue
-			"harass":
-				var prey = st.get("prey")
-				var prey_ok: bool = prey != null and is_instance_valid(prey) \
-					and not (prey as Unit).is_dead() and not (prey as Unit).garrisoned
-				var resisted: bool = _foes_near(c, _GobCfg.RAID_FLEE_RADIUS) >= _GobCfg.RAID_FLEE_FOES
-				if weak or resisted:
-					_scout_go_home(st, sq, c, out, "потери" if weak else "сопротивление")
-					continue
-				if not prey_ok or clock - float(st["at"]) >= _GobCfg.SCOUT_HARASS_SEC:
-					if not prey_ok:
-						scout_kills_prey += 1
-					# HIT-AND-RUN: отход на следующую точку орбиты в режиме отхода
-					st["state"] = "run"
-					st["at"] = clock
-					st["wp"] = int(st["wp"]) + 1
-					st["prey"] = null
-					var rp: Vector3 = _scout_orbit_point(int(st["lane"]), int(st["wp"]))
-					sq["target"] = rp
-					out.append({"sq": sq, "goal": rp, "center": c, "retreat": true})
-					continue
-				sq["target"] = (prey as Node3D).global_position
-				out.append({"sq": sq, "foe": prey, "wake": true})
-				continue
-			"run":
-				if weak:
-					_scout_go_home(st, sq, c, out, "потери")
-					continue
-				if clock - float(st["at"]) < _GobCfg.SCOUT_RUN_SEC:
-					continue
-				st["state"] = "out"
-				st["at"] = clock
-				st["wp_at"] = -1.0e9
-		# out: срок вылазки, потери, добыча, орбита
-		if weak or clock - float(st["out_at"]) >= _GobCfg.SCOUT_SORTIE_MAX_SEC:
-			_scout_go_home(st, sq, c, out, "потери" if weak else "срок")
-			continue
-		var prey2: Node3D = _scout_prey(c)
-		if prey2 != null:
-			st["state"] = "harass"
-			st["at"] = clock
-			st["prey"] = prey2
-			scout_harasses += 1
-			last_action += "|разведка налетает на добычу"
-			sq["target"] = prey2.global_position
-			out.append({"sq": sq, "foe": prey2, "wake": true})
-			continue
-		var goal: Vector3 = _scout_orbit_point(int(st["lane"]), int(st["wp"]))
-		if c.distance_to(goal) <= _GobCfg.SCOUT_ARRIVE:
-			if float(st["wp_at"]) < 0.0:
-				st["wp_at"] = clock
-			elif clock - float(st["wp_at"]) >= _GobCfg.SCOUT_DWELL_SEC:
-				st["wp"] = int(st["wp"]) + 1
-				st["wp_at"] = -1.0e9
-				goal = _scout_orbit_point(int(st["lane"]), int(st["wp"]))
-		sq["target"] = goal
-		out.append({"sq": sq, "goal": goal, "center": c, "wake": true})
-	_sync_scout_compat()
-	return out
-
-func _scout_go_home(st: Dictionary, sq: Dictionary, c: Vector3, out: Array, why: String) -> void:
-	st["state"] = "home"
-	st["at"] = clock
-	st["prey"] = null
-	sq["target"] = village
-	last_action += "|разведка отходит домой (%s)" % why
-	out.append({"sq": sq, "goal": village, "center": c, "retreat": true})
-
-## Разведка — ИСТОРИЯ (спринт 17): один малый отряд, обход точек, укол и
-## домой. Оставлена как обёртка: первый план из _scout_plans()
-func _scout_plan(_field: Array) -> Dictionary:
-	var plans: Array = _scout_plans()
-	return plans[0] if not plans.is_empty() else {}
-
-func _scout_plan_legacy(_field: Array) -> Dictionary:
-	var sq: Dictionary = {}
-	for s in squads:
-		if int((s as Dictionary)["id"]) == scout_sid:
-			sq = s
-			break
-	if sq.is_empty():
-		# Разведчика нет — выпустить из деревни малый конный отряд
-		scout_sid = 0
-		if main == null or not main.has_method("spawn_goblin_squad"):
-			return {}
-		var nsid: int = main.spawn_goblin_squad("goblin_rider", _GobCfg.SCOUT_UNITS, village)
-		if nsid <= 0:
-			return {}
-		scout_sid = nsid
-		scout_state = "out"
-		_scout_state_at = clock
-		_scout_wp = 0
-		_scout_at = -1.0e9
-		scout_sorties += 1
-		last_action += "|вышла разведка (%d конных)" % _GobCfg.SCOUT_UNITS
-		_regroup()
-		for s2 in squads:
-			if int((s2 as Dictionary)["id"]) == scout_sid:
-				sq = s2
-		if sq.is_empty():
-			return {}
-	sq["role"] = ROLE_SCOUT
-	var c: Vector3 = _squad_center(sq)
-	_scout_look(sq)
-	match scout_state:
-		"harass":
-			if clock - _scout_state_at >= _GobCfg.SCOUT_HARASS_SEC:
-				scout_state = "home"
-				_scout_state_at = clock
-				last_action += "|разведка уколола и отходит"
-				sq["target"] = village
-				return {"sq": sq, "goal": village, "center": c, "retreat": true}
-			var prey: Node3D = _raid_prey(c)
-			if prey != null:
-				sq["target"] = prey.global_position
-				return {"sq": sq, "foe": prey, "wake": true}
-			scout_state = "home"
-			_scout_state_at = clock
-			return {"sq": sq, "goal": village, "center": c, "retreat": true}
-		"home":
-			if c.distance_to(village) > _GobCfg.SCOUT_ARRIVE + 4.0:
-				return {}                       # ещё идёт домой
-			if clock - _scout_state_at < _GobCfg.SCOUT_SORTIE_SEC:
-				return {}                       # передышка
-			scout_state = "out"
-			_scout_state_at = clock
-			_scout_wp = 0
-			_scout_at = -1.0e9
-			scout_sorties += 1
-	# out: обход точек интереса; у найденной базы — короткий укол
-	for f in known_bases:
-		if c.distance_to(known_bases[f]) <= _GobCfg.SCOUT_SIGHT:
-			scout_state = "harass"
-			_scout_state_at = clock
-			scout_harasses += 1
-			last_action += "|разведка нашла базу, точечный укол"
-			var prey2: Node3D = _raid_prey(c)
-			if prey2 != null:
-				sq["target"] = prey2.global_position
-				return {"sq": sq, "foe": prey2, "wake": true}
-			break
-	var pts: Array = _scout_waypoints()
-	if pts.is_empty():
-		return {}
-	_scout_wp = _scout_wp % pts.size()
-	var goal: Vector3 = pts[_scout_wp]
-	if c.distance_to(goal) <= _GobCfg.SCOUT_ARRIVE:
-		if _scout_at < 0.0:
-			_scout_at = clock
-		elif clock - _scout_at >= _GobCfg.SCOUT_DWELL_SEC:
-			_scout_wp = (_scout_wp + 1) % pts.size()
-			_scout_at = -1.0e9
-			goal = pts[_scout_wp]
-	sq["target"] = goal
-	return {"sq": sq, "goal": goal, "center": c, "wake": true}
-
-## Рейды: раз в RAID_INTERVAL_SEC отправить малую или крупную группу на
-## экономику известной базы. Ведётся в такте (см. tick): цель уточняется
-## каждый такт, отход — по запасу, сопротивлению или сроку
-func _tick_raids() -> void:
-	if phase != PHASE_HARASS or known_bases.is_empty() or mine_alarm_active():
-		return
-	# Действующие рейды: снять выбывших
-	var gone: Array = []
-	for sid in raid_sids:
-		var found := false
-		for s in squads:
-			if int((s as Dictionary)["id"]) == int(sid) \
-					and String((s as Dictionary)["role"]) != ROLE_HEAL:
-				found = true
-		if not found:
-			gone.append(sid)
-	for sid in gone:
-		raid_sids.erase(sid)
-	if not raid_sids.is_empty():
-		return
-	if clock - _raid_last < _GobCfg.RAID_INTERVAL_SEC:
-		return
-	var want: int = _GobCfg.RAID_SQUADS_BIG if (raids_launched % 2 == 1) else _GobCfg.RAID_SQUADS_SMALL
-	var picked := 0
-	# ── КОННИЦА РЕЗЕРВА — ПЕРВОЙ (13.09.2026) ──────────────────────────────
-	# Вылазка hit & run через брод: 1-2 конных отряда из дремлющего резерва,
-	# режут одиночек и рабочих, при угрозе отходят НА ПОСТ лечиться
-	if reserve != null and is_instance_valid(reserve):
-		for sid_r in reserve.borrow_cavalry(mini(want, _GobCfg.RESERVE_LEND_MAX)):
-			raid_sids[int(sid_r)] = clock
-			picked += 1
-			reserve_raids += 1
-	# Конные — первыми: рейд это скорость
-	for pass_i in range(2):
-		for s in squads:
-			var sq: Dictionary = s
-			var sid: int = int(sq["id"])
-			if picked >= want:
-				break
-			if String(sq["role"]) == ROLE_HEAL or _is_special(sid) or sid == scout_sid \
-					or sid == hill_mine_sid or raid_sids.has(sid):
-				continue
-			var cav: bool = String(sq["type"]) == "goblin_rider"
-			if pass_i == 0 and not cav:
-				continue
-			raid_sids[sid] = clock
-			picked += 1
-	if picked > 0:
-		_raid_last = clock
-		raids_launched += 1
-		last_action += "|рейд №%d, отрядов %d" % [raids_launched, picked]
-
-## ── ЗАЩИТА КРАСНОГО ИИ (спринт 20) ──────────────────────────────────────
-## По базе ИИ-человека орда работает не раньше AI_PROTECT_SEC и только когда
-## у него стоит крепость: иначе диверсанты вырезали бы пять рабочих на старте
-var ai_protect_refusals: int = 0
-
-func _target_faction_allowed(f: int) -> bool:
-	if f != Constants.FACTION_ENEMY:
-		return true
-	if clock < _GobCfg.AI_PROTECT_SEC:
-		ai_protect_refusals += 1
-		return false
-	for b in main.get_tree().get_nodes_in_group(Constants.building_group(f)):
-		if b == null or not is_instance_valid(b):
-			continue
-		var bld := b as Building
-		if bld != null and not bld.is_dead() and bld.has_method("is_stronghold") \
-				and bool(bld.call("is_stronghold")):
-			return true
-	ai_protect_refusals += 1
-	return false
-
-## Цель рейда у известной базы: рабочий → одиночная постройка (не крепость).
-## null — целей нет, идём к базе
-func _raid_prey(base: Vector3) -> Node3D:
-	var best: Node3D = null
-	var bd := INF
-	for f in [Constants.FACTION_PLAYER, Constants.FACTION_ENEMY]:
-		if not _target_faction_allowed(f):
-			continue
-		for n in main.get_tree().get_nodes_in_group(Constants.unit_group(f)):
-			if n == null or not is_instance_valid(n):
-				continue
-			var u := n as Unit
-			if u == null or u.is_dead() or u.garrisoned or not (u is Worker):
-				continue
-			var d: float = base.distance_squared_to(u.global_position)
-			if d < bd and d <= _GobCfg.RAID_HUNT_RADIUS * _GobCfg.RAID_HUNT_RADIUS:
-				bd = d
-				best = u
-	if best != null:
-		return best
-	for f in [Constants.FACTION_PLAYER, Constants.FACTION_ENEMY]:
-		if not _target_faction_allowed(f):
-			continue
-		for b in main.get_tree().get_nodes_in_group(Constants.building_group(f)):
-			if b == null or not is_instance_valid(b):
-				continue
-			var bld := b as Building
-			if bld == null or bld.is_dead():
-				continue
-			if bld.has_method("is_stronghold") and bool(bld.call("is_stronghold")):
-				continue
-			var d2: float = base.distance_squared_to(bld.global_position)
-			if d2 < bd and d2 <= _GobCfg.RAID_HUNT_RADIUS * _GobCfg.RAID_HUNT_RADIUS:
-				bd = d2
-				best = bld
-	return best
-
-## Сколько боевых чужих рядом с точкой (сопротивление рейду)
-func _foes_near(p: Vector3, r: float) -> int:
-	var n := 0
-	for m in GameManager.unit_grid.query_radius(p, r):
-		if m == null or not is_instance_valid(m):
-			continue
-		var u := m as Unit
-		if u == null or u.is_dead() or u is Worker or int(u.faction) == Constants.FACTION_GOBLIN:
-			continue
-		n += 1
 	return n
 
-## План одного рейд-отряда: атака добычи или отход домой лечиться
-func _raid_plan(sq: Dictionary) -> Dictionary:
-	var sid: int = int(sq["id"])
-	var c: Vector3 = _squad_center(sq)
-	var peak: int = maxi(int(sq.get("peak", 1)), 1)
-	var alive: int = (sq["members"] as Array).size()
-	var weak: bool = float(alive) < float(peak) * _GobCfg.RAID_RETREAT_HP
-	var resisted: bool = _foes_near(c, _GobCfg.RAID_FLEE_RADIUS) >= _GobCfg.RAID_FLEE_FOES
-	var expired: bool = clock - float(raid_sids.get(sid, clock)) > _GobCfg.RAID_MAX_SEC
-	if weak or resisted or expired:
-		raid_sids.erase(sid)
-		raid_retreats += 1
-		last_action += "|рейд %d отходит (%s)" % [sid,
-			"мало запаса" if weak else ("сопротивление" if resisted else "срок")]
-		# Конница резерва возвращается на СВОЙ пост и лечится там, а не в хижине
-		if reserve_sids.has(sid) and reserve != null and is_instance_valid(reserve):
-			sq["role"] = ROLE_DEFEND
-			var post: Vector3 = reserve.return_squad(sid)
-			return {"sq": sq, "goal": post, "center": c, "retreat": true}
-		sq["role"] = ROLE_HEAL
-		var hut := _nearest_hut(c)
-		if hut != null and hut.request_garrison(sid):
-			return {}
-		# Хижина полна — отход к деревне в режиме отхода
-		return {"sq": sq, "goal": village, "center": c, "retreat": true}
-	var base := Vector3.ZERO
-	var bd := INF
-	for f in known_bases:
-		if not _target_faction_allowed(int(f)):
+func _centre(sid: int) -> Vector3:
+	var c: Vector2 = GameManager.squad_centre_xz(sid)
+	return Vector3(c.x, 0.0, c.y) if c.x != INF else Vector3.INF
+
+func _type(sid: int) -> String:
+	return GameManager.squad_type(sid)
+
+## Выбитые отряды снимаются отовсюду
+func _prune() -> void:
+	for sid in guards.keys():
+		if _alive_n(int(sid)) == 0:
+			guards.erase(sid)
+	for sid in _muster_slot.keys():
+		if _alive_n(int(sid)) == 0:
+			muster.erase(_muster_slot[sid])
+			_muster_slot.erase(sid)
+	for pl in ([_plan] + _ready_q):
+		if (pl as Dictionary).is_empty():
 			continue
-		var d: float = c.distance_squared_to(known_bases[f])
-		if d < bd:
-			bd = d
-			base = known_bases[f]
-	sq["role"] = ROLE_RAID
-	var prey: Node3D = _raid_prey(base if base != Vector3.ZERO else c)
-	if prey != null:
-		sq["target"] = prey.global_position
-		return {"sq": sq, "foe": prey, "wake": true}
-	# ── ДОБЫЧИ НЕТ — ДИВЕРСАНТЫ НЕ ПАСУТСЯ В УГЛУ ЧУЖОЙ БАЗЫ (спринт 20) ──
-	# Прежде отряд шёл к базе и стоял там до срока рейда. Теперь рейд, у
-	# которого некого бить (или база ещё не найдена), кончается сразу: отряд
-	# возвращается в поле — к центру/деревне общим порядком
-	if base == Vector3.ZERO or clock - float(raid_sids.get(sid, clock)) > _GobCfg.RAID_IDLE_SEC:
-		raid_sids.erase(sid)
-		raid_returns += 1
-		if reserve_sids.has(sid) and reserve != null and is_instance_valid(reserve):
-			sq["role"] = ROLE_DEFEND
-			var post2: Vector3 = reserve.return_squad(sid)
-			return {"sq": sq, "goal": post2, "center": c, "wake": true}
-		sq["role"] = ROLE_CENTER
-		last_action += "|рейд %d без добычи — домой" % sid
-		return {"sq": sq, "goal": village if phase == PHASE_DEFEND else Vector3.ZERO,
-			"center": c, "wake": true}
-	sq["target"] = base
-	return {"sq": sq, "goal": base, "center": c, "wake": true}
+		var keep: Array = []
+		for sid in ((pl as Dictionary)["have"] as Array):
+			if _alive_n(int(sid)) > 0:
+				keep.append(sid)
+		(pl as Dictionary)["have"] = keep
 
-## Охрана рудника: патруль кольцом, на тревоге — бой у рудника
-const TERRITORY_GUARD_R := 18.0
-
-func _mine_guard_plan(sq: Dictionary, idx: int) -> Dictionary:
-	var own: Variant = mine_guard_sids.get(int(sq["id"]))
-	var guarded: Node = mine
-	if own is Node and is_instance_valid(own):
-		guarded = own
-	if guarded == null or not is_instance_valid(guarded):
-		return {}
-	var mp: Vector3 = (guarded as Node3D).global_position
-	var c: Vector3 = _squad_center(sq)
-	sq["role"] = ROLE_MINE_GUARD
-	# Охрана рудников сторон (ТЗ 29.09.2026, п. 5) держит САМ рудник: чужой
-	# ближе TERRITORY_GUARD_R. Охрана деревенского рудника — прежние 30 м
-	var guard_r: float = TERRITORY_GUARD_R if guarded != mine else _GobCfg.CENTER_RADIUS
-	var foe: Node3D = _nearest_foe(mp, guard_r)
-	if foe != null:
-		if GameManager.squad_in_combat(int(sq["id"])):
-			return {}
-		return {"sq": sq, "foe": foe}
-	var slot: int = int(floor(clock / _GobCfg.MINE_GUARD_PATROL_SEC)) + idx
-	var ang: float = TAU * float(slot % 6) / 6.0
-	var goal := Vector3(mp.x + cos(ang) * _GobCfg.MINE_GUARD_PATROL_R, 0.0,
-		mp.z + sin(ang) * _GobCfg.MINE_GUARD_PATROL_R)
-	sq["target"] = goal
-	var prev_goal: Vector3 = sq.get("ordered_goal", Vector3.INF)
-	if prev_goal.distance_to(goal) < 0.5:
-		return {}
-	return {"sq": sq, "goal": goal, "center": c}
+func _reflect() -> void:
+	squads.clear()
+	field_units = 0
+	for sid in guards:
+		squads.append({"id": int(sid), "type": _type(int(sid)), "role": ROLE_GUARD})
+	for sid in _muster_slot:
+		squads.append({"id": int(sid), "type": _type(int(sid)), "role": ROLE_MUSTER})
+		field_units += _alive_n(int(sid))
+	for w in waves:
+		for sid in (w["sids"] as Array):
+			if _muster_slot.has(sid):
+				continue
+			squads.append({"id": int(sid), "type": _type(int(sid)), "role": ROLE_WAVE})
+			field_units += _alive_n(int(sid))
 
 # ═════════════════════════════════════════════════════════════════════════════
-# ПРИКАЗЫ
+# ЭКОНОМИКА ЕДЫ
 # ═════════════════════════════════════════════════════════════════════════════
-## Одна цель на ОТРЯД, а не на бойца. Раздача по бойцу — это ровно тот способ,
-## которым отряд разваливается: каждый получает своего ближайшего врага и
-## растекается по округе. command_attack сам разложит отряд по моделям чужого
-## отряда (GameManager.squad_pick_member)
-# ─────────────────────────────────────────────────────────────────────────────
-# РАЗДАЧА ПРИКАЗОВ: РЕШЕНИЕ СРАЗУ, ИСПОЛНЕНИЕ ПОРЦИЯМИ И ТОЛЬКО ПО ДЕЛУ
-# ─────────────────────────────────────────────────────────────────────────────
-# Зонд qa_mass3k/AIProbe (сент. 2026) поймал здесь горб 46-72 мс КАЖДЫЙ такт:
-# _issue_orders выдавал command_attack/command_move КАЖДОМУ из тысячи гоблинов
-# в один кадр и КАЖДЫЕ две секунды, даже когда ни фаза, ни цель, ни точка не
-# менялись. На кадре свалки это читалось как стабильные ~2.4 мс «мышления ИИ»
-# (замер qa_mass3k) — рывок, размазанный усреднением по секунде.
-#
-# Лечение — ДВА приёма красного ИИ, перенесённые сюда дословно:
-#  1) НЕИЗМЕНИВШИЙСЯ ПРИКАЗ НЕ ПЕРЕИЗДАЁТСЯ (правило stagnant target,
-#     EnemyAI._posts_intact). Отряд, уже втянутый в бой, новых приказов не
-#     получает вовсе — бойцов ведут сцепка, авто-агро и подтягивание фланга;
-#     переиздание только дёргало их (command_attack будит, метит позу грязной
-#     и переставляет стену — см. «цена костыля была не там, где её мерили»).
-#     Марш к той же точке переиздаётся не чаще REISSUE_KEEPALIVE_SEC —
-#     страховка от застрявших остаётся, но вчетверо реже.
-#  2) РАЗДАЧА НАРЕЗАНА ПО КАДРАМ (EnemyAI._drain_orders): решение по всем
-#     отрядам принимается одним тактом (картина мира согласована), а дорогие
-#     обходы состава складываются в очередь и разбираются по
-#     ORDER_BUDGET_MEMBERS бойцов за кадр.
-var _order_queue: Array = []
-var _order_at: int = 0
-## БЮДЖЕТ РЕЖЕТ И ВНУТРИ ОТРЯДА (аудит 19.09.2026): 150 бойцов за кадр при
-## 90-155 мкс на приказ (маршрут, разметка, пробуждение) давали кадры по
-## 60-75 мс в qa_bigstand/Owner — самый высокий пик партии. Теперь отряд
-## раздаётся с того места, где кончился бюджет (plan["_k"]), а бюджет —
-## ORDER_BUDGET_MEMBERS 40 (~5 мс кадра); очередь в 750 бойцов уходит за
-## 19 кадров, такт вожака — 120
-const ORDER_BUDGET_MEMBERS := 24
-## Как часто повторять марш В ТУ ЖЕ точку отряду вне боя (страховка от
-## застрявших). Прежние две секунды (каждый такт) были не страховкой, а
-## основной статьёй расхода кадра
-const REISSUE_KEEPALIVE_SEC := 8.0
+func _huts_alive() -> Array:
+	var out: Array = []
+	for b in get_tree().get_nodes_in_group(Constants.building_group(Constants.FACTION_GOBLIN)):
+		if b == null or not is_instance_valid(b) or not (b is Building) or (b as Building).is_dead():
+			continue
+		var bid: String = String((b as Building).building_id)
+		if bid == "goblin_hut" or bid == "goblin_chief_hut":
+			out.append(b)
+	return out
 
-func _drain_orders() -> void:
-	if _order_at >= _order_queue.size():
-		return
-	var left: int = ORDER_BUDGET_MEMBERS
-	while _order_at < _order_queue.size() and left > 0:
-		var plan: Dictionary = _order_queue[_order_at]
-		left -= _issue_squad(plan, left)
-		if bool(plan.get("_done", true)):
-			_order_at += 1
-	if _order_at >= _order_queue.size():
-		_order_queue.clear()
-		_order_at = 0
+func chief_alive() -> bool:
+	if chief == null or not is_instance_valid(chief):
+		# Загрузка партии сносит и ставит постройки заново: хата — та, что
+		# стоит в лагере сейчас (поиск только при потере ссылки)
+		chief = null
+		for b in get_tree().get_nodes_in_group(Constants.building_group(Constants.FACTION_GOBLIN)):
+			if is_instance_valid(b) and b is Building and String((b as Building).building_id) == "goblin_chief_hut":
+				chief = b
+				break
+	return chief != null and is_instance_valid(chief) and not (chief as Building).is_dead()
 
-func _issue_orders(only_revenge: bool = false) -> void:
-	var aim := village
-	match phase:
-		PHASE_CENTER: aim = Vector3.ZERO           # центр карты
-		PHASE_HARASS: aim = Vector3.ZERO           # поле держится у центра
-		PHASE_HUNT:
-			aim = _assault_target() if hunt_target_override == Vector3.INF else hunt_target_override
-		PHASE_DEFEND: aim = village
-	# Недоразобранный план прошлого такта выбрасывается целиком: обстановка
-	# пересчитана, и выдавать поверх неё вчерашние приказы хуже, чем не выдать
-	_order_queue.clear()
-	_order_at = 0
-	var alarm: bool = mine_alarm_active()
-	var mine_pos: Vector3 = (mine as Node3D).global_position if alarm else Vector3.ZERO
-	# ── ОСОБЫЕ РОЛИ (спринт 17): гарнизон, охрана рудника, разведка, рейды ──
-	var handled: Dictionary = {}
-	var guard_idx := 0
-	var field: Array = []
-	for s0 in squads:
-		var sq0: Dictionary = s0
-		var sid0: int = int(sq0["id"])
-		if String(sq0["role"]) == ROLE_HEAL or (sq0["members"] as Array).is_empty():
+## Спячка одного бойца (прежний помощник вожака; стенд тумана qa_fog D7 зовёт
+## его напрямую): тело — Unit.set_dormant, визуальный тик не гасится
+func _set_dormant(u: Unit, on: bool) -> void:
+	if u != null and is_instance_valid(u):
+		u.set_dormant(on)
+
+## ── ПОСЛЕ ЗАГРУЗКИ ПАРТИИ (SaveLoadManager.apply) ─────────────────────────
+## Отряды орды восстанавливаются из слепка заново и с новыми номерами, а
+## вожак о них не знает: отряд у рудника (ближе GUARD_LEASH) становится его
+## охраной (пост — где стоит), прочие — площадкой сбора (идут в слот и спят).
+## Гноллы, тролли и туши пней — дикие, их не трогаем
+func adopt_after_load() -> void:
+	# Резерв уже лежит в сохранённых отрядах — второй раз его не рожать
+	_reserve_done = true
+	guards.clear()
+	muster.clear()
+	_muster_slot.clear()
+	_homing.clear()
+	waves.clear()
+	_ready_q.clear()
+	_plan = {}
+	var mines: Array = []
+	for grp in ["neutral_buildings", "enemy_buildings", "goblin_buildings", "player_buildings"]:
+		for b in get_tree().get_nodes_in_group(grp):
+			if b is Mine and is_instance_valid(b) and not mines.has(b):
+				mines.append(b)
+	for sid in GameManager.squads.keys():
+		var sq: Dictionary = GameManager.squads[sid]
+		if int(sq.get("faction", -1)) != Constants.FACTION_GOBLIN:
 			continue
-		if only_revenge:
+		var t: String = String(sq.get("type", ""))
+		if t != "goblin_spearman" and t != "goblin_rider" and t != "big_goblin":
 			continue
-		if garrison_sids.has(sid0):
-			sq0["role"] = ROLE_GARRISON
-			handled[sid0] = true
-			# Гарнизон стоит толпой за околицей и бьёт то, что подошло
-			var gspread: float = 6.0 * float(garrison_idx_of(sid0))
-			var ggoal := Vector3(village.x + gspread, 0.0, village.z)
-			var gfoe: Node3D = _nearest_foe(_squad_center(sq0), _GobCfg.CENTER_RADIUS)
-			if gfoe != null:
-				if not GameManager.squad_in_combat(sid0):
-					_order_queue.append({"sq": sq0, "foe": gfoe})
-			elif (sq0.get("ordered_goal", Vector3.INF) as Vector3).distance_to(ggoal) > 0.5 \
-					or clock - float(sq0.get("ordered_at", -1.0e9)) >= REISSUE_KEEPALIVE_SEC:
-				sq0["target"] = ggoal
-				_order_queue.append({"sq": sq0, "goal": ggoal, "center": _squad_center(sq0)})
+		if _alive_n(int(sid)) == 0:
 			continue
-		if mine_guard_sids.has(sid0):
-			handled[sid0] = true
-			var gp: Dictionary = _mine_guard_plan(sq0, guard_idx)
-			guard_idx += 1
-			if not gp.is_empty():
-				_order_queue.append(gp)
-			continue
-		if _revenge_sids.has(sid0):
-			continue                       # ниже, общим путём
-		if sid0 == scout_sid or scouts.has(sid0):
-			continue                       # разведка ведётся своим автоматом ниже
-		# Резерв ведёт DormantReserve; в поле попадает только конница, взятая
-		# на вылазку (она в raid_sids)
-		if reserve_sids.has(sid0) and not raid_sids.has(sid0):
-			continue
-		# Отряды набега по расписанию ведёт GoblinRaids
-		if raids.owned.has(sid0):
-			handled[sid0] = true
-			continue
-		field.append(sq0)
-	# ── ТРЕВОГА РУДНИКА: УПРАВЛЯЕМЫЕ ВОЛНЫ (ТЗ 24.09.2026, второе письмо) ────
-	# Было «вся орда к руднику» — бессистемная куча в первый же захват.
-	# Теперь волна из MINE_WAVE_SQUADS отрядов: выстроилась (WaveStager) →
-	# атаковала → при потерях или по сроку отступила → следующая волна
-	# ДРУГИМИ отрядами. Прочие отряды поля держат деревню
-	if alarm and not only_revenge:
-		_mine_waves(field, mine_pos, handled)
-		field = []
-	elif not alarm and _mw_state != "":
-		_mw_state = ""
-		_mw_sids.clear()
-	# ── МИРНАЯ ФАЗА: ПАТРУЛЬ ГРАНИЦ ДЕРЕВНИ (уточнение владельца) ───────────
-	if not only_revenge and not alarm and phase == PHASE_PEACE:
-		if _village_threatened():
-			# Пришли бить — оборона деревни командиром, как в фазе обороны
-			var dplans: Array = commander.plan_defense(field, village, clock)
-			for s5 in field:
-				(s5 as Dictionary)["role"] = ROLE_DEFEND
-				handled[int((s5 as Dictionary)["id"])] = true
-			for plan5 in dplans:
-				_order_queue.append(plan5)
+		var c: Vector3 = _centre(int(sid))
+		var near: Node = null
+		var bd: float = GUARD_LEASH
+		for m in mines:
+			var d: float = Vector2(c.x - (m as Node3D).global_position.x, c.z - (m as Node3D).global_position.z).length()
+			if d < bd:
+				bd = d
+				near = m
+		if near != null:
+			register_mine_guard(int(sid), near, c)
 		else:
-			var bi := 0
-			for s5 in field:
-				var sq5: Dictionary = s5
-				handled[int(sq5["id"])] = true
-				sq5["role"] = ROLE_BORDER
-				var slot: int = int(floor(clock / _GobCfg.PATROL_BORDER_SEC)) + bi
-				var ang: float = TAU * float(slot % _GobCfg.PATROL_BORDER_POINTS) / float(_GobCfg.PATROL_BORDER_POINTS)
-				var r: float = _GobCfg.VILLAGE_RADIUS + _GobCfg.PATROL_BORDER_R
-				var goal5 := Vector3(village.x + cos(ang) * r, 0.0, village.z + sin(ang) * r)
-				bi += 1
-				sq5["target"] = goal5
-				var c5: Vector3 = _squad_center(sq5)
-				var foe5: Node3D = _nearest_foe(c5, _GobCfg.CENTER_RADIUS)
-				if foe5 != null:
-					if not GameManager.squad_in_combat(int(sq5["id"])):
-						_order_queue.append({"sq": sq5, "foe": foe5})
-					continue
-				if (sq5.get("ordered_goal", Vector3.INF) as Vector3).distance_to(goal5) < 0.5:
-					continue
-				_order_queue.append({"sq": sq5, "goal": goal5, "center": c5})
-		field = []
-	# ── РАЗВЕДКА, РЕЙДЫ, РЕЗЕРВ НА РУДНИКЕ ХОЛМА (фазы экспансии и рейдов) ───
-	if not only_revenge and (phase == PHASE_HARASS or phase == PHASE_CENTER):
-		var rest: Array = []
-		# Резерв на руднике холма: EXPAND_MINE_SQUADS отрядов стоят на нём
-		var hill: Node3D = _hill_mine()
-		var hold_left: int = _GobCfg.EXPAND_MINE_SQUADS if hill != null else 0
-		for s2 in field:
-			var sq2: Dictionary = s2
-			var sid2: int = int(sq2["id"])
-			if phase == PHASE_HARASS and raid_sids.has(sid2):
-				handled[sid2] = true
-				var rp: Dictionary = _raid_plan(sq2)
-				if not rp.is_empty():
-					_order_queue.append(rp)
-				continue
-			if hold_left > 0 and (hill_mine_sid == sid2 or hill_mine_sid == 0) \
-					and sid2 != scout_sid:
-				hill_mine_sid = sid2
-				hold_left -= 1
-				handled[sid2] = true
-				sq2["role"] = ROLE_MINE_HOLD
-				var hp3: Vector3 = hill.global_position
-				var hfoe: Node3D = _nearest_foe(hp3, _GobCfg.CENTER_RADIUS)
-				if hfoe != null:
-					if not GameManager.squad_in_combat(sid2):
-						_order_queue.append({"sq": sq2, "foe": hfoe})
-					continue
-				sq2["target"] = hp3
-				if (sq2.get("ordered_goal", Vector3.INF) as Vector3).distance_to(hp3) < 0.5 \
-						and clock - float(sq2.get("ordered_at", -1.0e9)) < REISSUE_KEEPALIVE_SEC:
-					continue
-				_order_queue.append({"sq": sq2, "goal": hp3, "center": _squad_center(sq2)})
-				continue
-			rest.append(sq2)
-		if hill == null:
-			hill_mine_sid = 0
-		if phase == PHASE_HARASS:
-			for sp_v in _scout_plans():
-				var sp: Dictionary = sp_v
-				var ssq: Dictionary = sp["sq"]
-				handled[int(ssq["id"])] = true
-				if sp.has("foe") or bool(sp.get("retreat", false)):
-					_order_queue.append(sp)
-				else:
-					var prev_g: Vector3 = ssq.get("ordered_goal", Vector3.INF)
-					if prev_g.distance_to(sp["goal"]) > 0.5 \
-							or clock - float(ssq.get("ordered_at", -1.0e9)) >= REISSUE_KEEPALIVE_SEC:
-						_order_queue.append(sp)
-		field = rest
-	# ── ШТУРМ БАЗЫ ВЕДЁТ КОМАНДИР (заказ 10.09.2026) ─────────────────────────
-	# В фазе охоты полевые отряды (не месть, не лечащиеся) получают план от
-	# GoblinAttackCommander: сбор на дистанции, паттерн, отход и лечение.
-	# Режимов три (уточнение владельца): охота — штурм базы, центр — марш с
-	# дозором, оборона деревни — рубеж у костров и фланговые уколы конницы.
-	# Фаза рейдов держит поле у центра тем же маршем с дозором
-	var tactical: Dictionary = {}
-	if _GobCfg.ASSAULT_TACTICS and not only_revenge and not alarm \
-			and (phase == PHASE_HUNT or phase == PHASE_CENTER or phase == PHASE_DEFEND \
-			or phase == PHASE_HARASS):
-		var role: String = ROLE_HUNT if phase == PHASE_HUNT else \
-			(ROLE_CENTER if (phase == PHASE_CENTER or phase == PHASE_HARASS) else ROLE_DEFEND)
-		for s4 in field:
-			var sq4: Dictionary = s4
-			sq4["role"] = role
-			sq4["target"] = aim
-			tactical[int(sq4["id"])] = true
-		var plans: Array = []
-		match phase:
-			PHASE_HUNT:   plans = commander.plan(field, aim, village, clock)
-			PHASE_DEFEND: plans = commander.plan_defense(field, village, clock)
-			_:            plans = commander.plan_advance(field, aim, village, clock)
-		for plan in plans:
-			_order_queue.append(plan)
-		if commander.last_action != "":
-			last_action += "|" + commander.last_action
-	elif commander.is_active():
-		commander.reset()
-	var i := 0
-	for s in squads:
-		var sq: Dictionary = s
-		if String(sq["role"]) == ROLE_HEAL:
-			continue                       # отход ведёт хижина, свой приказ его отменит
-		var members: Array = sq["members"]
-		if members.is_empty():
-			continue
-		var sid: int = int(sq["id"])
-		if tactical.has(sid) or handled.has(sid) or raids.owned.has(sid):
-			continue                       # приказы этого отряда уже в плане
-		# РЕЗЕРВ ВЕДЁТ DormantReserve, и общий путь его не касается (19.09.2026):
-		# из списка field он выброшен, а здесь обход идёт по ВСЕМ отрядам —
-		# проснувшийся резерв уходил с ордой к центру карты и домой не
-		# возвращался никогда (qa_reserve_sleep: 12 075 приказов horde_ai за
-		# окно, все двенадцать отрядов в 60-140 м от постов). Взятая взаймы
-		# конница — исключение, её план — рейд
-		if reserve_sids.has(sid) and not raid_sids.has(sid):
-			continue
-		if only_revenge and not (String(sq["role"]) == ROLE_REVENGE or _revenge_sids.has(sid)):
-			continue
-		# Отряды расходятся по фронту, а не лезут в одну точку
-		var spread: float = 8.0 * float(i - squads.size() / 2)
-		var goal := Vector3(aim.x + spread, 0.0, aim.z)
-		i += 1
-		# ОТРЯД МЕСТИ ДЕРЖИТ ДЕРЕВО ТРОЛЛЯ, фазы орды его не касаются
-		if String(sq["role"]) == ROLE_REVENGE or _revenge_sids.has(sid):
-			sq["role"] = ROLE_REVENGE
-			goal = _revenge_goal(sid)
-		else:
-			sq["role"] = ROLE_CENTER if phase == PHASE_CENTER else \
-				(ROLE_HUNT if phase == PHASE_HUNT else ROLE_DEFEND)
-		sq["target"] = goal
-		var center := _squad_center(sq)
-		# Цель поблизости — атакуем её; нет — идём к точке
-		var foe: Node3D = _nearest_foe(center, _GobCfg.CENTER_RADIUS)
-		# ── ПОСТРОЙКИ ТОЖЕ ЦЕЛЬ (заказ 10.09.2026) ──────────────────────
-		# Орда доходила до чужой базы и вставала «у стены»: приказ атаки
-		# раздавался только по бойцам, а дома вокруг были не при чём. Нет
-		# бойца в радиусе — ближайший чужой дом в BUILDING_HUNT_RADIUS
-		# получает тот же command_attack (охрана деревни и месть — нет:
-		# у них своя цель)
-		if foe == null and String(sq["role"]) != ROLE_REVENGE and phase != PHASE_DEFEND:
-			foe = _nearest_enemy_building(center, _GobCfg.BUILDING_HUNT_RADIUS)
-		if foe != null:
-			# ОТРЯД УЖЕ ДЕРЁТСЯ — НЕ ТРОГАТЬ. Приказ нужен один раз, на входе
-			# в бой; дальше цели раздают сцепка и авто-агро, а переиздание
-			# каждые две секунды только будило и передёргивало всю орду
-			if GameManager.squad_in_combat(sid):
-				continue
-			# ── СБОР ПЕРЕД УДАРОМ (ТЗ 24.09.2026, п. 8) ─────────────────
-			# Не бить поодиночке: отряды, увидевшие того же врага, сперва
-			# встают линией перед ним и уходят в бой одной волной
-			var gt: Dictionary = stager.gate(sid, center, foe, clock)
-			if gt.has("stage"):
-				var sg: Vector3 = gt["stage"]
-				sq["target"] = sg
-				var pg: Vector3 = sq.get("ordered_goal", Vector3.INF)
-				var fresh_at: bool = clock - float(sq.get("ordered_at", -1.0e9)) < REISSUE_KEEPALIVE_SEC
-				if pg.distance_to(sg) < 1.0 and fresh_at:
-					continue
-				_order_queue.append({"sq": sq, "goal": sg, "center": center, "wake": true})
-				continue
-			# Фронт на фронт: волна делит чужую линию (WaveStager._go)
-			_order_queue.append({"sq": sq, "foe": gt.get("foe", foe)})
-			continue
-		# Марш в ту же точку не переиздаётся чаще страховочного срока
-		var prev_goal: Vector3 = sq.get("ordered_goal", Vector3.INF)
-		var prev_at: float = float(sq.get("ordered_at", -1.0e9))
-		if prev_goal.distance_to(goal) < 0.5 \
-				and clock - prev_at < REISSUE_KEEPALIVE_SEC:
-			continue
-		_order_queue.append({"sq": sq, "goal": goal, "center": center})
+			_to_muster(int(sid))
 
-## ── ВОЛНЫ НА РУДНИКЕ ─────────────────────────────────────────────────────────
-const MINE_WAVE_SQUADS := 2
-const MINE_WAVE_ATTACK_SEC := 60.0
-const MINE_WAVE_GAP_SEC := 20.0
-const MINE_WAVE_LOSS := 0.5
-var _mw_sids: Array = []
-var _mw_state: String = ""
-var _mw_since: float = 0.0
-var _mw_peak: int = 0
-var _mw_used: Dictionary = {}
-## Стендам: сколько волн ушло на рудник
-var mine_waves_sent: int = 0
 
-func _mw_alive() -> int:
-	var n := 0
-	for sid in _mw_sids:
-		var raw: Variant = GameManager.squads.get(int(sid))
-		if raw == null:
-			continue
-		for m in (raw as Dictionary)["members"]:
-			if m != null and is_instance_valid(m) and not (m as Unit).is_dead():
-				n += 1
-	return n
-
-func _mine_waves(field: Array, mine_pos: Vector3, handled: Dictionary) -> void:
-	var by_id: Dictionary = {}
-	for s in field:
-		var sq: Dictionary = s
-		var sid: int = int(sq["id"])
-		if reserve_sids.has(sid):
-			continue
-		by_id[sid] = sq
-		handled[sid] = true
-		raid_sids.erase(sid)
-	var foe: Node3D = _nearest_foe(mine_pos, _GobCfg.CENTER_RADIUS)
-	# ── ВЫБОР ВОЛНЫ ─────────────────────────────────────────────────────────
-	if _mw_state == "" or (_mw_state == "gap" and clock - _mw_since >= MINE_WAVE_GAP_SEC):
-		_mw_sids.clear()
-		var cands: Array = []
-		for sid2 in by_id.keys():
-			if not _mw_used.has(sid2):
-				cands.append(sid2)
-		if cands.size() < MINE_WAVE_SQUADS:
-			_mw_used.clear()
-			cands = by_id.keys()
-		cands.sort_custom(func(a, b): return (by_id[a]["members"] as Array).size() > (by_id[b]["members"] as Array).size())
-		for k in range(mini(MINE_WAVE_SQUADS, cands.size())):
-			_mw_sids.append(int(cands[k]))
-			_mw_used[int(cands[k])] = true
-		_mw_state = "go" if not _mw_sids.is_empty() else ""
-		_mw_since = clock
-		_mw_peak = _mw_alive()
-		if not _mw_sids.is_empty():
-			mine_waves_sent += 1
-			last_action += "|волна на рудник (%d отр.)" % _mw_sids.size()
-	# ── ПРОЧИЕ ДЕРЖАТ ДЕРЕВНЮ ───────────────────────────────────────────────
-	for sid3 in by_id.keys():
-		if _mw_sids.has(int(sid3)) and _mw_state != "gap":
-			continue
-		var sq3: Dictionary = by_id[sid3]
-		sq3["role"] = ROLE_DEFEND
-		var home := Vector3(village.x, 0.0, village.z)
-		var c3: Vector3 = _squad_center(sq3)
-		if c3.distance_to(home) > _GobCfg.VILLAGE_RADIUS + 10.0 \
-				and (sq3.get("ordered_goal", Vector3.INF) as Vector3).distance_to(home) > 0.5:
-			sq3["target"] = home
-			_order_queue.append({"sq": sq3, "goal": home, "center": c3, "retreat": _mw_sids.has(int(sid3))})
-	if _mw_state == "gap" or _mw_sids.is_empty():
+func _economy_tick(dt: float) -> void:
+	if phase == PHASE_DEFEATED:
 		return
-	# ── ВОЛНА: СБОР → УДАР → ОТХОД ─────────────────────────────────────────
-	var alive: int = _mw_alive()
-	var attack_long: bool = _mw_state == "attack" and clock - _mw_since >= MINE_WAVE_ATTACK_SEC
-	if alive == 0 or foe == null or attack_long or float(alive) < float(_mw_peak) * (1.0 - MINE_WAVE_LOSS):
-		_mw_state = "gap"
-		_mw_since = clock
-		for sid4 in _mw_sids:
-			var sq4: Variant = by_id.get(sid4)
-			if sq4 != null:
-				_order_queue.append({"sq": sq4, "goal": Vector3(village.x, 0.0, village.z),
-					"center": _squad_center(sq4), "retreat": true})
-		last_action += "|волна рудника отходит"
+	var huts: Array = _huts_alive()
+	if huts.is_empty():
+		_defeat()
 		return
-	for sid5 in _mw_sids:
-		var sq5: Variant = by_id.get(sid5)
-		if sq5 == null:
-			continue
-		(sq5 as Dictionary)["role"] = ROLE_MINE_ALARM
-		if GameManager.squad_in_combat(int(sid5)):
-			continue
-		var c5: Vector3 = _squad_center(sq5)
-		var gt: Dictionary = stager.gate(int(sid5), c5, foe, clock)
-		if gt.has("stage"):
-			var sg: Vector3 = gt["stage"]
-			if (sq5.get("ordered_goal", Vector3.INF) as Vector3).distance_to(sg) >= 1.0:
-				_order_queue.append({"sq": sq5, "goal": sg, "center": c5, "wake": true})
-			continue
-		if _mw_state != "attack":
-			_mw_state = "attack"
-			_mw_since = clock
-		_order_queue.append({"sq": sq5, "foe": gt.get("foe", foe), "wake": true})
+	var small := 0
+	for h in huts:
+		if String((h as Building).building_id) == "goblin_hut":
+			small += 1
+	var ramp: float = minf(1.0 + _Spawn.FOOD_RAMP_PER_HOUR * clock / 3600.0, _Spawn.FOOD_RAMP_MAX)
+	var diff_k: float = _Diff.goblin_hut_food_per_min() / maxf(_GobCfg.HUT_FOOD_PER_MIN, 0.001)
+	income_min = (float(small) * _Spawn.HUT_FOOD_MIN \
+		+ (_Spawn.CHIEF_FOOD_MIN if chief_alive() else 0.0)) * ramp * diff_k
+	upkeep_min = float(field_units) * _Spawn.FOOD_UPKEEP_PER_UNIT_MIN
+	var f: float = ResourceManager.get_amount(Constants.FACTION_GOBLIN, Constants.RESOURCE_FOOD)
+	f = clampf(f + (income_min - upkeep_min) / 60.0 * dt, 0.0, _Spawn.FOOD_BANK_MAX)
+	ResourceManager.set_amount(Constants.FACTION_GOBLIN, Constants.RESOURCE_FOOD, f)
 
-## Порядковый номер гарнизонного отряда (для разноса по околице)
-func garrison_idx_of(sid: int) -> int:
-	var i := 0
-	for k in garrison_sids:
-		if int(k) == sid:
-			return i
-		i += 1
+## ПОСЛЕДНЯЯ ХИЖИНА СНЕСЕНА — орда разбита: производство встаёт навсегда.
+## Живые отряды доживают своё (охрана спит, волны дерутся)
+func _defeat() -> void:
+	phase = PHASE_DEFEATED
+	_plan = {}
+	_ready_q.clear()
+	last_action = "лагерь уничтожен — производство остановлено"
+	var hud = main.get("hud") if main != null else null
+	if hud != null and is_instance_valid(hud) and hud.has_method("show_placement_hint"):
+		hud.show_placement_hint("Лагерь орды уничтожен — новых волн не будет")
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ПРОИЗВОДСТВО: ПЛАН ВОЛНЫ → ПОКУПКА ПО ОТРЯДУ → СЛОТ ПЛОЩАДКИ СБОРА
+# ═════════════════════════════════════════════════════════════════════════════
+func horde_alive() -> int:
+	if main != null and main.has_method("horde_alive"):
+		return int(main.call("horde_alive"))
 	return 0
 
-## Исполнить одну запись плана (обход состава — дорогая часть).
-## Возвращает число бойцов, которым выдан приказ, — им и меряется бюджет кадра
-func _issue_squad(plan: Dictionary, budget: int = 1000000) -> int:
-	var sq: Dictionary = plan["sq"]
-	var members: Array = sq["members"]
-	var issued := 0
-	# Продолжение с места, где кончился бюджет прошлого кадра
-	var k0: int = int(plan.get("_k", 0))
-	plan["_done"] = true
-	# Зонд BigStand: источник приказов — вожак орды (метку снимает физтик)
-	if _OptGA.cmd_meter: _OptGA.cmd_src = "horde_ai"
-	# Живость — на СЫРОЙ ссылке, до приведения типа (правило 5): цель могла
-	# пасть, пока запись ждала своего кадра, а типизированное присваивание
-	# освобождённого объекта не даёт null — оно бросает исключение
-	# Ветка выбирается ПО КЛЮЧУ, а не по «цель не null»: павшая цель в
-	# словаре сравнивается с null как равная, и запись атаки проваливалась
-	# в ветку марша без «goal» (SCRIPT ERROR в зонде длинной партии, 34-я мин)
-	if plan.has("foe"):
-		var foe_raw: Variant = plan.get("foe")
-		if foe_raw == null or not is_instance_valid(foe_raw):
-			return 0
-		var foe := foe_raw as Node3D
-		# Приказ командира штурма снимает режим отхода (щуп вернулся к линии
-		# и снова идёт в бой): в отходе боец не берёт целей вовсе
-		var wake: bool = bool(plan.get("wake", false))
-		for ka in range(k0, members.size()):
-			if issued >= budget:
-				plan["_k"] = ka
-				plan["_done"] = false
-				return issued
-			var m = members[ka]
-			if not is_instance_valid(m):
-				continue
-			var u := m as Unit
-			if u != null and not u.is_dead():
-				if wake and u.retreating:
-					u.end_retreat(true)
-				if _OptGA.sys_meter:
-					var ta: int = Time.get_ticks_usec()
-					u.command_attack(foe, true, true)
-					_OptGA.sys_add("ga_cmd_attack", Time.get_ticks_usec() - ta)
-				else:
-					u.command_attack(foe, true, true)
-				issued += 1
-		return issued
-	var goal: Vector3 = plan["goal"]
-	var center: Vector3 = plan["center"]
-	sq["ordered_goal"] = goal
-	sq["ordered_at"] = clock
-	# ── ОТХОД (командир штурма): режим отхода — сквозь тела, без агро и
-	# ответного удара, разметка снята; в лагере отряд стоит толпой у костров
-	if bool(plan.get("retreat", false)):
-		# Разметка НЕ снимается, а ставится на лагерь: дойдя, отряд стоит у
-		# костров толпой, и смыкание собирает его там же (хижина снимает
-		# разметку потому, что её отряд уходит в ворота — здесь он остаётся)
-		var nr: int = members.size()
-		var rslots: Array = plan.get("_slots", [])
-		if k0 == 0:
-			rslots = []
-			for kr in range(nr):
-				var hr: Vector2 = _GobCfg.horde_offset(kr, nr, int(sq["id"]))
-				rslots.append(Vector3(goal.x + hr.x, 0.0, goal.z + hr.y))
-			plan["_slots"] = rslots
-			GameManager.squad_set_formation(int(sq["id"]), rslots,
-				(goal - center).normalized() if goal.distance_to(center) > 0.1 else Vector3.FORWARD,
-				false)
-		for kr2 in range(k0, mini(nr, rslots.size())):
-			if issued >= budget:
-				plan["_k"] = kr2
-				plan["_done"] = false
-				return issued
-			if not is_instance_valid(members[kr2]):
-				continue
-			var ur := members[kr2] as Unit
-			if ur == null or ur.is_dead():
-				continue
-			ur.begin_retreat()
-			ur.command_move(GameManager.land_target(rslots[kr2]), false, Vector3.ZERO, true)
-			issued += 1
-		return issued
-	# ── ТОЛПОЙ, А НЕ В ОДНУ ТОЧКУ ───────────────────────────────────────────
-	# Раньше всем бойцам отряда выдавалась ОДНА цель: сотня гоблинов шла в
-	# один пятачок, упиралась друг в друга и разбиралась расталкиванием уже
-	# на месте. Теперь у каждого своё место в толпе (диск со сдвигом,
-	# goblin_config.horde_offset), и оно же кладётся в разметку отряда —
-	# чтобы смыкание после боя собирало ТОЛПУ, а не квадрат фаланги
-	var slots: Array = plan.get("_slots", [])
-	var n: int = members.size()
-	if k0 == 0:
-		var _tf: int = Time.get_ticks_usec() if _OptGA.sys_meter else 0
-		slots = []
-		for k in range(n):
-			var ho: Vector2 = _GobCfg.horde_offset(k, n, int(sq["id"]))
-			slots.append(Vector3(goal.x + ho.x, 0.0, goal.z + ho.y))
-		plan["_slots"] = slots
-		GameManager.squad_set_formation(int(sq["id"]), slots,
-			(goal - center).normalized() if goal.distance_to(center) > 0.1 else Vector3.FORWARD,
-			false)
-		if _OptGA.sys_meter:
-			_OptGA.sys_add("ga_form", Time.get_ticks_usec() - _tf)
-	var wake2: bool = bool(plan.get("wake", false))
-	for k2 in range(k0, mini(n, slots.size())):
-		if issued >= budget:
-			plan["_k"] = k2
-			plan["_done"] = false
-			return issued
-		if not is_instance_valid(members[k2]):
+func _new_plan() -> void:
+	var pat: Array = _Spawn.WAVE_PATTERN
+	var tpl: String = String(pat[_pattern_i % pat.size()])
+	_pattern_i += 1
+	_plan = {"tpl": tpl, "comp": (_Spawn.WAVE_TEMPLATES[tpl] as Array).duplicate(), "have": [], "t0": clock}
+
+## Какого рода не хватает плану (первый неукомплектованный)
+func _plan_missing() -> String:
+	var need: Dictionary = {}
+	for t in (_plan["comp"] as Array):
+		need[String(t)] = int(need.get(String(t), 0)) + 1
+	for sid in (_plan["have"] as Array):
+		var t2: String = _type(int(sid))
+		need[t2] = int(need.get(t2, 0)) - 1
+	for t3 in (_plan["comp"] as Array):
+		if int(need.get(String(t3), 0)) > 0:
+			return String(t3)
+	return ""
+
+func _in_ready(sid: int) -> bool:
+	for rp in _ready_q:
+		if ((rp as Dictionary)["have"] as Array).has(sid):
+			return true
+	return false
+
+func _free_slot() -> int:
+	for i in range((_Spawn.MUSTER_SLOTS as Array).size()):
+		if not muster.has(i):
+			return i
+	return -1
+
+func _slot_pos(i: int) -> Vector3:
+	var o: Vector2 = _Spawn.MUSTER_SLOTS[i]
+	return GameManager.land_target(Vector3(village.x + o.x, 0.0, village.z + o.y))
+
+func _production_tick() -> void:
+	if phase == PHASE_DEFEATED:
+		return
+	if _plan.is_empty():
+		_new_plan()
+	var want: String = _plan_missing()
+	if want == "":
+		return
+	# Сначала — вернувшиеся с прошлой волны (стоят на площадке, уже оплачены)
+	for sid in _muster_slot.keys():
+		if (_plan["have"] as Array).has(sid) or _type(int(sid)) != want or _in_ready(int(sid)):
 			continue
-		var u2 := members[k2] as Unit
-		if u2 == null or u2.is_dead():
-			continue
-		if wake2 and u2.retreating:
-			u2.end_retreat(true)
-		if _OptGA.sys_meter:
-			var tm: int = Time.get_ticks_usec()
-			u2.command_move(GameManager.land_target(slots[k2]))
-			_OptGA.sys_add("ga_cmd_move", Time.get_ticks_usec() - tm)
+		(_plan["have"] as Array).append(sid)
+		return
+	if clock - _last_spawn < _Spawn.SQUAD_SPAWN_GAP_SEC:
+		return
+	var price: float = float((_Spawn.SQUAD_PRICE as Dictionary).get(want, 300.0))
+	if ResourceManager.get_amount(Constants.FACTION_GOBLIN, Constants.RESOURCE_FOOD) < price:
+		return
+	var n: int = int(_GobCfg.SQUAD_SIZE.get(want, 50))
+	if field_units + n > _Spawn.HORDE_FIELD_CAP or horde_alive() + n > _Spawn.HORDE_CAP:
+		last_action = "потолок орды: %s ждёт" % want
+		return
+	var slot: int = _free_slot()
+	if slot < 0:
+		return
+	var base: Vector3 = _slot_pos(slot)
+	var sid: int = int(main.call("spawn_goblin_squad", want, n, base, true))
+	if sid <= 0:
+		return
+	ResourceManager.set_amount(Constants.FACTION_GOBLIN, Constants.RESOURCE_FOOD,
+		ResourceManager.get_amount(Constants.FACTION_GOBLIN, Constants.RESOURCE_FOOD) - price)
+	food_spent += price
+	squads_bought += 1
+	_last_spawn = clock
+	field_units += n
+	muster[slot] = sid
+	_muster_slot[sid] = slot
+	(_plan["have"] as Array).append(sid)
+	# Разметка — толпа на слоте: смыкание собирает отряд там же, где он стоит
+	_set_horde_formation(sid, base, n, Vector3.FORWARD)
+	# Спать сразу: опоздавшие (растяжка спавна) перенимают спячку у старшего
+	_sleep_squad(sid)
+	last_action = "куплен %s (слот %d)" % [want, slot]
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ВЫПУСК ВОЛНЫ: СЦЕНАРИЙ, ЦЕЛЬ, ТАКТИКА
+# ═════════════════════════════════════════════════════════════════════════════
+## ── ГОТОВЫЕ ВОЛНЫ ЖДУТ ВЫХОДА ОЧЕРЕДЬЮ ────────────────────────────────────
+## Набранная волна, которой выходить рано (перемирие) или некуда (в поле уже
+## WAVES_MAX_ACTIVE), встаёт в очередь _ready_q, а производство берётся за
+## следующий план — иначе копилка упиралась в потолок, пока волна ждала
+var _ready_q: Array = []
+
+func _maybe_launch() -> void:
+	if phase == PHASE_DEFEATED:
+		return
+	# Укомплектованный план — в очередь готовых, если на площадке есть место
+	# под следующий (иначе он остаётся планом и просто ждёт)
+	if not _plan.is_empty() and _plan_missing() == "" and _ready_q.size() < 3 \
+			and _free_slots_n() >= 2:
+		_ready_q.append(_plan)
+		_plan = {}
+	if clock < _peace_sec():
+		return
+	phase = PHASE_WAR
+	if waves.size() >= _Spawn.WAVES_MAX_ACTIVE:
+		return
+	# ── ТЕМП: ВОЛНА КАЖДЫЕ 7-10 МИНУТ (ТЗ 12.10.2026, второе письмо) ──────
+	# Не чаще WAVE_GAP_MIN_SEC; дольше WAVE_GAP_MAX_SEC без выхода — план
+	# уходит тем, что набрано (ветка «не набрал состав» ниже)
+	var since: float = clock - _last_launch_clock if _last_launch_clock >= 0.0 else 1.0e9
+	if since < _Spawn.WAVE_GAP_MIN_SEC:
+		return
+	var overdue: bool = since >= _Spawn.WAVE_GAP_MAX_SEC and _last_launch_clock >= 0.0
+	if not _ready_q.is_empty():
+		# ── ОДИН ВЫХОД — ВСЁ НАБРАННОЕ (ТЗ 12.10.2026, второе письмо) ───────
+		# Волны выходят раз в 7-10 минут, а не парами по готовности: за паузу
+		# набирается два-три плана, и уходят они ОДНОЙ ощутимой волной, а не
+		# цепочкой мелких набегов (зонд GobProbe: 12 волн по 2-3 отряда за 40
+		# минут — «волны почти исчезли»). Состав плана в работе тоже идёт,
+		# если он полон
+		var rp: Dictionary = _ready_q.pop_front()
+		var merged: Array = (rp["have"] as Array).duplicate()
+		var tpl0: String = String(rp["tpl"])
+		while not _ready_q.is_empty():
+			var more: Dictionary = _ready_q.pop_front()
+			merged.append_array(more["have"])
+			tpl0 = String(more["tpl"]) if tpl0 == "scout" else tpl0
+		if not _plan.is_empty() and _plan_missing() == "":
+			merged.append_array(_plan["have"])
+			_plan = {}
+		_launch(tpl0, merged)
+		return
+	if _plan.is_empty():
+		return
+	var have: Array = _plan["have"]
+	if have.is_empty():
+		return
+	var full: bool = _plan_missing() == ""
+	if not full and not overdue and clock - float(_plan["t0"]) < _Spawn.WAVE_ASSEMBLE_MAX_SEC:
+		return
+	_launch(String(_plan["tpl"]), have.duplicate())
+	_plan = {}
+
+func _free_slots_n() -> int:
+	return (_Spawn.MUSTER_SLOTS as Array).size() - muster.size()
+
+func _launch(tpl: String, sids: Array) -> void:
+	var live: Array = []
+	for s in sids:
+		if _alive_n(int(s)) > 0:
+			live.append(int(s))
+	if live.is_empty():
+		return
+	for sid in live:
+		if _muster_slot.has(sid):
+			muster.erase(_muster_slot[sid])
+			_muster_slot.erase(sid)
+		_homing.erase(sid)
+		_wake_squad(sid)
+	var sc: Dictionary = _pick_scenario(tpl, live)
+	if sc.is_empty():
+		# Целей нет вовсе — отряды обратно на площадку
+		for sid2 in live:
+			_to_muster(sid2)
+		return
+	_wave_seq += 1
+	var has_cav := false
+	for sid3 in live:
+		if _type(sid3) == "goblin_rider":
+			has_cav = true
+	var tactic: String = "raid" if String(sc["name"]) == "scout" else _pick_tactic(has_cav)
+	var w := {"id": _wave_seq, "tpl": tpl, "sids": live, "name": sc["name"],
+		"pos": sc["pos"], "node": sc.get("node"), "tactic": tactic, "stage": "march",
+		"t0": clock, "st_t": clock, "men0": 0, "feint_done": false, "calm": 0.0,
+		"pts": {}, "roles": {}, "track": {}}
+	var men0 := 0
+	for sid4 in live:
+		men0 += _alive_n(sid4)
+	w["men0"] = men0
+	waves.append(w)
+	waves_launched += 1
+	_last_launch_clock = clock
+	raids_launched += 1
+	if String(sc["name"]) == "scout":
+		scout_sorties += 1
+	scenario_counts[sc["name"]] = int(scenario_counts.get(sc["name"], 0)) + 1
+	tactic_counts[tactic] = int(tactic_counts.get(tactic, 0)) + 1
+	last_action = "волна %d (%s): %s, тактика %s, отрядов %d" % [_wave_seq, tpl, sc["name"], tactic, live.size()]
+	_assign_points(w)
+	for sid5 in live:
+		_order_move(sid5, (w["pts"] as Dictionary)[sid5]["stage"], false)
+		(w["track"] as Dictionary)[sid5] = {"c": _centre(sid5), "t": clock, "n": 0}
+	_blow_horn("волна %d вышла" % _wave_seq)
+
+## Сценарий волны: {name, pos, node}. Разведка — к базе игрока (ловить
+## рабочих и одиночек); прочие — взвешенный жребий по обстановке
+func _pick_scenario(tpl: String, sids: Array) -> Dictionary:
+	var player_base: Node3D = _base_of(Constants.FACTION_PLAYER)
+	var red_base: Node3D = _base_of(Constants.FACTION_ENEMY)
+	if tpl == "scout":
+		var tgt: Node3D = player_base if player_base != null else red_base
+		if tgt == null:
+			return {}
+		return {"name": "scout", "pos": tgt.global_position, "node": null}
+	var cand: Array = []
+	if main != null and main.has_method("ford_point"):
+		var fp: Vector3 = main.call("ford_point")
+		var foes: int = _foes_count(fp, 35.0)
+		if foes >= _Spawn.FORD_TAKEN_FOES:
+			cand.append({"name": "ford_assault", "pos": fp, "node": null, "w": 4.0})
 		else:
-			u2.command_move(GameManager.land_target(slots[k2]))
-		issued += 1
-	return issued
+			cand.append({"name": "ford_patrol", "pos": fp, "node": null, "w": 1.0})
+	var pm: Node3D = _mine_of(Constants.FACTION_PLAYER)
+	if pm != null:
+		cand.append({"name": "player_mine", "pos": pm.global_position, "node": pm, "w": 2.5})
+	var rm: Node3D = _mine_of(Constants.FACTION_ENEMY)
+	if rm != null:
+		cand.append({"name": "red_mine", "pos": rm.global_position, "node": rm, "w": 1.5})
+	if player_base != null:
+		cand.append({"name": "player_base", "pos": player_base.global_position, "node": player_base,
+			"w": 1.5 + (1.0 if clock > 1500.0 else 0.0)})
+	if red_base != null:
+		cand.append({"name": "red_base", "pos": red_base.global_position, "node": red_base, "w": 1.0})
+	if cand.is_empty():
+		return {}
+	var total := 0.0
+	for c in cand:
+		total += float(c["w"])
+	var r: float = _rng.randf() * total
+	for c2 in cand:
+		r -= float(c2["w"])
+		if r <= 0.0:
+			return c2
+	return cand[cand.size() - 1]
 
-## Ближайший чужой ЛЮБОЙ стороны. Гоблины враждебны всем, поэтому спрашиваем
-## обе фракции и берём ближайшего
-## Ближайшая живая чужая постройка (игрока или красного ИИ) не дальше radius
-func _nearest_enemy_building(from: Vector3, radius: float) -> Node3D:
-	var best: Node3D = null
-	var bd: float = radius * radius
-	# Снимок — ПАРА [узлы, xz] (спринт 14): обход самой пары молча давал
-	# ноль построек, и орда не выбирала здания целью вовсе
-	for b in (GameManager.enemy_buildings_snapshot(Constants.FACTION_GOBLIN)[0] as Array):
-		if b == null or not is_instance_valid(b):
-			continue
-		var bld := b as Building
-		if bld == null or bld.is_dead() or not GameManager.goblin_may_raze(bld):
-			continue
-		var d: float = from.distance_squared_to(bld.global_position)
-		if d < bd:
-			bd = d
-			best = bld
-	return best
+func _pick_tactic(has_cav: bool) -> String:
+	var opts: Array = [["front", 0.3], ["flank", 0.3], ["rear", 0.2], ["feint", 0.2]] if has_cav \
+		else [["front", 0.5], ["feint", 0.3], ["flank", 0.2]]
+	var r: float = _rng.randf()
+	for o in opts:
+		r -= float(o[1])
+		if r <= 0.0:
+			return String(o[0])
+	return "front"
 
+## Точки этапов каждому отряду: развёртывание за WAVE_STAGE_DIST до цели,
+## отряды рядом поперёк подхода с шагом больше диаметра толпы; фланг/тыл —
+## у конницы (или у последнего отряда пехоты, если конницы нет)
+func _assign_points(w: Dictionary) -> void:
+	var sids: Array = w["sids"]
+	var t: Vector3 = w["pos"]
+	var c := Vector3.ZERO
+	var k := 0
+	for sid in sids:
+		var cc: Vector3 = _centre(int(sid))
+		if cc.x != INF:
+			c += cc
+			k += 1
+	c = c / float(maxi(k, 1)) if k > 0 else village
+	var dir: Vector3 = t - c
+	dir.y = 0.0
+	dir = dir.normalized() if dir.length() > 0.1 else Vector3.FORWARD
+	var side := Vector3(-dir.z, 0.0, dir.x)
+	w["dir"] = dir
+	var tactic: String = w["tactic"]
+	var flankers: Array = []
+	if tactic == "flank" or tactic == "rear":
+		for sid2 in sids:
+			if _type(int(sid2)) == "goblin_rider":
+				flankers.append(int(sid2))
+		if flankers.is_empty() and sids.size() >= 2:
+			flankers.append(int(sids[sids.size() - 1]))
+	var front: Array = []
+	for sid3 in sids:
+		if not flankers.has(int(sid3)):
+			front.append(int(sid3))
+	var stage_c: Vector3 = t - dir * _Spawn.WAVE_STAGE_DIST
+	var pts: Dictionary = {}
+	var roles: Dictionary = {}
+	for i in range(front.size()):
+		var off: float = (float(i) - float(front.size() - 1) * 0.5) * 17.0
+		var sp: Vector3 = GameManager.land_target(stage_c + side * off)
+		pts[front[i]] = {"stage": sp, "strike": t + side * off * 0.5}
+		roles[front[i]] = "front"
+	var sgn: float = 1.0 if _rng.randf() < 0.5 else -1.0
+	for j in range(flankers.size()):
+		var fp: Vector3
+		if tactic == "rear":
+			fp = t + dir * _Spawn.WAVE_FLANK_DIST + side * (float(j) - float(flankers.size() - 1) * 0.5) * 17.0
+		else:
+			fp = t + side * sgn * (_Spawn.WAVE_FLANK_DIST + float(j) * 17.0) - dir * 6.0
+		var lim: Vector2 = GameManager.clamp_to_map(fp.x, fp.z)
+		var fpp: Vector3 = GameManager.land_target(Vector3(lim.x, 0.0, lim.y))
+		pts[flankers[j]] = {"stage": GameManager.land_target(stage_c + side * sgn * 26.0), "flank": fpp, "strike": t}
+		roles[flankers[j]] = "flank"
+	w["pts"] = pts
+	w["roles"] = roles
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ВОЛНА В ПОЛЕ
+# ═════════════════════════════════════════════════════════════════════════════
+func _waves_tick(dt: float) -> void:
+	var done: Array = []
+	for w in waves:
+		var live: Array = []
+		for sid in (w["sids"] as Array):
+			if _alive_n(int(sid)) > 0:
+				live.append(int(sid))
+		w["sids"] = live
+		if live.is_empty():
+			done.append(w)
+			continue
+		if clock - float(w["t0"]) > _Spawn.WAVE_MAX_SEC and String(w["stage"]) != "home":
+			_wave_home(w)
+			continue
+		match String(w["stage"]):
+			"march":
+				_wave_march(w)
+			"flank":
+				_wave_flank(w)
+			"engage":
+				_wave_engage(w, dt)
+			"feint":
+				if clock - float(w["st_t"]) >= _Spawn.WAVE_FEINT_REGROUP_SEC:
+					w["feint_done"] = true
+					_set_stage(w, "engage")
+					for sid2 in live:
+						_engage_squad(int(sid2), w)
+			"home":
+				if _wave_home_tick(w):
+					done.append(w)
+	for w2 in done:
+		waves.erase(w2)
+
+func _set_stage(w: Dictionary, st: String) -> void:
+	w["stage"] = st
+	w["st_t"] = clock
+
+## Марш к точкам развёртывания: дошли 3/4 отрядов или вышел срок —
+## развёртывание. Застрявшему (центр не сдвинулся) — тот же приказ ещё раз,
+## не чаще STUCK_SEC и не больше STUCK_REISSUE_MAX раз
+func _wave_march(w: Dictionary) -> void:
+	var live: Array = w["sids"]
+	var pts: Dictionary = w["pts"]
+	var arrived := 0
+	var far := 0.0
+	for sid in live:
+		var c: Vector3 = _centre(sid)
+		if c.x == INF or not pts.has(sid):
+			continue
+		var sp: Vector3 = pts[sid]["stage"]
+		var d: float = Vector2(c.x - sp.x, c.z - sp.z).length()
+		far = maxf(far, d)
+		if d < ARRIVE_M:
+			arrived += 1
+		else:
+			_stuck_check(w, sid, c, sp)
+	var timeout: float = 60.0 + float(w.get("dist0", 0.0))
+	if not w.has("dist0"):
+		w["dist0"] = far / 2.0
+	if float(arrived) >= ceilf(float(live.size()) * 0.75) or clock - float(w["st_t"]) > timeout \
+			or _foes_count(_wave_centre(w), 18.0) > 0:
+		_deploy(w)
+
+func _stuck_check(w: Dictionary, sid: int, c: Vector3, goal: Vector3) -> void:
+	var tr: Dictionary = (w["track"] as Dictionary).get(sid, {"c": c, "t": clock, "n": 0})
+	var pc: Vector3 = tr["c"]
+	if pc.x == INF or Vector2(c.x - pc.x, c.z - pc.z).length() > STUCK_M:
+		tr["c"] = c
+		tr["t"] = clock
+	elif clock - float(tr["t"]) > STUCK_SEC and int(tr["n"]) < STUCK_REISSUE_MAX:
+		tr["n"] = int(tr["n"]) + 1
+		tr["t"] = clock
+		stuck_reissues += 1
+		_order_move(sid, goal, false)
+	(w["track"] as Dictionary)[sid] = tr
+
+func _wave_centre(w: Dictionary) -> Vector3:
+	var acc := Vector3.ZERO
+	var k := 0
+	for sid in (w["sids"] as Array):
+		var c: Vector3 = _centre(int(sid))
+		if c.x != INF:
+			acc += c
+			k += 1
+	return acc / float(k) if k > 0 else village
+
+## Развёртывание: фронт бьёт сразу, фланг/тыл сначала заходит на свою точку
+func _deploy(w: Dictionary) -> void:
+	var roles: Dictionary = w["roles"]
+	var pts: Dictionary = w["pts"]
+	var any_flank := false
+	for sid in (w["sids"] as Array):
+		if String(roles.get(sid, "front")) == "flank" and pts.has(sid) and (pts[sid] as Dictionary).has("flank"):
+			any_flank = true
+			_order_move(int(sid), pts[sid]["flank"], true)
+	if String(w["name"]) == "ford_patrol" or String(w["name"]) == "ford_assault":
+		w["hold_t"] = clock
+	if any_flank:
+		_set_stage(w, "flank")
+		for sid2 in (w["sids"] as Array):
+			if String(roles.get(sid2, "front")) == "front":
+				_engage_squad(int(sid2), w)
+		return
+	_set_stage(w, "engage")
+	w["engage_t"] = clock
+	for sid3 in (w["sids"] as Array):
+		_engage_squad(int(sid3), w)
+
+## Фланг/тыл: дошёл до точки захода (или 25 с) — удар
+func _wave_flank(w: Dictionary) -> void:
+	var roles: Dictionary = w["roles"]
+	var pts: Dictionary = w["pts"]
+	var ready := true
+	for sid in (w["sids"] as Array):
+		if String(roles.get(sid, "front")) != "flank" or not pts.has(sid):
+			continue
+		var c: Vector3 = _centre(int(sid))
+		var fp: Vector3 = pts[sid].get("flank", c)
+		if c.x != INF and Vector2(c.x - fp.x, c.z - fp.z).length() > ARRIVE_M:
+			ready = false
+	if ready or clock - float(w["st_t"]) > 25.0:
+		_set_stage(w, "engage")
+		w["engage_t"] = clock
+		for sid2 in (w["sids"] as Array):
+			if String(roles.get(sid2, "front")) == "flank":
+				_engage_squad(int(sid2), w)
+
+## Бой: переприказ ТОЛЬКО отряду, который стоит без дела; ложный отход по
+## тактике; цель выполнена или чисто — дальше по сценарию
+func _wave_engage(w: Dictionary, dt: float) -> void:
+	var live: Array = w["sids"]
+	var nm: String = w["name"]
+	# Ложный отход: один раз за волну
+	if String(w["tactic"]) == "feint" and not bool(w["feint_done"]):
+		var men := 0
+		for sid in live:
+			men += _alive_n(sid)
+		var lost: float = 1.0 - float(men) / float(maxi(int(w["men0"]), 1))
+		if clock - float(w.get("engage_t", w["st_t"])) > _Spawn.WAVE_FEINT_SEC or lost >= _Spawn.WAVE_FEINT_LOSS:
+			var back: Vector3 = -(w.get("dir", Vector3.FORWARD) as Vector3)
+			for sid2 in live:
+				var c: Vector3 = _centre(sid2)
+				if c.x == INF:
+					continue
+				_order_move(sid2, GameManager.land_target(c + back * _Spawn.WAVE_FEINT_BACK), false, true)
+			_set_stage(w, "feint")
+			return
+	var idle := 0
+	for sid3 in live:
+		if _squad_idle(sid3):
+			idle += 1
+			_engage_squad(sid3, w)
+	# Цель и окрестности чисты?
+	var foes: int = _foes_count(w["pos"], ENGAGE_R)
+	var node = w.get("node")
+	var node_ok: bool = node != null and is_instance_valid(node) and not (node as Building).is_dead() \
+		and _hostile_building(node)
+	if foes == 0 and not node_ok:
+		w["calm"] = float(w["calm"]) + dt
+	else:
+		w["calm"] = 0.0
+	if nm == "ford_patrol" or nm == "ford_assault":
+		# Брод держим срок, потом домой (брод снова чей-то — следующая волна туда)
+		if clock - float(w.get("hold_t", w["st_t"])) > _Spawn.WAVE_FORD_HOLD_SEC and foes == 0:
+			_wave_home(w)
+		return
+	if float(w["calm"]) < 12.0:
+		return
+	# Штурм базы: следующая постройка той же стороны рядом — продолжаем
+	if nm == "player_base" or nm == "red_base":
+		var fac: int = Constants.FACTION_PLAYER if nm == "player_base" else Constants.FACTION_ENEMY
+		var nb: Node3D = _nearest_building_of(fac, w["pos"], 60.0)
+		if nb != null:
+			w["node"] = nb
+			w["pos"] = nb.global_position
+			w["calm"] = 0.0
+			for sid4 in live:
+				_engage_squad(sid4, w)
+			return
+	_wave_home(w)
+
+func _squad_idle(sid: int) -> bool:
+	for m in _alive(sid):
+		var u := m as Unit
+		if u.state != Unit.State.IDLE:
+			return false
+	return true
+
+## Приказ отряду волны по цели: чужой отряд у цели (раскладка фронта), иначе
+## постройка-цель, иначе — встать на цель
+func _engage_squad(sid: int, w: Dictionary) -> void:
+	var c: Vector3 = _centre(sid)
+	if c.x == INF:
+		return
+	var t: Vector3 = w["pos"]
+	var probe: Vector3 = c if c.distance_to(t) < ENGAGE_R else t
+	var pairs: Dictionary = GameManager.front_pairs([sid], probe, ENGAGE_R, Constants.FACTION_GOBLIN)
+	if pairs.has(sid):
+		_order_attack_squad(sid, int(pairs[sid]))
+		return
+	var node = w.get("node")
+	if node != null and is_instance_valid(node) and not (node as Building).is_dead() and _hostile_building(node):
+		_order_attack_node(sid, node)
+		return
+	var pts: Dictionary = w["pts"]
+	var goal: Vector3 = pts[sid].get("strike", t) if pts.has(sid) else t
+	if c.distance_to(goal) > ARRIVE_M:
+		_order_move(sid, goal, false)
+
+func _hostile_building(b) -> bool:
+	if not (b is Building):
+		return false
+	var bb := b as Building
+	if bb.faction == Constants.FACTION_GOBLIN or bb.faction == Constants.FACTION_NEUTRAL:
+		return false
+	return GameManager.goblin_may_raze(bb)
+
+## Волна домой: на площадку сбора (свободные слоты; нет — к хате), там спать
+func _wave_home(w: Dictionary) -> void:
+	_set_stage(w, "home")
+	waves_returned += 1
+	raid_retreats += 1
+	for sid in (w["sids"] as Array):
+		_to_muster(int(sid))
+
+func _wave_home_tick(w: Dictionary) -> bool:
+	# Все отряды волны уже числятся на площадке — волна закрыта
+	for sid in (w["sids"] as Array):
+		if not _muster_slot.has(int(sid)):
+			return false
+	return true
+
+## Отряд — на площадку сбора: слот, приказ одним разом, по приходу спать
+## (_muster_home_tick). Свободного слота нет — к хате, и спать там же
+var _homing: Dictionary = {}    # sid → время приказа
+
+func _to_muster(sid: int) -> void:
+	var slot: int = _free_slot()
+	var goal: Vector3
+	if slot >= 0:
+		muster[slot] = sid
+		_muster_slot[sid] = slot
+		goal = _slot_pos(slot)
+	else:
+		_muster_slot[sid] = -1
+		goal = GameManager.land_target(village + Vector3(_rng.randf_range(-20.0, 20.0), 0.0, 30.0))
+	_wake_squad(sid)
+	_order_move(sid, goal, false, true)
+	_homing[sid] = {"t": clock, "goal": goal}
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ОХРАНА РУДНИКОВ — СПИТ, ПОКА НЕ ТРОНУЛИ
+# ═════════════════════════════════════════════════════════════════════════════
+func _guards_tick(dt: float) -> void:
+	# Дошедшие домой (площадка сбора) засыпают здесь же, в одном такте
+	for sid in _homing.keys():
+		var h: Dictionary = _homing[sid]
+		var c: Vector3 = _centre(int(sid))
+		var goal: Vector3 = h["goal"]
+		if c.x == INF or Vector2(c.x - goal.x, c.z - goal.z).length() < _Spawn.GUARD_HOME_R \
+				or clock - float(h["t"]) > 60.0:
+			_homing.erase(sid)
+			if not _camp_awake:
+				_sleep_squad(int(sid))
+	# По руднику — одна проверка на такт, а не по отряду
+	var by_mine: Dictionary = {}
+	for sid in guards:
+		var g: Dictionary = guards[sid]
+		var m = g["mine"]
+		if m == null or not is_instance_valid(m):
+			continue
+		if not by_mine.has(m):
+			by_mine[m] = []
+		(by_mine[m] as Array).append(int(sid))
+	for m2 in by_mine:
+		var mp: Vector3 = (m2 as Node3D).global_position
+		var foe: Node3D = _nearest_foe(mp, _Spawn.GUARD_WAKE_R)
+		var hit: bool = clock - float(_mine_hit.get(m2, -1.0e9)) < 6.0
+		var threat: bool = foe != null or hit
+		for sid2 in (by_mine[m2] as Array):
+			var g2: Dictionary = guards[sid2]
+			var st: String = g2["st"]
+			var c2: Vector3 = _centre(sid2)
+			var leash: bool = c2.x != INF and Vector2(c2.x - mp.x, c2.z - mp.z).length() > GUARD_LEASH
+			if threat and not leash:
+				g2["calm"] = 0.0
+				if st != "fight":
+					guard_wakes += 1
+					_wake_squad(sid2)
+					g2["st"] = "fight"
+				if _squad_idle(sid2):
+					var probe: Vector3 = foe.global_position if foe != null else mp
+					var pairs: Dictionary = GameManager.front_pairs([sid2], probe, _Spawn.GUARD_WAKE_R + 15.0, Constants.FACTION_GOBLIN)
+					if pairs.has(sid2):
+						_order_attack_squad(sid2, int(pairs[sid2]))
+				continue
+			if st == "fight":
+				g2["calm"] = float(g2["calm"]) + dt
+				if float(g2["calm"]) >= _Spawn.GUARD_CALM_SEC or leash:
+					g2["st"] = "home"
+					g2["t"] = clock
+					_order_move(sid2, g2["post"], false, true)
+			elif st == "home":
+				var post: Vector3 = g2["post"]
+				if c2.x == INF or Vector2(c2.x - post.x, c2.z - post.z).length() < _Spawn.GUARD_HOME_R \
+						or clock - float(g2["t"]) > _Spawn.GUARD_HOME_TIMEOUT_SEC:
+					g2["st"] = "sleep"
+					_sleep_squad(sid2)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ТРЕВОГА ЛАГЕРЯ
+# ═════════════════════════════════════════════════════════════════════════════
+func _camp_tick(dt: float) -> void:
+	var p: Vector3 = (chief as Node3D).global_position if chief_alive() else village
+	var foe: Node3D = _nearest_foe(p, _Spawn.CAMP_ALARM_R)
+	if foe != null:
+		_camp_calm = 0.0
+		if not _camp_awake:
+			_camp_awake = true
+			last_action = "тревога лагеря"
+		for sid in _muster_slot.keys():
+			_homing.erase(sid)
+			_wake_squad(int(sid))
+			if _squad_idle(int(sid)):
+				var pairs: Dictionary = GameManager.front_pairs([int(sid)], foe.global_position, 40.0, Constants.FACTION_GOBLIN)
+				if pairs.has(int(sid)):
+					_order_attack_squad(int(sid), int(pairs[int(sid)]))
+		return
+	if not _camp_awake:
+		return
+	_camp_calm += dt
+	if _camp_calm < _Spawn.GUARD_CALM_SEC:
+		return
+	_camp_awake = false
+	for sid2 in _muster_slot.keys():
+		var slot: int = int(_muster_slot[sid2])
+		var goal: Vector3 = _slot_pos(slot) if slot >= 0 else village + Vector3(0.0, 0.0, 30.0)
+		_order_move(int(sid2), goal, false, true)
+		_homing[sid2] = {"t": clock, "goal": goal}
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ЦЕЛИ
+# ═════════════════════════════════════════════════════════════════════════════
 func _nearest_foe(from: Vector3, radius: float) -> Node3D:
 	var best: Node3D = null
 	var bd := radius * radius
@@ -2029,11 +1117,187 @@ func _nearest_foe(from: Vector3, radius: float) -> Node3D:
 			best = nd
 	return best
 
-func _squad_center(sq: Dictionary) -> Vector3:
-	var live: Array = []
-	for m in (sq["members"] as Array):
-		if is_instance_valid(m) and not (m as Unit).is_dead():
-			live.append(m)
-	if live.is_empty():
-		return village
-	return GameManager._centroid_of(live)
+## Чужих бойцов (люди обеих сторон) в радиусе — зовётся на выпуске волны и
+## раз в такт на волну, не покадрово
+func _foes_count(p: Vector3, r: float) -> int:
+	var n := 0
+	for e in GameManager.unit_grid.query_radius(p, r):
+		var u := e as Unit
+		if u == null or u.is_dead() or u.garrisoned:
+			continue
+		if u.faction == Constants.FACTION_PLAYER or u.faction == Constants.FACTION_ENEMY:
+			n += 1
+	return n
+
+## Главная постройка стороны: крепость, иначе любая постройка (кроме рудников)
+func _base_of(fac: int) -> Node3D:
+	var any: Node3D = null
+	for b in get_tree().get_nodes_in_group(Constants.building_group(fac)):
+		if b == null or not is_instance_valid(b) or not (b is Building) or (b as Building).is_dead():
+			continue
+		if b is Mine:
+			continue
+		if b.has_method("is_stronghold") and bool(b.call("is_stronghold")):
+			if GameManager.goblin_may_raze(b):
+				return b
+			continue
+		if any == null and GameManager.goblin_may_raze(b):
+			any = b
+	return any
+
+func _mine_of(fac: int) -> Node3D:
+	for b in get_tree().get_nodes_in_group(Constants.building_group(fac)):
+		if b is Mine and is_instance_valid(b) and not (b as Building).is_dead():
+			return b
+	return null
+
+func _nearest_building_of(fac: int, from: Vector3, r: float) -> Node3D:
+	var best: Node3D = null
+	var bd: float = r * r
+	for b in get_tree().get_nodes_in_group(Constants.building_group(fac)):
+		if b == null or not is_instance_valid(b) or not (b is Building) or (b as Building).is_dead():
+			continue
+		if not GameManager.goblin_may_raze(b):
+			continue
+		var d: float = from.distance_squared_to((b as Node3D).global_position)
+		if d < bd:
+			bd = d
+			best = b
+	return best
+
+# ═════════════════════════════════════════════════════════════════════════════
+# СОН И ПРИКАЗЫ
+# ═════════════════════════════════════════════════════════════════════════════
+func _sleep_squad(sid: int) -> void:
+	for m in _alive(sid):
+		var u := m as Unit
+		if u.retreating:
+			u.end_retreat(true)
+		u.set_attack_target(null)
+		if not u.dormant:
+			u.set_dormant(true)
+
+func _wake_squad(sid: int) -> void:
+	for m in _alive(sid):
+		var u := m as Unit
+		if u.dormant:
+			u.set_dormant(false)
+
+## Разметка отряда — толпа вокруг точки (goblin_config.horde_offset)
+func _set_horde_formation(sid: int, goal: Vector3, n: int, course: Vector3) -> Array:
+	var slots: Array = []
+	# ШАГ ТОЛПЫ ПО ТЕЛУ (ТЗ 12.10.2026): туша вдвое с лишним крупнее гоблина,
+	# а места ей раздавались шагом гоблина — пять туш шли комом и толкались.
+	# Тот же множитель, что у разметки GameManager (_block_slot_step)
+	var hk: float = 1.0
+	var sq: Variant = GameManager.squads.get(sid)
+	if sq != null:
+		hk = maxf(1.0, GameManager._block_slot_step((sq as Dictionary)["members"]) / _GobCfg.HORDE_SPOT)
+	for k in range(n):
+		var ho: Vector2 = _GobCfg.horde_offset(k, n, sid) * hk
+		slots.append(Vector3(goal.x + ho.x, 0.0, goal.z + ho.y))
+	GameManager.squad_set_formation(sid, slots, course, false)
+	return slots
+
+func _order_move(sid: int, goal: Vector3, run: bool, retreat: bool = false) -> void:
+	_drop_orders(sid)
+	_oq.append({"k": "move", "sid": sid, "goal": goal, "run": run, "retreat": retreat, "i": 0})
+
+func _order_attack_squad(sid: int, foe_sid: int) -> void:
+	var sink: Array = []
+	GameManager.squad_attack_squad(sid, foe_sid, true, sink)
+	if sink.is_empty():
+		return
+	_drop_orders(sid)
+	_oq.append({"k": "pairs", "sid": sid, "pairs": sink, "i": 0})
+
+func _order_attack_node(sid: int, node: Node3D) -> void:
+	_drop_orders(sid)
+	_oq.append({"k": "node", "sid": sid, "node": node, "i": 0})
+
+## Новый приказ отряду заменяет недоданный старый
+func _drop_orders(sid: int) -> void:
+	for i in range(_oq.size() - 1, -1, -1):
+		if int((_oq[i] as Dictionary)["sid"]) == sid:
+			_oq.remove_at(i)
+
+func _drain_orders() -> void:
+	if _oq.is_empty():
+		return
+	if _OptGA.cmd_meter: _OptGA.cmd_src = "horde_ai"
+	var budget: int = ORDER_BUDGET
+	while budget > 0 and not _oq.is_empty():
+		var o: Dictionary = _oq[0]
+		var used: int = _issue(o, budget)
+		budget -= maxi(used, 1)
+		if bool(o.get("_done", false)):
+			_oq.pop_front()
+
+func _issue(o: Dictionary, budget: int) -> int:
+	var sid: int = int(o["sid"])
+	var k: String = o["k"]
+	var used := 0
+	if k == "pairs":
+		var pairs: Array = o["pairs"]
+		var i: int = int(o["i"])
+		while i + 1 < pairs.size() and used < budget:
+			var u_raw = pairs[i]
+			var t_raw = pairs[i + 1]
+			i += 2
+			if not is_instance_valid(u_raw) or not is_instance_valid(t_raw):
+				continue
+			var u := u_raw as Unit
+			if u.is_dead() or (t_raw as Unit).is_dead():
+				continue
+			if u.dormant:
+				u.set_dormant(false)
+			if u.retreating:
+				u.end_retreat(true)
+			u.command_attack(t_raw as Node3D, true, true)
+			used += 1
+		o["i"] = i
+		o["_done"] = i + 1 >= pairs.size()
+		orders_issued += used
+		return used
+	var men: Array = o.get("_men", [])
+	if int(o["i"]) == 0:
+		men = _alive(sid)
+		o["_men"] = men
+		if k == "move":
+			var goal: Vector3 = o["goal"]
+			var c: Vector3 = _centre(sid)
+			var course: Vector3 = (goal - c).normalized() if c.x != INF and goal.distance_to(c) > 0.1 else Vector3.FORWARD
+			course.y = 0.0
+			o["_slots"] = _set_horde_formation(sid, goal, men.size(), course)
+	var node_raw = o.get("node")
+	if k == "node" and not is_instance_valid(node_raw):
+		o["_done"] = true
+		return 0
+	var j: int = int(o["i"])
+	while j < men.size() and used < budget:
+		var m = men[j]
+		j += 1
+		if not is_instance_valid(m) or (m as Unit).is_dead():
+			continue
+		var u2 := m as Unit
+		if u2.dormant:
+			u2.set_dormant(false)
+		if k == "move":
+			var slots: Array = o["_slots"]
+			var p: Vector3 = GameManager.land_target(slots[mini(j - 1, slots.size() - 1)])
+			if bool(o["retreat"]):
+				u2.begin_retreat()
+				u2.command_move(p, false, Vector3.ZERO, true)
+			else:
+				if u2.retreating:
+					u2.end_retreat(true)
+				u2.command_move(p, false, Vector3.ZERO, false, false, bool(o["run"]))
+		else:
+			if u2.retreating:
+				u2.end_retreat(true)
+			u2.command_attack(node_raw as Node3D, true, false)
+		used += 1
+	o["i"] = j
+	o["_done"] = j >= men.size()
+	orders_issued += used
+	return used

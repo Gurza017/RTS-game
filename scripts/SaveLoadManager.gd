@@ -95,9 +95,20 @@ const WORLD_GEN_VERSION := 8   # 14.09.2026: ИИ на левом берегу, 
 ## Сколько слотов сохранения показывает интерфейс
 const SLOT_COUNT := 3
 
+## ── АВТОСОХРАНЕНИЕ — СЛОТ 0, ОДИН ФАЙЛ (ТЗ 13.10.2026, письмо 7) ──────────
+## Слот 0 — выделенный файл автосохранения; он перезаписывается по кругу, и
+## диск не засоряется. Пишет его scripts/Autosave.gd: слепок снимается на
+## главном потоке, кодирование и запись идут в фоновом (encode_state +
+## write_bytes), файл кладётся через временный и переименование — обрыв
+## посреди записи не портит прежнее автосохранение
+const AUTOSAVE_SLOT := 0
+const AUTOSAVE_PATH := "user://autosave.tts"
+
 ## Путь к файлу слота. user:// — единственное место, куда игра вправе писать:
 ## каталог игры в экспорте может лежать в Program Files и быть только для чтения
 static func slot_path(slot: int) -> String:
+	if slot <= AUTOSAVE_SLOT:
+		return AUTOSAVE_PATH
 	return "user://save_%d.tts" % clampi(slot, 1, SLOT_COUNT)
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -119,6 +130,9 @@ static func capture(main: Node) -> Dictionary:
 	# Бойцы идут ПОСЛЕ отрядов: колонка squad ссылается на номера, которые
 	# отряды уже перечислили, и порядок делает файл читаемым глазами
 	state["units"] = _capture_units(main)
+	# Копилка опыта армии и реликвии (ТЗ 10.10.2026): несомая — номером
+	# отряда носителя, лежащая — точкой; ПОСЛЕ бойцов, по sid_map
+	state["relics"] = GameManager.relic_mgr().capture()
 	return state
 
 static func _capture_meta(main: Node) -> Dictionary:
@@ -220,6 +234,9 @@ static func _capture_squads() -> Array:
 			# Охрана крепости ИИ (15.09.2026): по этому признаку HomeGuard
 			# усыновляет отряд заново после загрузки
 			"home_guard": bool(sq.get("home_guard", false)),
+			# Индивидуальное звание — красный штандарт (ТЗ 13.10.2026, письмо
+			# 7): реликвия или награда рукой игрока; читается с умолчанием
+			"elite": bool(sq.get("elite", false)),
 		})
 	return out
 
@@ -326,17 +343,45 @@ static func _capture_units(main: Node) -> Dictionary:
 ## Записать слепок в слот. Возвращает пустую строку при успехе и текст ошибки
 ## для интерфейса — не bool: игроку надо показать ПРИЧИНУ, а не «не вышло»
 static func save_game(main: Node, slot: int) -> String:
-	var f := FileAccess.open(slot_path(slot), FileAccess.WRITE)
+	return write_bytes(slot_path(slot), encode_state(capture(main)))
+
+## СЛЕПОК → БАЙТЫ. Чистая функция без дерева сцены — её зовёт и ручное
+## сохранение, и ФОНОВЫЙ ПОТОК автосохранения (Autosave.gd): словарь слепка
+## после capture() главному потоку больше не нужен, и кодировать его можно
+## где угодно. full_objects = false НАМЕРЕННО: в слепке нет и не должно быть
+## ссылок на узлы. Разреши их — и в файл уехал бы кусок дерева сцены, а чтение
+## такого файла означало бы исполнение чужого кода
+static func encode_state(state: Dictionary) -> PackedByteArray:
+	# var_to_bytes (не var_to_bytes_with_objects) — объекты в байты не идут
+	return var_to_bytes(state)
+
+## Записать готовые байты слепка в файл. Пишется ВО ВРЕМЕННЫЙ ФАЙЛ РЯДОМ и
+## переименовывается поверх: автосохранение перезаписывает единственный слот,
+## и обрыв записи (вылет, выключение питания) иначе оставил бы вместо прежней
+## партии полфайла. Возвращает "" при успехе, иначе текст ошибки для интерфейса
+static func write_bytes(path: String, bytes: PackedByteArray) -> String:
+	var tmp: String = path + ".tmp"
+	var f := FileAccess.open(tmp, FileAccess.WRITE)
 	if f == null:
 		return "Не удалось открыть файл сохранения (код %d)" % FileAccess.get_open_error()
 	f.store_32(MAGIC)
 	f.store_32(FORMAT_VERSION)
 	f.store_32(WORLD_GEN_VERSION)
-	# full_objects = false НАМЕРЕННО: в слепке нет и не должно быть ссылок на
-	# узлы. Разреши их — и в файл уехал бы кусок дерева сцены, а чтение такого
-	# файла означало бы исполнение чужого кода
-	f.store_var(capture(main), false)
+	# Длина + байты — ровно то, что пишет store_var: load_state читает слепок
+	# прежним get_var, формат файла не менялся
+	f.store_32(bytes.size())
+	f.store_buffer(bytes)
 	f.close()
+	var abs_tmp: String = ProjectSettings.globalize_path(tmp)
+	var abs_dst: String = ProjectSettings.globalize_path(path)
+	# rename поверх существующего файла на Windows не атомарен сам по себе:
+	# старый сперва снимается. Окно в миллисекунды, и прежний файл к этому
+	# моменту уже целиком лежит во временном — потерять можно только оба сразу
+	if FileAccess.file_exists(path):
+		DirAccess.remove_absolute(abs_dst)
+	var err: int = DirAccess.rename_absolute(abs_tmp, abs_dst)
+	if err != OK:
+		return "Не удалось заменить файл сохранения (код %d)" % err
 	return ""
 
 ## Прочитать слот. Пустой словарь — файла нет, он битый или чужой версии;
@@ -374,13 +419,14 @@ static func has_save(slot: int) -> bool:
 ## меню, а отдельный «заголовочный» блок в файле означал бы второй формат,
 ## который рано или поздно разъедется с основным
 static func slot_label(slot: int) -> String:
+	var who: String = "Автосохранение" if slot <= AUTOSAVE_SLOT else "Слот %d" % slot
 	if not has_save(slot):
-		return "Слот %d — пусто" % slot
+		return "%s — пусто" % who
 	var st := load_state(slot)
 	if st.has("__error"):
-		return "Слот %d — %s" % [slot, String(st["__error"])]
+		return "%s — %s" % [who, String(st["__error"])]
 	var meta: Dictionary = st.get("meta", {})
-	return "Слот %d — %s, %s" % [slot, String(meta.get("saved_at", "?")),
+	return "%s — %s, %s" % [who, String(meta.get("saved_at", "?")),
 		_Diff.label(String(meta.get("difficulty", _Diff.DEFAULT)))]
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -426,6 +472,12 @@ static func apply(main: Node, state: Dictionary) -> void:
 	var sid_map: Dictionary = _restore_squads(state.get("squads", []))
 	var blds: Array = _restore_buildings(main, state.get("buildings", []))
 	_restore_units(main, state.get("units", {}), sid_map, blds)
+	GameManager.relic_mgr().restore(state.get("relics", {}), sid_map)
+	# Вожак орды принимает восстановленные отряды: охрана рудников и площадка
+	# сбора (ТЗ 11.10.2026 — отряды из слепка вожаку не известны)
+	var gai = main.get("goblin_ai")
+	if gai != null and is_instance_valid(gai) and gai.has_method("adopt_after_load"):
+		gai.call("adopt_after_load")
 	# Часы партии — последними: орда читает их каждый такт, и до расстановки
 	# войск ей нечего было бы будить
 	var meta: Dictionary = state.get("meta", {})
@@ -534,6 +586,8 @@ static func _restore_squads(src: Array) -> Dictionary:
 		sq["abilities"] = ab
 		if bool(d.get("home_guard", false)):
 			sq["home_guard"] = true
+		if bool(d.get("elite", false)):
+			sq["elite"] = true
 		map[int(d["id"])] = sid
 	return map
 
@@ -559,6 +613,9 @@ static func _restore_buildings(main: Node, src: Array) -> Array:
 		# Запас жизни ставится ПОСЛЕ входа в дерево: _ready() здания сам берёт
 		# максимум из конфига и затёр бы сохранённое число
 		b.current_health = float(d.get("hp", b.max_health))
+		# Раненая постройка из сохранения сразу с полоской (ТЗ 14.10, п. 5)
+		if b.has_method("refresh_hp_bar"):
+			b.refresh_hp_bar()
 		if not lair.is_empty():
 			if int(lair.get("side", -1)) >= 0:
 				b.set("side_faction", int(lair.get("side", -1)))
@@ -581,6 +638,7 @@ static func _make_building(id: String) -> Building:
 		"tower":      return load("res://scripts/Tower.gd").new()
 		"town_center": return load("res://scripts/TownCenter.gd").new()
 		"goblin_hut": return load("res://scripts/goblin/GoblinHut.gd").new()
+		"goblin_chief_hut": return load("res://scripts/goblin/GoblinChiefHut.gd").new()
 		"troll_lair": return load("res://scripts/goblin/TrollLair.gd").new()
 	# Три дома — один скрипт, картинка по ключу (House.variant_id)
 	if _UCfg.is_house(id):

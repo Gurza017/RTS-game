@@ -286,6 +286,8 @@ func _apply_dir_tex(key: String) -> void:
 	_look_px     = PIXEL_SIZE
 	_look_loop   = true
 	_look_fps    = 10.0 if (key == "run" or key.begins_with("attack")) else 6.0
+	if key == "run":
+		_look_fps *= _UStats.walk_boost(stat_id)    # темп ног под шаг (ТЗ 10.10.2026)
 	# Компенсация привязки листа: низ рисунка встаёт туда же, где у Idle
 	# ── ПО СТУПНЯМ, А НЕ ПО НИЖНЕЙ КРОМКЕ АЛЬФЫ (ТЗ 24.09.2026, п. 7) ─────
 	# Прежняя привязка ровняла самый нижний непрозрачный пиксель листа по
@@ -497,14 +499,20 @@ func _spear_leveled() -> bool:
 	# ЗАЩИТА, и приказ атаки — бежать щетиной пик нельзя ни при каких условиях.
 	# Флаг снимается сам по прибытии (Unit._arrive_at_target), и копья
 	# опускаются обратно тем же путём, что и всегда
-	var holds: bool = (not sprinting) and (_stance_holds_ground() or _charging())
+	# ── ФАЛАНГА — УЛУЧШЕНИЕ, А НЕ СТОЙКА (ТЗ 14.10.2026, п. 6) ──────────────
+	# Без изученной «Фаланги» (spearman_1d) [S] — просто «держать строй», как
+	# у любого рода: копья стоят. С ней [S] опускает копья — это и есть
+	# фаланга со всеми её свойствами (spear_wall_active)
+	var phalanx: bool = squad_id > 0 and GameManager.spear_wall_ready(squad_id)
+	var holds: bool = (not sprinting) and ((_stance_holds_ground() and phalanx) or _charging())
 	# ── «СТЕНА КОПИЙ» ДЕРЖИТ ПИКИ ВПЕРЁД ВСЕГДА (ТЗ 20.09.2026, п. 4.1) ────
 	# Заказ: «когда улучшение изучено, копейщики во время стояния И МАРША (все
 	# 3 ряда) держат копья направленными вперёд, образуя готовую фалангу
 	# против конницы». Это перк отряда, а не стойка: он снимает и требование
 	# «стойка ЗАЩИТА или бой», и гистерезис по ряду (ниже). На бегу фаланги
 	# по-прежнему нет — двойной ПКМ распускает строй, и это правило старше
-	var wall: bool = (not sprinting) and squad_id > 0 		and GameManager.spear_wall_ready(squad_id)
+	# С ТЗ 14.10.2026 щетина — по нажатому [S] (стойка «Защита»), а не всегда
+	var wall: bool = (not sprinting) and phalanx and _stance_holds_ground()
 	if wall:
 		holds = true
 	if holds != _was_holding:
@@ -613,7 +621,7 @@ func _update_dir_sprite() -> void:
 				# Передние шеренги идут с копьями наперевес, в сторону марша.
 				# ВЕСЬ ОТРЯД — ПО КУРСУ ОТРЯДА (ТЗ 24.09.2026, второе письмо):
 				# личный шаг (смыкание, обход соседа) разворачивал бойцов вразнобой
-				var mdir := _squad_face(velocity if velocity.length() > 0.05 else _facing)
+				var mdir := _squad_face_moving(velocity if velocity.length() > 0.05 else _facing)
 				var msec := _facing_to_dir_key(mdir.normalized())
 				tex_key = DEFENCE_KEYS[msec]
 				_set_dir_flip(SECTOR_MIRROR[msec])
@@ -673,6 +681,19 @@ func _squad_face(fallback: Vector3) -> Vector3:
 		return fallback
 	var c: Vector3 = GameManager.squad_course(squad_id)
 	return c if c.length_squared() > 1e-6 else fallback
+
+## ── НА ХОДУ КУРС ОТРЯДА — ТОЛЬКО ЕСЛИ ОН ПО ХОДУ (ТЗ 12.10.2026) ──────────
+## «Красные идут спиной вперёд»: курс отряда хранится от ПОСЛЕДНЕЙ разметки, а
+## ИИ разметку не перекладывает — отряд шёл домой, а копья смотрели туда, где
+## он стоял прошлый раз. Курс, расходящийся с ходом больше чем на 60°, — не
+## курс этого марша: поза берётся по ходу
+func _squad_face_moving(move_dir: Vector3) -> Vector3:
+	var c: Vector3 = _squad_face(move_dir)
+	if c == move_dir or move_dir.length_squared() < 1e-6:
+		return c
+	var a := Vector2(c.x, c.z).normalized()
+	var b := Vector2(move_dir.x, move_dir.z).normalized()
+	return c if a.dot(b) >= 0.5 else move_dir
 
 func _own_enemy_dir() -> Vector3:
 	var dir := Vector3.ZERO
@@ -896,6 +917,14 @@ func phalanx_wall_active() -> bool:
 
 func _strike_damage() -> float:
 	var dmg: float = super._strike_damage()
+	# ── «ПРИЁМ КОПЬЯ» (forge spearman_2d, ТЗ 14.10.2026, п. 6) ─────────────
+	# Урон по крупной цели (конница, туша, тролль — Unit.giant_class) ×(1 +
+	# bonus_giant_melee). Признак крупной цели — метод цели, без приведений
+	var tgt = attack_target
+	if tgt != null and is_instance_valid(tgt) and tgt is Unit and (tgt as Unit).giant_class():
+		var gm: float = GameManager.unit_bonus(faction, "spearman", "bonus_giant_melee")
+		if gm > 0.0:
+			dmg *= 1.0 + gm
 	if _push_left > 0 and phalanx_push_active():
 		_push_left -= 1
 		push_hits_done += 1

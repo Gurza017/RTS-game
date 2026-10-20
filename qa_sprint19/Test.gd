@@ -132,7 +132,9 @@ func _run() -> void:
 		if p.z - spos.z > 0.0:
 			front += 1
 			worst = maxf(worst, p.z - spos.z)
-	var lim: float = _CSite.FRONT_EDGE + Worker.BUILD_STAND_PAD + Worker.BUILD_ARRIVE_PAD + 0.3
+	# ТЗ 14.10.2026: передняя стена — основание СДВИНУТОГО рисунка стройки
+	# (_draw_z), а не FRONT_EDGE: у FRONT_EDGE рабочий стоял за картинкой
+	var lim: float = maxf(_CSite.FRONT_EDGE, float(site.get("_draw_z"))) + Worker.BUILD_STAND_PAD + Worker.BUILD_ARRIVE_PAD + 0.3
 	print("  строителей у стены %d/%d, со стороны камеры %d, худший вынос вперёд %.2f м (коробка %.2f)" % [
 		settled, ws.size(), front, worst, site.build_size.z * 0.5])
 	verdict("C1 все строители встали на работу", settled == ws.size(), "%d из %d" % [settled, ws.size()])

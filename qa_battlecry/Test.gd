@@ -215,12 +215,20 @@ func _run() -> void:
 	var lis: Node3D = AudioManager._listener_node()
 	var here: Vector3 = lis.global_position if lis != null else Vector3.ZERO
 	var uniq: Dictionary = {}
+	# Слушатель стоит в фокусе камеры — на базе, которую к этому моменту
+	# туман может не освещать (стенд гоняет отряды в стороне). Проверка — про
+	# разброс ВЫСОТЫ, а не про туман: на время замера туман снимается
+	var fog_was: bool = GameManager.fog != null and GameManager.fog.enabled
+	if GameManager.fog != null:
+		GameManager.fog.enabled = false
 	for _i in range(24):
 		AudioManager.play_3d("battle_cry", here)
 		for v in AudioManager._pool:
 			var p3 := v as AudioStreamPlayer3D
 			if p3 != null and p3.stream != null:
 				uniq[snappedf(p3.pitch_scale, 0.001)] = true
+	if GameManager.fog != null:
+		GameManager.fog.enabled = fog_was
 	var in_range := true
 	for k in uniq:
 		if float(k) < float(pr[0]) - 0.001 or float(k) > float(pr[1]) + 0.001:
@@ -281,21 +289,26 @@ func _run() -> void:
 	sm.set_selection_stance(_UCfg().STANCE_DEFENSE)
 	hud.show_selection(sm.selected_units)
 	await frames(3)
-	var atk_btn := _find_btn("Attack")
-	var def_btn := _find_btn("Defend")
+	# ── РАЗВОРОТ ТЗ 10.10.2026 (блок 4) ─────────────────────────────────────
+	# Кнопки Attack/Defend сняты: стойку показывает ряд команд A · C · S · F1.
+	# «Защита» — это [S] «Держать позицию», «Атака» — [C] «Вольно». Свойство
+	# прежнее: активная обведена жёлтой рамкой со скруглением, неактивная — нет,
+	# и подсветка переезжает вместе со стойкой
+	var atk_btn: Button = hud._squad_cmd_btns.get("C")
+	var def_btn: Button = hud._squad_cmd_btns.get("S")
 	verdict("D0 обе кнопки стоек на панели (подготовка)",
-		atk_btn != null and def_btn != null)
+		atk_btn != null and def_btn != null and hud._squad_cmd_bar.visible)
 	if atk_btn != null and def_btn != null:
 		var def_sb := def_btn.get_theme_stylebox("normal") as StyleBoxFlat
 		var atk_sb := atk_btn.get_theme_stylebox("normal") as StyleBoxFlat
-		verdict("D1 активная «Защита» обведена жёлтым",
-			def_sb != null and def_sb.border_color.is_equal_approx(HUD.ACTIVE_BORDER_COLOR)
-				and def_sb.border_width_top == HUD.ACTIVE_BORDER_W,
+		verdict("D1 активная «Держать позицию» обведена жёлтым",
+			def_sb != null and _yellow(def_sb.border_color)
+				and def_sb.border_width_top >= HUD.ACTIVE_BORDER_W,
 			"рамка %d px, цвет %s" % [
 				def_sb.border_width_top if def_sb != null else -1,
 				str(def_sb.border_color) if def_sb != null else "нет"])
-		verdict("D2 неактивная «Атака» жёлтой рамки НЕ имеет",
-			atk_sb != null and not atk_sb.border_color.is_equal_approx(HUD.ACTIVE_BORDER_COLOR),
+		verdict("D2 неактивная «Вольно» жёлтой рамки НЕ имеет",
+			atk_sb != null and not _yellow(atk_sb.border_color),
 			"цвет %s" % (str(atk_sb.border_color) if atk_sb != null else "нет"))
 		verdict("D3 у подсветки скруглены углы",
 			def_sb != null and def_sb.corner_radius_top_left == HUD.ACTIVE_BORDER_RADIUS,
@@ -305,14 +318,14 @@ func _run() -> void:
 		sm.set_selection_stance(_UCfg().STANCE_ATTACK)
 		hud.show_selection(sm.selected_units)
 		await frames(3)
-		var atk2 := _find_btn("Attack")
-		var def2 := _find_btn("Defend")
+		var atk2: Button = hud._squad_cmd_btns.get("C")
+		var def2: Button = hud._squad_cmd_btns.get("S")
 		var a_sb := atk2.get_theme_stylebox("normal") as StyleBoxFlat if atk2 != null else null
 		var d_sb := def2.get_theme_stylebox("normal") as StyleBoxFlat if def2 != null else null
-		verdict("D4 после переключения подсветка переехала на «Атаку»",
-			a_sb != null and a_sb.border_color.is_equal_approx(HUD.ACTIVE_BORDER_COLOR)
-				and d_sb != null and not d_sb.border_color.is_equal_approx(HUD.ACTIVE_BORDER_COLOR),
-			"атака %s / защита %s" % [
+		verdict("D4 после переключения подсветка переехала на «Вольно»",
+			a_sb != null and _yellow(a_sb.border_color)
+				and d_sb != null and not _yellow(d_sb.border_color),
+			"вольно %s / держать %s" % [
 				str(a_sb.border_color) if a_sb != null else "нет",
 				str(d_sb.border_color) if d_sb != null else "нет"])
 
@@ -326,6 +339,11 @@ func _run() -> void:
 
 func _UCfg():
 	return load("res://scripts/unit_stats_config.gd")
+
+## Жёлтая рамка активной кнопки (тон, а не точное число: у ряда команд свой
+## оттенок той же семьи, что HUD.ACTIVE_BORDER_COLOR)
+func _yellow(c: Color) -> bool:
+	return c.r > 0.85 and c.g > 0.7 and c.b < 0.5
 
 ## Кнопка панели по её tooltip_text (в _cmd туда кладётся первая строка подписи)
 func _find_btn(title: String) -> Button:

@@ -70,6 +70,14 @@ func _run() -> void:
 		GameManager.fog.enabled = false
 		GameManager.fog = null
 	await frames(4)
+	# ПЛОЩАДКА СТЕНДА ЧИСТИТСЯ (ТЗ 11.10.2026): охрана ничейного рудника
+	# красного (−75, 80) стоит постами по всей окружности, и один пост лёг на
+	# (−90, 90) — клик D2 забирал гоблина вместо рабочего у стены
+	for u in get_tree().get_nodes_in_group("all_units"):
+		if is_instance_valid(u) and u is Unit and (u as Unit).faction != Constants.FACTION_PLAYER \
+				and Vector2((u as Node3D).global_position.x + 75.0, (u as Node3D).global_position.z - 90.0).length() < 45.0:
+			(u as Unit).take_damage(1.0e9, null)
+	await pframes(4)
 
 	var keep := Castle.new()
 	keep.faction = Constants.FACTION_PLAYER
@@ -188,15 +196,17 @@ func _check_click(b: Building) -> void:
 	var top: float = _drawn_top(b)
 	# Целимся в ВЕРХНЮЮ часть картинки — туда, где луч уходит выше коробки
 	var aim: Vector3 = b.global_position + Vector3(b._draw_cx,
-		b._draw_base_y + (top - b._draw_base_y) * 0.78, 0.0)
+		b._draw_base_y + (top - b._draw_base_y) * 0.78, b._draw_z)
 	var scr: Vector2 = cam.unproject_position(aim)
 	var ground: Vector3 = _ground_under(cam, scr)
 	var away: float = Vector2(ground.x - b.global_position.x,
 		ground.z - b.global_position.z).length()
+	# ЗА РИСУНКОМ, а не за коробкой: рисунок сдвинут к камере на _draw_z
+	# (ТЗ 12.10.2026), и «за зданием» — это дальше его плоскости от камеры
+	var behind_m: float = (b.global_position.z + b._draw_z) - ground.z
 	verdict("D0 точка земли под курсором и правда уходит ЗА здание",
-		away > maxf(b.build_size.x, b.build_size.z) * 0.5,
-		"%.2f м при полугабарите коробки %.2f м" % [
-			away, maxf(b.build_size.x, b.build_size.z) * 0.5])
+		behind_m > 2.0,
+		"%.2f м за плоскостью рисунка (от центра %.2f м)" % [behind_m, away])
 
 	# ── РАБОЧИЙ РОВНО В ТОЧКЕ ЗЕМЛИ ПОД КУРСОРОМ ────────────────────────────
 	# Это и есть жалоба: игрок целится в стену, а клик забирает крестьянина,

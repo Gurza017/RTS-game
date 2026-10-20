@@ -11,7 +11,7 @@ const _GSCam := preload("res://scripts/game_settings.gd")
 ## висит на фиксированном отступе от него.
 ##
 ## ЧТО ИГРОКУ РАЗРЕШЕНО:
-##   • двигать карту — WASD / стрелки / край экрана / ЗАЖАТАЯ СРЕДНЯЯ КНОПКА;
+##   • двигать карту — стрелки (WASD снят ТЗ 10.10.2026) / край экрана / ЗАЖАТАЯ СРЕДНЯЯ КНОПКА;
 ##   • менять высоту — колесо мыши (в пределах min_height…max_height).
 ## ЧТО ЗАПРЕЩЕНО СОВСЕМ:
 ##   • крутить сцену вокруг (yaw) — прежние Q/E и перетаскивание средней
@@ -117,13 +117,15 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	var move := Vector2.ZERO
 
-	if Input.is_key_pressed(KEY_W) or Input.is_key_pressed(KEY_UP):
+	# КАМЕРА — ТОЛЬКО СТРЕЛКИ (ТЗ 10.10.2026, п. 1): A, S, C заняты командами
+	# отряду, и WASD двигал бы карту в тот же миг, когда игрок отдаёт приказ
+	if Input.is_key_pressed(KEY_UP):
 		move.y -= 1
-	if Input.is_key_pressed(KEY_S) or Input.is_key_pressed(KEY_DOWN):
+	if Input.is_key_pressed(KEY_DOWN):
 		move.y += 1
-	if Input.is_key_pressed(KEY_A) or Input.is_key_pressed(KEY_LEFT):
+	if Input.is_key_pressed(KEY_LEFT):
 		move.x -= 1
-	if Input.is_key_pressed(KEY_D) or Input.is_key_pressed(KEY_RIGHT):
+	if Input.is_key_pressed(KEY_RIGHT):
 		move.x += 1
 
 	# Скролл краем экрана отключается, пока карту тащат средней кнопкой:

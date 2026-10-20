@@ -49,6 +49,10 @@ extends RefCounted
 const GROW_STEP := 128
 const _Opt := preload("res://scripts/perf_config.gd")
 const _SHADER := preload("res://shaders/mm_unit_sprite.gdshader")
+const _GHOST_SHADER := preload("res://shaders/mm_unit_ghost.gdshader")
+## Цвет силуэта сквозь постройку по фракции (ТЗ 14.10.2026, п. 1): игрок —
+## синий, красный ИИ — красный, орда — зелёный
+const GHOST_COLORS := [Vector3(0.45, 0.72, 1.0), Vector3(1.0, 0.36, 0.32), Vector3(0.45, 1.0, 0.45)]
 const _BB     := preload("res://scripts/BillboardUtil.gd")
 
 class Bucket:
@@ -134,6 +138,16 @@ class Bucket:
 		_flash = c
 		if mat != null:
 			mat.set_shader_parameter("flash_color", Vector3(c.r, c.g, c.b))
+
+	## Второй проход — силуэт сквозь постройку (mm_unit_ghost), null — выключен
+	var ghost: ShaderMaterial = null
+	var _ghost_fac: int = -1
+	func set_ghost(faction: int) -> void:
+		if ghost == null or faction == _ghost_fac:
+			return
+		_ghost_fac = faction
+		var c: Vector3 = GHOST_COLORS[clampi(faction, 0, GHOST_COLORS.size() - 1)]
+		ghost.set_shader_parameter("ghost_color", c)
 
 	var _blood: float = -1.0
 	func set_blood(v: float) -> void:
@@ -302,6 +316,14 @@ func _get_or_make_bucket(key: String, sheet: Texture2D, frames: int,
 	# (см. GameManager.far_units), поэтому число здесь совпадает с тем, что у
 	# запасного Sprite3D-пути стоит в UnitVisuals.gd (render_priority = 1)
 	mat.render_priority = 1
+	if _Opt.unit_ghost:
+		var gm := ShaderMaterial.new()
+		gm.shader = _GHOST_SHADER
+		gm.set_shader_parameter("albedo_tex", sheet)
+		gm.set_shader_parameter("frame_count", float(maxi(frames, 1)))
+		gm.render_priority = 1
+		mat.next_pass = gm
+		b.ghost = gm
 	quad.material = mat
 
 	# Привязку ног ставит первый же зарегистрировавшийся боец (см. set_foot):
@@ -382,6 +404,7 @@ func register(unit: Unit, world_root: Node3D, mirror: bool) -> Slot:
 	b.set_foot(s.base_y)
 	b.set_blood(unit.blood_spots())
 	b.set_flash(unit.hit_flash_color())
+	b.set_ghost(unit.faction)
 	s.frame  = sf[1]
 	s.mirror = mirror
 	s.pos    = unit.global_position + Vector3(0.0, s.base_y, 0.0)
@@ -449,6 +472,7 @@ func look_table_for(unit: Unit, world_root: Node3D) -> Dictionary:
 		var shift: float = float(unit._look_base_bottom - int(row[4])) * unit._look_px
 		var base_y: float = (unit._look_base_y + clampf(shift, -cap, cap)) * _BB.V_STRETCH
 		b.set_foot(base_y)
+		b.set_ghost(unit.faction)
 		b.set_blood(unit.blood_spots())
 		b.set_flash(unit.hit_flash_color())
 		names[k] = packed.size() / 6
@@ -608,6 +632,34 @@ func bucket_count() -> int:
 ## GameManager._wake_returned_far_units: спящий боец сам не заметит возврат)
 func registered_units() -> Array:
 	return _slot.keys()
+
+## ── НОВАЯ СЦЕНА: УЗЛЫ БАКЕТОВ ЗАВОДЯТСЯ ЗАНОВО (ТЗ 11.10.2026, «Играть заново»)
+## Рендерер живёт в АВТОЗАГРУЗКЕ и переживает смену сцены, а его
+## MultiMeshInstance3D лежали под World прошлой партии и ушли вместе с ним.
+## Бакет из словаря отдавался новой партии как есть: буфер писался, слоты
+## выдавались, но рисовать их было некому — «после перезапуска рабочие
+## невидимы» (рабочие — первые бойцы игрока на экране). Буфер и MultiMesh
+## бакета живы (их держит сам Bucket), поэтому узел заводится заново над тем
+## же ресурсом. Зовёт Main._ready сразу после создания World
+func reattach_world(world_root: Node3D) -> void:
+	for key in _buckets:
+		var b: Bucket = _buckets[key]
+		b.mmi = reattach_mmi(b.mmi, b.mm, world_root)
+
+## Узел слоя на месте — он же; освобождён вместе со старой сценой — новый над
+## тем же MultiMesh. Общий для слоёв автозагрузки (кольца, полоски здоровья).
+## `old` БЕЗ ТИПА намеренно: освобождённый объект в типизированном параметре —
+## исключение, а не null (правило 5 CLAUDE.md)
+static func reattach_mmi(old, mm: MultiMesh, world_root: Node3D) -> MultiMeshInstance3D:
+	if is_instance_valid(old) and old.is_inside_tree():
+		return old
+	if mm == null or world_root == null:
+		return null
+	var n := MultiMeshInstance3D.new()
+	n.multimesh = mm
+	n.extra_cull_margin = 16384.0
+	world_root.add_child(n)
+	return n
 
 ## Полная очистка (смена сцены/сброс партии). Сами MultiMeshInstance3D остаются
 ## в дереве — их удаляет владелец world_root при выгрузке сцены

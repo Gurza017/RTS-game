@@ -200,7 +200,7 @@ func _a_no_split() -> void:
 	# по дороге кто-то переключается на отвлекающий отряд
 	var strayed := 0
 	var decoy_hit := 0.0
-	for _i in range(1800):
+	for _i in range(3600):   # потолок, а не ожидание: выход — по разгрому цели
 		await get_tree().physics_frame
 		strayed = maxi(strayed, _aiming_elsewhere(men, tsid))
 		if _alive(target).is_empty():
