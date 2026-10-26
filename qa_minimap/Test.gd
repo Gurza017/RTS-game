@@ -69,8 +69,9 @@ func _run() -> void:
 	mm.bake_now()
 	var vs: Vector2 = get_viewport().get_visible_rect().size
 	var r: Rect2 = mm.panel_rect()
-	verdict("A2", r.end.x > vs.x - 20.0 and r.end.x <= vs.x and r.end.y > vs.y - 20.0
-		and r.end.y <= vs.y and r.size.x >= 180.0,
+	# ТЗ 20.10.2026: левый нижний угол, на 30 % меньше (240×135 → 168×95)
+	verdict("A2", r.position.x >= 0.0 and r.position.x <= 20.0 and r.end.y > vs.y - 20.0
+		and r.end.y <= vs.y and r.size.x >= 150.0 and r.size.x <= 200.0,
 		"панель %s, экран %s" % [r, vs])
 
 	await _markers()

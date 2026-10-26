@@ -285,7 +285,8 @@ func command_attack(target: Node3D, forced: bool = true, charge: bool = false,
 	_leave_construction()
 	_build_queue.clear()
 	super.command_attack(target, forced, charge, lock)
-	# Артель набрасывается толпой (письмо 12): соседи получают того же врага
+	# Артель набрасывается толпой (письмо 12): соседи получают того же врага.
+	# Бегущие в укрытие в ней не участвуют (см. _shelter_off)
 	if attack_target == target and target is Unit:
 		GameManager.workers_rally(faction, target, self)
 
@@ -310,6 +311,12 @@ func _hunt_strike_anim() -> void:
 
 func command_move(target_pos: Vector3, slow_march: bool = false, face_dir: Vector3 = Vector3.ZERO,
 		keep_retreat: bool = false, player_order: bool = false, run: bool = false) -> void:
+	# Любой приказ снимает поход в укрытие; приказ БЕЗ сохранения отхода —
+	# и режим отхода, в котором рабочий туда бежал (_shelter_off)
+	if keep_retreat:
+		shelter_host = null
+	else:
+		_shelter_off()
 	_build_queue.clear()
 	_drop_sheep_job()
 	_free_slot()
@@ -318,6 +325,81 @@ func command_move(target_pos: Vector3, slow_march: bool = false, face_dir: Vecto
 	_gather_cluster  = 0
 	_leave_construction()
 	super.command_move(target_pos, slow_march, face_dir, keep_retreat, player_order, run)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# УКРЫТИЕ В ЗАМКЕ (ТЗ 20.10.2026, блок 5: тревога «колокол» и приём рабочего)
+# ═════════════════════════════════════════════════════════════════════════════
+## Замок, к которому рабочий бежит прятаться (null — не бежит). Ставит
+## GameManager.shelter_workers, снимает Castle при входе или новый приказ
+var shelter_host: Node3D = null
+## Чем рабочий был занят до тревоги — к этому он вернётся после выхода
+var shelter_task: Dictionary = {}
+
+## ── ПОХОД В УКРЫТИЕ — РЕЖИМ ОТХОДА (ТЗ 22.10.2026, блок 2) ─────────────────
+## Рабочий бежит к воротам в Unit.begin_retreat: без цели, без ответа на удар
+## и авто-агро (все эти гейты уже смотрят на retreating), артель его в бой
+## не зовёт (GameManager.workers_rally). Прежде поход был обычным маршем:
+## первый же удар всадника перебивал его ответом, и рабочий вставал драться.
+## Снимает режим вход в замок (Castle._shelter_absorb) или новая работа
+func _shelter_off() -> void:
+	shelter_host = null
+	if retreating:
+		end_retreat(true)
+
+## Снимок текущей работы: стройка, жила, загон или просто точка
+func shelter_snapshot() -> Dictionary:
+	if build_target != null and is_instance_valid(build_target):
+		return {"kind": "build", "node": build_target}
+	var fp: Node3D = farm_pen()
+	if fp != null and is_instance_valid(fp):
+		return {"kind": "farm", "node": fp}
+	if gather_target != null and is_instance_valid(gather_target):
+		return {"kind": "gather", "node": gather_target, "res": _gather_res_type}
+	if _gather_res_type >= 0:
+		return {"kind": "res", "res": _gather_res_type, "at": _gather_origin}
+	return {"kind": "idle", "at": global_position}
+
+## Вернуться к работе из снимка. Узел цели мог пропасть (стройка готова, жила
+## выработана) — тогда ближайшая жила того же ресурса, иначе — на прежнее место
+func shelter_resume(snap: Dictionary) -> void:
+	var kind: String = String(snap.get("kind", "idle"))
+	var node: Variant = snap.get("node")
+	var alive: bool = node != null and is_instance_valid(node)
+	match kind:
+		"build":
+			if alive and not ((node as Node).has_method("is_dead") and bool(node.call("is_dead"))):
+				command_build(node as Node3D)
+				return
+		"farm":
+			if alive:
+				command_farm_pen(node as Node3D)
+				return
+		"gather":
+			if alive and float((node as Node).get("remaining")) > 0.0:
+				command_gather(node as ResourceNode)
+				return
+	var res: int = int(snap.get("res", -1))
+	if res >= 0:
+		var near: ResourceNode = _nearest_resource_of(res, snap.get("at", global_position) as Vector3)
+		if near != null:
+			command_gather(near)
+			return
+	var at: Variant = snap.get("at")
+	if at != null:
+		command_move(at as Vector3)
+
+func _nearest_resource_of(res: int, around: Vector3) -> ResourceNode:
+	var best: ResourceNode = null
+	var best_d := INF
+	for n in get_tree().get_nodes_in_group("resource_nodes"):
+		var rn := n as ResourceNode
+		if rn == null or not is_instance_valid(rn) or rn.resource_type != res or rn.remaining <= 0.0:
+			continue
+		var d: float = rn.global_position.distance_squared_to(around)
+		if d < best_d:
+			best_d = d
+			best = rn
+	return best
 
 ## Отдать своё место на кольце жилы. Зовётся отовсюду, где рабочий перестаёт
 ## быть добытчиком: иначе слот остаётся забронированным за ушедшим, и бригада
@@ -345,6 +427,7 @@ func build_queue_size() -> int:
 	return _build_queue.size()
 
 func command_build(site: Node3D, queue: bool = false) -> void:
+	_shelter_off()
 	if site == null or not is_instance_valid(site):
 		return
 	if queue and build_target != null and is_instance_valid(build_target) \
@@ -375,6 +458,7 @@ func command_build(site: Node3D, queue: bool = false) -> void:
 	_wake_process()
 
 func command_gather(node: ResourceNode) -> void:
+	_shelter_off()
 	if node == null or not is_instance_valid(node):
 		return
 	# ЦЕЛЬ ДОБЫЧИ У РУДЫ — ВСЯ КУЧА, А НЕ ТОТ КАМУШЕК, ПО КОТОРОМУ КЛИКНУЛИ.
@@ -501,6 +585,7 @@ func farm_pen() -> Node3D:
 	return _farm_pen if _farm_pen != null and is_instance_valid(_farm_pen) else null
 
 func command_farm_pen(p: Node3D) -> void:
+	_shelter_off()
 	if p == null or not is_instance_valid(p) or not p.has_method("pick_sheep_for"):
 		return
 	_drop_sheep_job()

@@ -453,7 +453,7 @@ func _f_lock() -> void:
 func _g_texts() -> void:
 	print("\n═════ G. ТЕКСТЫ ═════")
 	var hud = main.hud
-	verdict("G1 подпись строки — «Кулдаун»", String(hud.STAT_ROW_LABELS["cooldown"]) == "Кулдаун")
+	verdict("G1 подпись строки — «Cooldown» (ТЗ 24.10: было «Кулдаун»)", String(hud.STAT_ROW_LABELS["cooldown"]) == "Cooldown")
 	var node: Dictionary = _Forge.UNITS["spearman"]["1d"]
 	var d: String = String(node.get("desc", ""))
 	verdict("G2 «Стена копий»: 300%, замедление конницы, без слов о стрелах",
@@ -478,7 +478,12 @@ func _icons_of(hud) -> Array:
 	var all: Array = []
 	_buttons(hud.button_container, all)
 	var out: Array = []
+	# Мини-слоты колонки «Гарнизон» тоже лежат в button_container, и портрет
+	# лучника там — это сидящий на крыше отряд, а не кнопка найма
+	var strip: Node = hud._garrison_strip
 	for bt in all:
+		if strip != null and is_instance_valid(strip) and strip.is_ancestor_of(bt):
+			continue
 		for ch in (bt as Button).get_children():
 			var tr := ch as TextureRect
 			if tr != null and tr.texture != null:

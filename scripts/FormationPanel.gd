@@ -5,7 +5,7 @@ extends Control
 ## Заменило текстовый индикатор «строй [1] широкий» в правой верхней панели.
 ## Три ячейки со СХЕМОЙ, а не словами:
 ##   [1] широкий фронт — точки в одну линию;
-##   [2] коробочка — блок 3 × 3 (держат копейщики, см. _deep_formation_slots);
+##   [2] блоки сеткой (с ТЗ 20.10.2026 три шеренги копейщикам не навязываются);
 ##   [3] авангард — передняя шеренга цветом рода, который ставится вперёд
 ##       (копейщики → мечники → лучники по кругу).
 ## Активный режим — в золотой рамке. Клик по ячейке — то же, что клавиша
@@ -56,6 +56,11 @@ func _process(_delta: float) -> void:
 	var sm = _sm()
 	if sm == null:
 		return
+	if _press_left > 0.0:
+		_press_left -= _delta
+		if _press_left <= 0.0:
+			_press_cell = -1
+			queue_redraw()
 	var key: int = int(sm.formation_mode) * 10 + int(sm.formation_front)
 	if key != _last_key:
 		_last_key = key
@@ -64,6 +69,21 @@ func _process(_delta: float) -> void:
 func _cell_rect(i: int) -> Rect2:
 	var cw: float = (size.x - PAD * 2.0 - GAP * float(CELLS - 1)) / float(CELLS)
 	return Rect2(PAD + float(i) * (cw + GAP), PAD, cw, size.y - PAD * 2.0)
+
+## ── КНОПКИ-ПЛИТКИ (ТЗ 20.10.2026, блок 2) ─────────────────────────────────
+## «Сделать кнопочки над картой явными, красивыми прямоугольными/почти
+## квадратными с чётким визуальным откликом». Каждая ячейка — объёмная плитка:
+## светлая фаска сверху, тёмная снизу, наведение подсвечивает плитку, нажатие
+## «вдавливает» её (фаски меняются местами, схема смещается на пиксель) на
+## PRESS_SEC, активный режим — золотая рамка и подсветка фона
+const C_CELL_HI := Color(0.17, 0.17, 0.26)
+const C_CELL_ON := Color(0.22, 0.19, 0.10)
+const C_BEVEL_LT := Color(1.0, 1.0, 1.0, 0.16)
+const C_BEVEL_DK := Color(0.0, 0.0, 0.0, 0.45)
+const PRESS_SEC := 0.14
+var _hover_cell: int = -1
+var _press_cell: int = -1
+var _press_left: float = 0.0
 
 func _draw() -> void:
 	var sm = _sm()
@@ -75,30 +95,42 @@ func _draw() -> void:
 	var font: Font = get_theme_default_font()
 	for i in range(CELLS):
 		var r := _cell_rect(i)
-		draw_rect(r, C_CELL, true)
 		var on: bool = (i == 0 and mode != deep_id) or (i == 1 and mode == deep_id)
 		if i == 2:
 			on = front != 0
-		draw_rect(r, C_ON if on else C_BORDER, false, 2.0 if on else 1.0)
+		var pressed: bool = i == _press_cell and _press_left > 0.0
+		var bg: Color = C_CELL_ON if on else C_CELL
+		if i == _hover_cell and not pressed:
+			bg = bg.lightened(0.18) if on else C_CELL_HI
+		draw_rect(r, bg, true)
+		# Фаски: выпуклая плитка — свет сверху/слева; вдавленная — наоборот
+		var lt: Color = C_BEVEL_DK if pressed else C_BEVEL_LT
+		var dk: Color = C_BEVEL_LT if pressed else C_BEVEL_DK
+		draw_line(r.position + Vector2(1, 1), Vector2(r.end.x - 1, r.position.y + 1), lt, 2.0)
+		draw_line(r.position + Vector2(1, 1), Vector2(r.position.x + 1, r.end.y - 1), lt, 2.0)
+		draw_line(Vector2(r.position.x + 1, r.end.y - 1), r.end - Vector2(1, 1), dk, 2.0)
+		draw_line(Vector2(r.end.x - 1, r.position.y + 1), r.end - Vector2(1, 1), dk, 2.0)
+		draw_rect(r, C_ON if on else (C_KEY if i == _hover_cell else C_BORDER), false, 2.0 if on else 1.0)
+		var sh := Vector2(1.0, 1.0) if pressed else Vector2.ZERO
 		# Номер клавиши — в левом верхнем углу ячейки
 		if font != null:
-			draw_string(font, r.position + Vector2(3.0, 11.0), str(i + 1),
-				HORIZONTAL_ALIGNMENT_LEFT, -1.0, 10, C_KEY)
-		var c: Vector2 = r.get_center() + Vector2(4.0, 1.0)
-		var dot: float = 2.0
+			draw_string(font, r.position + Vector2(4.0, 12.0) + sh, str(i + 1),
+				HORIZONTAL_ALIGNMENT_LEFT, -1.0, 10, C_ON if on else C_KEY)
+		var c: Vector2 = r.get_center() + Vector2(3.0, 2.0) + sh
+		var dot: float = 1.8
 		match i:
 			0:
-				for k in range(7):
-					draw_circle(c + Vector2((float(k) - 3.0) * 6.0, 0.0), dot, C_DOT)
+				for k in range(5):
+					draw_circle(c + Vector2((float(k) - 2.0) * 6.0, 0.0), dot, C_DOT)
 			1:
 				for row in range(3):
 					for col in range(3):
 						draw_circle(c + Vector2((float(col) - 1.0) * 6.0, (float(row) - 1.0) * 5.0), dot, C_DOT)
 			2:
 				var fc: Color = FRONT_COLORS[clampi(front, 0, FRONT_COLORS.size() - 1)]
-				for k in range(5):
-					draw_circle(c + Vector2((float(k) - 2.0) * 6.0, -4.0), dot + 0.4, fc)
-					draw_circle(c + Vector2((float(k) - 2.0) * 6.0, 4.0), dot, C_DOT)
+				for k in range(4):
+					draw_circle(c + Vector2((float(k) - 1.5) * 6.0, -3.5), dot + 0.4, fc)
+					draw_circle(c + Vector2((float(k) - 1.5) * 6.0, 3.5), dot, C_DOT)
 
 func _gui_input(ev: InputEvent) -> void:
 	if ev is InputEventMouseMotion:
@@ -108,6 +140,9 @@ func _gui_input(ev: InputEvent) -> void:
 			if _cell_rect(i).has_point(p):
 				hit = i
 		_show_tip(hit)
+		if hit != _hover_cell:
+			_hover_cell = hit
+			queue_redraw()
 		return
 	var mb := ev as InputEventMouseButton
 	if mb == null or not mb.pressed or mb.button_index != MOUSE_BUTTON_LEFT:
@@ -119,6 +154,8 @@ func _gui_input(ev: InputEvent) -> void:
 		if _cell_rect(i).has_point(mb.position):
 			var keys := [KEY_1, KEY_2, KEY_3]
 			sm._formation_key(keys[i])
+			_press_cell = i
+			_press_left = PRESS_SEC
 			AudioManager.play_ui("menu_button")
 			queue_redraw()
 			accept_event()
@@ -127,6 +164,9 @@ func _gui_input(ev: InputEvent) -> void:
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_MOUSE_EXIT:
 		_show_tip(-1)
+		if _hover_cell != -1:
+			_hover_cell = -1
+			queue_redraw()
 
 ## Подпись ячейки над окошком; -1 — спрятать
 func _show_tip(i: int) -> void:

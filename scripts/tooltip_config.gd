@@ -23,7 +23,9 @@ extends RefCounted
 ## ── ПОРЯДОК БЛОКОВ КАРТОЧКИ (его собирает HUD._show_card) ──────────────────
 ##   1) иконка + название      ← "icon" / "display_name"
 ##   2) строки параметров      ← "visible_stats" (порядок = порядок в списке)
-##   3) описание               ← "description"
+##   3) описание               ← "role" / "skills" / "special" (ТЗ 20.10.2026,
+##      блок 3: «Тип / Умения / Особое умение» тремя строками вместо абзаца;
+##      "description" остался запасным текстом для объектов без этих полей)
 ##   4) цена                   ← "show_cost" (сама цена приходит от вызывающего)
 
 const _UCfg := preload("res://scripts/unit_stats_config.gd")
@@ -50,27 +52,27 @@ const _UCfg := preload("res://scripts/unit_stats_config.gd")
 ## как подписана. Сами карточки ниже только СОБИРАЮТ строки из этой библиотеки
 static var PARAMS: Dictionary = {
 	"attack": {
-		"value_type": "stat", "label": "Атака",
+		"value_type": "stat", "label": "Атака", "icon": "icon_sword.png",
 		"max_of": ["attack_1", "attack_2"],
 		"bonus": "bonus_attack", "upgrade": "damage", "digits": 0,
 	},
 	"armor": {
-		"value_type": "stat", "label": "Броня",
+		"value_type": "stat", "label": "Броня", "icon": "icon_shield.png",
 		"sum_of": ["defense", "armor"],
 		"bonus": "bonus_armor", "upgrade": "defense", "digits": 0,
 	},
 	"move_speed": {
-		"value_type": "stat", "label": "Скорость",
+		"value_type": "stat", "label": "Скорость", "icon": "icon_luck_horseshoe.png",
 		"max_of": ["movement_speed", "walk_speed_empty"],
 		"bonus": "bonus_speed", "upgrade": "", "digits": 1,
 	},
 	"hp": {
-		"value_type": "stat", "label": "Здоровье",
+		"value_type": "stat", "label": "Здоровье", "icon": "icon_heart.png",
 		"stat": "health", "bonus": "bonus_health", "upgrade": "", "digits": 0,
 	},
 	## То же здоровье, но «текущее/максимум» — для карточки живого юнита на карте
 	"hp_current": {
-		"value_type": "current_max", "label": "Здоровье", "stat": "health",
+		"value_type": "current_max", "label": "Здоровье", "icon": "icon_heart.png", "stat": "health",
 	},
 	"range": {
 		"value_type": "plain", "stat": "attack_range", "fmt": "Дальность: %.1f м",
@@ -84,10 +86,12 @@ static var PARAMS: Dictionary = {
 	"gather": {
 		"value_type": "pair", "stats": ["gather_amount", "gather_time"],
 		"fmt": "Добыча: %.0f за %.1f с",
+		"label": "Добыча", "short": "%.0f за %.1f с", "icon": "icon_axe.png",
 	},
 	"carry_speed": {
 		"value_type": "pair", "stats": ["walk_speed_empty", "walk_speed_loaded"],
 		"fmt": "Скорость: %.1f налегке / %.1f с грузом",
+		"label": "Скорость", "short": "%.1f / %.1f с грузом", "icon": "icon_luck_horseshoe.png",
 	},
 	"arrow": {
 		"value_type": "pair", "stats": ["arrow_speed", "arrow_arc"],
@@ -107,6 +111,9 @@ static var PARAMS: Dictionary = {
 static var TOOLTIPS: Dictionary = {
 	"spearman": {
 		"display_name": "Копейщик",
+		"role": "Строевая пехота",
+		"skills": "Держать строй, Фаланга (кузница)",
+		"special": "Натиск фаланги (сомкнутый удар копьями)",
 		"icon": "res://assets/factions/humans/icons/units/Lancer.png",
 		"description": "Основа строя. Могут строиться в фалангу и делать стену копий. Эффективен против конницы и крупных целей (троллей, гоблинов). Сдерживающий мясной щит.",
 		# ── НИ «ДАЛЬНОСТИ», НИ «УДАР РАЗ В N С» (заказ владельца) ────────────
@@ -123,6 +130,9 @@ static var TOOLTIPS: Dictionary = {
 	},
 	"warrior": {
 		"display_name": "Мечник",
+		"role": "Штурмовая пехота",
+		"skills": "Стена щитов",
+		"special": "Яростная атака (серия стремительных ударов)",
 		"icon": "res://assets/factions/humans/icons/units/Warrior.png",
 		"description": "Штурмовая пехота. Строится в стену щитов. Эффективен для быстрых атак с флангов, отлично режет копейщиков и стрелков.",
 		# Дальность и темп удара сняты (ТЗ 29.09.2026, блок 4): игрок их не читает
@@ -134,17 +144,22 @@ static var TOOLTIPS: Dictionary = {
 	},
 	"archer": {
 		"display_name": "Лучник",
+		"role": "Стрелки",
+		"skills": "Стрельба из укрытия, Залповый огонь (кузница)",
+		"special": "Снайперский выстрел",
 		"icon": "res://assets/factions/humans/icons/units/Archer.png",
 		"description": "Дальнобойный юнит. Может стрелять залпом по скоплениям врагов. Способен занимать башни, крепости и бараки для стрельбы с укрытия (+дальность и урон).",
 		"visible_stats": [
 			{"key": "hp"}, {"key": "attack"}, {"key": "armor"},
 			{"key": "move_speed"},
-			{"key": "arrow"},
 		],
 		"show_cost": true,
 	},
 	"monk": {
 		"display_name": "Монах",
+		"role": "Поддержка",
+		"skills": "Исцеление раненых",
+		"special": "Возвращение павших в строй",
 		# Готового портрета у монаха нет — берём первый кадр его боевого листа,
 		# ровно тот же путь и тот же приём, что и у кнопки найма в Замке
 		# (HUD.UNIT_ICONS + FRAME_SHEET_ICONS обрезают кадр по силуэту)
@@ -159,6 +174,9 @@ static var TOOLTIPS: Dictionary = {
 	},
 	"worker": {
 		"display_name": "Рабочий",
+		"role": "Хозяйство",
+		"skills": "Добыча, стройка, ремонт",
+		"special": "Укрытие в замке по тревоге",
 		"icon": "res://assets/factions/humans/icons/units/Avatars_25.png",
 		"description": "Добывает ресурсы и строит здания. Безоружен — держите его подальше от боя.",
 		# Ни "attack", ни "armor": этих параметров у рабочего нет по смыслу
@@ -189,6 +207,9 @@ static func tooltip(unit_id: String) -> Dictionary:
 							_UCfg.get_stats(unit_id).get("description", ""))),
 		"visible_stats": t.get("visible_stats", DEFAULT_VISIBLE_STATS),
 		"show_cost":     bool(t.get("show_cost", true)),
+		"role":          String(t.get("role", "")),
+		"skills":        String(t.get("skills", "")),
+		"special":       String(t.get("special", "")),
 	}
 
 ## Описание одной строки: то, что задано в visible_stats, ПОВЕРХ библиотечного

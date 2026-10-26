@@ -330,7 +330,7 @@ func _hunt_strike_anim() -> void:
 	var sec := _facing_to_dir_key(_facing.normalized() if _facing.length_squared() > 1e-6 else Vector3.RIGHT)
 	_apply_dir_tex(ATTACK_KEYS[sec])
 	_set_dir_flip(SECTOR_MIRROR[sec])
-	_anim_lock_until_ms = Time.get_ticks_msec() + 450
+	_anim_lock_until_ms = Unit.game_ms() + 450
 	_lock_pending = true
 	mark_pose_dirty(18)
 
@@ -512,7 +512,11 @@ func _spear_leveled() -> bool:
 	# «стойка ЗАЩИТА или бой», и гистерезис по ряду (ниже). На бегу фаланги
 	# по-прежнему нет — двойной ПКМ распускает строй, и это правило старше
 	# С ТЗ 14.10.2026 щетина — по нажатому [S] (стойка «Защита»), а не всегда
-	var wall: bool = (not sprinting) and phalanx and _stance_holds_ground()
+	# ── ФАЛАНГА САМА ПРИ ОБСТРЕЛЕ И КОНТАКТЕ (ТЗ 23.10.2026, п. 6) ─────────
+	# Изученная и включённая «Фаланга» опускает копья и без [S], пока отряд
+	# в бою (удар или стрела за последние секунды — squad_in_combat); ручное
+	# отключение — переключатель приёма на панели отряда
+	var wall: bool = (not sprinting) and phalanx and (_stance_holds_ground() or _phalanx_auto_threat())
 	if wall:
 		holds = true
 	if holds != _was_holding:
@@ -820,8 +824,13 @@ func _add_spear_procedural() -> void:
 ## Стена копий (спринт 18): стойка «Защита» И режим отряда «Стена копий»
 ## (forge spearman_1d, переключатель, включён по умолчанию, как залп)
 func spear_wall_active() -> bool:
-	return stance == "defense" and squad_id > 0 \
+	return squad_id > 0 and (stance == "defense" or _phalanx_auto_threat()) \
 		and GameManager.spear_wall_ready(squad_id)
+
+## Отряд под ударом или обстрелом — фаланга встаёт сама (ручка phalanx_auto)
+func _phalanx_auto_threat() -> bool:
+	return _Opt.phalanx_auto and squad_id > 0 and not sprinting and not retreating \
+		and GameManager.squad_in_combat(squad_id)
 
 func repels_charge() -> bool:
 	return true
@@ -899,13 +908,13 @@ func start_phalanx_push() -> void:
 		return
 	_push_left = PHALANX_PUSH_HITS
 	_push_wall = false
-	_push_until_ms = Time.get_ticks_msec() + int(PHALANX_PUSH_SEC * 1000.0)
+	_push_until_ms = Unit.game_ms() + int(PHALANX_PUSH_SEC * 1000.0)
 	push_hits_done = 0
 	mark_pose_dirty()
 
 ## Натиск идёт (любая из двух фаз)
 func phalanx_push_active() -> bool:
-	return (_push_left > 0 or _push_wall) and Time.get_ticks_msec() < _push_until_ms
+	return (_push_left > 0 or _push_wall) and Unit.game_ms() < _push_until_ms
 
 ## Фаза усиленных ударов
 func phalanx_push_hits_left() -> int:
@@ -913,7 +922,7 @@ func phalanx_push_hits_left() -> int:
 
 ## Фаза оттеснения (серия исчерпана, строй давит)
 func phalanx_wall_active() -> bool:
-	return _push_wall and Time.get_ticks_msec() < _push_until_ms
+	return _push_wall and Unit.game_ms() < _push_until_ms
 
 func _strike_damage() -> float:
 	var dmg: float = super._strike_damage()

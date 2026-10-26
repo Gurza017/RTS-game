@@ -90,7 +90,13 @@ func state_of(sid: int) -> String:
 	var raw: Variant = _sq.get(sid)
 	return ST_NAMES[int((raw as Dictionary)["st"])] if raw != null else "idle"
 
+## Шаг игровых часов (scripts/GameClockStep.gd, аудит 22.10.2026): часы и
+## таймеры этого узла идут от Unit.game_ms(), а не от delta отрисовки —
+## при просадке FPS мир замедляется, и сроки этого узла вместе с ним
+var _gclk = preload("res://scripts/GameClockStep.gd").new()
+
 func _process(delta: float) -> void:
+	delta = _gclk.step()   # игровое время вместо delta отрисовки (GameClockStep)
 	if not _Opt.cav_commander:
 		return
 	_t += delta
@@ -100,7 +106,7 @@ func _process(delta: float) -> void:
 	_t = 0.0
 	_tick_n += 1
 	var t0: int = Time.get_ticks_usec()
-	var now: float = float(Time.get_ticks_msec()) * 0.001
+	var now: float = float(Unit.game_ms()) * 0.001
 	# Рабочие не-орды — один обход группы на такт (их десятки, а не тысячи)
 	_workers.clear()
 	for w in get_tree().get_nodes_in_group("workers"):
@@ -307,7 +313,7 @@ func _go_charge(sid: int, r: Dictionary, men: Array, foe: Unit, now: float) -> v
 		var pr: float = (m0 as Unit).global_position.dot(dirn)
 		projs[m0] = pr
 		lead_proj = maxf(lead_proj, pr)
-	var no_charge: int = Time.get_ticks_msec() + int(REAR_NO_CHARGE_SEC * 1000.0)
+	var no_charge: int = Unit.game_ms() + int(REAR_NO_CHARGE_SEC * 1000.0)
 	for m in men:
 		if m == null or not is_instance_valid(m):
 			continue

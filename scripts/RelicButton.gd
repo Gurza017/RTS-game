@@ -72,16 +72,29 @@ func _process(delta: float) -> void:
 	if int(m.pool) == _tip_pool:
 		return
 	_tip_pool = int(m.pool)
-	tooltip_text = "Штандарт армии: %d / %d опыта\n" % [int(m.pool), int(_RCfgB.POOL_COST)] \
-		+ "Заряжена — клик, затем ЛКМ по своему отряду:\n" \
-		+ "+1 уровень отряду и реликвия-штандарт центральному бойцу\n" \
-		+ "(аура %d м: атака, мораль, быстрее удар; скорость не меняет).\n" % int(_RCfgB.AURA_RADIUS) \
-		+ "Повторно тому же отряду — реликвия +1 уровень. Павший носитель\n" \
-		+ "роняет её: поднять может любой, и враг тоже. Esc/ПКМ — отмена"
+	tooltip_text = tip_text(m.charged(), int(m.pool))
+
+## ── ПОДСКАЗКА (ТЗ 24.10.2026, второе письмо, блок 2) ───────────────────────
+## Была сплошная «стена текста» из шести строк. Теперь — состояние первой
+## строкой, затем описание и повторное использование отдельными абзацами
+static func tip_text(is_charged: bool, pool: int) -> String:
+	var head: String
+	if is_charged:
+		head = "Штандарт готов!\nНажмите ПКМ, чтобы выбрать бонус и выдать отряду. ЛКМ/Esc — отмена."
+	else:
+		head = "[Недоступно] накапливается боевой опыт: %d / %d" % [pool, int(_RCfgB.POOL_COST)]
+	var desc: String = "Штандарт выдаётся отряду за накопленный боевой опыт. Присваивает отряду\n" \
+		+ "реликвию, увеличивая атаку, мораль и скорость удара в ауре %d м." % int(_RCfgB.AURA_RADIUS)
+	var again: String = "При повторном использовании можно выдать новый штандарт или улучшить\nсуществующий."
+	return head + "\n\n" + desc + "\n\n" + again
 
 func _gui_input(event: InputEvent) -> void:
 	var mb := event as InputEventMouseButton
-	if mb == null or not mb.pressed or mb.button_index != MOUSE_BUTTON_LEFT:
+	if mb == null or not mb.pressed:
+		return
+	# ПКМ по самой кнопке тоже взводит (ТЗ 24.10.2026, второе письмо): в
+	# подсказке выдача — ПКМ, и игрок жмёт ту же кнопку мыши с первого раза
+	if mb.button_index != MOUSE_BUTTON_LEFT and mb.button_index != MOUSE_BUTTON_RIGHT:
 		return
 	var m: Node = GameManager.relic_mgr()
 	if m.armed:
@@ -104,16 +117,83 @@ func _draw() -> void:
 	elif frac >= 1.0:
 		col = GOLD.lerp(Color(1.0, 0.95, 0.7), pulse)
 	draw_arc(c, r - 2.0, 0.0, TAU, 48, GOLD_DIM, 4.0, true)
-	if frac > 0.0:
+	# Крошечная дуга заряда рисуется скруглённой точкой — она читалась как
+	# «жёлтая точка на ободе» (ТЗ 24.10.2026, блок 2). Видна от 2 %
+	if frac >= 0.02:
 		draw_arc(c, r - 2.0, -PI * 0.5, -PI * 0.5 + TAU * frac, 48, col, 4.0, true)
-	var tex: Texture2D = GameManager.relic_mgr().relic_texture()
-	if tex != null:
-		var ts: Vector2 = tex.get_size()
-		var h: float = SIZE * 0.70
-		var w: float = h * ts.x / ts.y
-		var mod := Color(1, 1, 1, 1) if frac >= 1.0 else Color(0.55, 0.55, 0.55, 0.9)
-		draw_texture_rect(tex, Rect2(c - Vector2(w * 0.5, h * 0.5), Vector2(w, h)), false, mod)
+	var full: bool = frac >= 1.0 and not m.armed
+	if full:
+		# Заряжен — мягкое свечение за полотнищем
+		draw_circle(c, r * 0.80, Color(1.0, 0.82, 0.40, 0.10 + 0.14 * pulse))
+	_draw_standard_icon(c, r, full)
 	var charges: int = int(m.pool / _RCfgB.POOL_COST)
 	if charges > 1:
 		draw_string(ThemeDB.fallback_font, Vector2(SIZE - 16.0, SIZE - 4.0), "×%d" % charges,
 			HORIZONTAL_ALIGNMENT_LEFT, -1, 13, GOLD)
+
+## ── ЗНАЧОК ШТАНДАРТА В КРУГЕ ───────────────────────────────────────────────
+## ТЗ 23.10.2026, п. 5: значок векторный — древко с перекладиной, полотнище с
+## «ласточкиным хвостом» и золотой каймой, римская I; не тускнеет никогда,
+## заряд показывает кольцо.
+## ТЗ 24.10.2026 (второе письмо, блок 2): полотнище — благородный бордовый,
+## как у знамени войск; фигура меньше прежней и ОТЦЕНТРОВАНА по своей рамке
+## (прежде навершие древка садилось прямо на обод — «жёлтая точка»).
+## Габарит фигуры — не дальше 0.80 r от центра, обод начинается с r − 4.
+## Заряжен — по полотнищу бежит светлый блик (перелив)
+const ICON_RED := Color(0.50, 0.06, 0.11)
+const ICON_RED_DARK := Color(0.32, 0.03, 0.07)
+const ICON_RED_HI := Color(0.74, 0.20, 0.24)
+const ICON_POLE := Color(0.36, 0.22, 0.10)
+
+## ── ДРЕВКО ЗА ПОЛОТНИЩЕМ, БЕЗ ТОЧКИ, ПОЛОТНИЩЕ УЖЕ (ТЗ 25.10.2026, UI, п. 2)
+## Было: древко шло по левой кромке, над ним — золотая точка навершия
+## («пиптык»). Теперь фигура симметрична по оси медальона: древко строго
+## ПОЗАДИ полотнища по центру (рисуется первым, видно над перекладиной),
+## навершия-точки нет, полотнище на 10 % уже (0.72 r против 0.80 r), цифра и
+## кант пересчитаны от новой ширины и стоят по центру
+const ICON_W_K := 0.72
+func _draw_standard_icon(c: Vector2, r: float, shimmer: bool = false) -> void:
+	var h: float = r * 1.15            # высота полотнища с древком
+	var w: float = r * ICON_W_K        # ширина полотнища
+	var box_h: float = h + r * 0.18
+	var x0: float = c.x - w * 0.5
+	var top: float = c.y - box_h * 0.5 + r * 0.13
+	# Древко ПОЗАДИ полотнища, по оси; перекладина чуть шире ткани
+	draw_line(Vector2(c.x, top - r * 0.02), Vector2(c.x, top + h + r * 0.05), ICON_POLE, maxf(2.0, r * 0.09), true)
+	draw_line(Vector2(x0 - r * 0.07, top + r * 0.10), Vector2(x0 + w + r * 0.07, top + r * 0.10), ICON_POLE, maxf(2.0, r * 0.08), true)
+	# Полотнище: прямоугольник с вырезом «ласточкин хвост» снизу
+	var y_top: float = top + r * 0.16
+	var y_bot: float = top + h
+	var notch: float = h * 0.20
+	var cloth := PackedVector2Array([
+		Vector2(x0, y_top), Vector2(x0 + w, y_top), Vector2(x0 + w, y_bot),
+		Vector2(x0 + w * 0.5, y_bot - notch), Vector2(x0, y_bot)])
+	draw_colored_polygon(cloth, ICON_RED)
+	# Тень складки по левой кромке
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(x0, y_top), Vector2(x0 + w * 0.16, y_top),
+		Vector2(x0 + w * 0.16, y_bot - notch * 0.32), Vector2(x0, y_bot)]), ICON_RED_DARK)
+	if shimmer:
+		# Перелив: косая светлая полоса едет по полотнищу слева направо раз
+		# в 1.6 с; обрезана по прямоугольнику полотнища выше выреза
+		var ph: float = fmod(_t / 1.6, 1.0)
+		var bx: float = x0 - w * 0.4 + ph * w * 1.8
+		var band := PackedVector2Array([
+			Vector2(clampf(bx, x0, x0 + w), y_top),
+			Vector2(clampf(bx + w * 0.22, x0, x0 + w), y_top),
+			Vector2(clampf(bx + w * 0.02, x0, x0 + w), y_bot - notch),
+			Vector2(clampf(bx - w * 0.20, x0, x0 + w), y_bot - notch)])
+		var a: float = 0.55 * sin(PI * ph)
+		draw_colored_polygon(band, Color(ICON_RED_HI.r, ICON_RED_HI.g, ICON_RED_HI.b, a))
+	var edge := cloth.duplicate()
+	edge.append(cloth[0])
+	draw_polyline(edge, GOLD, maxf(1.5, r * 0.054), true)
+	# Римская I — золотом по ОСИ медальона, засечки — от ширины полотнища
+	var cx: float = c.x
+	var iy0: float = y_top + h * 0.16
+	var iy1: float = y_bot - notch - h * 0.08
+	var iw: float = maxf(2.0, r * 0.108)
+	var serif: float = w * 0.15
+	draw_line(Vector2(cx, iy0), Vector2(cx, iy1), GOLD, iw, true)
+	draw_line(Vector2(cx - serif, iy0), Vector2(cx + serif, iy0), GOLD, maxf(1.5, r * 0.063), true)
+	draw_line(Vector2(cx - serif, iy1), Vector2(cx + serif, iy1), GOLD, maxf(1.5, r * 0.063), true)

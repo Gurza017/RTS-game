@@ -78,6 +78,18 @@ const VOICE_COME_ON  := DIR_SFX + "magiaz-man_saying_come_on-396180.mp3"
 const MARCH_WALK_LOOP := DIR_VOICE + "community-marching-loop-32908.mp3"
 const MARCH_RUN_LOOP  := DIR_VOICE + "magiaz-soldiers_marching-394036.mp3"
 
+## ── СИНТЕЗИРОВАННЫЕ РЕПЛИКИ СНЯТЫ (ТЗ 25.10.2026, блок 1) ─────────────────
+## 24.10 сюда легли папки orders/ и worker/ — фразы «Attack!», «Yes, sir»,
+## собранные синтезатором речи Windows. В партии они звучали роботом, и
+## владелец велел вернуть звук к прежнему: файлы удалены, события
+## order_move_short / order_attack_short / worker_ack — тоже. 1-4 отряда на
+## приказ отвечают штатным щелчком (как до 24.10), голоса у рабочих нет.
+## Новые реплики — только живыми записями (кандидаты CC0 — в ASSETS.md)
+## Клич 5+ отрядов после рога — тот же человеческий хор, что у отрядного
+## battle_cry (SFX_BANK), но плоским голосом реплики: это ответ войска на
+## приказ, а не звук в точке
+const VOICE_WAR_CRY := DIR_SFX + "soldiers-battle-cry.wav"
+
 ## ═══════════════════════════════════════════════════════════════════════════
 ## ПЛЕЙЛИСТ ФОНОВОЙ МУЗЫКИ
 ## ═══════════════════════════════════════════════════════════════════════════
@@ -131,11 +143,29 @@ const UI_BANK := {
 	"menu_tab":    "click1.ogg",
 	"menu_button": "click3.ogg",
 	"menu_close":  MENU_CLOSE_ID,
+	# Приказ монаху лечить (ТЗ 22.10.2026): процедурное «снадобье»
+	"monk_heal":   HEAL_POTION_ID,
+	# ── ТЗ 24.10.2026 (второе письмо), блок 1 ────────────────────────────
+	# Колокол замка: мягкий глубокий звон вместо щелчка кнопки; приказ
+	# стрелкам/башне по цели — низкое «тум»; штандарт заряжен — светлый
+	# двухнотный перезвон. Все три собираются кодом (_bell_stream)
+	"alarm_bell":   BELL_ID,
+	"order_target": TARGET_CONFIRM_ID,
+	"banner_ready": BANNER_READY_ID,
+	# ── ОТКЛИК РАБОЧЕГО, ПЕРВАЯ СТУПЕНЬ (ТЗ 24.10.2026) ──────────────────────
+	# Короткий тихий щелчок — первый клик по рабочему. Вторая ступень берёт
+	# штатное событие (pick_squad / order_move), третья — голос (worker_ack
+	# в VOICE_BANK). Разбор — у worker_ack()
+	"worker_pick":  "click1.ogg",
 }
 
 ## Процедурные щелчки ТЗ 10.10.2026 (см. _proc_click_stream)
 const ATTACK_CLICK_ID := "@proc_attack_click"
 const MENU_CLOSE_ID := "@proc_menu_close"
+const HEAL_POTION_ID := "@proc_heal_potion"
+const BELL_ID := "@proc_bell"
+const TARGET_CONFIRM_ID := "@proc_target_confirm"
+const BANNER_READY_ID := "@proc_banner_ready"
 
 ## Имя-метка процедурного щелчка. Не «res://…» и не имя файла: в ui_path оно
 ## превратилось бы в DIR_UI + метка, то есть в заведомо отсутствующий путь —
@@ -161,6 +191,13 @@ const UI_LIMITS := {
 	"menu_tab":      {"gap": 0.04, "db": -9.0},
 	"menu_button":   {"gap": 0.04, "db": -10.0},
 	"menu_close":    {"gap": 0.08, "db": -10.0},
+	"monk_heal":     {"gap": 0.25, "db": -9.0},
+	# Колокол — не громче кнопок: звон длинный и сам по себе заметен
+	"alarm_bell":    {"gap": 0.6, "db": -11.0},
+	"order_target":  {"gap": 0.08, "db": -10.0},
+	"banner_ready":  {"gap": 1.0, "db": -9.0},
+	# Тише кнопки: это «тик» подтверждения, а не нажатие
+	"worker_pick":   {"gap": 0.04, "db": -12.0},
 }
 
 ## ── ПОЧЕМУ У ИНТЕРФЕЙСА СВОИ ГОЛОСА, А НЕ ОБЩИЙ ПУЛ ─────────────────────────
@@ -198,23 +235,41 @@ const VOICE_BANK := {
 	"hold_line":  VOICE_HOLD_LINE,     # растянут строй (отпущена ПКМ)
 	"horn_attack": VOICE_HORN_ATTACK,  # 5+ отрядов получили приказ атаковать
 	"horde_horn": DIR_GOBLIN_VOICE + "horde_horn.mp3",  # горн орды (см. play_horn)
+	"war_cry":            VOICE_WAR_CRY,                     # 5+ на атаку: клич под хвост рога
 }
 
-## ПУЛ РЕПЛИК ПРИКАЗА (заказ спринта 18: «юниты постоянно повторяют одну и ту
-## же фразу»). Пять реплик: «Hold the line», «Go, go, go!» и три разных
-## «Come on!» из одного файла — кусок задаётся парой from/to в секундах.
-## Кусок без «to» играет до конца файла. Выбор — случайный, но не тот же,
-## что в прошлый раз (_reply_last)
+## ВСЕ ФРАЗЫ ПРИКАЗОВ — ОДНОЙ ТАБЛИЦЕЙ (заказ спринта 18: «юниты постоянно
+## повторяют одну и ту же фразу»). «Hold the line», «Go, go, go!», три
+## разных «Come on!» из одного файла — кусок задаётся парой from/to в
+## секундах, кусок без «to» играет до конца файла.
+## ── ТЗ 24.10.2026: ТАБЛИЦА ФРАЗ ОДНА, ПУЛЫ — ПО СОБЫТИЯМ ─────────────────
+## До сих пор пул был ОДИН на оба события, и на массовый марш могло
+## прозвучать «Hold the line!», а на протяжку строя — «Come on!». Это и был
+## кринж из ТЗ: фраза не про то, что приказано. Теперь у каждого события
+## свой список id (REPLY_POOL_EVENTS), а таблица фраз общая — один файл не
+## описывается дважды. Выбор — случайный из rng, без повтора подряд В ПРЕДЕЛАХ
+## СОБЫТИЯ (_reply_last_of)
 const ORDER_REPLIES := [
 	{"id": "hold_line", "file": VOICE_HOLD_LINE},
 	{"id": "go_go_go",  "file": VOICE_GO_GO_GO, "from": 1.0},
 	{"id": "come_on_1", "file": VOICE_COME_ON, "from": 0.20, "to": 1.10},
 	{"id": "come_on_2", "file": VOICE_COME_ON, "from": 2.12, "to": 3.10},
 	{"id": "come_on_3", "file": VOICE_COME_ON, "from": 4.12, "to": 5.06},
+	# «Forward, march!» — прежний файл 5+, теперь одна из фраз массового марша
+	{"id": "forward_march", "file": VOICE_MARCH_5PLUS},
 ]
-## События, чья фраза берётся из пула
-const REPLY_POOL_EVENTS := {"mass_march": true, "hold_line": true}
+## Событие → id фраз его пула. Только ЛЮДИ: гоблинский смех и рык в эти
+## списки не попадают по построению (стенд qa_voice_ack B сверяет каждую
+## фразу с каталогом речи людей)
+const REPLY_POOL_EVENTS := {
+	"mass_march": ["forward_march", "go_go_go", "come_on_1", "come_on_2", "come_on_3"],
+	"hold_line":  ["hold_line"],
+}
 var _reply_last: int = -1
+## Последняя фраза по событию (индекс в ORDER_REPLIES): без повтора подряд
+var _reply_last_of: Dictionary = {}
+## id → индекс в ORDER_REPLIES; строится один раз (_build_reply_index)
+var _reply_index: Dictionary = {}
 ## СВОЙ ГЕНЕРАТОР СЛУЧАЙНЫХ ДЛЯ ЗВУКА (спринт 18). Партия сеется (seed зерна
 ## карты), и два прогона одного боя обязаны давать одно поле; всякий новый
 ## randf() в общем потоке сдвигает ВСЕ последующие жребии игры (qa_monk B1
@@ -236,6 +291,9 @@ const VOICE_LIMITS := {
 	# Горн орды — средняя громкость, не оглушает; окно длинное: два триггера
 	# (первый контакт и штурм) могут совпасть по времени
 	"horde_horn":  {"gap": 20.0, "db": -8.0},
+	# Клич после рога — РЕДКИЙ: окно 30 с поверх окна рога (5 с), то есть
+	# из шести массовых атак подряд клич звучит на первой и шестой
+	"war_cry":            {"gap": 30.0, "db": -5.0},
 }
 ## ── ГОРН ОРДЫ: СВОЯ ШИНА С РЕВЕРБЕРАЦИЕЙ (спринт 18) ─────────────────────
 ## Умеренный эмбиентный эффект: шина «Horn» → SFX с AudioEffectReverb
@@ -639,7 +697,16 @@ const SFX_BANK := {
 	# Рыцари: выкрик на ПЕРВЫЙ удар «Яростной атаки» (Warrior._after_melee_hit),
 	# в случайном порядке без повтора подряд (shuffle); победа над отрядом —
 	# один файл (GameManager._on_squad_wiped)
-	"knight_angry": ["angry1.wav", "angry2.wav", "angry3.wav", "angry4.wav"],
+	# ── РЫЧАНИЕ У РЫЦАРЕЙ ЗАПРЕЩЕНО (ТЗ 24.10.2026) ──────────────────────────
+	# Здесь стояли angry1-4.wav из «Warrior Voice Pack» (John Carroll): это
+	# рык и рёв, и на рыцаре он читался как зверь — «рычание только
+	# гоблинам». Выкрик ярости теперь ЧЕЛОВЕЧЕСКИЙ: хор клича людей и три
+	# выдоха усилия из пака боя на мечах (те же, что у vox_action). Файлы
+	# angry*.wav на диске остались — их больше никто не читает
+	"knight_angry": ["soldiers-battle-cry.wav",
+					 "VOXEfrt_ActionGrunt_HoveAud_SwordCombat_01.wav",
+					 "VOXEfrt_ActionGrunt_HoveAud_SwordCombat_23.wav",
+					 "VOXEfrt_ActionGrunt_HoveAud_SwordCombat_54.wav"],
 	"knight_victory": ["excited2.wav"],
 	# Нарезка пака voicebosch-monster-grunts-174559 (qa_audio_env/Slice.tscn):
 	# первая половина файла — тролли, середина — туши, завершающая треть —
@@ -1346,7 +1413,7 @@ func play_voice(event: String) -> bool:
 			return false
 	# ── РЕПЛИКА ИЗ ПУЛА: файл и кусок выбираются здесь, событие не меняется ──
 	if REPLY_POOL_EVENTS.has(event):
-		var r: Dictionary = _pick_reply()
+		var r: Dictionary = _pick_reply(event)
 		path = String(r["file"])
 		clip_from = float(r.get("from", 0.0))
 		clip_to = float(r.get("to", 0.0))
@@ -1371,14 +1438,205 @@ func play_voice(event: String) -> bool:
 	v.play(clip_from)
 	return true
 
-## Случайная реплика пула, не совпадающая с прошлой
-func _pick_reply() -> Dictionary:
-	var n: int = ORDER_REPLIES.size()
-	var i: int = rng.randi() % n
-	if n > 1 and i == _reply_last:
-		i = (i + 1 + rng.randi() % (n - 1)) % n
-	_reply_last = i
-	return ORDER_REPLIES[i]
+## Случайная реплика пула события, не совпадающая с прошлой ЭТОГО события.
+## Пустое событие — вся таблица (так её перебирают стенды). Жребий — только из
+## rng: общий поток партии звук не трогает (правило проекта)
+func _pick_reply(event: String = "") -> Dictionary:
+	var ids: Variant = REPLY_POOL_EVENTS.get(event) if event != "" else null
+	if ids == null:
+		var n: int = ORDER_REPLIES.size()
+		var i: int = rng.randi() % n
+		if n > 1 and i == _reply_last:
+			i = (i + 1 + rng.randi() % (n - 1)) % n
+		_reply_last = i
+		return ORDER_REPLIES[i]
+	if _reply_index.is_empty():
+		_build_reply_index()
+	var pool: Array = ids
+	var m: int = pool.size()
+	var k: int = rng.randi() % m
+	var last: int = int(_reply_last_of.get(event, -1))
+	if m > 1 and int(_reply_index.get(String(pool[k]), -1)) == last:
+		k = (k + 1 + rng.randi() % (m - 1)) % m
+	var idx: int = int(_reply_index.get(String(pool[k]), 0))
+	_reply_last_of[event] = idx
+	_reply_last = idx
+	return ORDER_REPLIES[idx]
+
+func _build_reply_index() -> void:
+	_reply_index.clear()
+	for i in range(ORDER_REPLIES.size()):
+		_reply_index[String((ORDER_REPLIES[i] as Dictionary)["id"])] = i
+
+## ═══════════════════════════════════════════════════════════════════════════
+## ОЗВУЧКА ПРИКАЗА ПО ЧИСЛУ ОТРЯДОВ (ТЗ 24.10.2026, п. 3)
+## ═══════════════════════════════════════════════════════════════════════════
+## РЕШЕНИЕ «ЧТО КРИЧАТЬ» ЖИВЁТ ЗДЕСЬ, А НЕ У ВЫЗЫВАЮЩЕГО. SelectionManager
+## знает, СКОЛЬКО боевых отрядов получили приказ и КАКОЙ это приказ, — и это
+## всё, что ему положено знать о звуке. Плотность (1-4 — короткая фраза, 5+ —
+## рог и редкий клич) — правило озвучки, и жить ему в одном месте: иначе
+## марш, атака и протяжка строя развели бы его по трём веткам приказа.
+##
+##   1-4 отряда          → голоса нет, только штатный щелчок приказа
+##                         (синтезированные короткие фразы сняты 25.10.2026)
+##   5+ отрядов, идти    → mass_march         («Forward, march!», «Go, go, go»)
+##   5+ отрядов, атака   → horn_attack, и если открыто окно клича (30 с) —
+##                         war_cry под хвост рога цепочкой (play_voice_chain)
+##
+## Порог — ТО ЖЕ ЧИСЛО, что SelectionManager.MASS_ORDER_SQUADS. Своя
+## константа, а не ссылка на класс: автозагрузка звука не должна тянуть за
+## собой скрипт выделения (а тот — пол-игры); равенство чисел стережёт
+## qa_voice_ack C1.
+const ORDER_VOICE_MASS_SQUADS := 5
+## Что озвучено последним приказом (стендам): имя события или ""
+var order_voice_last: String = ""
+
+## squads — число БОЕВЫХ отрядов приказа (SelectionManager.
+## selected_combat_squad_count), attack — приказ атаки. Возвращает событие,
+## которое было ЗАПРОШЕНО (прошло ли оно окна — вопрос play_voice; стенды в
+## headless иначе не отличили бы «не позвали» от «устройство молчит»)
+func order_voice(squads: int, attack: bool) -> String:
+	order_voice_last = ""
+	if squads <= 0:
+		return ""
+	if squads < ORDER_VOICE_MASS_SQUADS:
+		return ""
+	if not attack:
+		order_voice_last = "mass_march"
+		play_voice("mass_march")
+		return order_voice_last
+	order_voice_last = "horn_attack"
+	# ── РОГ ВСЕГДА, КЛИЧ — РЕДКО ─────────────────────────────────────────
+	# Клич ставится в цепочку только при открытом СВОЁМ окне: иначе цепочка
+	# поставила бы его в очередь, а очередь честно отбила бы его тем же окном —
+	# лишний вызов и лишняя отметка в счётчиках ради заведомой тишины
+	if war_cry_ready():
+		play_voice_chain(["horn_attack", "war_cry"])
+	else:
+		play_voice("horn_attack")
+	return order_voice_last
+
+## Открыто ли окно клича (стенды и order_voice)
+func war_cry_ready() -> bool:
+	var now: float = float(Time.get_ticks_msec()) * 0.001
+	var gap: float = float((VOICE_LIMITS["war_cry"] as Dictionary)["gap"])
+	return now - float(_voice_last.get("war_cry", -999.0)) >= gap
+
+## ═══════════════════════════════════════════════════════════════════════════
+## ОТКЛИК РАБОЧЕГО: РОТАЦИЯ ПО КЛИКАМ (ТЗ 24.10.2026, п. 2)
+## ═══════════════════════════════════════════════════════════════════════════
+## Заказ: «1-й клик — короткий клик выбора; 2-й — стандартный звук; 3-й —
+## голосовой отклик; дальше пауза». Голос снят 25.10.2026 вместе с
+## синтезированными файлами: третья ступень — начало паузы (тишина).
+##
+## ПОЧЕМУ СТУПЕНИ, А НЕ ЖРЕБИЙ. Голос на каждый клик — это ровно та жалоба,
+## от которой реплики уже дважды откатывали («постоянно повторяют одну
+## фразу»). Жребий с малым шансом даёт голос то два раза подряд, то ни
+## разу за минуту. Ступени предсказуемы: игрок, который щёлкает по рабочим
+## подряд, слышит ответ «живым голосом» ровно на третий раз — как
+## подтверждение настойчивости, а не как шум.
+##
+## СЕРИЯ И ПАУЗА — ДВА РАЗНЫХ ЧИСЛА:
+##   • WORKER_ACK_RESET_SEC — клики реже этого считаются НОВОЙ серией: игрок
+##     отвлёкся, и следующий клик снова начинается с короткого щелчка;
+##   • WORKER_ACK_REST_SEC — после голоса серия МОЛЧИТ столько секунд, сколько
+##     бы ни щёлкали. Без неё быстрый кликер получал бы голос на каждый третий
+##     клик, то есть раз в секунду.
+## Часы — стенные (Time), а не игровые: это отклик интерфейса, и на паузе
+## щелчок по рабочему обязан звучать так же (правило игровых часов: Time —
+## для интерфейса и звука).
+const WORKER_ACK_RESET_SEC := 2.5
+const WORKER_ACK_REST_SEC := 10.0
+## Ступени по роду клика: [первая (короткая), вторая (штатная)]; третья —
+## пауза. Выбор и приказ звучат на второй ступени своими
+## штатными щелчками — так игрок слышит разницу «выбрал» и «послал»
+const WORKER_ACK_STEPS := {
+	"pick":  ["worker_pick", "pick_squad"],
+	"order": ["worker_pick", "order_move"],
+}
+var _wack_step: int = 0
+var _wack_last_click: float = -999.0
+var _wack_voice_at: float = -999.0
+## Стендам: что сыграла последняя ступень — "click" / "std" / "rest" / ""
+var worker_ack_last: String = ""
+var worker_ack_calls: int = 0
+
+## kind — "pick" (выбрали рабочих) или "order" (дали приказ рабочим).
+## now_sec < 0 — стенные часы; стенд передаёт своё время, чтобы проверять
+## серию и паузу без ожидания. Возвращает имя сыгранной ступени
+func worker_ack(kind: String = "pick", now_sec: float = -1.0) -> String:
+	worker_ack_calls += 1
+	var now: float = now_sec if now_sec >= 0.0 else float(Time.get_ticks_msec()) * 0.001
+	if _wack_step >= 3:
+		# Отдых после голоса: серия не начинается заново раньше срока
+		if now - _wack_voice_at >= WORKER_ACK_REST_SEC:
+			_wack_step = 0
+	elif now - _wack_last_click > WORKER_ACK_RESET_SEC:
+		_wack_step = 0
+	_wack_last_click = now
+	_wack_step += 1
+	var steps: Variant = WORKER_ACK_STEPS.get(kind)
+	if steps == null:
+		steps = WORKER_ACK_STEPS["pick"]
+	match _wack_step:
+		1:
+			worker_ack_last = "click"
+			play_ui(String((steps as Array)[0]))
+		2:
+			worker_ack_last = "std"
+			play_ui(String((steps as Array)[1]))
+		3:
+			# Третья ступень была голосом «Yes, sir» (синтезатор, снят
+			# 25.10.2026): теперь это начало отдыха — тишина, а серия молчит
+			# WORKER_ACK_REST_SEC, как молчала после голоса
+			worker_ack_last = "rest"
+			_wack_voice_at = now
+		_:
+			worker_ack_last = ""
+	return worker_ack_last
+
+## Сброс серии (стенды, новая партия)
+func worker_ack_reset() -> void:
+	_wack_step = 0
+	_wack_last_click = -999.0
+	_wack_voice_at = -999.0
+	worker_ack_last = ""
+
+## ═══════════════════════════════════════════════════════════════════════════
+## АУДИТ ЦЕЛОСТНОСТИ: ВСЕ ФАЙЛОВЫЕ ПУТИ ДВИЖКА ОДНИМ СПИСКОМ (ТЗ 24.10.2026)
+## ═══════════════════════════════════════════════════════════════════════════
+## Банков шесть (музыка, интерфейс, реплики, фразы, лупы, бой), и каждый
+## собирает путь по-своему (DIR_SFX/DIR_UI + имя, полный res://, метка
+## процедурного звука). Стенд, проверяющий каждый банк своим циклом, однажды
+## забудет седьмой; здесь список собирается ТЕМИ ЖЕ функциями пути, что и при
+## воспроизведении, а процедурные метки отбрасываются — файла у них нет.
+## Перебора каталогов здесь нет (правило 8): только то, что движок реально
+## попросит загрузить
+func all_asset_paths() -> PackedStringArray:
+	var out := PackedStringArray()
+	var seen: Dictionary = {}
+	var add := func(p: String) -> void:
+		if p == "" or p.begins_with("@proc_") or seen.has(p):
+			return
+		seen[p] = true
+		out.append(p)
+	for p in MUSIC_PLAYLIST:
+		add.call(String(p))
+	add.call(MUSIC_MENU)
+	add.call(AMBIENCE_FOREST)
+	add.call(AMBIENCE_RIVER)
+	add.call(MARCH_WALK_LOOP)
+	add.call(MARCH_RUN_LOOP)
+	for k in UI_BANK:
+		add.call(ui_path(String(UI_BANK[k])))
+	for k in VOICE_BANK:
+		add.call(String(VOICE_BANK[k]))
+	for r in ORDER_REPLIES:
+		add.call(String((r as Dictionary)["file"]))
+	for cat in SFX_BANK:
+		for f in SFX_BANK[cat]:
+			add.call(sfx_path(String(f)))
+	return out
 
 ## Кусок составного файла кончился — голос глушится (позиция читается в
 ## _process, раз в кадр по двум голосам — дёшево)
@@ -1969,8 +2227,125 @@ func _order_click_stream() -> AudioStream:
 ## ── ПРОЦЕДУРНЫЕ ЩЕЛЧКИ ТЗ 10.10.2026 ──────────────────────────────────────
 ## Attack-Move — низкий «тук» (140 + 210 Гц, мягкая атака, хвост 0.17 с) в
 ## СТЕРЕО: правый канал опаздывает на 9 мс (эффект Хааса) — звук шире, а не
-## громче. Закрытие панели — короткий нисходящий тон 520 → 300 Гц
+## громче. Закрытие панели и сброс выделения — сухой «клац» (ТЗ 21.10.2026)
 var _proc_clicks: Dictionary = {}
+
+## ── «СНАДОБЬЕ» (ТЗ 22.10.2026) ──────────────────────────────────────────────
+## Мягкий звук приказа лечить: три пузырька с восходящим тоном (бульканье
+## флакона) и тихий стеклянный звон 1.3/2.0 кГц в конце. Синтез кодом, как
+## у щелчков; случайности нет — общий поток жребиев не трогается
+func _heal_potion_stream() -> AudioStream:
+	var have: Variant = _proc_clicks.get(HEAL_POTION_ID)
+	if have != null:
+		return have
+	var hz: int = 22050
+	var sec: float = 0.55
+	var n: int = int(float(hz) * sec)
+	var data := PackedByteArray()
+	data.resize(n * 4)
+	var ph := 0.0
+	var ph2 := 0.0
+	var ph3 := 0.0
+	for i in range(n):
+		var t: float = float(i) / float(hz)
+		var s := 0.0
+		# Пузырьки: 0, 0.09, 0.18 с, тон скользит вверх
+		for b in range(3):
+			var t0: float = 0.09 * float(b)
+			var tb: float = t - t0
+			if tb >= 0.0 and tb < 0.12:
+				var f: float = (420.0 + 140.0 * float(b)) * (1.0 + tb * 6.0)
+				s += sin(TAU * f * tb) * exp(-tb * 30.0) * minf(tb / 0.004, 1.0) * 0.55
+		# Звон стекла
+		if t > 0.24:
+			var tc: float = t - 0.24
+			ph2 += TAU * 1320.0 / float(hz)
+			ph3 += TAU * 1980.0 / float(hz)
+			s += (sin(ph2) * 0.35 + sin(ph3) * 0.18) * exp(-tc * 9.0) * minf(tc / 0.003, 1.0)
+		ph += 0.0
+		var v: int = clampi(int(s * 0.5 * 32767.0), -32767, 32767)
+		data.encode_s16(i * 4, v)
+		data.encode_s16(i * 4 + 2, v)
+	var w := AudioStreamWAV.new()
+	w.format = AudioStreamWAV.FORMAT_16_BITS
+	w.mix_rate = hz
+	w.stereo = true
+	w.data = data
+	_proc_clicks[HEAL_POTION_ID] = w
+	return w
+
+## ── КОЛОКОЛ, ПОДТВЕРЖДЕНИЕ ЦЕЛИ, ШТАНДАРТ (ТЗ 24.10.2026, второе письмо) ──
+## Колокол — сумма НЕГАРМОНИЧЕСКИХ партиалов настоящего колокола (гул 0.5,
+## прайм 1, малая терция 1.2, квинта 1.5, номинал 2 и 2.5/3 от основы
+## 196 Гц): «колокольность» даёт именно их соотношение, а не высота. Атака
+## 12 мс — мягкий удар без щелчка, верхние партиалы гаснут быстрее нижних
+## (у бронзы так же), поэтому звон с первой же доли секунды темнеет и не
+## режет слух. Слабое биение пары 196/197.3 Гц — «живой» гул.
+## Подтверждение цели — низкое «тум»: 110 + 165 Гц с атакой 6 мс и хвостом
+## 0.22 с, чуть стерео. Штандарт — две светлые ноты (659 → 988 Гц) колоколом
+## поменьше. Случайности нет: общий поток жребиев не трогается
+func _bell_stream(id: String) -> AudioStream:
+	var have: Variant = _proc_clicks.get(id)
+	if have != null:
+		return have
+	var hz: int = 22050
+	var parts: Array = []      # [частота, громкость, спад 1/с, задержка с]
+	var sec: float = 2.6
+	var atk: float = 0.012
+	if id == BELL_ID:
+		var f0: float = 196.0
+		parts = [[f0 * 0.5, 0.55, 0.9, 0.0], [f0, 0.80, 1.4, 0.0],
+			[f0 * 1.0068, 0.35, 1.4, 0.0], [f0 * 1.2, 0.42, 2.0, 0.0],
+			[f0 * 1.5, 0.30, 2.8, 0.0], [f0 * 2.0, 0.26, 3.6, 0.0],
+			[f0 * 2.5, 0.12, 5.5, 0.0], [f0 * 3.0, 0.08, 7.0, 0.0]]
+	elif id == TARGET_CONFIRM_ID:
+		sec = 0.30
+		atk = 0.006
+		parts = [[110.0, 0.9, 14.0, 0.0], [165.0, 0.45, 18.0, 0.0],
+			[220.0, 0.18, 24.0, 0.0], [330.0, 0.10, 30.0, 0.0]]
+	else:
+		sec = 1.6
+		atk = 0.008
+		for nt in [[659.25, 0.0], [987.77, 0.16]]:
+			var f: float = float(nt[0])
+			var d: float = float(nt[1])
+			parts.append([f, 0.55, 2.6, d])
+			parts.append([f * 2.0, 0.20, 4.5, d])
+			parts.append([f * 2.76, 0.09, 6.5, d])
+	var n: int = int(float(hz) * sec)
+	var lag: int = int(0.007 * float(hz))
+	var mono := PackedFloat32Array()
+	mono.resize(n)
+	var peak := 0.0
+	for i in range(n):
+		var t: float = float(i) / float(hz)
+		var v := 0.0
+		for pr in parts:
+			var tt: float = t - float(pr[3])
+			if tt < 0.0:
+				continue
+			var env: float = minf(tt / atk, 1.0) * exp(-float(pr[2]) * tt)
+			v += sin(TAU * float(pr[0]) * tt) * float(pr[1]) * env
+		# Края обнулены клином: оборванная волна трещит
+		var tail: float = clampf(float(n - i) / (float(hz) * 0.08), 0.0, 1.0)
+		v *= tail
+		mono[i] = v
+		peak = maxf(peak, absf(v))
+	var g: float = 0.7 / maxf(peak, 1e-4)
+	var data := PackedByteArray()
+	data.resize(n * 4)
+	for i in range(n):
+		var l: float = mono[i] * g
+		var r: float = (mono[i - lag] if i >= lag else 0.0) * g
+		data.encode_s16(i * 4, clampi(int(l * 32767.0), -32767, 32767))
+		data.encode_s16(i * 4 + 2, clampi(int(r * 32767.0), -32767, 32767))
+	var w := AudioStreamWAV.new()
+	w.format = AudioStreamWAV.FORMAT_16_BITS
+	w.mix_rate = hz
+	w.stereo = true
+	w.data = data
+	_proc_clicks[id] = w
+	return w
 
 func _proc_click_stream(id: String) -> AudioStream:
 	var have: Variant = _proc_clicks.get(id)
@@ -1978,7 +2353,7 @@ func _proc_click_stream(id: String) -> AudioStream:
 		return have
 	var hz: int = 22050
 	var attack: bool = id == ATTACK_CLICK_ID
-	var sec: float = 0.17 if attack else 0.07
+	var sec: float = 0.17 if attack else 0.05
 	var n: int = int(float(hz) * sec)
 	var lag: int = int(0.009 * float(hz)) if attack else 0
 	var mono := PackedFloat32Array()
@@ -1994,10 +2369,21 @@ func _proc_click_stream(id: String) -> AudioStream:
 			ph2 += TAU * 210.0 / float(hz)
 			mono[i] = (sin(ph1) + 0.45 * sin(ph2) + 0.12 * sin(ph1 * 3.0)) * env * 0.62
 		else:
-			env = minf(t / 0.002, 1.0) * exp(-45.0 * t)
-			var f: float = lerpf(520.0, 300.0, t / sec)
-			ph1 += TAU * f / float(hz)
-			mono[i] = (sin(ph1) + 0.25 * sin(ph1 * 2.0)) * env * 0.55
+			# ── «КЛАЦ» ВМЕСТО «УКАНЬЯ» (ТЗ 21.10.2026) ──────────────────────
+			# Прежний нисходящий тон 520 → 300 Гц на слух был «ук». Теперь —
+			# щелчок кнопки: короткий шумовой удар (детерминированный хэш, не
+			# randf — общий поток жребиев не трогается), металлический звон
+			# 2.4 + 3.7 кГц на 15-20 мс и деревянный «тук» корпуса 190 Гц
+			var hsh: int = (i * 1103515245 + 12345) & 0x7FFFFFFF
+			var noise: float = float(hsh % 2001) / 1000.0 - 1.0
+			var e_hit: float = exp(-900.0 * t)
+			var e_tick: float = minf(t / 0.0006, 1.0) * exp(-230.0 * t)
+			var e_body: float = minf(t / 0.001, 1.0) * exp(-120.0 * t)
+			ph1 += TAU * 2400.0 / float(hz)
+			ph2 += TAU * 190.0 / float(hz)
+			mono[i] = (noise * e_hit * 0.55
+				+ (sin(ph1) * 0.5 + sin(ph1 * 1.54) * 0.3) * e_tick
+				+ sin(ph2) * e_body * 0.7) * 0.6
 	var data := PackedByteArray()
 	data.resize(n * 4)
 	for i in range(n):
@@ -2025,6 +2411,10 @@ func _stream(path: String) -> AudioStream:
 			return _order_click_stream()
 		if path == ATTACK_CLICK_ID or path == MENU_CLOSE_ID:
 			return _proc_click_stream(path)
+		if path == HEAL_POTION_ID:
+			return _heal_potion_stream()
+		if path == BELL_ID or path == TARGET_CONFIRM_ID or path == BANNER_READY_ID:
+			return _bell_stream(path)
 		return null
 	if _streams.has(path):
 		return _streams[path]

@@ -143,13 +143,27 @@ func _b_aggro() -> void:
 	# Отход меряется ПИКОМ дистанции за окно: отойдя, гнолл вправе тут же
 	# пойти на новый наскок, и снимок в конце окна застал бы его на обратном
 	# пути (первая версия так и намеряла «было 7.1, стало 6.9»)
+	# ── ОТХОД — К ПНЮ, А НЕ «ПРОЧЬ ОТ СТРЕЛКА» (ТЗ 21.10.2026) ─────────────
+	# Код отходит К ПНЮ на GNOLL_RUN_BACK (Gnoll._on_attack_fired). Прежний
+	# вердикт мерил рост дистанции до стрелка и краснел от ГЕОМЕТРИИ: гнолл,
+	# подошедший с дальней от пня стороны, честно шёл 5 м к пню поперёк линии
+	# «стрелок → гнолл», и дистанция не росла (трасса: 4.97 → 0.81 м до точки
+	# отхода за 2.3 с, а «было 13.5, отходил до 13.5»). Где гнолл стоит к
+	# броску, решает патруль блока A, то есть любая правка прибытия. Судим
+	# свойство: отход взят, гнолл прошёл к пню больше половины GNOLL_RUN_BACK
+	var p_throw: Vector3 = _g.global_position
+	var lair_throw: float = _xz(p_throw, _lair.global_position)
 	var d_far: float = d_at_throw
+	var lair_min: float = lair_throw
 	for _i in range(150):
 		await get_tree().physics_frame
 		d_far = maxf(d_far, _xz(_g.global_position, _archer.global_position))
-	verdict("B3 после броска отошёл (дальше от стрелка, чем в миг броска)",
-		int(_g.get("run_backs")) >= 1 and d_far > d_at_throw + 1.0,
-		"было %.1f, отходил до %.1f м, отходов %d" % [d_at_throw, d_far, int(_g.get("run_backs"))])
+		lair_min = minf(lair_min, _xz(_g.global_position, _lair.global_position))
+	var gain: float = lair_throw - lair_min
+	verdict("B3 после броска отошёл к пню (больше половины дистанции отхода)",
+		int(_g.get("run_backs")) >= 1 and gain >= _GobCfg.GNOLL_RUN_BACK * 0.5,
+		"к пню %.1f м из %.1f; до стрелка было %.1f, стало до %.1f м, отходов %d" % [
+			gain, _GobCfg.GNOLL_RUN_BACK, d_at_throw, d_far, int(_g.get("run_backs"))])
 	# Второй укол — второй наскок
 	var thrown1: int = int(_g.get("bones_thrown"))
 	_g.take_damage(3.0, _archer)

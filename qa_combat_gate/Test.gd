@@ -470,6 +470,11 @@ func _e_cavalry(base: Vector3) -> void:
 		and S.sector_of(Vector3(1, 0, 0), Vector3(0, 0, -1)) == S.SECTOR_FLANK
 		and S.sector_of(Vector3(0, 0, -1), Vector3(0, 0, -1)) == S.SECTOR_REAR)
 	S.reset_stats()
+	# Коробка в бою (ТЗ 24.10) честно разворачивает строй к всаднику, который
+	# стоит здесь неподвижно у спины кадрами; блок мерит СЕКТОР и множители на
+	# строе с известным курсом — коробку на время блока снимаем
+	var box_was: bool = _Opt.box_front
+	_Opt.box_front = false
 	# Копейщики лицом на −Z (FORWARD); всадники с −Z летят в лоб, с +Z — в спину
 	var sq: Array = _squad("spearman", F, base, 24, 12, 0.55)
 	for u in sq[1]:
@@ -523,4 +528,5 @@ func _e_cavalry(base: Vector3) -> void:
 	var riders: Array = [rider]
 	_kill_all(sq[1])
 	_kill_all(riders)
+	_Opt.box_front = box_was
 	await pframes(4)

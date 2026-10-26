@@ -193,7 +193,7 @@ func _t2_no_swing_on_run() -> void:
 	var wasp := w._active_sprite as AnimatedSprite3D
 	if wasp != null:
 		w_anim = String(wasp.animation)
-	var w_locked: bool = Time.get_ticks_msec() < w._anim_lock_until_ms
+	var w_locked: bool = Unit.game_ms() < w._anim_lock_until_ms
 	print("  мечник: в зоне=%s, анимация=«%s», блокировка удара=%s, комбо-шаг=%d" % [
 		str(w.target_in_range()), w_anim, str(w_locked), w._combo_step])
 	verdict("2a мечник на бегу к цели не проигрывает удар",
@@ -1099,14 +1099,14 @@ func _t9_perf() -> void:
 
 	for m in spears:
 		(m as Unit).set_stance(_UCfg.STANCE_DEFENSE)
-	# ЖДЁМ ПО СТЕННЫМ ЧАСАМ, А НЕ ПО КАДРАМ. Копья опускаются ВРАЗНОБОЙ:
+	# ЖДЁМ ПО ИГРОВЫМ ЧАСАМ, А НЕ ПО КАДРАМ. Копья опускаются ВРАЗНОБОЙ:
 	# у каждого бойца своя микро-задержка до Spearman.DROP_DELAY_MAX_MS, и
-	# отсчитывается она по Time.get_ticks_msec(). В headless кадры крутятся
+	# отсчитывается она по Unit.game_ms(). В headless кадры отрисовки крутятся
 	# намного быстрее реального времени, поэтому «подождать 90 кадров» здесь
 	# означает подождать доли секунды — и замер ловил фалангу на середине
 	# опускания, когда копьё выставила едва половина отряда
-	var t_drop: int = Time.get_ticks_msec()
-	while Time.get_ticks_msec() - t_drop < Spearman.DROP_DELAY_MAX_MS + 400:
+	var t_drop: int = Unit.game_ms()
+	while Unit.game_ms() - t_drop < Spearman.DROP_DELAY_MAX_MS + 400:
 		await get_tree().process_frame
 	var s_proc := await _avg_monitor(Performance.TIME_PROCESS, 60)
 	var awake := 0

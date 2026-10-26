@@ -204,13 +204,153 @@ public partial class ArmyCore : RefCounted
         if (ForestCells > 0) _cliffOn = true;
     }
 
+    // ── ЛЕС-СТЕНА СПЛОШНАЯ НА ШАГЕ НАВИГАЦИИ (ТЗ 23.10.2026, третье письмо) ──
+    // ПЕРВОПРИЧИНА «ЛОВУШЕК В ПРОСВЕТЕ СТЕНЫ». Клетка навигации (2 м) закрыта,
+    // если в ней есть хоть один ствол (BuildNavGrid), а шаг бойца, разведение,
+    // толчок и поиск проходимого спрашивали маску стволов по ТОЧКЕ (1 м). Между
+    // стволами закрытой клетки шаг был разрешён, а дороги оттуда у A* нет:
+    // боец заходил (выталкивали соседи, толкал враг, скользил вдоль стены) и
+    // застревал — дальше nav_pocket, вызволения, вынос из стволов. Теперь
+    // ForestAt — то же, что видит A*: клетка, закрытая лесом, непроходима
+    // целиком для всех потребителей IsCliffAt (шаг, разведение, единый
+    // предикат Passable, поиск NearestPassable, сбор застрявших). Сырая маска
+    // стволов остаётся поверх (до пересборки сетки после посадки — она точнее)
+    public bool ForestSolid = true;
+    public void SetForestSolid(bool on) { ForestSolid = on; }
+
+    // ── ЛЕСНЫЕ КАРМАНЫ ЗАЛИВАЮТСЯ (ТЗ 24.10.2026, блок 5) ─────────────────────
+    // Карман — свободная клетка навигации, с трёх или четырёх сторон закрытая
+    // лесом (или лесом и скалой). Дороги ВПЕРЁД из неё нет, но A* срезал
+    // через неё угол, шаг скользил в неё вдоль кромки, разведение выдавливало
+    // туда крайних — и отряд «вклинивался» в рощу и стоял. Заливка идёт
+    // проходами: залитый карман может сделать карманом соседа, поэтому
+    // тупиковый коридор шириной в клетку закрывается целиком, до устья.
+    // Вода в счёт стен не идёт: у брода свои правила. Итог — кромка без
+    // зубцов, и маршрут обходит рощу по гладкой огибающей, а не по пазам.
+    // КРАЙ КАРТЫ — СТЕНА (партия 25.10.2026): роща, упёртая в кромку, оставляла
+    // вдоль неё замкнутый коридор в клетку (с запада лес, с востока край), и
+    // без края в счёте стен у его клеток выходило по две стены. Вынос из леса
+    // (passable_exit) клал туда бойцов — два отряда орды стояли там 11 минут,
+    // 300 «unstuck_giveup»: A* оттуда дороги не имеет, другая компонента.
+    // Проходов — до опустения, а не восемь: коридор вдоль кромки длиннее
+    public bool ForestPocketFill = true;
+    public int ForestPockets = 0;
+    public void SetForestPocketFill(bool on) { ForestPocketFill = on; }
+
+    private int NavFillForestPockets(byte[] navForest)
+    {
+        int filled = 0;
+        for (int pass = 0; pass < 64; pass++)
+        {
+            int got = 0;
+            for (int r = 0; r < _navRows; r++)
+                for (int c = 0; c < _navCols; c++)
+                {
+                    int i = r * _navCols + c;
+                    if (_nav[i] != 0) continue;
+                    int walls = 0, wood = 0;
+                    for (int k = 0; k < 4; k++)
+                    {
+                        int rr = r + (k == 0 ? -1 : k == 1 ? 1 : 0);
+                        int cc = c + (k == 2 ? -1 : k == 3 ? 1 : 0);
+                        if (rr < 0 || cc < 0 || rr >= _navRows || cc >= _navCols) { walls++; continue; }
+                        int j = rr * _navCols + cc;
+                        if (_nav[j] == 1) { walls++; if (navForest[j] != 0) wood++; }
+                    }
+                    if (walls < 3 || wood == 0) continue;
+                    _nav[i] = 1;
+                    navForest[i] = 1;
+                    NavBlocked++;
+                    got++;
+                }
+            filled += got;
+            if (got == 0) break;
+        }
+        return filled;
+    }
+    private byte[] _navForest = System.Array.Empty<byte>();
+
+    // ── ЗАМКНУТЫЕ КЛОЧКИ ЗЕМЛИ ЗАКРЫВАЮТСЯ (партия 25.10.2026) ────────────────
+    // Правило «три стены» ловит коридор в клетку, но не тупик в две клетки
+    // шириной: у кромки карты между рощами оставались замкнутые клочки
+    // (зерно 1881811904: 2×2 клетки у (-206, -125), 1×6 вдоль края у (224,
+    // -30)). С основной землёй они не связаны ничем, A* оттуда дороги не
+    // имеет, а вынос из леса (passable_exit — ближайшая проходимая точка)
+    // клал туда бойцов, и те стояли до конца партии. Любая 4-связная
+    // компонента свободных клеток меньше NavIsolatedMax, кроме самой большой,
+    // закрывается; у леса — как лес (ForestSolid делает её сплошной для шага)
+    public const int NavIsolatedMax = 48;
+    public int NavIsolatedFilled = 0;
+
+    private int NavFillIsolated(byte[] navForest)
+    {
+        int n = _navCols * _navRows;
+        var comp = new int[n];
+        var size = new System.Collections.Generic.List<int> { 0 };
+        var stack = new int[n];
+        for (int i = 0; i < n; i++)
+        {
+            if (_nav[i] != 0 || comp[i] != 0) continue;
+            int id = size.Count;
+            int cnt = 0, sp = 0;
+            stack[sp++] = i; comp[i] = id;
+            while (sp > 0)
+            {
+                int cur = stack[--sp];
+                cnt++;
+                int cc = cur % _navCols, cr = cur / _navCols;
+                for (int k = 0; k < 4; k++)
+                {
+                    int nc = cc + NavDc[k], nr = cr + NavDr[k];
+                    if (NavCellBlocked(nc, nr)) continue;
+                    int ni = nr * _navCols + nc;
+                    if (comp[ni] != 0) continue;
+                    comp[ni] = id; stack[sp++] = ni;
+                }
+            }
+            size.Add(cnt);
+        }
+        int main = 0;
+        for (int id = 1; id < size.Count; id++) if (main == 0 || size[id] > size[main]) main = id;
+        // Клочок, хоть одной клеткой касающийся леса, закрывается лесом целиком
+        var woody = new bool[size.Count];
+        for (int i = 0; i < n; i++)
+        {
+            int id = comp[i];
+            if (id == 0 || woody[id]) continue;
+            int cc = i % _navCols, cr = i / _navCols;
+            for (int k = 0; k < 4; k++)
+            {
+                int nc = cc + NavDc[k], nr = cr + NavDr[k];
+                if (nc < 0 || nr < 0 || nc >= _navCols || nr >= _navRows) continue;
+                if (navForest[nr * _navCols + nc] != 0) { woody[id] = true; break; }
+            }
+        }
+        int filled = 0;
+        for (int i = 0; i < n; i++)
+        {
+            int id = comp[i];
+            if (id == 0 || id == main || size[id] >= NavIsolatedMax) continue;
+            _nav[i] = 1;
+            if (woody[id]) navForest[i] = 1;
+            NavBlocked++;
+            filled++;
+        }
+        return filled;
+    }
+
     public bool ForestAt(float x, float z)
     {
         if (ForestCells <= 0) return false;
         int c = (int)Math.Floor((x - _cliffOx) / _cliffCell);
         int r = (int)Math.Floor((z - _cliffOz) / _cliffCell);
         if (c < 0 || r < 0 || c >= _cliffCols || r >= _cliffRows) return false;
-        return _forest[r * _cliffCols + c] != 0;
+        if (_forest[r * _cliffCols + c] != 0) return true;
+        if (!ForestSolid || _navForest.Length != _nav.Length || _navCell <= 0.0f) return false;
+        int nc = (int)Math.Floor((x - _navOx) / _navCell);
+        int nr = (int)Math.Floor((z - _navOz) / _navCell);
+        if (nc < 0 || nr < 0 || nc >= _navCols || nr >= _navRows) return false;
+        return _navForest[nr * _navCols + nc] != 0;
     }
 
     // Шаг строки упирается в скалу или лес-стену. Рабочий лес не замечает;
@@ -240,7 +380,10 @@ public partial class ArmyCore : RefCounted
                 int idx = rw * _navCols + c;
                 if (_navBase[idx] != 1) continue;
                 if (!NavCellHasWall(_navOx + c * _navCell, _navOz + rw * _navCell, _navCell))
+                {
                     _navBase[idx] = 0;
+                    if (_navForest.Length == _navBase.Length) _navForest[idx] = 0;
+                }
             }
         _navBldDirty = true;
     }
@@ -2167,6 +2310,72 @@ public partial class ArmyCore : RefCounted
     /// То же правило, ответ — СТРОКА (−1 — никого). Снаряды ядра (этап 3
     /// BigStand-5) отдают жертву строкой: узел GDScript берёт из своего
     /// реестра строка → узел, а не из обёртки объекта в событии
+    /// ── ХИТБОКС СТРЕЛЫ ПО ТЕЛУ (ТЗ 20.10.2026, блок 7) ─────────────────────
+    /// Стрела касалась бойца в общем радиусе HIT_RADIUS (0.35 м) от центра,
+    /// одинаковом у человека и у гоблина ×1.7 / туши — широкая фигура орды
+    /// ловила стрелы только серединой. Радиус попадания строки масштабируется
+    /// её личным радиусом расталкивания (_sepR, тело) против общего
+    /// HitBodyBase, не больше HitBodyMax; у людей (_sepR = 0) — прежний.
+    /// Ручка perf_config.arrow_body_hit (ArrowBodyHit)
+    public bool ArrowBodyHit = false;
+    public float HitBodyBase = 0.45f;
+    public float HitBodyMax = 2.0f;
+    public float HitBodyFromT = 0.6f;
+
+    public int EnemyRowAtBody(float x, float z, float radius, int fac)
+    {
+        if (_gw == 0) return -1;
+        float rMax = radius * HitBodyMax;
+        int cx0 = (int)((x - rMax - _gx0) * _ginv);
+        int cz0 = (int)((z - rMax - _gz0) * _ginv);
+        int cx1 = (int)((x + rMax - _gx0) * _ginv);
+        int cz1 = (int)((z + rMax - _gz0) * _ginv);
+        if (cx1 < 0 || cz1 < 0 || cx0 >= _gw || cz0 >= _gh) return -1;
+        if (cx0 < 0) cx0 = 0;
+        if (cz0 < 0) cz0 = 0;
+        if (cx1 >= _gw) cx1 = _gw - 1;
+        if (cz1 >= _gh) cz1 = _gh - 1;
+        int mySlot = FacSlot(fac);
+        int dead = DeadState;
+        float inv = HitBodyBase > 1e-4f ? 1.0f / HitBodyBase : 1.0f;
+        int best = -1;
+        float bestQ = float.MaxValue;
+        for (int cz = cz0; cz <= cz1; cz++)
+        {
+            int b = cz * _gw;
+            for (int cx = cx0; cx <= cx1; cx++)
+            {
+                int slot = (b + cx) * Factions;
+                for (int side = 0; side < Factions; side++)
+                {
+                    if (side == mySlot) continue;
+                    int j = _head[slot + side];
+                    while (j != -1)
+                    {
+                        if (_st[j] == dead) { j = _next[j]; continue; }
+                        float k = _sepR[j] > 0.0f ? Mathf.Clamp(_sepR[j] * inv, 1.0f, HitBodyMax) : 1.0f;
+                        float r = radius * k;
+                        float dx = x - _px[j];
+                        float dz = z - _pz[j];
+                        float d2 = dx * dx + dz * dz;
+                        // Из нескольких накрытых — ближайший по доле своего радиуса
+                        if (d2 <= r * r && d2 / (r * r) < bestQ)
+                        {
+                            var u = _unitOf[j];
+                            if (u != null && GodotObject.IsInstanceValid(u))
+                            {
+                                best = j;
+                                bestQ = d2 / (r * r);
+                            }
+                        }
+                        j = _next[j];
+                    }
+                }
+            }
+        }
+        return best;
+    }
+
     public int EnemyRowAt(float x, float z, float radius, int fac)
     {
         if (_gw == 0) return -1;
@@ -2219,6 +2428,29 @@ public partial class ArmyCore : RefCounted
     /// финализируемого мусора среди вызовов ядра (~59 на вызов). Узел по
     /// строке GDScript берёт из своего реестра (GameManager._row_units)
     private readonly System.Collections.Generic.List<int> _qrRows = new System.Collections.Generic.List<int>(256);
+    /// ЗАПЕРТЫЕ В НЕПРОХОДИМОМ (ТЗ 22.10.2026, скриншот 16:05): порция
+    /// живых строк (budget за вызов, курсор по плотному списку) — кто стоит в
+    /// клетке скалы или леса-стены. Вызволение бойца (Unit._tick_stuck)
+    /// работает только у идущего к цели; стоящий в кармане леса (пост, точка
+    /// приказа ИИ внутри массива) не проверялся никем и стоял вечно.
+    /// Один вызов на кадр вместо перехода границы на каждого бойца (правило 1)
+    private int _trapCursor;
+    private readonly System.Collections.Generic.List<int> _trapRows = new System.Collections.Generic.List<int>();
+    public int[] TrappedRows(int budget)
+    {
+        _trapRows.Clear();
+        if (!_cliffOn || _liveCount == 0) return Array.Empty<int>();
+        int k = Math.Min(budget, _liveCount);
+        for (int j = 0; j < k; j++)
+        {
+            if (_trapCursor >= _liveCount) _trapCursor = 0;
+            int row = _liveRows[_trapCursor++];
+            if ((_flags[row] & FPosValid) == 0) continue;
+            if (IsCliffAt(_px[row], _pz[row])) _trapRows.Add(row);
+        }
+        return _trapRows.Count == 0 ? Array.Empty<int>() : _trapRows.ToArray();
+    }
+
     public int[] QueryRadiusRows(float x, float z, float radius)
     {
         _qrRows.Clear();
@@ -4057,6 +4289,19 @@ public partial class ArmyCore : RefCounted
             _gateT[i] -= delta;
             if (_gateT[i] <= 0.0f) { PressWake(i); continue; }
             float x = _px[i], z = _pz[i];
+            // ── ОЖИДАНИЕ НА МЕСТЕ ПО ТОЧКЕ (ТЗ 25.10.2026, п. 5) ─────────────
+            // Вторая линия осады взводит «стоять» на собственной точке со
+            // стопом 0: проверка прибытия ниже (d2 <= 0) будила её в тот же
+            // такт, и ~300 бойцов входили в автомат каждый кадр. Стоящему по
+            // точке прибывать некуда — будят только срок и чужое тело рядом
+            if (goal && _pressV[i] <= 0.0f)
+            {
+                _vx[i] = 0; _vz[i] = 0;
+                if (scanMod > 1 && ((i + tick) % scanMod) == 0
+                    && EnemyNear(x, z, _fac[i], scanR))
+                    PressWake(i);
+                continue;
+            }
             float dx = (goal ? _pressX[i] : _px[t]) - x;
             float dz = (goal ? _pressZ[i] : _pz[t]) - z;
             float d2 = dx * dx + dz * dz;
@@ -4808,7 +5053,11 @@ public partial class ArmyCore : RefCounted
                 rb.Dirty = true;
             }
             // Попадание — тем же правилом, что было в Arrow._check_hit
-            int j = EnemyRowAt(x, z, hitRadius, _afFac[k]);
+            // Хитбокс по телу — только на спуске дуги (t >= HitBodyFromT): над
+            // ближним чужим строем стрела проходит высоко, и широкий радиус
+            // снимал бы её на нём (qa_garrison_archers_test D4)
+            int j = (ArrowBodyHit && t >= HitBodyFromT) ? EnemyRowAtBody(x, z, hitRadius, _afFac[k])
+                : EnemyRowAt(x, z, hitRadius, _afFac[k]);
             int flags = _afFlags[k];
             if ((flags & PfLegacy) != 0)
             {
@@ -5206,6 +5455,57 @@ public partial class ArmyCore : RefCounted
     }
 
     public int LookTableCount() => _lkTables.Count;
+
+    // ── ЗОНД «БЕГ НА МЕСТЕ» (ТЗ 25.10.2026, блок 5) ──────────────────────────
+    // Строка, у которой в слоте лента ХОДЬБЫ (_lkCur == _lkWalk), а точка за
+    // окно windowMs сместилась меньше minDist, — «бежит на месте» (дрожь
+    // между местом коробки, разведением и чужим телом). Окно меряется по
+    // каждой строке своё; needHits окон подряд — в ответ. Один проход по
+    // плотному списку живых раз в такт зонда (GDScript, ~4 Гц), не покадрово
+    private float[] _prPx = Array.Empty<float>(), _prPz = Array.Empty<float>();
+    private int[] _prMs = Array.Empty<int>(), _prHits = Array.Empty<int>();
+    private int[] _prOut = new int[64];
+
+    /// moveState — состояние хода: у строки БЕЗ слота общей отрисовки (туман,
+    /// headless-стенд) ленты нет, и «бежит» значит «в состоянии хода»
+    public int[] ProbeStuckRows(int nowMs, float minDist, int windowMs, int needHits, int moveState)
+    {
+        int cap = _px.Length;
+        if (_prMs.Length < cap)
+        {
+            Array.Resize(ref _prPx, cap); Array.Resize(ref _prPz, cap);
+            Array.Resize(ref _prMs, cap); Array.Resize(ref _prHits, cap);
+        }
+        int n = 0, dead = DeadState;
+        float md2 = minDist * minDist;
+        for (int k = 0; k < _liveCount; k++)
+        {
+            int i = _liveRows[k];
+            // Вне карты (гарнизон замка/башни/крыши) — не бег: строка без
+            // слота хранит ленту, с которой её сняли (лог партии 26.10:
+            // 1053 из 1540 сводок — лучники на крыше «бегут» по 30 минут)
+            if (_st[i] == dead || (_flags[i] & FPosValid) == 0) { _prHits[i] = 0; _prMs[i] = 0; continue; }
+            // Привязана к таблице, но без слота (туман, гарнизон) — лента в
+            // _lkCur устарела: LookPass такие строки пропускает
+            bool bound = i < _lkTable.Length && _lkTable[i] >= 0 && _rbB[i] >= 0;
+            if (!bound && _st[i] != moveState) { _prHits[i] = 0; _prMs[i] = 0; continue; }
+            if (_prMs[i] == 0) { _prPx[i] = _px[i]; _prPz[i] = _pz[i]; _prMs[i] = nowMs; continue; }
+            if (nowMs - _prMs[i] < windowMs) continue;
+            float dx = _px[i] - _prPx[i], dz = _pz[i] - _prPz[i];
+            bool walk = bound ? (_lkCur[i] >= 0 && _lkCur[i] == _lkWalk[i]) : _st[i] == moveState;
+            if (walk && dx * dx + dz * dz < md2) _prHits[i]++;
+            else _prHits[i] = 0;
+            _prPx[i] = _px[i]; _prPz[i] = _pz[i]; _prMs[i] = nowMs;
+            if (_prHits[i] >= needHits)
+            {
+                if (n >= _prOut.Length) Array.Resize(ref _prOut, _prOut.Length * 2);
+                _prOut[n++] = i;
+            }
+        }
+        var res = new int[n];
+        Array.Copy(_prOut, res, n);
+        return res;
+    }
 
     /// Привязать строку к таблице: покой, ходьба, ТЕКУЩАЯ лента (та, в чей
     /// бакет строку уже поставил GDScript), личный порог ленты шага (0 — общий),
@@ -6365,6 +6665,7 @@ public partial class ArmyCore : RefCounted
         _navRows = Math.Max((int)Math.Ceiling(_cliffRows * _cliffCell / cell), 1);
         int n = _navCols * _navRows;
         _nav = new byte[n];
+        var navForest = new byte[n];
         _navStamp = new int[n]; _navG = new float[n]; _navParent = new int[n]; _navClosed = new byte[n];
         NavBlocked = 0;
         for (int r = 0; r < _navRows; r++)
@@ -6380,10 +6681,14 @@ public partial class ArmyCore : RefCounted
                 int cc1 = (int)Math.Floor((x0 + cell - 0.01f - _cliffOx) / _cliffCell);
                 int cr1 = (int)Math.Floor((z0 + cell - 0.01f - _cliffOz) / _cliffCell);
                 bool fo = _forest.Length == _cliff.Length && ForestCells > 0;
-                for (int rr = Math.Max(cr0, 0); rr <= cr1 && rr < _cliffRows && !blocked; rr++)
+                bool byForest = false;
+                for (int rr = Math.Max(cr0, 0); rr <= cr1 && rr < _cliffRows; rr++)
                     for (int cc = Math.Max(cc0, 0); cc <= cc1 && cc < _cliffCols; cc++)
-                        if (_cliff[rr * _cliffCols + cc] != 0
-                            || (fo && _forest[rr * _cliffCols + cc] != 0)) { blocked = true; break; }
+                    {
+                        if (_cliff[rr * _cliffCols + cc] != 0) blocked = true;
+                        if (fo && _forest[rr * _cliffCols + cc] != 0) { blocked = true; byForest = true; }
+                    }
+                if (byForest) navForest[r * _navCols + c] = 1;
                 // ── ВОДА — СВОЙ КОД 3 (ТЗ 20.09.2026, п. 1) ───────────────
                 // Прибавка отступа NavCliffExtra писана под ГОРУ: у скалы
                 // строй обязан идти шире. На БРОДЕ она сжимала проход —
@@ -6402,7 +6707,10 @@ public partial class ArmyCore : RefCounted
                 if (blocked || water) { _nav[r * _navCols + c] = (byte)(blocked ? 1 : 3); NavBlocked++; }
             }
         }
+        if (ForestPocketFill && ForestCells > 0) ForestPockets += NavFillForestPockets(navForest);
+        if (ForestPocketFill) NavIsolatedFilled = NavFillIsolated(navForest);
         _navBase = (byte[])_nav.Clone();
+        _navForest = navForest;
         _navWanted = true;
         _navBldDirty = true;
         NavSync();
@@ -6580,6 +6888,73 @@ public partial class ArmyCore : RefCounted
         NavSync();
         if (!_navOn) return true;
         return !NavBlockedAt(x, z);
+    }
+
+    // ── ПРОХОДИМОСТЬ ТОЧКИ И БЛИЖАЙШАЯ ПРОХОДИМАЯ — ОДНИМ ВЫЗОВОМ (аудит 22.10) ──
+    // GameManager.nearest_passable обходил кольца в GDScript и на КАЖДУЮ пробу
+    // ходил в ядро 4-6 раз (is_cliff, is_water, in_building и nav_pocket =
+    // nav_free + obstacle_count + bld_depth): ~7 мкс на переход, до ~1900 проб
+    // при неудаче — десятки мс на вызов, а _sweep_trapped зовёт его до 256 раз
+    // за кадр. Теперь предикат и обход — здесь, переход один.
+    // Маска (GameManager.passable_mask) задаёт, какие источники непроходимости
+    // включены — это правила партии, которые знает GDScript (границы мира,
+    // ручки building_obstacles / nav_pocket_out):
+    //   1 скала/лес-стена (IsCliffAt), 2 вода реки, 4 фундамент (зазор bldClear),
+    //   8 просвет лесной стены: клетка навигации закрыта, но не у стены здания
+    //     (зазор pocketPad — ворота и сдача ресурсов законно стоят в клетке
+    //     постройки), 16 озеро — через gm.is_water (сейчас выключено вовсе).
+    // Правило ОБЯЗАНО совпадать с GameManager.is_cliff/is_water/in_building/
+    // nav_pocket — стережёт qa_session_audit_1022 блок E (сверка на сетке точек)
+    public const int PassCliff = 1, PassWater = 2, PassBld = 4, PassPocket = 8, PassLake = 16;
+
+    private bool PassableAt(float x, float z, int mask, float bldClear, float pocketPad, GodotObject gm)
+    {
+        if ((mask & PassCliff) != 0 && IsCliffAt(x, z)) return false;
+        if ((mask & PassWater) != 0)
+        {
+            if (_riverOn) { if (RiverWater(x, z)) return false; }
+            else if ((mask & PassLake) != 0 && gm != null && (bool)gm.Call("is_water", x, z)) return false;
+        }
+        bool bldOn = (mask & PassBld) != 0 && BldCount > 0;
+        if (bldOn && BldPenetration(x, z, bldClear, out _, out _) > 0.0f) return false;
+        if ((mask & PassPocket) != 0 && _navOn && NavBlockedAt(x, z))
+        {
+            if (!(bldOn && BldPenetration(x, z, pocketPad, out _, out _) > 0.0f)) return false;
+        }
+        return true;
+    }
+
+    public bool Passable(float x, float z, int mask, float bldClear, float pocketPad, GodotObject gm)
+    {
+        if (mask == 0) return true;
+        if ((mask & PassPocket) != 0) NavSync();
+        return PassableAt(x, z, mask, bldClear, pocketPad, gm);
+    }
+
+    // Кольцами по step до rMax (n = max(8, 2πr/step) проб на кольцо — тот же
+    // обход, что был в GDScript, порядок проб прежний), пробы за |limX|/|limZ|
+    // пропускаются. Исходная точка проходима — она же. Не нашлось — (+INF,
+    // +INF): признак неудачи значением (правило 14), а не исходная точка
+    public Vector2 NearestPassable(float x, float z, float limX, float limZ, int mask,
+        float bldClear, float pocketPad, float step, float rMax, GodotObject gm)
+    {
+        if (mask == 0) return new Vector2(x, z);
+        if ((mask & PassPocket) != 0) NavSync();
+        if (PassableAt(x, z, mask, bldClear, pocketPad, gm)) return new Vector2(x, z);
+        if (step <= 0.0f) step = 1.0f;
+        for (float r = step; r <= rMax + 1e-4f; r += step)
+        {
+            int n = Math.Max(8, (int)(Mathf.Tau * r / step));
+            for (int i = 0; i < n; i++)
+            {
+                float a = Mathf.Tau * i / n;
+                float px = x + Mathf.Cos(a) * r;
+                float pz = z + Mathf.Sin(a) * r;
+                if (Mathf.Abs(px) > limX || Mathf.Abs(pz) > limZ) continue;
+                if (PassableAt(px, pz, mask, bldClear, pocketPad, gm)) return new Vector2(px, pz);
+            }
+        }
+        return new Vector2(float.PositiveInfinity, float.PositiveInfinity);
     }
 
     // Видимость по сетке с зазором NavClearance по обе стороны отрезка:

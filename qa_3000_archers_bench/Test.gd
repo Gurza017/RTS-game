@@ -472,7 +472,7 @@ func _d_player_kick() -> void:
 	# Отодвигаем такт радара на полсекунды вперёд и проверяем, что приказ
 	# игрока не ждёт его, а исполняется немедленно
 	var sq: Dictionary = GameManager.squads[sid]
-	sq["radar_next"] = Time.get_ticks_msec() + 100000
+	sq["radar_next"] = Unit.game_ms() + 100000
 	sq["radar_phase"] = GameManager.RADAR_IDLE
 	sq["radar_foe"] = null
 	var lead := men[0] as Unit

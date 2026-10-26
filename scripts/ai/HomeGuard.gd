@@ -182,7 +182,7 @@ func _foes_in_zone() -> int:
 func castle_under_attack() -> bool:
 	if castle == null or not is_instance_valid(castle) or castle.is_dead():
 		return false
-	return float(Time.get_ticks_msec() - castle.last_hit_ms) * 0.001 < _AICfg.HOME_GUARD_HIT_SEC
+	return float(Unit.game_ms() - castle.last_hit_ms) * 0.001 < _AICfg.HOME_GUARD_HIT_SEC
 
 ## Штурм: удар по замку, прорыв в зону, бьют саму охрану ЛИБО чужой боевой
 ## подобрался к ЛЮБОМУ посту гарнизона (HOME_GUARD_POST_ZONE, ТЗ 25.09.2026:
@@ -190,6 +190,27 @@ func castle_under_attack() -> bool:
 ## иначе не будил никого)
 ## Почему тревога (стендам): castle / zone / hit:<sid> / post:<sid> / ""
 var last_reason: String = ""
+## Своя постройка базы, по которой били последней (тревога «bld»)
+var _hit_bld: Building = null
+const BASE_ALARM_R := 80.0
+
+func _base_building_hit() -> Building:
+	var cp: Vector3 = _castle_pos()
+	if cp.x == INF:
+		return null
+	var now: int = Unit.game_ms()
+	var win: int = int(_AICfg.HOME_GUARD_HIT_SEC * 1000.0)
+	for b in GameManager.nodes_in_group_cached(Constants.building_group(Constants.FACTION_ENEMY)):
+		if b == null or not is_instance_valid(b):
+			continue
+		var bl := b as Building
+		if bl == null or bl == castle or bl.is_dead():
+			continue
+		if now - bl.last_hit_ms >= win:
+			continue
+		if _xz2(bl.global_position, cp) <= BASE_ALARM_R * BASE_ALARM_R:
+			return bl
+	return null
 
 func _threatened() -> bool:
 	if castle_under_attack():
@@ -203,6 +224,15 @@ func _threatened() -> bool:
 		if GameManager.squad_hit_recently(int(s["sid"])):
 			last_reason = "hit:%d" % int(s["sid"])
 			return true
+	# ── БЬЮТ ПОСТРОЙКУ БАЗЫ (ТЗ 23.10.2026, п. 7) ─────────────────────────
+	# Скриншоты 23.10: армия игрока сносит башню и бараки красных в 30-40 м от
+	# крепости, а охрана спит в лесу рядом — тревогу поднимали только удар по
+	# САМОЙ крепости, враг в её зоне и враг у поста. Теперь — и удар по любой
+	# своей постройке в BASE_ALARM_R от крепости; цель — тот, кто её бьёт
+	_hit_bld = _base_building_hit() if _OptSys.home_guard_buildings else null
+	if _hit_bld != null:
+		last_reason = "bld:%s" % _hit_bld.name
+		return true
 	var pz: float = _AICfg.HOME_GUARD_POST_ZONE
 	if pz > 0.0:
 		for s in squads:
@@ -212,6 +242,11 @@ func _threatened() -> bool:
 				return true
 	last_reason = ""
 	return false
+
+## Шаг игровых часов (scripts/GameClockStep.gd, аудит 22.10.2026): часы и
+## таймеры этого узла идут от Unit.game_ms(), а не от delta отрисовки —
+## при просадке FPS мир замедляется, и сроки этого узла вместе с ним
+var _gclk = preload("res://scripts/GameClockStep.gd").new()
 
 func _process(delta: float) -> void:
 	# Часы подсистемы (perf_config.sys_meter, qa_bigstand): одна проверка bool
@@ -223,6 +258,7 @@ func _process(delta: float) -> void:
 	_OptSys.sys_add("home_guard", Time.get_ticks_usec() - _sys_t0)
 
 func _process_timed(delta: float) -> void:
+	delta = _gclk.step()   # игровое время вместо delta отрисовки (GameClockStep)
 	_tick_t += delta
 	if _tick_t < _AICfg.HOME_GUARD_TICK_SEC:
 		return
@@ -284,7 +320,7 @@ func _process_timed(delta: float) -> void:
 ## Пора ли переиздать приказ домой (см. DormantReserve._home_due)
 func _home_due(s: Dictionary) -> bool:
 	var sid: int = int(s["sid"])
-	var nms: int = Time.get_ticks_msec()
+	var nms: int = Unit.game_ms()
 	if _all_idle(sid) or nms - int(s.get("home_ms", 0)) >= int(_AICfg.HOME_GUARD_HOME_RETRY_SEC * 1000.0):
 		s["home_ms"] = nms
 		return true
@@ -321,6 +357,9 @@ func _fight() -> void:
 	var shared: Node3D = null
 	if cp.x != INF:
 		shared = _nearest_foe(cp, _AICfg.HOME_GUARD_ZONE + 20.0)
+	# Бьют постройку базы — общая цель у неё (тот, кто бьёт)
+	if shared == null and _hit_bld != null and is_instance_valid(_hit_bld):
+		shared = _nearest_foe(_hit_bld.global_position, 30.0)
 	if shared == null:
 		var bd := INF
 		for s in squads:

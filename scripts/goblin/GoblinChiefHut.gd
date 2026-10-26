@@ -25,7 +25,7 @@ func _process(delta: float) -> void:
 	super._process(delta)
 	if _dead or current_health >= max_health:
 		return
-	if Time.get_ticks_msec() - last_hit_ms < int(_SpawnC.CHIEF_HUT_REGEN_DELAY_SEC * 1000.0):
+	if Unit.game_ms() - last_hit_ms < int(_SpawnC.CHIEF_HUT_REGEN_DELAY_SEC * 1000.0):
 		return
 	current_health = minf(max_health, current_health + _SpawnC.CHIEF_HUT_REGEN_PER_SEC * delta)
 	_update_hp_bar()

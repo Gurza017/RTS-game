@@ -762,7 +762,7 @@ func _block_b() -> void:
 			if men.is_empty():
 				continue
 			var c: Vector3 = _median(men)
-			if Vector2(c.x - dest.x, c.z - dest.z).length() < 22.0:
+			if _arrived_at(men, c, dest):
 				arrived += 1
 		if arrived >= 14:
 			break
@@ -846,9 +846,25 @@ func _block_c() -> void:
 			if men.is_empty():
 				continue
 			var c: Vector3 = _median(men)
-			if Vector2(c.x - dest.x, c.z - dest.z).length() < 22.0:
+			if _arrived_at(men, c, dest):
 				arrived += 1
 		if arrived >= 13:
 			break
 	print("    дошли %d из 15" % arrived)
 	verdict("C3 после конницы армия дошла до точки (%d из 15 ≥ 13)" % arrived, arrived >= 13)
+
+## Дошёл ли отряд: центр у СВОЕЙ точки — середины постов, а не у точки клика.
+## С ТЗ 23.10.2026 у каждого отряда [A] своя точка (am_own_dest): группа в
+## 15 отрядов приходит своей шириной (~70 м), а «22 м от точки клика»
+## засчитывало только тех, кого прежний баг стягивал в центр
+func _arrived_at(men: Array, c: Vector3, dest: Vector3) -> bool:
+	var pxs: Array = []
+	var pzs: Array = []
+	for u in men:
+		pxs.append((u as Unit).post_pos.x)
+		pzs.append((u as Unit).post_pos.z)
+	pxs.sort(); pzs.sort()
+	var pc := Vector3(float(pxs[pxs.size() / 2]), 0.0, float(pzs[pzs.size() / 2]))
+	if Vector2(pc.x - dest.x, pc.z - dest.z).length() > 60.0:
+		return false
+	return Vector2(c.x - pc.x, c.z - pc.z).length() < 8.0

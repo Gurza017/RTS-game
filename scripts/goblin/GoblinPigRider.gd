@@ -66,7 +66,7 @@ func may_sleep_physics() -> bool:
 ## перехват) игнорируются: отряд обязан оторваться и зайти заново
 var _cav_withdraw_until_ms: int = 0
 func is_withdrawing() -> bool:
-	return Time.get_ticks_msec() < _cav_withdraw_until_ms
+	return Unit.game_ms() < _cav_withdraw_until_ms
 
 func command_attack(target: Node3D, forced: bool = true, charge: bool = false,
 		lock: bool = false) -> void:

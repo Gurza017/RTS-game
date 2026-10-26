@@ -83,6 +83,16 @@ var flank_foot_frac: float = 0.6
 var _sprites: Array = []
 var _shown: int = 0
 var _fire_cd: Dictionary = {}       # Unit → секунд до выстрела
+## ── БЕЗ «ЗАЛПОВОГО ОГНЯ» — ВРАЗНОБОЙ (ТЗ 20.10.2026, блок 7) ──────────────
+## Без улучшения archer_1d (режим залпа отряда выключен или не куплен) стрелки
+## на крыше стреляли всё равно ХОРОМ: у всех одна перезарядка, и отсчёт
+## начинался в один кадр — по построению это тот же залп. Теперь у
+## незалпового стрелка: первый выстрел — со случайной задержкой в пределах
+## перезарядки, каждая следующая перезарядка — × RAGGED_JITTER. Свой
+## генератор: общий сеяный поток партии не сдвигается (правило звука)
+const RAGGED_JITTER := Vector2(0.80, 1.25)
+var _rng := RandomNumberGenerator.new()
+var _rng_seeded := false
 var _fire_target = null             # сырая ссылка (правило 5)
 var _retarget_t: float = 0.0
 var _volley_wait: Dictionary = {}   # sid → сколько ждём готовности залпа
@@ -329,7 +339,7 @@ func fire_range() -> float:
 ## Цель жива и в дальности огня: боец — по точке, ПОСТРОЙКА — до края её
 ## рисунка (Unit._pad_of), иначе крепость в 25 м от башни числилась бы
 ## «за дальностью», хотя её стена в 20
-func _target_alive(t) -> bool:
+func _target_alive(t, range_k: float = 1.0) -> bool:
 	if t == null or not is_instance_valid(t):
 		return false
 	var pad: float = 0.0
@@ -345,7 +355,7 @@ func _target_alive(t) -> bool:
 		pad = b.ring_radius()
 	var p := host.global_position
 	var q := (t as Node3D).global_position
-	var r: float = fire_range() + pad
+	var r: float = fire_range() * range_k + pad
 	return Vector2(q.x - p.x, q.z - p.z).length_squared() <= r * r
 
 ## ── ПРЯМОЙ ПРИКАЗ ГАРНИЗОНУ (ТЗ 19.09.2026, Garrison Manual Targeting) ─────
@@ -354,6 +364,8 @@ func _target_alive(t) -> bool:
 ## дальности; погибла или ушла — обратно к авто-выбору ближайшего. Держится
 ## СЫРАЯ ссылка (правило 5): живость проверяется в _target_alive
 var _manual_target = null
+## Ручная цель держится до стольких дальностей огня (см. tick)
+const MANUAL_HOLD_K := 2.0
 var manual_orders: int = 0
 
 func order_fire(t: Node3D) -> bool:
@@ -384,7 +396,7 @@ func order_fire(t: Node3D) -> bool:
 
 ## Текущая ручная цель (null — гарнизон на авто-агро)
 func manual_target():
-	if _manual_target == null or not is_instance_valid(_manual_target) 			or not _target_alive(_manual_target):
+	if _manual_target == null or not is_instance_valid(_manual_target) 			or not _target_alive(_manual_target, MANUAL_HOLD_K):
 		_manual_target = null
 	return _manual_target
 
@@ -424,15 +436,23 @@ func tick(delta: float) -> void:
 	# дальности; ушла или пала — гарнизон сам возвращается к ближайшему
 	# Освобождённый объект в Variant РАВЕН null (правило 5): живость — только
 	# через is_instance_valid, иначе выбитая цель висела бы в поле вечно
+	# ── РУЧНАЯ ЦЕЛЬ СТРОГАЯ (ТЗ 25.10.2026, третье письмо, п. 1) ───────────
+	# «Башни бьют по клику и не переключаются сами»: цель игрока держится,
+	# пока жива и не дальше MANUAL_HOLD_K дальностей огня (то же правило, что
+	# замок стрелка — _lock_sight_range). Вышла за дальность огня — башня
+	# ЖДЁТ (личная досягаемость ниже не пускает выстрел), а не берёт
+	# ближайшего. Прежнее: ушла за дальность — сразу авто-выбор
+	var manual_hold := false
 	if _manual_target != null and is_instance_valid(_manual_target):
-		if _target_alive(_manual_target):
+		if _target_alive(_manual_target, MANUAL_HOLD_K if _OptR.tower_strict_target else 1.0):
 			_fire_target = _manual_target
+			manual_hold = _OptR.tower_strict_target
 		else:
 			_manual_target = null
 			_fire_target = null
 	else:
 		_manual_target = null
-	if not _target_alive(_fire_target):
+	if not manual_hold and not _target_alive(_fire_target):
 		_fire_target = null
 		if _retarget_t <= 0.0:
 			_retarget_t = _UCfgR.TOWER_RETARGET_SEC
@@ -451,11 +471,18 @@ func tick(delta: float) -> void:
 	# VOLLEY_READY_FRACTION видимых, либо ожидание перевалило VOLLEY_FORCE_MS
 	var hold: Dictionary = {}
 	var by_sid: Dictionary = {}
+	if not _rng_seeded:
+		_rng_seeded = true
+		_rng.seed = int(host.get_instance_id()) * 2654435761 & 0x7fffffff
 	for i in range(n):
 		var u: Unit = units[i]
+		var volley_u: bool = u.squad_id > 0 and GameManager.squad_volley_mode(u.squad_id)
+		# Новичок на крыше без залпа — первый выстрел со своей фазой
+		if not volley_u and not _fire_cd.has(u):
+			_fire_cd[u] = _rng.randf() * u._effective_cooldown()
 		var cd: float = float(_fire_cd.get(u, 0.0)) - delta
 		_fire_cd[u] = maxf(cd, 0.0)
-		if u.squad_id > 0 and GameManager.squad_volley_mode(u.squad_id):
+		if volley_u:
 			var st: Variant = by_sid.get(u.squad_id)
 			var arr: Array
 			if st == null:
@@ -501,7 +528,10 @@ func tick(delta: float) -> void:
 		u._on_attack_fired(_fire_target,
 			(u._strike_damage() + u._upgrade_damage_bonus()) * _UCfgR.GARRISON_DAMAGE_MULT)
 		shots_fired += 1
-		_fire_cd[u] = u._effective_cooldown()
+		var cd_next: float = u._effective_cooldown()
+		if not (u.squad_id > 0 and GameManager.squad_volley_mode(u.squad_id)):
+			cd_next *= _rng.randf_range(RAGGED_JITTER.x, RAGGED_JITTER.y)
+		_fire_cd[u] = cd_next
 
 # ─────────────────────────────────────────────────────────────────────────────
 # УРОН ПО ЛУЧНИКУ НА КРЫШЕ

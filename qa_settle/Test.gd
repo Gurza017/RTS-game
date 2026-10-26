@@ -30,8 +30,8 @@ func frames(n: int) -> void:
 		await get_tree().process_frame
 
 func wait_ms(ms: int) -> void:
-	var end: int = Time.get_ticks_msec() + ms
-	while Time.get_ticks_msec() < end:
+	var end: int = Unit.game_ms() + ms
+	while Unit.game_ms() < end:
 		await get_tree().process_frame
 
 func verdict(title: String, ok: bool, detail: String = "") -> void:

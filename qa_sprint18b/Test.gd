@@ -152,7 +152,6 @@ func _run() -> void:
 	# ПКМ (_block_formation_slots, спринт 20)
 	var sm = main.selection_manager
 	sm.select_units(men)
-	var forms0: int = GameManager.spear_wall_forms
 	sm.set_selection_stance("defense")
 	await pframes(2)
 	var moving := 0
@@ -163,8 +162,8 @@ func _run() -> void:
 		if (u as Unit).stance == "defense":
 			in_def += 1
 	verdict("B3 «Защита» у стоящего отряда — стойка у всех сразу, перестроения нет",
-		GameManager.spear_wall_forms == forms0 and moving == 0 and in_def == men.size(),
-		"построений %d, идут %d, в обороне %d из %d" % [GameManager.spear_wall_forms - forms0, moving, in_def, men.size()])
+		moving == 0 and in_def == men.size(),
+		"идут %d, в обороне %d из %d" % [moving, in_def, men.size()])
 	# Растяг ПКМ у копейщиков со стеной ложится в три шеренги (спринт 20)
 	var la := p0 + Vector3(-3.0, 0.0, 12.0)
 	var lb := p0 + Vector3(3.0, 0.0, 12.0)
@@ -173,9 +172,11 @@ func _run() -> void:
 	var rows_max := -1
 	for r in plan.get("rows", []):
 		rows_max = maxi(rows_max, int(r))
-	# РАЗВОРОТ ТЗ 14.10.2026, п. 6: протяжка ПКМ без «три в ряд»
-	var want_rows: int = GameManager.SPEAR_WALL_ROWS if sm.SPEAR_WALL_DRAG_ROWS else rows_max + 1
-	verdict("B3б растяг ПКМ у стены копий — шеренг по ручке SPEAR_WALL_DRAG_ROWS (%d)" % want_rows,
+	# РАЗВОРОТ ТЗ 14.10.2026, п. 6 и ТЗ 21.10.2026: протяжка ПКМ без «три в
+	# ряд» — глубину задаёт длина линии, как у всех родов
+	var per_row_w: int = maxi(1, int(floor((lb - la).length() / sm.UNIT_SPACING)))
+	var want_rows: int = int(ceil(float(men.size()) / float(per_row_w)))
+	verdict("B3б растяг ПКМ у фаланги — шеренг по длине линии (%d)" % want_rows,
 		slots.size() == men.size() and rows_max + 1 == want_rows,
 		"мест %d, шеренг %d" % [slots.size(), rows_max + 1])
 	await pframes(60 * 4)

@@ -152,8 +152,23 @@ func _a_inside() -> void:
 		absf(q.z - (lz - 2.75 - pad)) < 0.01 and q.x == p.x, "z %.2f, ждали %.2f" % [q.z, lz - 2.75 - pad])
 	var p2 := Vector3(-lx - 5.0, 0.0, lz + 5.0)
 	var q2: Vector3 = GameManager.squad_inside(p2, 4.0)
-	verdict("A2 угол карты: обе оси", absf(q2.x + (lx - 4.0 - pad)) < 0.01 and absf(q2.z - (lz - 4.0 - pad)) < 0.01,
-		"%.1f, %.1f" % [q2.x, q2.z])
+	# Угол зажима бывает в стволах лесной кромки: тогда центр отрядного
+	# приказа выносится на проходимое (аудит 22.10.2026, nav_pocket) — судим
+	# свойство, а не голый зажим
+	var c2 := Vector3(-(lx - 4.0 - pad), 0.0, lz - 4.0 - pad)
+	var c2_bad: bool = GameManager.is_cliff(c2.x, c2.z) or GameManager.nav_pocket(c2.x, c2.z)
+	var a2_ok: bool
+	if not c2_bad:
+		a2_ok = q2.distance_to(Vector3(c2.x, q2.y, c2.z)) < 0.01
+	else:
+		a2_ok = absf(q2.x) <= lx - 4.0 - pad + 0.01 and absf(q2.z) <= lz - 4.0 - pad + 0.01 \
+			and not GameManager.is_cliff(q2.x, q2.z) and not GameManager.nav_pocket(q2.x, q2.z) \
+			and Vector2(q2.x - c2.x, q2.z - c2.z).length() <= GameManager.CLIFF_SEARCH_R
+	# «Рядом» — в радиусе поиска проходимого, а не числом: со сплошной на
+	# клетке навигации лес-стеной (ТЗ 23.10.2026, третье письмо) толща леса
+	# в углу карты на 1-2 клетки шире, и вынос 15-16 м законен
+	verdict("A2 угол карты: обе оси (угол в стволах — %s, вынесен на проходимое рядом)" % str(c2_bad), a2_ok,
+		"%.1f, %.1f (угол %.1f, %.1f)" % [q2.x, q2.z, c2.x, c2.z])
 	var p3 := Vector3(10.0, 0.0, -20.0)
 	verdict("A3 точка в поле не трогается", GameManager.squad_inside(p3, 5.0) == p3)
 	GameManager.world_bounds_enabled = false

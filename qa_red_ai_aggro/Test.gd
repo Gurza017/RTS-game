@@ -220,7 +220,11 @@ func _block_c() -> void:
 	tw.global_position = Vector3(at.x, GameManager.get_terrain_height(at.x, at.z), at.z)
 	var reds: Array = _squad("swordsman" if Building.PRELOAD_SCENES.has("swordsman") else "warrior", R, 12, at + Vector3(-1, 0, 5))
 	var arch: Array = _squad("archer", P, 12, at + Vector3(0, 0, -14))
+	# Полный запас — до боя: павший и освобождённый лучник в приведение
+	# типа не годится (правило 5)
+	var full: float = 0.0
 	for u in arch[1]:
+		full += (u as Unit).max_health
 		(u as Unit).command_attack(reds[1][0], true, true)
 	var reached := 0
 	for t in range(40):
@@ -228,9 +232,6 @@ func _block_c() -> void:
 	var hp_a := 0.0
 	for u in _alive(arch[1]):
 		hp_a += (u as Unit).current_health
-	var full: float = 0.0
-	for u in arch[1]:
-		full += (u as Unit).max_health
 	for u in _alive(reds[1]):
 		if Vector2((u as Unit).global_position.x - at.x, (u as Unit).global_position.z - (at.z - 14.0)).length() < 6.0:
 			reached += 1

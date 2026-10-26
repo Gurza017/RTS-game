@@ -124,14 +124,14 @@ func _a_monk() -> void:
 	await pframes(5)
 	verdict("A0 приказ лечить отряд принят", monk._order_sid == sid, "order=%d" % monk._order_sid)
 	# Отряд бежит: паника + отход
-	(GameManager.squads[sid] as Dictionary)["panic_until"] = Time.get_ticks_msec() + 20000
+	(GameManager.squads[sid] as Dictionary)["panic_until"] = Unit.game_ms() + 20000
 	for m in _members(sid):
 		(m as Unit).retreating = true
 	monk._monk_step()
 	# Свой тик монаха тоже сканирует (и мог уже снять приказ раньше нас) —
 	# судим после нескольких его тактов, пока паника в силе
 	await pframes(90)
-	(GameManager.squads[sid] as Dictionary)["panic_until"] = Time.get_ticks_msec() + 20000
+	(GameManager.squads[sid] as Dictionary)["panic_until"] = Unit.game_ms() + 20000
 	monk._monk_step()
 	verdict("A1 паника пациента — приказ лечить снят", monk._order_sid != sid and monk.patient_sid != sid,
 		"order=%d patient=%d drops=%d" % [monk._order_sid, monk.patient_sid, monk.fled_drops])
@@ -158,12 +158,15 @@ func _b_houses() -> void:
 	verdict("B1 первые %d домов по базовой цене" % _UCfg.HOUSE_FREE_COUNT, flat)
 	var grows := true
 	for n in range(_UCfg.HOUSE_FREE_COUNT, 19):
-		if not (float(row[n + 1]) > float(row[n]) * 1.5):
+		# РАЗВОРОТ ТЗ 22.10.2026 (блок 8): рост мягче — × HOUSE_COST_GROWTH
+		# (1.12) за дом, чтобы 35 отрядов были достижимы; было ×1.7 и «≥ ×1.5»
+		if not (float(row[n + 1]) > float(row[n]) * 1.01):
 			grows = false
-	verdict("B2 с 10-го дома каждый следующий дороже ×1.5 и больше (экспонента)",
+	verdict("B2 с 10-го дома каждый следующий дороже (×%.2f за дом, ТЗ 22.10.2026)" % _UCfg.HOUSE_COST_GROWTH,
 		float(row[_UCfg.HOUSE_FREE_COUNT]) > 1.0 and grows,
 		"10-й ×%.2f, 15-й ×%.1f, 20-й ×%.0f" % [row[9], row[14], row[19]])
-	verdict("B3 20-й дом — «целое состояние» (> 20 000 дерева)", base * float(row[19]) > 20000.0,
+	verdict("B3 20-й дом заметно дороже базы (×2 и больше), но не «целое состояние» (< 20 000 дерева)",
+		float(row[19]) >= 2.0 and base * float(row[19]) < 20000.0,
 		"%.0f" % (base * float(row[19])))
 	# Три картинки дома считаются вместе
 	var at := Vector3(-30, 0, -70)
@@ -178,7 +181,7 @@ func _b_houses() -> void:
 	var total: int = GameManager.house_total(F)
 	var c_next: Dictionary = GameManager.build_cost_for(F, "house2")
 	verdict("B4 домов трёх картинок считается вместе; следующий уже дороже",
-		total >= _UCfg.HOUSE_FREE_COUNT and float(c_next.get(Constants.RESOURCE_WOOD, 0.0)) > base * 1.5,
+		total >= _UCfg.HOUSE_FREE_COUNT and float(c_next.get(Constants.RESOURCE_WOOD, 0.0)) > base * 1.05,
 		"домов %d, цена %.0f" % [total, float(c_next.get(Constants.RESOURCE_WOOD, 0.0))])
 	for h in hs:
 		h.queue_free()
@@ -252,11 +255,11 @@ func _d_phalanx() -> void:
 	# Первый вызов взводит ЛИЧНУЮ задержку опускания (_own_drop_delay_ms),
 	# второй — позже по часам — уже судит
 	for m in _members(sid):
-		Unit.now_ms = Time.get_ticks_msec()
+		Unit.now_ms = Unit.game_ms()
 		(m as Spearman)._spear_leveled()
 	for m in _members(sid):
 		var sp := m as Spearman
-		Unit.now_ms = Time.get_ticks_msec() + 10000
+		Unit.now_ms = Unit.game_ms() + 10000
 		if sp._spear_leveled():
 			down1 += 1
 	verdict("D2 с «Фалангой» [S] опускает копья у всего строя", down1 == 12, "опущено %d из 12" % down1)
@@ -267,7 +270,7 @@ func _d_phalanx() -> void:
 	var down2 := 0
 	for m in _members(sid):
 		var sp2 := m as Spearman
-		Unit.now_ms = Time.get_ticks_msec() + 5000
+		Unit.now_ms = Unit.game_ms() + 5000
 		if sp2._spear_leveled():
 			down2 += 1
 	verdict("D3 «Вольно» [C] — копья подняты и с «Фалангой»", down2 == 0, "опущено %d" % down2)
@@ -415,7 +418,7 @@ func _h_alt_drag() -> void:
 	for r in out["rows"]:
 		rows_max = maxi(rows_max, int(r))
 	verdict("H2 копейщики на длинной протяжке — не три шеренги (свободный прямоугольник)",
-		rows_max + 1 < GameManager.SPEAR_WALL_ROWS, "шеренг %d" % (rows_max + 1))
+		rows_max + 1 < 3, "шеренг %d" % (rows_max + 1))
 	for m in _members(sid):
 		m.queue_free()
 

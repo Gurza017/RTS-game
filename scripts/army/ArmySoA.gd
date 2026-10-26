@@ -24,6 +24,7 @@ extends RefCounted
 ## всего массива. Это не удобство, а разница между 0.1 мкс и 12 килобайтами.
 
 const _CORE := preload("res://csharp/ArmyCore.cs")
+const _Opt := preload("res://scripts/perf_config.gd")
 
 var _c = _CORE.new()
 
@@ -240,6 +241,7 @@ func is_cliff(x: float, z: float) -> bool:
 ## Строится ПОСЛЕ маски скал и реки (из них и складывается); зовётся из
 ## приказа, не из кадра
 func build_nav_grid(cell: float) -> int:
+	_c.SetForestPocketFill(_Opt.forest_pocket_fill)
 	return int(_c.BuildNavGrid(cell))
 
 func set_nav_enabled(on: bool) -> void:
@@ -251,6 +253,16 @@ func set_nav_arc(on: bool) -> void:
 
 func nav_free(x: float, z: float) -> bool:
 	return bool(_c.NavFree(x, z))
+
+## Проходимость точки и поиск ближайшей проходимой — целиком в ядре, один
+## переход (ArmyCore.Passable / NearestPassable; маска — GameManager.passable_mask).
+## Не нашлось — Vector2(INF, INF)
+func passable(x: float, z: float, mask: int, bld_clear: float, pocket_pad: float, gm: Object) -> bool:
+	return bool(_c.Passable(x, z, mask, bld_clear, pocket_pad, gm))
+
+func nearest_passable(x: float, z: float, lim_x: float, lim_z: float, mask: int,
+		bld_clear: float, pocket_pad: float, step: float, r_max: float, gm: Object) -> Vector2:
+	return _c.NearestPassable(x, z, lim_x, lim_z, mask, bld_clear, pocket_pad, step, r_max, gm)
 
 func nav_line_blocked(x0: float, z0: float, x1: float, z1: float, clear: float = 0.0) -> bool:
 	if clear > 0.0:
@@ -451,6 +463,14 @@ func fog_source_count() -> int:
 ## чистая математика по колонкам; вода/узлы/подача — главный поток
 func set_threads(t: int) -> void:
 	_c.SetThreads(t)
+
+## Лес-стена сплошная на шаге навигации (perf_config.forest_nav_solid)
+func set_forest_solid(on: bool) -> void:
+	_c.SetForestSolid(on)
+
+## Сколько лесных карманов залито при сборке сетки (стенды, отчёт)
+func forest_pockets() -> int:
+	return int(_c.ForestPockets)
 
 func rear_press_arm(i: int, tx: float, tz: float, speed: float, stop: float) -> void:
 	_c.RearPressArm(i, tx, tz, speed, stop)
@@ -689,6 +709,12 @@ func look_migrations() -> int:
 func look_decisions() -> int:
 	return _c.LookDecisions
 
+## Зонд «бег на месте» (ТЗ 25.10.2026): строки с лентой ходьбы, сместившиеся
+## меньше min_dist за window_ms need_hits окон подряд (ArmyCore.ProbeStuckRows)
+func probe_stuck_rows(now_ms: int, min_dist: float, window_ms: int, need_hits: int,
+		move_state: int) -> PackedInt32Array:
+	return _c.ProbeStuckRows(now_ms, min_dist, window_ms, need_hits, move_state)
+
 ## ── ТИХИЕ СТРОКИ (BigStand-5, этап 5) ─────────────────────────────────────
 ## Боец объявляет себя тихим: GDScript-тик картинки не идёт, пока ядро не
 ## заметит повод (срок, туман, LOD, ходьба, взгляд ведомого)
@@ -767,6 +793,10 @@ func projectile_fire(b: int, s: Vector3, e: Vector3, arc_h: float, rate: float,
 		tgt_id, flags, length, life, fade, max_age)
 
 func batch_arrows_relief(delta: float, hit_radius: float, relief_amp: float) -> void:
+	# Хитбокс по телу (ТЗ 20.10.2026, блок 7): ручка читается каждый кадр —
+	# её переключают на живой сцене для A/B; база тела — общий SEP_MIN_DIST
+	_c.ArrowBodyHit = _Opt.arrow_body_hit
+	_c.HitBodyBase = Unit.SEP_MIN_DIST
 	_c.BatchArrows(delta, hit_radius, relief_amp)
 
 func has_projectile_events() -> bool:
@@ -973,6 +1003,10 @@ func query_radius(x: float, z: float, radius: float) -> Array:
 ## обёрток на элемент; BigStand-5, этап 4). Узел по строке — GameManager._row_units
 func query_radius_rows(x: float, z: float, radius: float) -> PackedInt32Array:
 	return _c.QueryRadiusRows(x, z, radius)
+
+## Порция живых строк, стоящих в клетке скалы/леса-стены (ТЗ 22.10.2026)
+func trapped_rows(budget: int) -> PackedInt32Array:
+	return _c.TrappedRows(budget)
 
 ## Счёт живых чужих в радиусе без массива
 func enemy_count(x: float, z: float, radius: float, fac: int) -> int:

@@ -178,12 +178,18 @@ func _run() -> void:
 	# движка, не счётчик кадров) — при Engine.max_fps=0 в лёгкой сцене кадры
 	# летят намного быстрее 60/сек, и фиксированное число await-кадров может
 	# кончиться раньше, чем реально пройдут эти 3+ сек. Ждём по РЕАЛЬНЫМ часам
-	var t0 := Time.get_ticks_msec()
-	while Time.get_ticks_msec() - t0 < 4000:
+	# Ждём СВОЙСТВО с потолком (ловушка стендов: фиксированный срок): смыкание
+	# приходит по окну последнего удара на игровых часах, а длительность
+	# схватки зависит от запаса жизни (ТЗ 23.10.2026: × TTK_HEALTH_MULT)
+	var t0 := Unit.game_ms()
+	var waited_ms := 0
+	while Unit.game_ms() - t0 < 12000 and _reshuffled_ms(sid) == 0:
 		await get_tree().physics_frame
+	waited_ms = Unit.game_ms() - t0
+	print("  смыкание через %.1f с игрового времени после победы" % (float(waited_ms) / 1000.0))
 	var sq: Dictionary = GameManager.squads.get(sid, {})
 	print("  ДИАГНОСТИКА: in_combat=%s last_hit_ms=%s now=%d reform_pending=%s reshuffled=%s"
-		% [GameManager.squad_in_combat(sid), sq.get("last_hit_ms", "?"), Time.get_ticks_msec(),
+		% [GameManager.squad_in_combat(sid), sq.get("last_hit_ms", "?"), Unit.game_ms(),
 			sq.get("reform_check_pending", "?"), sq.get("reshuffled", "?")])
 	for u in men:
 		if is_instance_valid(u):

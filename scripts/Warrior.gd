@@ -25,7 +25,7 @@ func aggro_radius() -> float:
 	# мечник вставал в покой, где его инициатива — 5 м, и «замирал» в поле
 	# в десяти метрах от свалки. RUSH_HOT_SEC после рывка он подхватывает
 	# врага в радиусе рывка тем же штатным авто-агро — второй ветки боя нет
-	if Time.get_ticks_msec() < _rush_hot_until_ms:
+	if Unit.game_ms() < _rush_hot_until_ms:
 		return RUSH_AGGRO_R
 	return WARRIOR_AGGRO_RADIUS
 
@@ -150,7 +150,7 @@ func start_rage_dash() -> void:
 		return
 	_rage_left = rage_hits_total()
 	_rage_step = 0
-	_rage_until_ms = Time.get_ticks_msec() + int(RAGE_SEC * 1000.0)
+	_rage_until_ms = Unit.game_ms() + int(RAGE_SEC * 1000.0)
 	_rush_pending = true
 	_angry_pending = true
 	# Щит фиксируется НЕ флагом _guard_active напрямую: его каждый кадр
@@ -164,7 +164,7 @@ func drop_abilities() -> void:
 	_rush_pending = false
 
 func rage_active() -> bool:
-	return _rage_left > 0 and Time.get_ticks_msec() < _rage_until_ms
+	return _rage_left > 0 and Unit.game_ms() < _rage_until_ms
 
 ## ── КОНЕЦ РЫВКА — В БОЙ С БЛИЖАЙШИМ ───────────────────────────────────────
 ## Зовётся по прибытию (бег кончился), по истечении серии или её срока.
@@ -185,7 +185,7 @@ func _rush_aggro() -> void:
 		command_attack(foe, true)
 	else:
 		rush_hot_count += 1
-		_rush_hot_until_ms = Time.get_ticks_msec() + int(RUSH_HOT_SEC * 1000.0)
+		_rush_hot_until_ms = Unit.game_ms() + int(RUSH_HOT_SEC * 1000.0)
 		_aggro_timer = 0.0
 		_wake_process()
 
@@ -377,7 +377,7 @@ var _threat_until_ms: int = 0
 
 ## Угроза свежая — есть повод держать щит
 func _threatened() -> bool:
-	return Time.get_ticks_msec() < _threat_until_ms
+	return Unit.game_ms() < _threat_until_ms
 
 ## Щит поднят по угрозе — картинку разбудить, когда угроза истечёт (этап 5);
 ## в рывке — на его срок (конец рывка разбирает визуальный тик)
@@ -389,7 +389,7 @@ func _vis_extra_wake_ms() -> int:
 	return 0
 
 func _mark_threat() -> void:
-	_threat_until_ms = Time.get_ticks_msec() + GUARD_HOLD_MS
+	_threat_until_ms = Unit.game_ms() + GUARD_HOLD_MS
 
 ## Щит поднят? Читает HUD для подсветки и стенды QA
 func is_guarding() -> bool:
@@ -507,7 +507,7 @@ func _update_guard() -> void:
 # Анимация щита важнее walk/idle, но НЕ важнее анимации удара: пока идёт замах,
 # базовая проверка _anim_lock_until_ms не пускает сюда никого
 func _update_sprite_anim() -> void:
-	if Time.get_ticks_msec() < _anim_lock_until_ms:
+	if Unit.game_ms() < _anim_lock_until_ms:
 		return
 	if _guard_active and _has_anim(GUARD_ANIM):
 		if _anim_name != GUARD_ANIM:
@@ -547,7 +547,7 @@ func _effective_speed() -> float:
 # кадре idle/guard («еле дышит»), поэтому многокадровую ленту не усыпляем —
 # то же правило, что у базы и у копейщика
 func _process_can_sleep() -> bool:
-	if Time.get_ticks_msec() < _anim_lock_until_ms:
+	if Unit.game_ms() < _anim_lock_until_ms:
 		return false
 	if _threatened() or rage_active():
 		return false
@@ -616,3 +616,12 @@ func _setup_warrior_visual() -> void:
 		var mat := _sprite_node.get_active_material(0) as StandardMaterial3D
 		if mat:
 			mat.albedo_color = Color(0.75, 0.30, 0.90) if faction == Constants.FACTION_PLAYER else Color(0.90, 0.30, 0.30)
+
+## ── САМОЗАПУСК «ЯРОСТНОЙ АТАКИ» (ТЗ 23.10.2026, п. 6) ──────────────────────
+## Первый удар мечом в ближнем бою запускает приём всему отряду, если он
+## куплен, включён и откат прошёл (GameManager.squad_start_rage). Удар в серии
+## приёма повода не даёт
+func _on_attack_fired(target: Node3D, damage: float) -> void:
+	super._on_attack_fired(target, damage)
+	if _Opt.rage_auto and squad_id > 0 and not rage_active() and attack_range <= 3.0:
+		GameManager.squad_start_rage(squad_id, true)

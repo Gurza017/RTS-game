@@ -487,7 +487,7 @@ func _block_charge_rows() -> void:
 			print("    [первый удар на %d кадре] командир: состояние %s, таранов %d, первая линия %d" % [w, String(cc.state_of(rsid)), int(cc.charges), int(cc.front_riders)])
 			for ru0 in riders:
 				var r0 := ru0 as Unit
-				print("      всадник x=%.1f no_charge=%d charging=%s ready=%s state=%d" % [r0.global_position.x, r0.no_charge_until_ms - Time.get_ticks_msec(), str(r0.is_charging), str(r0._charge_ready), int(r0.state)])
+				print("      всадник x=%.1f no_charge=%d charging=%s ready=%s state=%d" % [r0.global_position.x, r0.no_charge_until_ms - Unit.game_ms(), str(r0.is_charging), str(r0._charge_ready), int(r0.state)])
 		if first_imp >= 0 and w - first_imp > 150:
 			break
 	var dealt: int = Unit.cav_impacts_dealt - imp0

@@ -177,7 +177,13 @@ func _ai() -> Node:
 # ═════════════════════════════════════════════════════════════════════════════
 # ТАКТ
 # ═════════════════════════════════════════════════════════════════════════════
+## Шаг игровых часов (scripts/GameClockStep.gd, аудит 22.10.2026): часы и
+## таймеры этого узла идут от Unit.game_ms(), а не от delta отрисовки —
+## при просадке FPS мир замедляется, и сроки этого узла вместе с ним
+var _gclk = preload("res://scripts/GameClockStep.gd").new()
+
 func _process(delta: float) -> void:
+	delta = _gclk.step()   # игровое время вместо delta отрисовки (GameClockStep)
 	if main == null or not (_Spawn.ASSAULT_EVENT_ENABLED or _Spawn.RAID_ENABLED):
 		return
 	clock += delta

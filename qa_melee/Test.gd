@@ -111,7 +111,7 @@ func _run() -> void:
 	# винил учёт, хотя проверяет он ФОРМУЛУ учёта, а не свежесть кэша — та
 	# заложена в конструкцию нарочно. Пересчитываем принудительно и сверяем в
 	# одном кадре
-	GameManager._recalc_melee(mine, Time.get_ticks_msec())
+	GameManager._recalc_melee(mine, Unit.game_ms())
 	var cnt: Array = GameManager.melee_counts(mine)
 	# Считаем то же самое вручную — ТОЙ ЖЕ метрикой, что и учёт: по плоскости
 	# XZ, а не в трёх измерениях (учёт читает столбцы ядра, Y в них не входит)

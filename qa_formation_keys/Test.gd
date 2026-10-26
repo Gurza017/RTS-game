@@ -157,8 +157,13 @@ func _run() -> void:
 		max_row = maxi(max_row, int(r))
 	print("  коробочка: ширина %.1f м, глубина %.1f м, шеренг в блоке %d" % [ed.x, ed.y, max_row + 1])
 	verdict("B2 все 60 получили место", (deep["slots"] as Array).size() == 60)
-	verdict("B3 отряд стоит в DEEP_ROWS шеренги, не в одну", max_row + 1 == sm.DEEP_ROWS,
-		"шеренг %d при заказанных %d" % [max_row + 1, sm.DEEP_ROWS])
+	# ТЗ 20.10.2026 (седьмой разворот): [2] не навязывает DEEP_ROWS шеренг —
+	# глубину блока задаёт протяжка, как в [1]; [2] лишь кладёт блоки сеткой
+	var max_row_w := 0
+	for rw0 in wide["rows"]:
+		max_row_w = maxi(max_row_w, int(rw0))
+	verdict("B3 [2] не навязывает три шеренги: шеренг в блоке столько же, сколько под [1]", max_row == max_row_w,
+		"шеренг %d под [2], %d под [1]" % [max_row + 1, max_row_w + 1])
 	verdict("B4 коробочка глубже широкого фронта", ed.y > ew.y + sm.ROW_DEPTH * 0.5, "%.2f против %.2f м" % [ed.y, ew.y])
 	verdict("B5 и уже его по фронту", ed.x < ew.x, "%.1f против %.1f м" % [ed.x, ew.x])
 	# Короткая линия — блоки переносятся во второй ряд сетки
@@ -240,8 +245,14 @@ func _run() -> void:
 	# ТЗ 29.09.2026 (блок 5, шестой разворот): под [2] коробочку в DEEP_ROWS
 	# шеренг получают ТОЛЬКО копейщики; лучники и мечники тянутся по линии,
 	# как в [1] — их глубина от режима не зависит
-	ok_rows = sp_rows + 1 == sm.DEEP_ROWS and other_rows_d == other_rows_w
-	verdict("C7 смешанное выделение под [2]: коробочка только у копейщиков (копейщики %d, прочие %d шеренг; под [1] прочих %d)" % [sp_rows + 1, other_rows_d + 1, other_rows_w + 1], ok_rows)
+	# ТЗ 20.10.2026 (седьмой разворот): три шеренги не навязываются НИКОМУ —
+	# и копейщики под [2] не глубже, чем под [1]
+	var sp_rows_w := 0
+	for j2 in range((plan_w["flat"] as Array).size()):
+		if GameManager.squad_type((plan_w["flat"][j2] as Unit).squad_id) == "spearman":
+			sp_rows_w = maxi(sp_rows_w, int(plan_w["rows"][j2]))
+	ok_rows = sp_rows == sp_rows_w and other_rows_d == other_rows_w
+	verdict("C7 смешанное выделение под [2]: ни у кого не три шеренги принудительно (копейщики %d/%d, прочие %d/%d шеренг под [2]/[1])" % [sp_rows + 1, sp_rows_w + 1, other_rows_d + 1, other_rows_w + 1], ok_rows)
 	# Копейщики с ВЫКЛЮЧЕННЫМ режимом стены — коробочка всё равно (стена копий
 	# по стойке — другая механика, к клавише [2] отношения не имеет)
 	var sp_sid: int = (mixed[0] as Unit).squad_id
@@ -251,7 +262,7 @@ func _run() -> void:
 	for i2 in range((plan_y["flat"] as Array).size()):
 		if GameManager.squad_type((plan_y["flat"][i2] as Unit).squad_id) == "spearman":
 			sp_rows_off = maxi(sp_rows_off, int(plan_y["rows"][i2]))
-	verdict("C7б [2] не зависит от «Стены копий» (шеренг %d)" % (sp_rows_off + 1), sp_rows_off + 1 == sm.DEEP_ROWS)
+	verdict("C7б [2] не зависит от «Стены копий» (шеренг %d)" % (sp_rows_off + 1), sp_rows_off == sp_rows)
 	GameManager.squad_set_ability(sp_sid, "spearman_1d", true)
 
 	print("\n═════ D. ПРЕВЬЮ И ПРИКАЗ ═════")
@@ -404,8 +415,10 @@ func _e_persist(all: Array, a: Vector3, b: Vector3) -> void:
 	sm.formation_mode = sm.FORM_DEEP
 	print("  второй растяг: глубина без нажатий %.1f м против широкого %.1f м" % [
 		e2.y, ew2.y])
-	verdict("E6 второй растяг без нажатий идёт запомненной КОРОБОЧКОЙ, а не широким фронтом",
-		e2.y > ew2.y + 0.5, "%.1f против %.1f м" % [e2.y, ew2.y])
+	# ТЗ 20.10.2026: глубина блока в [2] та же, что в [1] (три шеренги сняты),
+	# поэтому «запомнился ли режим» судится по самому режиму, а не по глубине
+	verdict("E6 второй растяг без нажатий идёт запомненным режимом [2] (глубина та же: %.1f / %.1f м)" % [e2.y, ew2.y],
+		sm.formation_mode == sm.FORM_DEEP and absf(e2.y - ew2.y) < 0.5)
 	# ── РУЧНОЙ ВОЗВРАТ ───────────────────────────────────────────────────
 	sm.formation_mode = sm.FORM_DEEP
 	sm._rmb_down = true

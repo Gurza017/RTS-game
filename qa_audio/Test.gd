@@ -129,6 +129,14 @@ func _b_assets() -> void:
 		for f in files:
 			total += 1
 			var p: String = AudioManager.sfx_path(String(f))
+			# ПРОЦЕДУРНЫЙ ЗВУК — МЕТКА, А НЕ ФАЙЛ (шаг туши «@proc_big_step_*»
+			# собирается кодом с ТЗ 23.09.2026). ResourceLoader про метку честно
+			# отвечает «нет», и стенд краснел на исправном банке; метку
+			# проверяем тем путём, которым её разбирает движок, — через _stream
+			if p.begins_with("@proc_"):
+				if AudioManager._stream(p) == null:
+					missing.append(p)
+				continue
 			if not ResourceLoader.exists(p):
 				missing.append(p)
 	print("  файлов эффектов в банке: %d, не найдено: %d" % [total, missing.size()])

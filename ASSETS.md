@@ -49,6 +49,35 @@ assets/
 
 ---
 
+## Звук: речь людей (реплики приказов)
+
+Каталог речи — `assets/environment/Main Sounds/sound voice humans/` (константа
+`AudioManager.DIR_VOICE`). Имена файлов — строчными через подчёркивание: PCK
+регистрозависим, регистр сверяет стенд `qa_voice_ack` (блок A, все пути
+движка через `AudioManager.all_asset_paths()`).
+
+**СИНТЕЗИРОВАННЫЕ РЕПЛИКИ УДАЛЕНЫ (ТЗ 25.10.2026, блок 1).** Папки `orders/`
+(«Forward!», «Attack!»…) и `worker/` («Yes, sir»…), собранные 24.10 синтезатором
+речи Windows, звучали роботом и сняты вместе с событиями `order_move_short`,
+`order_attack_short` и `worker_ack`-голосом: 1-4 отряда отвечают на приказ
+штатным щелчком, рабочий — щелчками без голоса. Синтезированные голоса в
+проект не класть; стенд `qa_voice_ack` A7 ловит любую `.wav` в этих папках.
+
+Если владелец захочет живые голоса — кандидаты CC0 (OpenGameArt, автор
+Scribe — «RTS commands and reports», «RTS commands 2»): один длинный mp3 со
+всеми фразами подряд, нарезать по образцу `ORDER_REPLIES` с `from`/`to`.
+
+Прочее в той же папке: `5+combat-voice-forward-march-543679.mp3` (фраза
+массового марша), `combat-voice-hold-the-line-543680.mp3`, `horn_attacks.mp3`,
+лупы шага и бега. Клич после рога (`war_cry`) — `Sounds Human/soldiers-battle-cry.wav`.
+
+**Сняты из использования (файлы на диске остались):** `Sounds Human/angry1-4.wav`
+(«Warrior Voice Pack», John Carroll) — рык на рыцаре, ТЗ 24.10.2026 «рычание
+только гоблинам»; выкрик ярости рыцаря (`knight_angry`) теперь — клич людей и
+выдохи усилия `VOXEfrt_ActionGrunt_*`.
+
+---
+
 ## Ленты кадров
 
 Лента — **горизонтальная полоска квадратных кадров** без полей:

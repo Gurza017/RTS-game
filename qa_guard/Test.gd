@@ -308,7 +308,7 @@ func _d_idle() -> void:
 	w._update_guard()
 
 	# Замах опускает щит: одновременно бить и закрываться нельзя
-	w._anim_lock_until_ms = Time.get_ticks_msec() + 400
+	w._anim_lock_until_ms = Unit.game_ms() + 400
 	w._update_guard()
 	verdict("D3 во время замаха щит опущен", not w.is_guarding())
 	w._anim_lock_until_ms = 0

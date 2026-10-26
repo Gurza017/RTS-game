@@ -336,7 +336,8 @@ func _check_tower(keep: Castle) -> void:
 	sm._sel_rebuild()
 	main.hud.show_selection([tower])
 	await frames(2)
-	var txt: String = String(main.hud.info_label.text)
+	# ТЗ 20.10.2026: обзор и гарнизон — второй строкой шапки панели
+	var txt: String = String(main.hud._castle_caption.text) if main.hud._castle_caption != null else ""
 	var cap_ok: bool = main.hud._castle_boost
 	verdict("B9 панель башни: обзор и отряд внутри",
 		txt.find("Обзор") >= 0 and txt.to_lower().find("лучник") >= 0 and cap_ok,

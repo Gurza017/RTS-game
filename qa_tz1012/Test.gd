@@ -265,8 +265,10 @@ func _block_g() -> void:
 	await get_tree().process_frame
 	var r: Rect2 = hud._bottom_panel.get_global_rect()
 	var vw: float = hud.get_viewport().get_visible_rect().size.x
-	verdict("G6 нижняя панель отряда — по центру экрана", absf(r.get_center().x - vw * 0.5) <= 2.0,
-		"центр %.0f, экран %.0f" % [r.get_center().x, vw * 0.5])
+	# ТЗ 20.10.2026: панель стыкуется к правому краю мини-карты (была по центру)
+	var dock_x: float = load("res://scripts/Minimap.gd").dock_right_x()
+	verdict("G6 нижняя панель отряда — у правого края мини-карты", absf(r.position.x - dock_x) <= 2.0,
+		"левый край %.0f, стык %.0f (экран %.0f)" % [r.position.x, dock_x, vw * 0.5])
 	var pen: Building = load("res://scripts/SheepPen.gd").new()
 	pen.faction = P
 	main.world_add(pen)
@@ -280,8 +282,14 @@ func _block_g() -> void:
 	var pen_cnt := ""
 	for lb in hud.button_container.find_children("CountLabel", "Label", true, false):
 		pen_cnt = (lb as Label).text
-	verdict("G7 загон: рабочие «N/M» иконкой и итог еды в минуту",
-		dt.contains("еды в минуту") and pen_cnt == "0/%d" % _UCfg.SHEEP_PEN_WORKERS, dt + " | " + pen_cnt)
+	# РАЗВОРОТ ТЗ 24.10.2026 (второе письмо, блок 3): «Еда +N» с иконкой мяса,
+	# в заголовке — «(построено/лимит)», без HP
+	verdict("G7 загон: рабочие «N/M» иконкой и итог «Еда +N» с иконкой",
+		dt.begins_with("Еда +") and hud.detail_icon_shown()
+		and pen_cnt == "0/%d" % _UCfg.SHEEP_PEN_WORKERS
+		and not hud.info_label.text.contains("HP")
+		and hud.info_label.text.contains("/%d)" % _UCfg.SHEEP_PEN_MAX_COUNT),
+		dt + " | " + pen_cnt + " | " + hud.info_label.text)
 	var mine: Mine = null
 	for b in GameManager.nodes_in_group_cached(Constants.building_group(Constants.FACTION_NEUTRAL)):
 		if b is Mine:

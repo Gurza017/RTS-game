@@ -172,6 +172,14 @@ func _run() -> void:
 		bld.faction = Constants.FACTION_ENEMY
 		main.world_add(bld)
 		bld.global_position = cp + Vector3(8.0 + float(k) * 8.0, 0.0, 8.0)
+	# Четыре дома и запас еды: с 29.09 первые четыре дома идут ДО башен
+	# (одна стройка за раз), и без них блок мерил закладку дома, а не башни
+	for k in range(4):
+		var hs: Building = load("res://scripts/House.gd").new()
+		hs.faction = Constants.FACTION_ENEMY
+		main.world_add(hs)
+		hs.global_position = cp - Vector3(14.0, 0.0, -8.0 + float(k) * 6.0)
+	ResourceManager.add_resource(Constants.FACTION_ENEMY, Constants.RESOURCE_FOOD, 2000.0)
 	await pframes(4)
 	var towers0: int = ai._towers_count()
 	var workers: Array = []
@@ -181,15 +189,33 @@ func _run() -> void:
 	ResourceManager.add_resource(Constants.FACTION_ENEMY, Constants.RESOURCE_STONE, 2000.0)
 	ResourceManager.add_resource(Constants.FACTION_ENEMY, Constants.RESOURCE_GOLD, 2000.0)
 	await pframes(2)
+	# Площадка, заложенная самим ИИ до блока (кузница — стенд поставил свою
+	# позже), занимает единственный слот стройки: снимаем
+	for st in get_tree().get_nodes_in_group("construction_sites"):
+		if is_instance_valid(st) and int(st.faction) == Constants.FACTION_ENEMY:
+			st.remove_from_group("construction_sites")
+			st.remove_from_group("enemy_buildings")
+			st.queue_free()
+	await pframes(1)
 	ai._construction(castle)
 	await pframes(2)
 	var towers1: int = ai._towers_count()
 	verdict("C1 после стрелковой ИИ закладывает башню на границе", towers1 > towers0, "башен %d → %d" % [towers0, towers1])
+	# Разворот ТЗ 25.10.2026 (третье письмо, п. 5): башни встают у ВХОДОВ в
+	# базу (слоты у проходов стены), следующая — в первом свободном слоте,
+	# не ближе TOWER_SLOT_BUSY_R к уже стоящей или заложенной
 	var tspot: Vector3 = ai._tower_spot(castle, 0)
-	var axis_d: float = _xz(cp, main.PLAYER_BASE_ANCHOR) * _AICfg.TOWER_BORDER_FRACTION
-	verdict("C2 башня стоит на доле пути к базе игрока, а не у стены замка",
-		absf(_xz(tspot, cp) - sqrt(axis_d * axis_d + _AICfg.TOWER_SIDE * _AICfg.TOWER_SIDE)) < 8.0,
-		"%.0f м от замка" % _xz(tspot, cp))
+	var near_busy := 1e9
+	for b in get_tree().get_nodes_in_group("enemy_buildings"):
+		if is_instance_valid(b) and ((b as Building).building_id == "tower" \
+				or (b.get("target_id") != null and String(b.get("target_id")) == "tower")):
+			near_busy = minf(near_busy, _xz(tspot, (b as Node3D).global_position))
+	var near_exit := 1e9
+	for ex in main.ai_base_exits():
+		near_exit = minf(near_exit, _xz(tspot, (ex as Dictionary)["p"]))
+	verdict("C2 следующая башня — у входа в базу и не вплотную к стоящей",
+		near_busy >= ai.TOWER_SLOT_BUSY_R and (main.ai_base_exits().is_empty() or near_exit < 30.0),
+		"до башни %.1f м, до входа %.1f м" % [near_busy, near_exit])
 
 	print("\n═════ D. РЕЙДЫ ═════")
 	# База игрока с рабочими — в 60 м

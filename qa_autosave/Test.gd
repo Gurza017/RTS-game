@@ -100,7 +100,7 @@ func _live_count() -> int:
 
 func _autosave_files() -> Array:
 	var out: Array = []
-	var d := DirAccess.open("user://")
+	var d := DirAccess.open(_Save.SAVE_DIR)
 	if d == null:
 		return out
 	for f in d.get_files():
@@ -120,7 +120,7 @@ func _run() -> void:
 	# Чистый лист: чужое автосохранение и чужая настройка не должны судиться
 	var keep_min: int = _GS.autosave_minutes()
 	for f in _autosave_files():
-		DirAccess.remove_absolute(ProjectSettings.globalize_path("user://" + f))
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(_Save.SAVE_DIR + f))
 
 	if "a" in _only:
 		await _block_a()
@@ -293,9 +293,30 @@ func _block_b(auto: Node) -> void:
 		slot_btn != null and not slot_btn.disabled and slot_btn.text.begins_with("Автосохранение"),
 		slot_btn.text if slot_btn != null else "кнопки нет")
 	hud._show_save_menu(true)
-	var save_btn0: Node = _find(hud, "SaveSlot0")
 	await get_tree().process_frame
-	verdict("B14 в «Сохранить игру» слота автосохранения нет (руками в него не пишут)", save_btn0 == null)
+	await get_tree().process_frame
+	# ТЗ 24.10.2026, блок 6: автосохранение видно и на экране сохранения, но
+	# писать в него руками нельзя — кнопка погашена
+	var save_btn0 := _find(hud._overlay, "SaveSlot0") as Button
+	verdict("B14 в «Сохранить игру» слот автосохранения виден, но погашен",
+		save_btn0 != null and save_btn0.disabled and save_btn0.text.begins_with("Автосохранение")
+		and not save_btn0.text.contains("несовмест"),
+		save_btn0.text if save_btn0 != null else "кнопки нет")
+	# Геометрия рамы не плывёт: сохранение в слот (смена подписи и строка
+	# статуса) не меняет размер окна
+	var frame := _find(hud._overlay, "ModalPanel") as Control
+	var size0: Vector2 = frame.size if frame != null else Vector2.ZERO
+	var b3 := _find(hud._overlay, "SaveSlot3") as Button
+	if b3 != null:
+		b3.pressed.emit()
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var size1: Vector2 = frame.size if frame != null else Vector2.ONE
+	verdict("B15 сохранение в слот не меняет размер окна",
+		frame != null and b3 != null and size0.is_equal_approx(size1),
+		"%s → %s" % [size0, size1])
+	verdict("B16 сохранения стенда — не в каталоге игрока", _Save.SAVE_DIR != "user://",
+		_Save.SAVE_DIR)
 	hud._clear_overlay()
 	get_tree().paused = false
 	await pframes(2)
@@ -326,6 +347,10 @@ func _block_c(auto: Node) -> void:
 		t_prev = t
 	# Запись: главный поток — capture; фон — кодирование и диск
 	_GS.set_autosave_minutes(5)
+	# Счёт — В ТОМ ЖЕ КАДРЕ, что слепок: за 60 кадров фона на карту успевает
+	# выйти стартовый резерв орды (565 бойцов, первый такт GoblinAI идёт по
+	# игровым часам, а на 3000 бойцах физика отстаёт от стены)
+	n = _live_count()
 	var t0: int = Time.get_ticks_usec()
 	var why: String = auto.trigger()
 	var t_main: int = Time.get_ticks_usec() - t0
@@ -397,35 +422,35 @@ func _block_d() -> void:
 	var b_rel = GameManager.squads[s_relic].get("banner")
 	var ok_rel: bool = b_rel != null and is_instance_valid(b_rel)
 	var q_rel: QuadMesh = (b_rel.mesh as QuadMesh) if ok_rel else null
-	verdict("D4 отряд с реликвией — элита: красный штандарт, квад × %.1f (%.3f×%.3f против %.3f×%.3f)" % [
-		_Banner.ELITE_SCALE, q_rel.size.x if q_rel else 0.0, q_rel.size.y if q_rel else 0.0, base_w, base_h],
-		granted and ok_rel and bool(b_rel.shown_elite) and GameManager.squad_elite(s_relic) and q_rel != null
-		and absf(q_rel.size.x - base_w * _Banner.ELITE_SCALE) < 1e-4
-		and absf(q_rel.size.y - base_h * _Banner.ELITE_SCALE) < 1e-4)
-	verdict("D5 сдвиг древка и высота центра штандарта едут за масштабом (pole %.3f = %.3f × 1.5)" % [
-		float(b_rel.pole_offset) if ok_rel else 0.0, _Banner.POLE_OFFSET_X],
-		ok_rel and absf(float(b_rel.pole_offset) - _Banner.POLE_OFFSET_X * _Banner.ELITE_SCALE) < 1e-5
-		and absf(float(b_rel._center_y) - (_Banner.CENTER_Y + base_h * (_Banner.ELITE_SCALE - 1.0) * 0.5)) < 1e-4)
-	# Штандарт поднялся в ранге — цифра меняется, элита остаётся
-	GameManager._grant_auto_veterancy(s_relic, 1, 3)
+	# ── РАЗВОРОТ ТЗ 22.10.2026 (блок 1): штандарт — ТОЛЬКО по личной награде
+	# игрока (реликвия, награда рукой, set_squad_elite), ранг шкалы — вымпел.
+	# Прежние D4-D8 утверждали «штандарт только легендарным» (ТЗ 20.10)
+	var q_w: float = q_rel.size.x if q_rel != null else 0.0
+	verdict("D4 отряд с реликвией — бордовый штандарт элиты, шире вымпела (разворот ТЗ 22.10.2026)",
+		granted and ok_rel and bool(b_rel.shown_elite) and GameManager.squad_elite(s_relic)
+		and q_rel != null and q_w > base_w * 1.05, "elite=%s квад %.3f против %.3f" % [
+		str(b_rel.shown_elite) if ok_rel else "-", q_w, base_w])
+	var top_rel: int = _UCfg.max_veteran_level("spearman")
+	GameManager._grant_auto_veterancy(s_relic, 1, top_rel)
 	await pframes(2)
-	verdict("D6 рост ранга элитного отряда перестраивает штандарт (цифра 3), элита не теряется",
-		ok_rel and int(b_rel.shown_level) == 3 and bool(b_rel.shown_elite))
-	# Снятие признака — обратно вымпел
+	verdict("D5 штандарт элиты переживает рост ранга (лычки ранга %d на нём же)" % top_rel,
+		ok_rel and bool(b_rel.shown_elite) and int(b_rel.shown_level) == top_rel)
+	verdict("D6 штандарт несёт уровень элиты (римская цифра ≥ 1)",
+		ok_rel and int(b_rel.shown_elite_lvl) >= 1 and int(b_rel.shown_elite_lvl) == GameManager.squad_elite_level(s_relic))
+	# Снятие признака — штандарт снимается (он и есть награда)
 	GameManager.set_squad_elite(s_relic, false)
 	await pframes(1)
-	var q_rel2: QuadMesh = (b_rel.mesh as QuadMesh) if ok_rel else null
-	verdict("D7 снятие признака возвращает вымпел обычного размера", ok_rel and not bool(b_rel.shown_elite)
-		and q_rel2 != null and absf(q_rel2.size.x - base_w) < 1e-4)
+	verdict("D7 снятие признака «elite» снимает штандарт", ok_rel and not bool(b_rel.shown_elite)
+		and not GameManager.squad_elite(s_relic))
 	GameManager.set_squad_elite(s_relic, true)
-	# Высший ранг
+	# Высший ранг без награды — вымпел
 	var top: int = _UCfg.max_veteran_level("spearman")
 	GameManager._grant_auto_veterancy(s_top, 0, top)
 	await pframes(2)
 	var b_top = GameManager.squads[s_top].get("banner")
 	var ok_top: bool = b_top != null and is_instance_valid(b_top)
-	verdict("D8 высший ранг %d: штандарт по ручке ELITE_BANNER_AT_TOP_RANK=%s" % [top, str(_UCfg.ELITE_BANNER_AT_TOP_RANK)],
-		ok_top and bool(b_top.shown_elite) == _UCfg.ELITE_BANNER_AT_TOP_RANK)
+	verdict("D8 высший ранг %d по убийствам без награды — вымпел, не штандарт" % top,
+		ok_top and not bool(b_top.shown_elite) and not GameManager.squad_elite(s_top))
 	# Промежуточный ранг без решения игрока — не элита (6 из 7)
 	var s_mid: int = _squad("spearman", F, base + Vector3(0, 0, 30), 20, 5)
 	await pframes(1)
@@ -442,8 +467,8 @@ func _block_d() -> void:
 	var at_e := (fe as TextureRect).texture as AtlasTexture
 	verdict("D10 флажок панели: ранг — обрезок вымпела %s, элита — обрезок штандарта %s" % [
 		str(at_l.region if at_l else null), str(at_e.region if at_e else null)],
-		at_l != null and at_e != null and at_l.region == hud.VET_FLAG_CROP and at_e.region == _BannerArt.vexillum_crop()
-		and at_l.atlas == _BannerArt.texture_for(2) and at_e.atlas == _BannerArt.vexillum_texture(2))
+		at_l != null and at_e != null and at_l.region == hud.VET_FLAG_CROP and at_e.region == _BannerArt.elite_crop()
+		and at_l.atlas == _BannerArt.texture_for(2) and at_e.atlas == _BannerArt.elite_texture(1, 2))
 	fl.queue_free(); fe.queue_free()
 	# Слепок переносит признак
 	var st: Dictionary = _Save.capture(main)

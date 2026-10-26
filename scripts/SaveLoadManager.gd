@@ -102,14 +102,30 @@ const SLOT_COUNT := 3
 ## write_bytes), файл кладётся через временный и переименование — обрыв
 ## посреди записи не портит прежнее автосохранение
 const AUTOSAVE_SLOT := 0
-const AUTOSAVE_PATH := "user://autosave.tts"
+
+## ── СТЕНДЫ НЕ ТРОГАЮТ СОХРАНЕНИЯ ИГРОКА (ТЗ 24.10.2026, блок 6) ──────────
+## user:// у стенда и у игры ОДИН и тот же каталог. qa_autosave начинал с
+## «чистого листа» — удалял autosave.tts владельца и клал свой, снятый со
+## стендовой сцены; qa_difficulty писал и стирал слот 3. Отсюда «чужое»
+## автосохранение в списке и пропавшие слоты. Сцена или зонд из res://qa_*
+## в командной строке — значит, это стенд, и его файлы живут в user://qa_saves/
+static var SAVE_DIR: String = _save_dir()
+static var AUTOSAVE_PATH: String = SAVE_DIR + "autosave.tts"
+
+static func _save_dir() -> String:
+	for a in OS.get_cmdline_args():
+		if String(a).begins_with("res://qa_"):
+			DirAccess.make_dir_recursive_absolute(
+				ProjectSettings.globalize_path("user://qa_saves/"))
+			return "user://qa_saves/"
+	return "user://"
 
 ## Путь к файлу слота. user:// — единственное место, куда игра вправе писать:
 ## каталог игры в экспорте может лежать в Program Files и быть только для чтения
 static func slot_path(slot: int) -> String:
 	if slot <= AUTOSAVE_SLOT:
 		return AUTOSAVE_PATH
-	return "user://save_%d.tts" % clampi(slot, 1, SLOT_COUNT)
+	return SAVE_DIR + "save_%d.tts" % clampi(slot, 1, SLOT_COUNT)
 
 # ═════════════════════════════════════════════════════════════════════════════
 # СНЯТЬ СЛЕПОК
@@ -237,6 +253,11 @@ static func _capture_squads() -> Array:
 			# Индивидуальное звание — красный штандарт (ТЗ 13.10.2026, письмо
 			# 7): реликвия или награда рукой игрока; читается с умолчанием
 			"elite": bool(sq.get("elite", false)),
+			# Уровень элиты — римская цифра штандарта (ТЗ 22.10.2026)
+			"elite_lvl": int(sq.get("elite_lvl", 0)),
+			# Лычки сверх легенды и мини-флажки на древке (ТЗ 25.10.2026)
+			"legend_extra": int(sq.get("legend_extra", 0)),
+			"legend_flags": int(sq.get("legend_flags", 0)),
 		})
 	return out
 
@@ -269,6 +290,9 @@ static func _capture_buildings(main: Node) -> Array:
 			"pos":     bld.global_position,
 			"hp":      float(bld.current_health),
 		}
+		# Ступень укрепления башни (ТЗ 20.10.2026, блок 4)
+		if bld.has_method("fort_apply") and int(bld.get("fort_level")) > 0:
+			rec["fort"] = int(bld.get("fort_level"))
 		# ПЕНЬ: сторона карты и заморозка с калькулятором (ТЗ 19.09.2026, блок 3.2)
 		if bld.has_method("virt_total"):
 			rec["lair"] = {
@@ -400,10 +424,10 @@ static func load_state(slot: int) -> Dictionary:
 	var wgen: int = f.get_32()
 	if fmt != FORMAT_VERSION:
 		f.close()
-		return {"__error": "Сохранение версии %d, игра читает %d" % [fmt, FORMAT_VERSION]}
+		return {"__error": "Сохранение версии %d, игра читает %d" % [fmt, FORMAT_VERSION], "__old": true}
 	if wgen != WORLD_GEN_VERSION:
 		f.close()
-		return {"__error": "Карта этой версии генерируется иначе — сохранение несовместимо"}
+		return {"__error": "Карта этой версии генерируется иначе — сохранение несовместимо", "__old": true}
 	var data: Variant = f.get_var(false)
 	f.close()
 	if typeof(data) != TYPE_DICTIONARY:
@@ -423,8 +447,11 @@ static func slot_label(slot: int) -> String:
 	if not has_save(slot):
 		return "%s — пусто" % who
 	var st := load_state(slot)
+	# Подпись — короткая: полный текст ошибки раздвигал кнопку и всё окно
+	# (скриншот 24.10, блок 6). Полный текст игрок увидит при попытке загрузки
 	if st.has("__error"):
-		return "%s — %s" % [who, String(st["__error"])]
+		return "%s — %s" % [who, "старая версия, перезапишите" if st.has("__old")
+			else "файл повреждён"]
 	var meta: Dictionary = st.get("meta", {})
 	return "%s — %s, %s" % [who, String(meta.get("saved_at", "?")),
 		_Diff.label(String(meta.get("difficulty", _Diff.DEFAULT)))]
@@ -455,6 +482,8 @@ static func request_load(tree: SceneTree, slot: int) -> String:
 	GameManager.player_color        = String(meta.get("player_color", GameManager.player_color))
 	GameManager.ai_color            = String(meta.get("ai_color", GameManager.ai_color))
 	tree.paused = false
+	# Экран загрузки (ТЗ 21.10.2026) переживает смену сцены; закрывает Main
+	load("res://scripts/ui/LoadingScreen.gd").begin(tree, "Загрузка сохранения…").set_target(0.30)
 	tree.change_scene_to_file("res://scenes/Main.tscn")
 	return ""
 
@@ -588,6 +617,10 @@ static func _restore_squads(src: Array) -> Dictionary:
 			sq["home_guard"] = true
 		if bool(d.get("elite", false)):
 			sq["elite"] = true
+			sq["elite_lvl"] = maxi(1, int(d.get("elite_lvl", 1)))
+		if int(d.get("legend_extra", 0)) > 0:
+			sq["legend_extra"] = int(d.get("legend_extra", 0))
+			sq["legend_flags"] = int(d.get("legend_flags", 0))
 		map[int(d["id"])] = sid
 	return map
 
@@ -612,6 +645,8 @@ static func _restore_buildings(main: Node, src: Array) -> Array:
 		b.global_position = d["pos"] as Vector3
 		# Запас жизни ставится ПОСЛЕ входа в дерево: _ready() здания сам берёт
 		# максимум из конфига и затёр бы сохранённое число
+		if int(d.get("fort", 0)) > 0 and b.has_method("fort_apply"):
+			b.call("fort_apply", int(d.get("fort", 0)))
 		b.current_health = float(d.get("hp", b.max_health))
 		# Раненая постройка из сохранения сразу с полоской (ТЗ 14.10, п. 5)
 		if b.has_method("refresh_hp_bar"):

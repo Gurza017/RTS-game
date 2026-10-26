@@ -291,6 +291,15 @@ const STANCE_DEFENSE := "defense"
 
 ## ОБЩИЙ МНОЖИТЕЛЬ СИЛЫ ТОЛЧКА (knockback) для всех юнитов.
 const PUSH_GLOBAL_SCALE := 0.35
+## ── ДОЛГИЙ БОЙ И ВИДИМЫЙ НАПОР (ТЗ 23.10.2026, второе письмо, п. 3) ───────
+## Запас жизни основных родов войск ОБЕИХ сторон (люди и орда) × множитель —
+## симметрично, баланс сторон не сдвигается, растёт только время схватки.
+## Пехотный толчок × INFANTRY_PRESS_MULT (конница толкает своим каналом).
+## Ручка для A/B — perf_config.ttk_press
+const TTK_HEALTH_MULT := 1.5
+const TTK_UNITS := ["spearman", "archer", "warrior", "goblin_spearman",
+	"goblin_rider", "big_goblin"]
+const INFANTRY_PRESS_MULT := 1.8
 
 const STANCES := {
 	"attack": {
@@ -309,7 +318,9 @@ const STANCES := {
 		"push_mult":         0.0,    # своего пуша у фаланги нет вовсе
 		"push_resist":       0.5,    # входящий толчок срезан вдвое (упор щитами)
 		"attack_speed_mult": 1.25,   # +25% скорости атаки
-		"move_speed_mult":   0.80,   # −20% к новому шагу (ТЗ 10.10.2026; было 0.65)
+		# ТЗ 23.10.2026, п. 6: «в режиме удержания отряды НЕ замедляются — идут
+		# стандартным шагом». Разворот ×0.80 ТЗ 10.10/14.10 по явному ТЗ
+		"move_speed_mult":   1.0,    # было 0.80 (ТЗ 10.10.2026), ещё раньше 0.65
 		"morale_mult":       1.30,   # +30% морали
 		"defense_bonus":     5.0,    # +5 защиты
 		"holds_ground":      true,   # с места не сходят (кроме смыкания рядов)
@@ -635,8 +646,10 @@ const BUILDINGS := {
 		"cost_stone": 0.0,
 		# ── РУДНИК УБРАН ИЗ МЕНЮ РАБОЧЕГО (заказ спринта 13) ───────────────
 		"worker_buildable": false,                # кнопки на панели рабочего нет
-		# ЗДЕСЬ СТОЯЛА Tower.png, А СПРАЙТ БЫЛ House1 — это и была жалоба
-		"icon": "res://assets/factions/humans/icons/hud/Gold_Resource.png",
+		# ЗДЕСЬ СТОЯЛА Tower.png, А СПРАЙТ БЫЛ House1 — это и была жалоба.
+		# ТЗ 25.10.2026 (UI, п. 1): не кусок золота, а сама шахта — та же
+		# картинка, что у значка рудников под панелью ресурсов
+		"icon": "res://assets/environment/resources/Gold_mine/GoldMine_Active.png",
 	},
 	"house": {
 		"name": "Дом",                            # подпись в интерфейсе
@@ -876,6 +889,32 @@ static func houses_for_full_army(castles: int = 1) -> int:
 ## ═══════════════════════════════════════════════════════════════════════════
 ## БАШНЯ (TOWER)
 const TOWER_VISION           := 35.0
+## ── УКРЕПЛЕНИЕ БАШНИ (ТЗ 20.10.2026, блок 4) ───────────────────────────────
+## Кнопка в панели КАЖДОЙ башни: дерево + камень, работы идут time секунд
+## (башня стоит и стреляет, гарнизон внутри). По завершении ступени:
+##   hp_add   — прибавка к запасу жизни, доля БАЗОВОГО max_hp (8000 → +4000);
+##              текущий запас растёт на ту же величину (раненая не «лечится»
+##              до полного, но и не теряет долю);
+##   dmg_mult — множитель ВХОДЯЩЕГО урона (стрелы, удары, туши) — каменная
+##              облицовка: 0.85 = −15 %. Ступени не складываются: берётся
+##              множитель текущей ступени.
+## Рисунок укреплённой башни темнее и «каменнее» (TOWER_FORT_TINT).
+## Правит владелец: число ступеней — длина списка.
+## ТЗ 24.10.2026 (второе письмо, блок 4): ТРИ РАВНЫХ ЭШЕЛОНА (I, II, III)
+## вместо двух. Итог прежний — +100 % базовой прочности и −30 % входящего
+## урона, — разложен поровну: каждая ступень +1/3 прочности и −10 % урона;
+## цена и срок двух прежних ступеней (650 дерева, 950 камня, 60 с) — тоже
+## поровну на три
+const TOWER_FORT_LEVELS := [
+	{"name": "Каменная облицовка", "cost_wood": 220.0, "cost_stone": 320.0,
+		"time": 20.0, "hp_add": 1.0 / 3.0, "dmg_mult": 0.90},
+	{"name": "Крепостные зубцы",   "cost_wood": 220.0, "cost_stone": 320.0,
+		"time": 20.0, "hp_add": 1.0 / 3.0, "dmg_mult": 0.80},
+	{"name": "Окованные ворота",   "cost_wood": 220.0, "cost_stone": 320.0,
+		"time": 20.0, "hp_add": 1.0 / 3.0, "dmg_mult": 0.70},
+]
+const TOWER_FORT_TINT := [Color(1, 1, 1), Color(0.90, 0.90, 0.93), Color(0.82, 0.83, 0.88),
+	Color(0.74, 0.75, 0.82)]
 ## Сколько отрядов помещается в башню и каких родов войск
 const TOWER_GARRISON_LIMIT   := 1
 const TOWER_GARRISON_TYPES   := ["archer"]
@@ -944,8 +983,36 @@ const TOWER_COST_MAX   := 8.0     # потолок множителя: цена 
 ## три картинки дома вместе и заложенные площадки (GameManager.house_total).
 ## Лимит армии пересчитан под эту цену (ARMY_HOUSE_UNITS 90): ~2000 бойцов
 ## при 20 домах
+## ── ТЗ 22.10.2026, блок 6: «смягчить рост, чтобы игрок мог держать до 35
+## отрядов». 35 отрядов × 60 = 2100 бойцов = 21 дом при одной крепости;
+## при ×1.7 21-й дом стоил ×582 базы — недостижимо. Стало ×1.12 за дом
+## сверх девяти: 15-й ×1.97, 21-й ×4.4, всего за 21 дом ≈ 39 базовых цен.
+## Разворот ×1.7 ТЗ 14.10.2026 (п. 8) по явному ТЗ
 const HOUSE_FREE_COUNT  := 9
-const HOUSE_COST_GROWTH := 1.7
+const HOUSE_COST_GROWTH := 1.12
+## ── РОСКОШЬ СВЕРХ 35 ОТРЯДОВ (ТЗ 23.10.2026, п. 4) ─────────────────────────
+## «35 отрядов — комфортно, с 35-го дома дорожают астрономически, 40+ —
+## огромная роскошь». Рост считается не от номера дома, а от ЛИМИТА В
+## ОТРЯДАХ, который даст этот дом (крепости тоже дают место): дом, после
+## которого лимит больше HOUSE_LUXURY_FROM отрядов, — × HOUSE_LUXURY_GROWTH
+## за каждый отряд сверх, а сверх HOUSE_LUXURY_STEEP_FROM — ещё ×
+## HOUSE_LUXURY_STEEP за каждый. Одна крепость: 21-й дом (35.5 отр.) ×6,
+## 22-й (37) ×20, 23-й (38.5) ×62, 24-й (40) ×200, 25-й (41.5) ×1800
+const HOUSE_LUXURY_FROM := 35.0
+const HOUSE_LUXURY_GROWTH := 2.0
+const HOUSE_LUXURY_STEEP_FROM := 40.0
+const HOUSE_LUXURY_STEEP := 4.0
+
+## Добавка роскоши к цене СЛЕДУЮЩЕГО дома: existing домов уже есть (с
+## площадками), castles крепостей стоит. 1.0 — лимит после дома не выше 35
+static func house_luxury_mult(existing: int, castles: int) -> float:
+	var per: float = float(maxi(squad_size("spearman"), 1))
+	var after: float = float(pop_army_cap(existing + 1, castles)) / per
+	var over: float = after - HOUSE_LUXURY_FROM
+	if over <= 0.0:
+		return 1.0
+	var steep: float = maxf(after - HOUSE_LUXURY_STEEP_FROM, 0.0)
+	return pow(HOUSE_LUXURY_GROWTH, over - steep) * pow(HOUSE_LUXURY_GROWTH * HOUSE_LUXURY_STEEP, steep)
 
 ## Во сколько раз дороже базовой обойдётся СЛЕДУЮЩЕЕ здание этого типа,
 ## когда у стороны уже стоит existing штук. Одна функция на все законы —
@@ -973,9 +1040,13 @@ static func building_cost_mult(building_id: String, existing: int) -> float:
 	return 1.0
 
 ## Цена постройки с учётом уже стоящих у этой стороны
-static func building_cost_scaled(building_id: String, existing: int) -> Dictionary:
+## castles >= 0 — у дома добавка роскоши сверх 35 отрядов (house_luxury_mult);
+## без числа крепостей (модель экономики, старые вызовы) — прежний закон
+static func building_cost_scaled(building_id: String, existing: int, castles: int = -1) -> Dictionary:
 	var cost: Dictionary = building_cost(building_id)
 	var k: float = building_cost_mult(building_id, existing)
+	if castles >= 0 and is_house(building_id):
+		k *= house_luxury_mult(existing, castles)
 	if k == 1.0:
 		return cost
 	for key in cost.keys():
@@ -1390,22 +1461,84 @@ const VET_BADGE_OUTLINE := Color(0.08, 0.08, 0.10, 0.9)
 ## Общее ветеранство по порогам убийств штандарт НЕ даёт ни при каком значении
 const ELITE_BANNER_AT_TOP_RANK := true
 
+## ── ТРИ ЗВАНИЯ ВМЕСТО СЕМИ (ТЗ 20.10.2026, блок 8) ─────────────────────────
+## 1-3 лычки — «Опытные», красный ТРЕУГОЛЬНЫЙ вымпел с 1/2/3 лычками;
+## 4-6 — «Ветераны», СИНИЙ треугольный вымпел с 1/2/3 лычками (гвидон с
+## вырезом снят — заказ «синие треугольные»); высший ранг — «Легендарные»:
+## увеличенный (+50 %, SquadBanner.ELITE_SCALE) красный ТРЕУГОЛЬНЫЙ вымпел с
+## тремя лычками и белым концом (ТЗ 21.10.2026, письмо 4: «убрать остатки
+## жёлтых коронок, оставить строго красные/синие треугольные флажки» —
+## золотой штандарт с короной и вертикальный штандарт со звездой сняты).
+## Шкала порогов VET_CONFIG не тронута
+## Золото легендарного квадратного флага и его кайма (ТЗ 25.10.2026)
+const LEGEND_GOLD := Color(0.96, 0.79, 0.20)
+const LEGEND_GOLD_DARK := Color(0.62, 0.42, 0.06)
 const VET_BANNER_TIERS := [
-	{"rank": "опытных",       "shape": BANNER_PENNANT,  "cloth": Color(0.72, 0.11, 0.13),
+	{"rank": "опытных",       "title": "Опытные",     "shape": BANNER_PENNANT,  "cloth": Color(0.72, 0.11, 0.13),
 		"chevrons": 1, "chevron_dir":  1, "white_tip": false},
-	{"rank": "закалённых",    "shape": BANNER_PENNANT,  "cloth": Color(0.72, 0.11, 0.13),
+	{"rank": "опытных",       "title": "Опытные",     "shape": BANNER_PENNANT,  "cloth": Color(0.72, 0.11, 0.13),
 		"chevrons": 2, "chevron_dir":  1, "white_tip": false},
-	{"rank": "ветеранов",     "shape": BANNER_PENNANT,  "cloth": Color(0.72, 0.11, 0.13),
-		"chevrons": 2, "chevron_dir":  1, "white_tip": true},
-	{"rank": "элитных",       "shape": BANNER_GUIDON,   "cloth": Color(0.16, 0.34, 0.70),
-		"chevrons": 1, "chevron_dir": -1, "white_tip": false},
-	{"rank": "знаменитых",    "shape": BANNER_GUIDON,   "cloth": Color(0.16, 0.34, 0.70),
-		"chevrons": 2, "chevron_dir": -1, "white_tip": false},
-	{"rank": "прославленных", "shape": BANNER_GUIDON,   "cloth": Color(0.16, 0.34, 0.70),
-		"chevrons": 2, "chevron_dir": -1, "white_tip": true},
-	{"rank": "легендарных",   "shape": BANNER_STANDARD, "cloth": Color(0.55, 0.09, 0.12),
-		"chevrons": 0, "chevron_dir":  1, "white_tip": false},
+	{"rank": "опытных",       "title": "Опытные",     "shape": BANNER_PENNANT,  "cloth": Color(0.72, 0.11, 0.13),
+		"chevrons": 3, "chevron_dir":  1, "white_tip": false},
+	{"rank": "ветеранов",     "title": "Ветераны",    "shape": BANNER_PENNANT,  "cloth": Color(0.16, 0.34, 0.70),
+		"chevrons": 1, "chevron_dir":  1, "white_tip": false},
+	{"rank": "ветеранов",     "title": "Ветераны",    "shape": BANNER_PENNANT,  "cloth": Color(0.16, 0.34, 0.70),
+		"chevrons": 2, "chevron_dir":  1, "white_tip": false},
+	{"rank": "ветеранов",     "title": "Ветераны",    "shape": BANNER_PENNANT,  "cloth": Color(0.16, 0.34, 0.70),
+		"chevrons": 3, "chevron_dir":  1, "white_tip": false},
+	# ── РАЗВОРОТ (ТЗ 25.10.2026, блок 3): ЛЕГЕНДАРНЫМ — ЗОЛОТОЙ КВАДРАТ ──────
+	# «У легендарной пехоты — оригинальный красивый жёлтый/золотистый
+	# квадратный флаг, а не бордовый баннер игрока». Снятие жёлтого 21.10
+	# развёрнуто явным ТЗ. Мини-флажки под ним — BannerArt.legend_texture
+	{"rank": "легендарных",   "title": "Легендарные", "shape": BANNER_STANDARD, "cloth": LEGEND_GOLD,
+		"edge": LEGEND_GOLD_DARK, "chevrons": 3, "chevron_dir":  1, "white_tip": true},
 ]
+
+
+## ── ЛЫЧКИ СВЕРХ ЛЕГЕНДЫ (ТЗ 25.10.2026, блок 3) ───────────────────────────
+## Легендарный отряд продолжает копить опыт боями и берёт ещё до
+## LEGEND_EXTRA_MAX лычек. Расстояние по опыту между ними плавно растёт:
+## k-я лычка (1..MAX) стоит последний интервал шкалы × LEGEND_EXTRA_GAP[k-1].
+## Каждая лычка — ещё одна ступень прибавок рода (vet_auto_step). Если отряд
+## несёт штандарт игрока (реликвию) — лычка поднимает его уровень (+язычок
+## на бордовом мини-флажке, +1 к реликвии); без штандарта — на древке под
+## золотым флагом прибавляется цветной мини-флажок (LEGEND_MINI_COLORS)
+const LEGEND_EXTRA_MAX := 3
+const LEGEND_EXTRA_GAP := [1.5, 2.0, 2.6]
+const LEGEND_MINI_COLORS := [Color(0.80, 0.12, 0.12), Color(0.16, 0.36, 0.78), Color(0.14, 0.60, 0.22)]
+## Бордовый мини-флажок штандарта игрока (тот же цвет, что BannerArt.ELITE_CLOTH)
+const LEGEND_ELITE_MINI := Color(0.47, 0.05, 0.11)
+
+## Порог убийств k-й лычки сверх легенды (k = 1..LEGEND_EXTRA_MAX); −1 — нет
+static func legend_extra_threshold(unit_type: String, k: int) -> int:
+	if k < 1 or k > LEGEND_EXTRA_MAX:
+		return -1
+	var th: Array = _vet_thresholds(unit_type)
+	if th.size() < 2:
+		return -1
+	var last: int = int(th[th.size() - 1])
+	var gap: float = float(last - int(th[th.size() - 2]))
+	var need: float = float(last)
+	for i in range(k):
+		need += gap * float(LEGEND_EXTRA_GAP[i])
+	return int(round(need))
+
+## Сколько лычек сверх легенды даёт счёт kills (0..LEGEND_EXTRA_MAX)
+static func legend_extra_for_kills(unit_type: String, kills: int) -> int:
+	var n := 0
+	for k in range(1, LEGEND_EXTRA_MAX + 1):
+		var t: int = legend_extra_threshold(unit_type, k)
+		if t < 0 or kills < t:
+			break
+		n = k
+	return n
+
+## Звание отряда одним словом для интерфейса: «Новобранцы» / «Опытные» /
+## «Ветераны» / «Легендарные» (ТЗ 20.10.2026, блок 8)
+static func rank_title(lvl: int) -> String:
+	if lvl <= 0:
+		return "Новобранцы"
+	return String(veteran_banner_tier(lvl).get("title", "Опытные"))
 
 static func veteran_banner_tier(lvl: int) -> Dictionary:
 	if lvl <= 0 or VET_BANNER_TIERS.is_empty():

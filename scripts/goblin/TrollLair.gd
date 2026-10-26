@@ -834,7 +834,7 @@ func _lair_clock() -> float:
 	var m = GameManager.main
 	if m != null and is_instance_valid(m) and m.has_method("game_clock"):
 		return float(m.call("game_clock"))
-	return float(Time.get_ticks_msec()) * 0.001
+	return float(Unit.game_ms()) * 0.001
 
 func _solidarity_count(now: float) -> int:
 	var n := 0

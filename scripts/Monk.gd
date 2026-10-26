@@ -97,6 +97,22 @@ func _ready() -> void:
 	super._ready()
 	_setup_monk_visual()
 
+## Направление от точки отряда на ближайшего врага в MONK_REAR_SCAN_R
+## (единичный вектор; ZERO — врага нет или ручка выключена). Один запрос
+## сетки — зовётся раз в шаг подхода, не покадрово
+const MONK_REAR_SCAN_R := 30.0
+func _enemy_dir_from(at: Vector3, _sid: int) -> Vector3:
+	if not _Opt.monk_rear or GameManager.unit_grid == null:
+		return Vector3.ZERO
+	var foe = GameManager.unit_grid.enemy_at(at, MONK_REAR_SCAN_R, faction)
+	if foe == null or not is_instance_valid(foe):
+		return Vector3.ZERO
+	var v: Vector3 = (foe as Node3D).global_position - at
+	v.y = 0.0
+	if v.length_squared() < 1e-4:
+		return Vector3.ZERO
+	return v.normalized()
+
 ## ── МОНАХ НЕ ДЕРЁТСЯ (спринт 19, письмо 12) ─────────────────────────────
 ## Урона у него нет (STATS: attack_1 = 0), значит нет авто-агро, ответа на
 ## удар и тылового напора. Приказ атаки монах НЕ ПРИНИМАЕТ вовсе: ни цели,
@@ -607,6 +623,13 @@ func _care_squad(sid: int, may_walk: bool = true) -> bool:
 	var cap: int = max_heal_targets()
 	var full: bool = full_heal_tick()
 	var per: float = tick / _MCfg.MONK_HEAL_SEC_PER_MAN * heal_amount_mult()
+	# ── МАССОВОЕ ЛЕЧЕНИЕ ДОЛЬШЕ ТОЧЕЧНОГО НА 40 % (ТЗ 23.10.2026, п. 7) ─────
+	# Без узла кузницы (1d «Троичный поток», 3d «Опека», 2d «Благодать») монах
+	# лечит одного (max_heal_targets = 1). С ним — нескольких сразу, и каждому
+	# достаётся доля одиночного темпа / MASS_HEAL_SLOW: отряд поднимается
+	# заметное время, а не «мгновенно из коробки»
+	if cap > 1 and not full:
+		per /= MASS_HEAL_SLOW
 	var given := 0.0
 	var touched := 0
 	heal_targets.clear()
@@ -773,6 +796,10 @@ func _go_to_front() -> bool:
 	if _step_t > 0.0:
 		return true
 	var dir := Vector3(best.x - mp.x, 0.0, best.y - mp.z) / d
+	# Из тыла: точка — за отрядом относительно его врага (ТЗ 22.10.2026)
+	var fd: Vector3 = _enemy_dir_from(Vector3(best.x, 0.0, best.y), 0)
+	if fd != Vector3.ZERO:
+		dir = fd
 	var stand: Vector3 = Vector3(best.x, 0.0, best.y) - dir * sd
 	if _step_to != Vector3.INF and _step_to.distance_to(stand) < _MCfg.MONK_MOVE_SLACK \
 			and state == State.MOVING:
@@ -1308,6 +1335,8 @@ func max_heal_targets() -> int:
 
 ## «Непрерывный Поток» (4b) задаёт такт АБСОЛЮТНО, а не долей
 const FLOW_TICK := 0.3
+## Массовый такт лечит каждого в 1.4 раза медленнее одиночного (ТЗ 23.10.2026)
+const MASS_HEAL_SLOW := 1.4
 ## «Абсолютное Целительство» (5b): такт восполняет живым весь запас
 func full_heal_tick() -> bool:
 	return _node("5b")
@@ -1396,6 +1425,12 @@ func _walk_to_patient(p: Unit, sid: int = 0) -> void:
 			anchor = Vector3(c.x, anchor.y, c.y)
 	var to_me: Vector3 = global_position - anchor
 	to_me.y = 0.0
+	# ── ИЗ ТЫЛА (ТЗ 22.10.2026): встаём со стороны, ПРОТИВОПОЛОЖНОЙ врагу
+	# отряда-пациента, а не «с нашей» — монах, оказавшийся впереди строя,
+	# вставал перед ним, то есть в авангарде, и погибал первым
+	var foe_dir: Vector3 = _enemy_dir_from(anchor, sid)
+	if foe_dir != Vector3.ZERO:
+		to_me = -foe_dir
 	if to_me.length() < 0.01:
 		to_me = Vector3(1.0, 0.0, 0.0)
 	var stand: Vector3 = anchor + to_me.normalized() * stand_dist()

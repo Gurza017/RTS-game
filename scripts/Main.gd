@@ -5,6 +5,9 @@ enum Phase { MAIN_MENU, PLACING_CASTLE, PLACING_BUILDING, PLAYING, VICTORY, DEFE
 
 const _BBUtil   := preload("res://scripts/BillboardUtil.gd")
 const _UIAssets := preload("res://scripts/UIAssets.gd")
+## Экран загрузки (ТЗ 21.10.2026): этапы сборки партии двигают его полосу.
+## Без открытого экрана (стенды грузят Main.tscn напрямую) вызовы пустые
+const _Loading  := preload("res://scripts/ui/LoadingScreen.gd")
 const _UCfg     := preload("res://scripts/unit_stats_config.gd")
 const _CSite    := preload("res://scripts/ConstructionSite.gd")
 # ИИ вынесен в отдельный файл: логика в EnemyAI.gd, ЧИСЛА — в ai_start_army_limit.gd
@@ -343,12 +346,16 @@ var _world: Node3D             = null
 # теперь можно повторить — достаточно записать зерно.
 var world_seed: int = 0
 
-## ЧАСЫ ПАРТИИ. Отдельно от Time.get_ticks_msec(): на паузе войско не воюет, и
-## расписание орды (спячка до тридцатой минуты, волны) обязано стоять вместе с
-## ним. Загрузка ставит эти часы в сохранённое значение — иначе партия,
-## поднятая с сороковой минуты, начинала бы отсчёт заново и усыпляла бы уже
-## проснувшуюся орду
+## ЧАСЫ ПАРТИИ. Приращение — из игровых часов Unit.game_ms() (накопленная
+## физическая дельта, аудит 22.10.2026), а не из delta отрисовки: на паузе
+## войско не воюет, при просадке FPS мир замедляется, и расписание орды
+## (перемирие, волны, штурм) обязано идти вместе со сроками бойцов, без
+## расхождения. Загрузка ставит эти часы в сохранённое значение — иначе
+## партия, поднятая с сороковой минуты, начинала бы отсчёт заново и усыпляла
+## бы уже проснувшуюся орду
 var _game_clock: float = 0.0
+## Шаг игровых часов для часов партии (scripts/GameClockStep.gd)
+var _clk = preload("res://scripts/GameClockStep.gd").new()
 
 ## Сколько секунд идёт партия
 func game_clock() -> float:
@@ -358,6 +365,14 @@ func game_clock() -> float:
 func set_game_clock(t: float) -> void:
 	_game_clock = maxf(t, 0.0)
 
+## Довести часы партии до игровых часов бойцов (GameClockStep: сумма шагов
+## равна пройденным Unit.game_ms(), дрейфа нет; разрыв больше 0.5 с — Main
+## морозили (стенд), он отбрасывается, как прежде). Отдаёт приращение в секундах
+func _advance_clocks() -> float:
+	var gdt: float = _clk.step()
+	_game_clock += gdt
+	return gdt
+
 func _ready() -> void:
 	# ЗЕРНО БЕРЁТСЯ ИЗ СЛЕПКА, ЕСЛИ ПАРТИЮ ГРУЗЯТ. Читать его надо ЗДЕСЬ и
 	# больше нигде: лес, кусты и вода сажаются ниже по этой же функции, то есть
@@ -366,6 +381,11 @@ func _ready() -> void:
 	var pending: Dictionary = GameManager.pending_load
 	var meta: Dictionary = pending.get("meta", {}) if not pending.is_empty() else {}
 	world_seed = int(meta.get("world_seed", 0))
+	# Стендам и A/B зондов: `-- seed=N` — та же карта в обеих фазах
+	if world_seed == 0:
+		for a in OS.get_cmdline_user_args():
+			if String(a).begins_with("seed="):
+				world_seed = int(String(a).substr(5))
 	if world_seed == 0:
 		# Новая партия: зерно случайное, но ЗАПОМНЕННОЕ — сохранение положит
 		# в файл именно его
@@ -406,10 +426,13 @@ func _ready() -> void:
 	# Пределы карты снимаются ОДИН РАЗ и дальше живут числами в GameManager:
 	# зажим границ стоит на самом горячем пути (шаг каждого бойца)
 	GameManager.refresh_map_bounds()
+	_Loading.stage("Генерация рельефа…", 0.38)
 	_setup_environment()
 	_setup_terrain()
+	_Loading.stage("Туман войны…", 0.66)
 	_setup_fog()
 	_camera = _setup_camera()
+	_Loading.stage("Подготовка интерфейса…", 0.70)
 	hud = HUD.new()
 	add_child(hud)
 	selection_manager = SelectionManager.new()
@@ -421,6 +444,7 @@ func _ready() -> void:
 	# Копилка опыта армии и её кнопка видны с первой секунды партии, а не с
 	# первого убийства (менеджер реликвий иначе создаётся лениво)
 	GameManager.relic_mgr()
+	_Loading.stage("Пробуждение противника…", 0.74)
 	enemy_ai = _EnemyAI.new()
 	enemy_ai.name = "EnemyAI"
 	add_child(enemy_ai)
@@ -448,6 +472,7 @@ func _ready() -> void:
 	autosave.setup(self)
 	_setup_pause_modes()
 	start_game()
+	_Loading.finish()
 
 ## Идёт ли живая партия (не расстановка крепости, не победа и не поражение).
 ## Спрашивает автосохранение
@@ -491,6 +516,12 @@ func _setup_pause_modes() -> void:
 		enemy_ai.process_mode = Node.PROCESS_MODE_PAUSABLE
 	if goblin_ai != null and is_instance_valid(goblin_ai):
 		goblin_ai.process_mode = Node.PROCESS_MODE_PAUSABLE
+	# Остальные «мозги» мира — тоже паузуемые (ТЗ 20.10.2026, блок 7): они
+	# дети Main и наследовали его ALWAYS — командир конницы, гноллы и движок
+	# волн штурма тикали на паузе (таймеры выхода волн, горны)
+	for n in [gnoll_ai, cav_commander, assault_event, telemetry]:
+		if n != null and is_instance_valid(n):
+			(n as Node).process_mode = Node.PROCESS_MODE_PAUSABLE
 	if GameManager.fog != null and is_instance_valid(GameManager.fog):
 		(GameManager.fog as Node).process_mode = Node.PROCESS_MODE_PAUSABLE
 
@@ -522,6 +553,7 @@ func start_game() -> void:
 	# Стенды поднимают Main под своим узлом и нанимают как никто не нанимает
 	GameManager.pop_limit_enabled = _UCfg.POP_LIMIT_ENABLED \
 		and get_tree().current_scene == self
+	_Loading.stage("Закладка баз и ресурсов…", 0.80)
 	_spawn_resource_nodes()
 	# Своя жила и своя каменоломня рядом с каждой базой — на расчищенной
 	# площадке, вне коллизии замка и не пересекаясь друг с другом
@@ -552,6 +584,7 @@ func start_game() -> void:
 		# поднимают Main под своим узлом и засоряли бы user:// логами
 		telemetry.write_file = get_tree().current_scene == self
 		add_child(telemetry)
+		telemetry.process_mode = Node.PROCESS_MODE_PAUSABLE
 	_phase = Phase.PLAYING
 	# Лес заводится на весь бой; основная тема будет подмешиваться раз в 10 минут
 	AudioManager.start_game_audio()
@@ -562,9 +595,11 @@ func start_game() -> void:
 	# бригада, а крепость игрок закладывает КНОПКОЙ РАБОЧЕГО в любом месте, где
 	# нет тумана (см. can_build_at). Механизм постановки замка фантомом оставлен
 	# и работает для второй и следующих крепостей
+	_Loading.stage("Размещение отрядов…", 0.88)
 	_spawn_starting_workers(PLAYER_BASE_ANCHOR)
 	if enemy_ai != null:
 		enemy_ai.setup(self)
+	_Loading.stage("Лагерь орды и логова…", 0.93)
 	_spawn_goblin_village()
 	_spawn_troll_lair()
 	_spawn_gold_mines()
@@ -580,6 +615,7 @@ func start_game() -> void:
 		# оставленный слепок при любой ошибке внутри привёл бы к повторной
 		# загрузке на следующем рестарте
 		GameManager.pending_load = {}
+		_Loading.stage("Восстановление сохранения…", 0.97)
 		_SaveLoad.apply(self, state)
 		# Охрана крепости ИИ приехала в слепке с признаком home_guard —
 		# усыновить заново (см. HomeGuard.adopt_loaded)
@@ -768,6 +804,11 @@ func _prewarm_art() -> void:
 	for lvl in range(1, 8):
 		_BannerArtM.texture_for(lvl)
 	_BannerArtM.white_flag_texture()
+	# Знамёна орды (зелёные и белые) и золотой квадрат легенд (ТЗ 25.10.2026)
+	for lv in [1, 4, 7]:
+		_BannerArtM.goblin_tongue_texture(lv)
+		_BannerArtM.goblin_tongue_texture(lv, true)
+	_BannerArtM.legend_texture(0, 0)
 	_MonkM._aura_texture()
 	# Лента лечения монаха: первый такт лечения стоил 3.8 мс (monk_build_vfx)
 	# — это НЕ load() (он кэширован), а BillboardUtil._detect_frame_count:
@@ -1482,11 +1523,26 @@ func _update_hover_cursor(delta: float) -> void:
 	# загона; прицел на чужом отряде/здании — острие меча вниз
 	var kind: int = _CursorArt.NONE
 	if hovered != null:
-		kind = _CursorArt.HAND
+		# ТЗ 20.10.2026, блок 6: инструмент по ресурсу — топор у дерева,
+		# кирка у камня и золота, нож у мяса
+		match int(hovered.resource_type):
+			Constants.RESOURCE_WOOD: kind = _CursorArt.AXE
+			Constants.RESOURCE_STONE, Constants.RESOURCE_GOLD: kind = _CursorArt.PICKAXE
+			Constants.RESOURCE_FOOD: kind = _CursorArt.KNIFE
+			_: kind = _CursorArt.HAND
 	else:
 		kind = selection_manager.hover_cursor_kind(mouse)
 		if kind == _CursorArt.NONE and aiming:
-			kind = _CursorArt.SWORD
+			# Только стрелки (лучники, башня с гарнизоном) — стрела; пехота
+			# и смешанное выделение — меч (ТЗ 24.10.2026, второе письмо)
+			var ranged: bool = selection_manager.selection_ranged_only()
+			kind = _CursorArt.ARROW if ranged else _CursorArt.SWORD
+		elif kind == _CursorArt.NONE and selection_manager.selection_towers_only() \
+				and selection_manager.selection_has_fire_forts():
+			# Выделены одни башни со стрелками: ПКМ по земле — огонь по врагу
+			# у точки (SelectionManager.TOWER_POINT_PICK_R), курсор — стрела
+			# всюду, не только над чужим (ТЗ 25.10.2026, третье письмо, п. 1)
+			kind = _CursorArt.ARROW
 	# Режим [A]: курсор — скрещённые мечи, его ведёт SelectionManager
 	if selection_manager.swords_cursor_on:
 		return
@@ -1544,7 +1600,10 @@ func _update_enemy_hover(mouse: Vector2, on_resource: bool) -> bool:
 	if on_resource or selection_manager == null:
 		GameManager.sel_decals.clear_hover()
 		return false
-	if not selection_manager._selection_can_attack():
+	# Своё укрепление со стрелками на крыше — тоже стрелок (ТЗ 25.10.2026,
+	# третье письмо, п. 1): без этого с выделенной башней прицела не было вовсе
+	if not selection_manager._selection_can_attack() \
+			and not selection_manager.selection_has_fire_forts():
 		GameManager.sel_decals.clear_hover()
 		return false
 	var foes: Array = selection_manager.enemy_squad_under_cursor(mouse)
@@ -1683,9 +1742,13 @@ func _process(delta: float) -> void:
 	_Opt.sys_add("main", Time.get_ticks_usec() - _sys_t0)
 
 func _process_timed(delta: float) -> void:
-	# Часы партии тикают ЗДЕСЬ, а не в физике: _process останавливается паузой
-	# вместе со всем деревом, и это ровно то поведение, которое нужно
-	_game_clock += delta
+	# ── ЧАСЫ ПАРТИИ — ПРИРАЩЕНИЕ ИГРОВЫХ ЧАСОВ (аудит 22.10.2026) ──────────
+	# Main работает в PROCESS_MODE_ALWAYS (_setup_pause_modes), и прежде часы
+	# партии шли на delta отрисовки: по ним перемирие, штурм базы, рейды орды,
+	# гноллы у пней, горны волн. Пауза (ТЗ 20.10) была закрыта проверкой
+	# paused, а просадка FPS и time_scale — нет. Теперь приращение — разность
+	# Unit.game_ms(): на паузе она ноль, при просадке — медленнее стены
+	var gdt: float = _advance_clocks()
 	# ── ТАКТИЧЕСКАЯ ПАУЗА: ИНТЕРФЕЙС ЖИВЁТ, МИР СТОИТ ───────────────────────
 	# Main работает и на паузе (см. _setup_pause_modes), поэтому всё, что здесь
 	# СИМУЛЯЦИЯ, а не интерфейс, надо остановить руками. Призрак постройки и
@@ -1694,15 +1757,20 @@ func _process_timed(delta: float) -> void:
 	var frozen: bool = get_tree().paused
 	_update_hover_cursor(delta)
 	if not frozen and _duck_node and is_instance_valid(_duck_node):
-		_duck_node.position.y = 0.45 + sin(Time.get_ticks_msec() * 0.001 * PI) * 0.08
+		_duck_node.position.y = 0.45 + sin(Unit.game_ms() * 0.001 * PI) * 0.08
 	if _phase == Phase.PLACING_CASTLE or _phase == Phase.PLACING_BUILDING:
 		_update_ghost(delta)
-	if not frozen and _phase == Phase.PLAYING:
+	# ЧАСЫ ПАРТИИ ИДУТ И ПОКА ИГРОК СТАВИТ ПОСТРОЙКУ (лог партии 23.10.2026):
+	# мир в PLACING_BUILDING живёт, а _match_clock стоял — к концу партии
+	# время событий телеметрии отставало от часов ИИ и бойцов на 62 с.
+	# Проверка победы — по-прежнему только в PLAYING (накопленный срок
+	# сработает по возврату)
+	if not frozen and is_playing():
 		# ИИ тикает сам (EnemyAI._process по THINK_INTERVAL из конфига);
 		# «волн усиления из воздуха» больше нет — армия только через найм
-		_match_clock += delta
-		_victory_timer += delta
-		if _victory_timer >= VICTORY_CHECK_INTERVAL:
+		_match_clock += gdt
+		_victory_timer += gdt
+		if _phase == Phase.PLAYING and _victory_timer >= VICTORY_CHECK_INTERVAL:
 			_victory_timer = 0.0
 			_check_victory()
 
@@ -1992,6 +2060,7 @@ func restart_game() -> void:
 	# Слепок сохранённой партии не должен подхватиться перезапуском: «заново»
 	# означает чистый старт, а не загрузку (см. GameManager.pending_load)
 	GameManager.pending_load = {}
+	_Loading.begin(get_tree(), "Перезапуск партии…").set_target(0.30)
 	get_tree().reload_current_scene()
 
 ## В ГЛАВНОЕ МЕНЮ. Та же сцена, из которой партия и открывается
@@ -2734,7 +2803,8 @@ func horde_spawn_pending() -> int:
 	return n
 
 func _physics_process(_delta: float) -> void:
-	if _horde_q.is_empty():
+	# Растяжка спавна орды — симуляция: на паузе не рожаем (Main — ALWAYS)
+	if _horde_q.is_empty() or get_tree().paused:
 		return
 	var left: int = _horde_budget_left()
 	while left > 0 and not _horde_q.is_empty():
@@ -2817,7 +2887,7 @@ func spawn_goblin_squad(uid: String, n: int, base: Vector3, staggered: bool = fa
 	# spawn_config.ASSAULT_EVENT_CAP_EXTRA): к 30-й минуте резерв площадки,
 	# охрана и волны вожака держат ~1700 из 1800, и 8-20 отрядов эвента в
 	# потолок не влезали вовсе (стенд: 4 из 8, затем отказы)
-	n = mini(n, _Spawn.HORDE_CAP + cap_bonus - horde_alive())
+	n = mini(n, _Spawn.horde_cap(_match_clock) + cap_bonus - horde_alive())
 	if n <= 0:
 		horde_cap_refusals += 1
 		return 0
@@ -3761,11 +3831,13 @@ func _setup_terrain() -> void:
 	ground_body.add_child(col); _world.add_child(ground_body)
 	_build_flat_terrain()
 	_build_world_edge()
+	_Loading.stage("Посадка лесов…", 0.46)
 	# ЗОНЫ РЕЗЕРВИРУЮТСЯ ЗДЕСЬ, а не только в start_game(): лес сажается из
 	# _ready() ДО start_game(), и раньше на момент посадки список зон был пуст —
 	# роща спокойно вырастала прямо на пятачке базы игрока
 	_setup_reserved_zones()
 	_add_forest_clusters()
+	_Loading.stage("Прокладка рек и бродов…", 0.56)
 	_spawn_water_body()
 	_spawn_river()
 	_spawn_bushes()
@@ -4129,6 +4201,26 @@ func _add_base_walls() -> void:
 			x += WALL_STEP * sx
 		base_wall_trees += wall_trees_placed - before
 	wall_trees_placed -= base_wall_trees     # счётчик игрока — прежний смысл (qa_tz0924)
+
+## ── ПРОХОДЫ В СТЕНЕ БАЗЫ КРАСНОГО (ТЗ 25.10.2026, третье письмо, п. 5) ──
+## Где сторожевым башням ИИ стоять «у входа»: середина каждого прохода, куда
+## смотреть ВНУТРЬ базы (inward) и вдоль прохода (along). Пусто — стен нет
+func ai_base_exits() -> Array:
+	var out: Array = []
+	var specs: Array = _wall_specs()
+	if specs.is_empty():
+		return out
+	var sp: Dictionary = specs[0]
+	var a: Vector3 = sp["a"]
+	var sx: float = float(sp["sx"])
+	var sz: float = float(sp["sz"])
+	var zg: float = a.z + sz * WALL_GAP_RIGHT_AT
+	out.append({"p": Vector3(_wall_x_of(sp, zg), 0.0, zg), "inward": Vector3(-sx, 0.0, 0.0),
+		"along": Vector3(0.0, 0.0, 1.0), "half": _wall_half(zg)})
+	var xg: float = a.x + sx * WALL_GAP_DOWN_AT
+	out.append({"p": Vector3(xg, 0.0, _wall_z_of(sp, xg)), "inward": Vector3(0.0, 0.0, -sz),
+		"along": Vector3(1.0, 0.0, 0.0), "half": _wall_half(xg)})
+	return out
 
 func _wall_gap(along: float, gap_center: float) -> bool:
 	return absf(along - gap_center) < WALL_GAP_W * 0.5

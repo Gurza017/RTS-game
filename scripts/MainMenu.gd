@@ -2,25 +2,24 @@ extends Control
 class_name MainMenu
 
 ## ═══════════════════════════════════════════════════════════════════════════
-## ГЛАВНОЕ МЕНЮ — ЧЕТЫРЕ КНОПКИ И ДВА ПОДМЕНЮ (заказ владельца 10.09.2026)
+## ГЛАВНОЕ МЕНЮ — ЧЕТЫРЕ КНОПКИ В РАМЕ ПОВЕРХ ИЛЛЮСТРАЦИИ (ТЗ 21.10.2026)
 ## ═══════════════════════════════════════════════════════════════════════════
-## Прежний экран был свалкой: подзаголовок, четыре выпадающих списка, ряд
-## сложности со строкой-подсказкой, кнопка старта, ряд слотов сохранений,
-## кнопка звука и выход — всё в одном столбце. Теперь так:
+## Порядок страниц прежний (заказ владельца 10.09.2026):
 ##
 ##   ГЛАВНАЯ    заголовок «10 000 копейщиков» и РОВНО ЧЕТЫРЕ кнопки:
 ##              START / Загрузить / Опции / Выход
-##   ЗАГРУЗИТЬ  подменю со слотами (пустой слот виден, но не нажимается)
-##   ОПЦИИ      подменю: партия (расы и цвета), сложность ВЫПАДАЮЩИМ СПИСКОМ,
-##              звук (три шины) и отображение (FPS, прокрутка камеры краем)
+##   ЗАГРУЗИТЬ  слоты сохранений (пустой слот виден, но не нажимается)
+##   ОПЦИИ      окно настроек с вкладками (scripts/ui/SettingsWindow.gd) —
+##              то же окно, что открывается из паузы
 ##
-## СТРАНИЦЫ — ЭТО ТРИ VBox'а В ОДНОМ КОНТЕЙНЕРЕ, а не отдельные сцены: выбор
-## расы и цвета читается кнопкой «START» с той же самой страницы опций, и
-## разнеси их по сценам — пришлось бы заводить второе хранилище выбора.
+## РЕДИЗАЙН 21.10.2026: вместо тёмно-синего фона и столбца плоских кнопок —
+## процедурная иллюстрация (MenuArt), кованая рама с деревянными кнопками
+## (MedievalUI), настройки — модальным окном с вкладками без прокрутки, а
+## загрузка партии — полноэкранным экраном с прогрессом (LoadingScreen).
 ##
-## ВЫБОР ЖИВЁТ НА ДИСКЕ, А НЕ В ПАМЯТИ МЕНЮ: сложность — user://difficulty.cfg
-## (_Diff), громкость — user://audio_settings.cfg (AudioManager), отображение —
-## user://view_settings.cfg (_GS). Поэтому «применить» нигде не нужно.
+## ВЫБОР ЖИВЁТ НА ДИСКЕ, А НЕ В ПАМЯТИ МЕНЮ: сложность — user://difficulty.cfg,
+## громкость — user://audio_settings.cfg, отображение — user://view_settings.cfg.
+## Раса и цвет — в GameManager (окно настроек пишет их по выбору).
 
 const FACTION_LABELS = ["Люди", "Нежить", "Орки", "Эльфы", "Гномы"]
 const FACTION_KEYS   = ["humans", "undead", "orc", "elves", "dwarves"]
@@ -28,16 +27,18 @@ const FACTION_KEYS   = ["humans", "undead", "orc", "elves", "dwarves"]
 const _GS       := preload("res://scripts/game_settings.gd")
 const _UIAssets := preload("res://scripts/UIAssets.gd")
 const _SSParser := preload("res://scripts/SpriteSheetParser.gd")
-## Пресеты сложности: подписи, подсказки и сам выбор живут там
 const _Diff     := preload("res://scripts/game_difficulty_config.gd")
-const _GobCfgMM := preload("res://scripts/goblin/goblin_config.gd")   # срок перемирия для подписи
-## Загрузка сохранённой партии прямо со стартового экрана
 const _SaveLoad := preload("res://scripts/SaveLoadManager.gd")
+const _MUI      := preload("res://scripts/ui/MedievalUI.gd")
+const _Art      := preload("res://scripts/ui/MenuArt.gd")
+const _Settings := preload("res://scripts/ui/SettingsWindow.gd")
+const _Loading  := preload("res://scripts/ui/LoadingScreen.gd")
 
-## Ширина кнопок главной страницы и подменю
-const BTN_W := 220
-const BTN_H := 44
+## Размер кнопок главной страницы
+const BTN_W := 280
+const BTN_H := 50
 
+## Ссылки на элементы окна настроек (окно живёт всю жизнь меню, см. keep_alive)
 var _player_opt: OptionButton
 var _ai_opt:     OptionButton
 var _player_color_opt: OptionButton
@@ -45,14 +46,16 @@ var _ai_color_opt:     OptionButton
 var _diff_opt:   OptionButton
 var _diff_hint:  Label = null
 
-## Страницы: главная, загрузка, опции. Видна всегда ровно одна
+## Страницы: главная и загрузка — в раме меню; опции — окно поверх
 var _page_main: VBoxContainer = null
 var _page_load: VBoxContainer = null
-var _page_opts: VBoxContainer = null
+var _page_opts: Control = null
+var _menu_panel: PanelContainer = null
 
 func _ready() -> void:
 	anchor_right  = 1.0
 	anchor_bottom = 1.0
+	theme = _MUI.theme()
 	# ВЫБОР ЧИТАЕТСЯ С ДИСКА ДО ВЁРСТКИ: списки строятся уже с прошлым выбором
 	_Diff.load_saved()
 	_GS.load_view_settings()
@@ -60,49 +63,50 @@ func _ready() -> void:
 	_UIAssets.install_cursor()
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	_build_ui()
-	# Панель выбора расы играет основную тему
 	AudioManager.play_menu_music()
 
 func _build_ui() -> void:
 	var bg := ColorRect.new()
-	bg.color          = Color(0.06, 0.08, 0.14)
-	bg.anchor_right   = 1.0
-	bg.anchor_bottom  = 1.0
+	bg.color = Color(0.04, 0.03, 0.04)
+	bg.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(bg)
+	var backdrop: TextureRect = _Art.backdrop()
+	if backdrop != null:
+		add_child(backdrop)
+	var art = _Art.new()
+	art.name = "MenuArt"
+	art.overlay_only = backdrop != null
+	add_child(art)
 
-	var scroll := ScrollContainer.new()
-	scroll.anchor_right  = 1.0
-	scroll.anchor_bottom = 1.0
-	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	add_child(scroll)
-
-	# CenterContainer внутри ScrollContainer обязан тянуться по ОБЕИМ осям:
-	# прокрутка выдаёт ребёнку ровно его минимум, и свёрнутая страница
-	# прижалась бы к верхней кромке вместо середины экрана
-	var center := CenterContainer.new()
-	center.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	center.size_flags_vertical   = Control.SIZE_EXPAND_FILL
-	scroll.add_child(center)
-
-	var stack := VBoxContainer.new()
-	stack.add_theme_constant_override("separation", 12)
-	center.add_child(stack)
-
-	# ЗАГОЛОВОК — ОДИН, БЕЗ ПОДЗАГОЛОВКА (заказ владельца): строка «Стратегия
-	# реального времени» ничего не сообщала игроку, который её и так открыл
-	var title := Label.new()
+	# Заголовок — один, без подзаголовка (заказ владельца)
+	var head := VBoxContainer.new()
+	head.name = "MenuHead"
+	head.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
+	head.offset_top = 36
+	head.add_theme_constant_override("separation", 4)
+	head.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(head)
+	var title := _MUI.title_label("10 000 КОПЕЙЩИКОВ", 54)
 	title.name = "MenuTitle"
-	title.text = "10 000 КОПЕЙЩИКОВ"
-	title.add_theme_font_size_override("font_size", 32)
-	title.add_theme_color_override("font_color", Color(0.95, 0.82, 0.22))
-	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	stack.add_child(title)
+	head.add_child(title)
+	head.add_child(_MUI.divider(420.0))
 
-	_add_spacer(stack, 18)
+	# Рама с кнопками — по центру, чуть ниже середины (заголовок сверху)
+	var cc := CenterContainer.new()
+	cc.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	cc.offset_top = 120
+	cc.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(cc)
+	_menu_panel = PanelContainer.new()
+	_menu_panel.name = "MenuPanel"
+	cc.add_child(_menu_panel)
+	var stack := VBoxContainer.new()
+	_menu_panel.add_child(stack)
 
 	_page_main = VBoxContainer.new()
 	_page_main.name = "PageMain"
-	_page_main.add_theme_constant_override("separation", 10)
+	_page_main.add_theme_constant_override("separation", 12)
 	stack.add_child(_page_main)
 	_build_main_page(_page_main)
 
@@ -113,84 +117,102 @@ func _build_ui() -> void:
 	stack.add_child(_page_load)
 	_build_load_page(_page_load)
 
-	_page_opts = VBoxContainer.new()
-	_page_opts.name = "PageOptions"
-	_page_opts.add_theme_constant_override("separation", 8)
-	_page_opts.visible = false
-	stack.add_child(_page_opts)
-	_build_options_page(_page_opts)
+	# ОКНО НАСТРОЕК строится сразу и прячется: START и стенды читают его
+	# элементы, даже если игрок опции не открывал
+	var win = _Settings.new()
+	win.name = "PageOptions"
+	win.setup(false)
+	win.keep_alive = true
+	add_child(win)
+	win.visible = false
+	win.closed.connect(func(): show_page("main"))
+	_page_opts = win
+	_player_opt = win.player_opt
+	_ai_opt = win.ai_opt
+	_player_color_opt = win.player_color_opt
+	_ai_color_opt = win.ai_color_opt
+	_diff_opt = win.diff_opt
+	_diff_hint = win.diff_hint
 
-## Показать ровно одну страницу. Стенд зовёт её по имени, поэтому строка, а не
-## enum: страниц три, и таблица соответствий была бы длиннее самой функции
+	var ver := Label.new()
+	ver.name = "MenuFooter"
+	ver.text = "Esc — назад  ·  настройки сохраняются сразу"
+	ver.add_theme_font_size_override("font_size", 12)
+	ver.add_theme_color_override("font_color", Color(0.85, 0.78, 0.62, 0.7))
+	ver.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_RIGHT)
+	ver.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	ver.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	ver.offset_right = -16
+	ver.offset_bottom = -10
+	add_child(ver)
+
+## Показать ровно одну страницу. Стенд зовёт её по имени
 func show_page(which: String) -> void:
-	if _page_main != null: _page_main.visible = (which == "main")
+	if _page_main != null: _page_main.visible = (which == "main" or which == "options")
 	if _page_load != null: _page_load.visible = (which == "load")
 	if _page_opts != null: _page_opts.visible = (which == "options")
+	# под окном настроек рама меню и заголовок не нужны — окно модальное,
+	# по центру, и заголовок просвечивал бы над его рамой
+	if _menu_panel != null: _menu_panel.visible = (which != "options")
+	var head: Node = get_node_or_null("MenuHead")
+	if head != null: (head as CanvasItem).visible = (which != "options")
+
+## Escape на странице загрузки — назад (окно настроек ловит его само)
+func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo \
+			and (event as InputEventKey).keycode == KEY_ESCAPE:
+		if _page_load != null and _page_load.visible:
+			show_page("main")
+			get_viewport().set_input_as_handled()
 
 # ═════════════════════════════════════════════════════════════════════════════
 # ГЛАВНАЯ СТРАНИЦА: РОВНО ЧЕТЫРЕ КНОПКИ
 # ═════════════════════════════════════════════════════════════════════════════
 func _build_main_page(vbox: VBoxContainer) -> void:
-	# START — КВАДРАТНАЯ, БЕЗ СТРЕЛОК. Чёрные треугольники по бокам («▶ НАЧАТЬ ▶»)
-	# читались как кнопки перемотки, а не как акцент
-	var start := Button.new()
+	var start := _menu_button("START", "green", 24)
 	start.name = "StartButton"
-	start.text = "START"
-	start.custom_minimum_size = Vector2(BTN_W, 64)
-	start.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-	start.add_theme_font_size_override("font_size", 22)
-	start.add_theme_color_override("font_color", Color(0.06, 0.10, 0.04))
-	start.add_theme_color_override("font_hover_color", Color(0.06, 0.10, 0.04))
-	_style_btn(start, Color(0.30, 0.82, 0.22), Color(0.42, 0.95, 0.32), Color(0.65, 1.0, 0.55))
+	start.custom_minimum_size = Vector2(BTN_W, 62)
 	start.pressed.connect(_on_start)
 	vbox.add_child(start)
 
-	var load_btn := _menu_button("Загрузить", Color(0.10, 0.20, 0.32),
-		Color(0.16, 0.30, 0.46), Color(0.28, 0.50, 0.72))
+	var load_btn := _menu_button("Загрузить", "steel")
 	load_btn.name = "LoadButton"
 	load_btn.pressed.connect(func(): show_page("load"))
 	vbox.add_child(load_btn)
 
-	var opt_btn := _menu_button("Опции", Color(0.10, 0.20, 0.32),
-		Color(0.16, 0.30, 0.46), Color(0.28, 0.50, 0.72))
+	var opt_btn := _menu_button("Опции", "wood")
 	opt_btn.name = "OptionsButton"
 	opt_btn.pressed.connect(func(): show_page("options"))
 	vbox.add_child(opt_btn)
 
-	var quit_btn := _menu_button("Выход", Color(0.28, 0.08, 0.08),
-		Color(0.42, 0.12, 0.12), Color(0.60, 0.22, 0.22))
+	var quit_btn := _menu_button("Выход", "red")
 	quit_btn.name = "QuitButton"
 	quit_btn.pressed.connect(func(): get_tree().quit())
 	vbox.add_child(quit_btn)
 
-func _menu_button(text: String, normal: Color, hover: Color, border: Color) -> Button:
+func _menu_button(text: String, kind: String, fs: int = 19) -> Button:
 	var b := Button.new()
 	b.text = text
 	b.custom_minimum_size = Vector2(BTN_W, BTN_H)
 	b.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-	b.add_theme_font_size_override("font_size", 17)
-	_style_btn(b, normal, hover, border)
+	b.focus_mode = Control.FOCUS_NONE
+	_MUI.style_button(b, kind, fs)
 	return b
 
 # ═════════════════════════════════════════════════════════════════════════════
 # ПОДМЕНЮ «ЗАГРУЗИТЬ»
 # ═════════════════════════════════════════════════════════════════════════════
-## СЛОТЫ ВИДНЫ ВСЕГДА, ПУСТЫЕ — НЕ НАЖИМАЮТСЯ. Прежде ряд слотов пропадал с
-## главного экрана целиком, если сохранений нет, — и игрок не знал, есть ли
-## тут вообще загрузка. В отдельном подменю пустой слот сообщает ровно то, что
-## нужно: место есть, партии в нём нет
+## СЛОТЫ ВИДНЫ ВСЕГДА, ПУСТЫЕ — НЕ НАЖИМАЮТСЯ: пустой слот сообщает, что место
+## есть, а партии в нём нет
 func _build_load_page(vbox: VBoxContainer) -> void:
-	vbox.add_child(_caption("Загрузить партию"))
-	var err_lbl := Label.new()
+	vbox.add_child(_MUI.title_label("Загрузить партию", 24))
+	vbox.add_child(_MUI.divider(260.0))
+	var err_lbl := _MUI.hint_label("", 12)
 	err_lbl.name = "LoadError"
-	err_lbl.add_theme_font_size_override("font_size", 11)
-	err_lbl.add_theme_color_override("font_color", Color(0.92, 0.66, 0.60))
+	err_lbl.add_theme_color_override("font_color", Color(0.95, 0.62, 0.52))
 	err_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	err_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	err_lbl.custom_minimum_size = Vector2(420, 0)
+	err_lbl.custom_minimum_size = Vector2(440, 0)
 
-	# Автосохранение (слот 0, ТЗ 13.10.2026) — первым: после вылета это то,
-	# что ищут
 	var slots: Array = [_SaveLoad.AUTOSAVE_SLOT]
 	for i in range(_SaveLoad.SLOT_COUNT):
 		slots.append(i + 1)
@@ -200,354 +222,79 @@ func _build_load_page(vbox: VBoxContainer) -> void:
 		var btn := Button.new()
 		btn.name = "Slot%d" % slot
 		btn.text = _SaveLoad.slot_label(slot)
-		btn.custom_minimum_size = Vector2(420, 32)
+		btn.custom_minimum_size = Vector2(440, 40)
 		btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 		btn.focus_mode = Control.FOCUS_NONE
 		btn.disabled = not has
-		btn.add_theme_font_size_override("font_size", 13)
-		_style_btn(btn, Color(0.12, 0.22, 0.32), Color(0.18, 0.32, 0.46),
-			Color(0.30, 0.50, 0.70))
+		_MUI.style_button(btn, "steel", 14)
 		vbox.add_child(btn)
 		if not has:
 			continue
 		btn.pressed.connect(func():
-			# Кэш листов сбрасывается ровно как при обычном старте: цвета
-			# сторон приедут из сохранения, и набор прошлой партии тут не при чём
+			# Кэш листов сбрасывается ровно как при обычном старте
 			_SSParser.clear_cache()
 			var err: String = _SaveLoad.request_load(get_tree(), slot)
 			if not err.is_empty():
 				err_lbl.text = err)
 	vbox.add_child(err_lbl)
-	_add_spacer(vbox, 10)
-	vbox.add_child(_back_button())
+	var back := _menu_button("Назад", "wood", 17)
+	back.name = "BackButton"
+	back.custom_minimum_size = Vector2(200, 42)
+	back.pressed.connect(func(): show_page("main"))
+	vbox.add_child(back)
 
 # ═════════════════════════════════════════════════════════════════════════════
-# ПОДМЕНЮ «ОПЦИИ»
+# СТАРТ ПАРТИИ И ЭКРАН ЗАГРУЗКИ
 # ═════════════════════════════════════════════════════════════════════════════
-func _build_options_page(vbox: VBoxContainer) -> void:
-	# ── ПАРТИЯ: РАСЫ И ЦВЕТА ────────────────────────────────────────────────
-	vbox.add_child(_caption("Партия"))
-	var grid := GridContainer.new()
-	grid.columns = 2
-	grid.add_theme_constant_override("h_separation", 18)
-	grid.add_theme_constant_override("v_separation", 8)
-	vbox.add_child(grid)
-
-	_player_opt = _make_option()
-	grid.add_child(_make_option_row("Раса Игрока:", _player_opt))
-	_player_color_opt = _make_color_option(_GS.DEFAULT_PLAYER_COLOR)
-	grid.add_child(_make_option_row("Цвет Игрока:", _player_color_opt))
-	_ai_opt = _make_option()
-	grid.add_child(_make_option_row("Раса ИИ:", _ai_opt))
-	_ai_color_opt = _make_color_option(_GS.DEFAULT_AI_COLOR)
-	grid.add_child(_make_option_row("Цвет ИИ:", _ai_color_opt))
-
-	# ── СЛОЖНОСТЬ — ВЫПАДАЮЩИМ СПИСКОМ (заказ владельца) ────────────────────
-	# Был ряд из трёх кнопок с подсветкой выбранной: он занимал полосу в треть
-	# экрана и требовал строки-подсказки под собой. В опциях сложность — такой
-	# же список, как раса, а подсказка выбранного уровня осталась строкой ПОД
-	# списком: в пункт списка её не положить, а объяснять выбор словами надо
-	_add_spacer(vbox, 6)
-	_diff_opt = OptionButton.new()
-	_diff_opt.name = "DifficultyOption"
-	_diff_opt.custom_minimum_size = Vector2(170, 36)
-	_diff_opt.add_theme_font_size_override("font_size", 16)
-	for id in _Diff.ORDER:
-		_diff_opt.add_item(_Diff.label(String(id)))
-	var cur: String = _Diff.current()
-	for i in range(_Diff.ORDER.size()):
-		if String(_Diff.ORDER[i]) == cur:
-			_diff_opt.select(i)
-	vbox.add_child(_make_option_row("Сложность:", _diff_opt))
-	_diff_hint = Label.new()
-	_diff_hint.add_theme_font_size_override("font_size", 12)
-	_diff_hint.add_theme_color_override("font_color", Color(0.62, 0.66, 0.76))
-	_diff_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_diff_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	_diff_hint.custom_minimum_size = Vector2(420, 0)
-	_diff_hint.text = _Diff.hint(cur)
-	vbox.add_child(_diff_hint)
-	# НА ДИСК ПИШЕМ СРАЗУ: файл крошечный, а отдельная кнопка «применить» —
-	# лишний шаг для игрока
-	_diff_opt.item_selected.connect(func(idx: int):
-		var key: String = String(_Diff.ORDER[idx])
-		_Diff.set_current(key)
-		_Diff.save()
-		_diff_hint.text = _Diff.hint(key))
-
-	# ── ЗВУК ────────────────────────────────────────────────────────────────
-	_add_spacer(vbox, 10)
-	vbox.add_child(_caption("Звук"))
-	_build_audio_sliders(vbox)
-
-	# ── ОТОБРАЖЕНИЕ ─────────────────────────────────────────────────────────
-	_add_spacer(vbox, 10)
-	vbox.add_child(_caption("Отображение"))
-	var fps_box := CheckBox.new()
-	fps_box.name = "FpsCheck"
-	fps_box.text = "Отображать FPS"
-	fps_box.button_pressed = _GS.show_fps()
-	fps_box.add_theme_font_size_override("font_size", 15)
-	fps_box.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-	vbox.add_child(fps_box)
-	fps_box.toggled.connect(func(on: bool):
-		_GS.set_show_fps(on))
-
-	var cam_box := CheckBox.new()
-	cam_box.name = "EdgePanCheck"
-	cam_box.text = "Камера едет от края экрана"
-	cam_box.button_pressed = _GS.edge_pan()
-	cam_box.add_theme_font_size_override("font_size", 15)
-	cam_box.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-	vbox.add_child(cam_box)
-	cam_box.toggled.connect(func(on: bool):
-		_GS.set_edge_pan(on))
-
-	# ── ПЕРЕМИРИЕ (ТЗ 14.09.2026, п. 2) ─────────────────────────────────────
-	# Та же ручка, что в паузе (HUD._add_armistice_toggle): game_settings.armistice
-	_add_spacer(vbox, 10)
-	vbox.add_child(_caption("Партия"))
-	var truce_box := CheckBox.new()
-	truce_box.name = "ArmisticeCheck"
-	truce_box.text = "Перемирие (первые %d мин без атак ИИ)" % int(round(_GobCfgMM.TRUCE_SEC / 60.0))
-	truce_box.button_pressed = _GS.armistice()
-	truce_box.add_theme_font_size_override("font_size", 15)
-	truce_box.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-	vbox.add_child(truce_box)
-	truce_box.toggled.connect(func(on: bool):
-		_GS.set_armistice(on))
-
-	# ── АВТОСОХРАНЕНИЕ (ТЗ 13.10.2026, письмо 7) ───────────────────────────
-	# Та же ручка, что в паузе (HUD._add_autosave_row): game_settings.
-	# autosave_minutes, файл user://settings.cfg
-	_add_spacer(vbox, 6)
-	var as_opt := OptionButton.new()
-	as_opt.name = "AutosaveOption"
-	as_opt.custom_minimum_size = Vector2(170, 36)
-	as_opt.add_theme_font_size_override("font_size", 16)
-	for lbl in _GS.AUTOSAVE_LABELS:
-		as_opt.add_item(String(lbl))
-	as_opt.select(_GS.autosave_choice_index())
-	vbox.add_child(_make_option_row("Автосохранение:", as_opt))
-	as_opt.item_selected.connect(func(idx: int):
-		_GS.set_autosave_minutes(int(_GS.AUTOSAVE_CHOICES[idx])))
-
-	_add_spacer(vbox, 10)
-	vbox.add_child(_back_button())
-
-func _back_button() -> Button:
-	var b := _menu_button("Назад", Color(0.14, 0.16, 0.22),
-		Color(0.20, 0.24, 0.32), Color(0.34, 0.38, 0.48))
-	b.name = "BackButton"
-	b.pressed.connect(func(): show_page("main"))
-	return b
-
-func _caption(text: String) -> Label:
-	var cap := Label.new()
-	cap.text = text
-	cap.add_theme_font_size_override("font_size", 15)
-	cap.add_theme_color_override("font_color", Color(0.82, 0.84, 0.90))
-	cap.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	return cap
-
-## Те же три шины, что и в меню паузы. Значения берутся и пишутся через
-## AudioManager, поэтому выставленное здесь сразу действует и переживает
-## старт партии — настройки лежат в user://audio_settings.cfg
-const MENU_BUSES := [
-	{"bus": "Master", "name": "Общая"},
-	{"bus": "Music",  "name": "Музыка"},
-	{"bus": "SFX",    "name": "Эффекты"},
-]
-
-func _build_audio_sliders(box: VBoxContainer) -> void:
-	for entry in MENU_BUSES:
-		var e: Dictionary = entry
-		var bus: String = String(e["bus"])
-		var row := HBoxContainer.new()
-		row.add_theme_constant_override("separation", 10)
-		row.alignment = BoxContainer.ALIGNMENT_CENTER
-		box.add_child(row)
-		var cap := Label.new()
-		cap.text = String(e["name"])
-		cap.custom_minimum_size = Vector2(96, 0)
-		cap.add_theme_font_size_override("font_size", 15)
-		cap.add_theme_color_override("font_color", Color(0.78, 0.80, 0.88))
-		row.add_child(cap)
-		var sl := HSlider.new()
-		sl.min_value = 0.0
-		sl.max_value = 1.0
-		sl.step      = 0.01
-		sl.value     = AudioManager.get_bus_volume(bus)
-		sl.custom_minimum_size = Vector2(190, 22)
-		row.add_child(sl)
-		var pct := Label.new()
-		pct.text = "%d%%" % int(sl.value * 100.0)
-		pct.custom_minimum_size = Vector2(48, 0)
-		pct.add_theme_font_size_override("font_size", 15)
-		pct.add_theme_color_override("font_color", Color(0.70, 0.76, 0.86))
-		row.add_child(pct)
-		sl.value_changed.connect(func(v: float):
-			AudioManager.set_bus_volume(bus, v)
-			pct.text = "%d%%" % int(v * 100.0)
-			AudioManager.save_settings())
-
-func _make_label(text: String) -> Label:
-	var lbl := Label.new()
-	lbl.text = text
-	lbl.add_theme_font_size_override("font_size", 18)
-	lbl.add_theme_color_override("font_color", Color(0.82, 0.84, 0.90))
-	return lbl
-
-## Подпись + выпадающий список в одной строке (вместо подписи НАД списком)
-func _make_option_row(text: String, opt: Control) -> HBoxContainer:
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 8)
-	row.alignment = BoxContainer.ALIGNMENT_CENTER
-	var lbl := Label.new()
-	lbl.text = text
-	lbl.custom_minimum_size = Vector2(112, 0)
-	lbl.add_theme_font_size_override("font_size", 14)
-	lbl.add_theme_color_override("font_color", Color(0.82, 0.84, 0.90))
-	lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	row.add_child(lbl)
-	row.add_child(opt)
-	return row
-
-func _make_option() -> OptionButton:
-	var opt := OptionButton.new()
-	opt.custom_minimum_size = Vector2(170, 36)
-	opt.add_theme_font_size_override("font_size", 16)
-	for lbl in FACTION_LABELS:
-		opt.add_item(lbl)
-	return opt
-
-## Список цветов с квадратиком-образцом у каждого пункта
-func _make_color_option(default_color: String) -> OptionButton:
-	var opt := OptionButton.new()
-	opt.custom_minimum_size = Vector2(170, 36)
-	opt.add_theme_font_size_override("font_size", 15)
-	for i in range(_GS.COLORS.size()):
-		var key: String = _GS.COLORS[i]
-		opt.add_item(String(_GS.COLOR_LABELS[i]))
-		opt.set_item_icon(i, _color_swatch(_GS.color_tint(key)))
-		if key == default_color:
-			opt.select(i)
-	return opt
-
-## Маленькая цветная плашка 22x22 для пункта списка
-func _color_swatch(c: Color) -> ImageTexture:
-	var img := Image.create(22, 22, false, Image.FORMAT_RGBA8)
-	img.fill(c)
-	# Тёмная рамка, чтобы светлые цвета не сливались с фоном списка
-	var border := Color(0.06, 0.07, 0.10)
-	for i in range(22):
-		img.set_pixel(i, 0, border);  img.set_pixel(i, 21, border)
-		img.set_pixel(0, i, border);  img.set_pixel(21, i, border)
-	return ImageTexture.create_from_image(img)
-
-func _add_spacer(parent: VBoxContainer, height: int) -> void:
-	var sp := Control.new()
-	sp.custom_minimum_size = Vector2(0, height)
-	parent.add_child(sp)
-
-func _style_btn(btn: Button, normal: Color, hover: Color, border: Color) -> void:
-	var sn := StyleBoxFlat.new()
-	sn.bg_color = normal; sn.border_color = border
-	sn.set_border_width_all(2); sn.set_corner_radius_all(8)
-	btn.add_theme_stylebox_override("normal", sn)
-	var sh := StyleBoxFlat.new()
-	sh.bg_color = hover; sh.set_corner_radius_all(8)
-	btn.add_theme_stylebox_override("hover", sh)
-	var sp := StyleBoxFlat.new()
-	sp.bg_color = normal.darkened(0.2); sp.set_corner_radius_all(8)
-	btn.add_theme_stylebox_override("pressed", sp)
-	var sd := StyleBoxFlat.new()
-	sd.bg_color = normal.darkened(0.55); sd.border_color = border.darkened(0.5)
-	sd.set_border_width_all(2); sd.set_corner_radius_all(8)
-	btn.add_theme_stylebox_override("disabled", sd)
-
 func _on_start() -> void:
-	var pi: int = maxi(_player_opt.selected, 0)
-	var ai: int = maxi(_ai_opt.selected, 0)
-	GameManager.player_faction_name = FACTION_KEYS[pi]
-	GameManager.ai_faction_name     = FACTION_KEYS[ai]
-
-	var pc: int = maxi(_player_color_opt.selected, 0)
-	var ac: int = maxi(_ai_color_opt.selected, 0)
-	GameManager.player_color = String(_GS.COLORS[pc])
-	GameManager.ai_color     = String(_GS.COLORS[ac])
+	# Окно настроек уже записало выбор в GameManager; читаем и сверяемся
+	GameManager.player_faction_name = FACTION_KEYS[maxi(_player_opt.selected, 0)]
+	GameManager.ai_faction_name     = FACTION_KEYS[maxi(_ai_opt.selected, 0)]
+	GameManager.player_color = String(_GS.COLORS[maxi(_player_color_opt.selected, 0)])
+	GameManager.ai_color     = String(_GS.COLORS[maxi(_ai_color_opt.selected, 0)])
 	# Одинаковый цвет у сторон = неразличимые армии. Разводим принудительно
 	if GameManager.player_color == GameManager.ai_color:
 		for c in _GS.COLORS:
 			if String(c) != GameManager.player_color:
 				GameManager.ai_color = String(c)
 				break
-	# Кэш спрайт-листов держит НАБОРЫ ПО ПУТЯМ и переживает смену сцены —
-	# сбрасываем, чтобы новая партия не подхватила цвета прошлой
+	# Кэш спрайт-листов держит НАБОРЫ ПО ПУТЯМ и переживает смену сцены
 	_SSParser.clear_cache()
-	# ── ИГРОВОЙ ЭКРАН ЗАГРУЗКИ ВМЕСТО СИСТЕМНОГО КРУЖКА (спринт 17) ─────────
-	# Сцена партии строится синхронно (рельеф, лес, тысяча бойцов), и на это
-	# время окно не отвечает: ОС показывала свой курсор ожидания поверх меню.
-	# Теперь на экран выводится игровая плашка загрузки, ей даётся два кадра
-	# на отрисовку, курсор на время сборки прячется (Main вернёт его вместе с
-	# игровым курсором), и только потом грузится сцена
 	_show_loader()
 	await get_tree().process_frame
 	await get_tree().process_frame
+	# ── РЕСУРСЫ СЦЕНЫ — В ФОНЕ, С ЧЕСТНОЙ ДОЛЕЙ ─────────────────────────────
+	# Пока поток грузит Main.tscn и его зависимости, кадры идут, и полоса с
+	# иллюстрацией живые. Не вышло запросить фоновую загрузку — обычная
+	const SCENE := "res://scenes/Main.tscn"
+	var packed: PackedScene = null
+	if ResourceLoader.load_threaded_request(SCENE) == OK:
+		var prog: Array = []
+		while true:
+			var st: int = ResourceLoader.load_threaded_get_status(SCENE, prog)
+			if st == ResourceLoader.THREAD_LOAD_IN_PROGRESS:
+				var p: float = float(prog[0]) if not prog.is_empty() else 0.0
+				_Loading.stage("Загрузка ресурсов…", 0.04 + 0.26 * p)
+				await get_tree().process_frame
+				continue
+			if st == ResourceLoader.THREAD_LOAD_LOADED:
+				packed = ResourceLoader.load_threaded_get(SCENE) as PackedScene
+			break
+	if packed == null:
+		packed = load(SCENE) as PackedScene
+	_Loading.stage("Подготовка карты…", 0.32)
+	await get_tree().process_frame
+	# Курсор на время синхронной сборки прячется (Main вернёт игровой)
 	Input.mouse_mode = Input.MOUSE_MODE_HIDDEN
-	get_tree().change_scene_to_file("res://scenes/Main.tscn")
+	get_tree().change_scene_to_packed(packed)
 
-## Плашка загрузки: затемнение, надпись и вращающийся кольцевой индикатор
-## (крутится, пока кадры идут; на время синхронной сборки замирает — это
-## честная картинка, а не системный кружок). Стенд ловит её по имени узла
+## Экран загрузки (scripts/ui/LoadingScreen.gd): иллюстрация, полоса с
+## процентами, советы и этапы. Висит на корне дерева и переживает смену
+## сцены; закрывает его Main в конце _ready. Стенд ловит по счётчику
 var loader_shown: int = 0
 
-func _show_loader() -> void:
-	var layer := CanvasLayer.new()
-	layer.name = "LoadingLayer"
-	layer.layer = 100
-	var back := ColorRect.new()
-	back.name = "LoadingBack"
-	back.color = Color(0.03, 0.05, 0.03, 0.96)
-	back.anchor_right = 1.0
-	back.anchor_bottom = 1.0
-	layer.add_child(back)
-	var spin := _LoaderSpinner.new()
-	spin.name = "LoadingSpinner"
-	spin.anchor_left = 0.5
-	spin.anchor_right = 0.5
-	spin.anchor_top = 0.5
-	spin.anchor_bottom = 0.5
-	spin.offset_left = -40
-	spin.offset_right = 40
-	spin.offset_top = -80
-	spin.offset_bottom = 0
-	layer.add_child(spin)
-	var lbl := Label.new()
-	lbl.name = "LoadingLabel"
-	lbl.text = "Загрузка карты…"
-	lbl.add_theme_font_size_override("font_size", 26)
-	lbl.add_theme_color_override("font_color", Color(0.85, 0.95, 0.80))
-	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	lbl.anchor_left = 0.0
-	lbl.anchor_right = 1.0
-	lbl.anchor_top = 0.5
-	lbl.anchor_bottom = 0.5
-	lbl.offset_top = 12
-	lbl.offset_bottom = 52
-	layer.add_child(lbl)
-	add_child(layer)
+func _show_loader():
+	var ls = _Loading.begin(get_tree(), "Подготовка ресурсов…")
+	ls.set_target(0.03)
 	loader_shown += 1
-
-## Кольцевой индикатор, нарисованный кодом: дуга бежит по кругу
-class _LoaderSpinner extends Control:
-	var _t: float = 0.0
-	func _process(delta: float) -> void:
-		_t += delta
-		queue_redraw()
-	func _draw() -> void:
-		var c: Vector2 = size * 0.5
-		var r: float = minf(size.x, size.y) * 0.42
-		draw_arc(c, r, 0.0, TAU, 48, Color(0.25, 0.35, 0.22), 6.0, true)
-		var a0: float = fmod(_t * 4.0, TAU)
-		draw_arc(c, r, a0, a0 + TAU * 0.3, 24, Color(0.45, 0.95, 0.35), 6.0, true)
+	return ls

@@ -68,6 +68,12 @@ func _counters() -> Dictionary:
 		"wall_us": Time.get_ticks_usec(),
 	}
 
+## Пауза — не кадр: без сброса первый кадр после паузы получал все её секунды
+## (лог 22.10.2026: «кадр 363 / 654 мс» при FPS 60 — это паузы игрока)
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_UNPAUSED:
+		_last_wall_us = Time.get_ticks_usec()
+
 func _process(delta: float) -> void:
 	if not enabled:
 		return
@@ -145,6 +151,10 @@ func _sample() -> void:
 		"scans_per_sec": snappedf(float(int(cur["scan"]) - int(_prev["scan"])) / wall, 0.1),
 		"ticks_per_sec": snappedf(float(int(cur["ticks"]) - int(_prev["ticks"])) / wall, 0.1),
 		"stuck": stuck,
+		# Накопленные: поиск проходимой точки не нашёл ничего (аудит 22.10,
+		# событие passable_miss — сводка раз в 5 с) и выносы из стволов
+		"passable_miss": GameManager.passable_misses,
+		"trap_pushes": GameManager.trap_pushes,
 		"panicking": panicking,
 		"heal_queue": hq,
 		"squads": GameManager.squads.size(),

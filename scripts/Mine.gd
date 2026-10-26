@@ -352,7 +352,7 @@ const ALARM_GAP_SEC := 2.0
 var _alarm_at_ms: int = -100000
 
 func _raise_alarm(by: int) -> void:
-	var now: int = Time.get_ticks_msec()
+	var now: int = Unit.game_ms()
 	if now - _alarm_at_ms < int(ALARM_GAP_SEC * 1000.0):
 		return
 	_alarm_at_ms = now

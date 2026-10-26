@@ -40,7 +40,7 @@ func _report(label: String, sid: int) -> void:
 	var t0: int = Time.get_ticks_usec()
 	for i in range(N):
 		GameManager._corridors.erase(sid)
-		GameManager._recalc_corridor(sid, Time.get_ticks_msec())
+		GameManager._recalc_corridor(sid, Unit.game_ms())
 	var total: float = float(Time.get_ticks_usec() - t0) / float(N)
 	opt.profile_physics = false
 	print("── %s: %.1f мкс на отряд из %d (все подветки, с профилем)" % [label, total, SQUAD])

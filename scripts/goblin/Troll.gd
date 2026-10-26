@@ -1018,6 +1018,12 @@ func take_damage(amount: float, attacker: Node3D = null) -> void:
 	super.take_damage(amount, attacker)
 	if state == State.DEAD:
 		return
+	# ── ДАЛЁКАЯ ЦЕЛЬ — НА ОБИДЧИКА (ТЗ 21.10.2026, письмо 4) ──────────────
+	# Логово агрит тролля лишь без цели; идущий к далёкой цели (и тролль без
+	# логова) отвечает здесь же — Unit.should_switch_to_attacker
+	if attack_target != null or lair == null or not is_instance_valid(lair):
+		if should_switch_to_attacker(attacker) and _raid.is_empty():
+			command_attack(attacker, true, true)
 	# АГРО-ВЫЗОВ (10.09.2026): любой удар по стражу — логово решает, выпускать
 	# ли помощников (первый удар по группе) и агрит самого тролля на обидчика
 	if lair != null and is_instance_valid(lair) and lair.has_method("on_guard_hit"):

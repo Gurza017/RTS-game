@@ -163,6 +163,9 @@ func _door_radius() -> float:
 ## 8.0 → 2.5 (ТЗ 29.09.2026, блок 2): «неадекватная задержка, как будто долго
 ## поднимаются по невидимой лестнице» — хвост толпы ждал восемь секунд
 const DOOR_PATIENCE := 2.5
+## Потолок продления отхода по дороге в замок (ТЗ 21.10.2026): лог партии —
+## худший честный поход 77 с
+const GARRISON_TRIP_MAX_SEC := 150.0
 
 ## Когда отряд встал в очередь ко входу, ticks_msec. Ключ — sid
 var _incoming_at: Dictionary = {}
@@ -190,10 +193,14 @@ func _tm(kind: String, sid: int, extra: Dictionary = {}) -> void:
 		d[k] = extra[k]
 	GameManager.tm_event(kind, d)
 
+## Отказ «нет места» — в телеметрию не чаще раза в 15 с на отряд
+const REFUSED_TELL_MS := 15000
+var _refused_told: Dictionary = {}
+
 ## Свежий билет застрявшим — не чаще раза в секунду на отряд
 var _kick_ms: Dictionary = {}
 func _kick_due(sid: int) -> bool:
-	var now: int = Time.get_ticks_msec()
+	var now: int = Unit.game_ms()
 	if now - int(_kick_ms.get(sid, -100000)) < 2000:
 		return false
 	_kick_ms[sid] = now
@@ -204,14 +211,14 @@ func _queue_secs(squad_id: int) -> float:
 	var since: Variant = _incoming_at.get(squad_id)
 	if since == null:
 		return 0.0
-	return snappedf(float(Time.get_ticks_msec() - int(since)) * 0.001, 0.1)
+	return snappedf(float(Unit.game_ms() - int(since)) * 0.001, 0.1)
 
 func _enter_radius(squad_id: int) -> float:
 	var door: float = minf(_door_radius(), _UCfg.GARRISON_ENTER_RADIUS)
 	var since: Variant = _incoming_at.get(squad_id)
 	if since == null:
 		return door
-	if float(Time.get_ticks_msec() - int(since)) * 0.001 < DOOR_PATIENCE:
+	if float(Unit.game_ms() - int(since)) * 0.001 < DOOR_PATIENCE:
 		return door
 	return _UCfg.GARRISON_ENTER_RADIUS
 
@@ -223,6 +230,10 @@ func _enter_radius(squad_id: int) -> float:
 ## Сколько отрядов помещается внутрь
 func garrison_limit() -> int:
 	return _UCfg.GARRISON_SQUAD_LIMIT
+
+## Есть ли место ещё одному отряду (внутри + идущие по заявке)
+func garrison_has_room() -> bool:
+	return garrison.size() + _incoming.size() < garrison_limit()
 
 ## Годится ли отряд этого рода войск
 func garrison_accepts(_unit_type: String) -> bool:
@@ -254,8 +265,15 @@ func request_garrison(squad_id: int, run: bool = true) -> bool:
 		return true                        # уже идёт или уже внутри
 	var utype: String = GameManager.squad_type(squad_id)
 	if garrison.size() + _incoming.size() >= garrison_limit():
-		_tm("garrison_refused", squad_id, {"type": utype, "why": "limit",
-			"inside": garrison.size(), "incoming": _incoming.size()})
+		# Отряд у ворот переспрашивает раз в 2 с (очередь «в замок») — в
+		# телеметрию отказ идёт раз в REFUSED_TELL_MS на отряд (лог 22.10:
+		# 107 одинаковых отказов за две минуты)
+		var told: Variant = _refused_told.get(squad_id)
+		var now_t: int = Unit.game_ms()
+		if told == null or now_t - int(told) >= REFUSED_TELL_MS:
+			_refused_told[squad_id] = now_t
+			_tm("garrison_refused", squad_id, {"type": utype, "why": "limit",
+				"inside": garrison.size(), "incoming": _incoming.size()})
 		return false
 	if not garrison_accepts(utype):
 		_tm("garrison_refused", squad_id, {"type": utype, "why": "type"})
@@ -272,7 +290,7 @@ func request_garrison(squad_id: int, run: bool = true) -> bool:
 		_tm("garrison_refused", squad_id, {"type": utype, "why": "empty"})
 		return false
 	_incoming.append(squad_id)
-	_incoming_at[squad_id] = Time.get_ticks_msec()
+	_incoming_at[squad_id] = Unit.game_ms()
 	_incoming_roof[squad_id] = on_roof
 	_patience_told.erase(squad_id)
 	absorb_worst_dist = 0.0
@@ -411,7 +429,7 @@ func release_unit(u: Unit, at: Vector3) -> void:
 func absorb_damage_for(_u: Unit, amount: float, attacker: Node3D = null) -> void:
 	if is_dead() or amount <= 0.0:
 		return
-	last_hit_ms = Time.get_ticks_msec()
+	last_hit_ms = Unit.game_ms()
 	super.take_damage(amount, attacker)
 
 ## Вытряхнуть наружу тех членов отряда, кто уже успел зайти внутрь, не трогая
@@ -523,8 +541,12 @@ func _release_members(squad_id: int) -> void:
 func _die() -> void:
 	if is_dead():
 		return
+	# Хижины орды наследуют Castle ради гарнизона и тоже «крепости» по
+	# is_stronghold — лог партии 21.10 писал castle_fell 8 раз за 3 с при
+	# сносе лагеря. Своё событие у хижины (ТЗ 21.10.2026, п. 5)
 	if is_stronghold():
-		GameManager.tm_event("castle_fell", {"fac": int(faction)})
+		var ev: String = "hut_fell" if faction == Constants.FACTION_GOBLIN else "castle_fell"
+		GameManager.tm_event(ev, {"fac": int(faction), "kind": building_id})
 	_evacuate_on_death()
 	super._die()
 
@@ -545,7 +567,7 @@ func take_damage(amount: float, attacker: Node = null) -> void:
 	if is_dead() or amount <= 0.0:
 		return
 	# Удар по замку отмечается ДО крыши (охрана ИИ читает «замок под ударом»)
-	last_hit_ms = Time.get_ticks_msec()
+	last_hit_ms = Unit.game_ms()
 	# ── ПАРАЛЛЕЛЬНЫЙ УРОН (ТЗ 19.09.2026, Parallel Damage Split) ─────────
 	# Дальний бой по укреплению идёт ДВУМЯ РУСЛАМИ независимо: стены получают
 	# полный (100 %) урон стрелы, и ТЕ ЖЕ стрелы бьют защитников на крыше со
@@ -568,6 +590,8 @@ func _ranged_attacker(attacker: Node) -> bool:
 	return u.attack_range > MELEE_RANGE_MAX
 
 func _evacuate_on_death() -> void:
+	# Укрытые рабочие выходят из руин и возвращаются к работе
+	shelter_release(-1)
 	# Копия списка: release_unit/_release_members трогают состав по ходу
 	var inside: Array = garrison.duplicate()
 	garrison.clear()
@@ -622,7 +646,16 @@ func _process_garrison(delta: float) -> void:
 			continue
 		var all_in := true
 		var cancelled := false
+		var cancel_why: Dictionary = {}
 		var gate := _gate_position()
+		# ── ОТХОД ДЕРЖИТСЯ ВСЮ ДОРОГУ (ТЗ 21.10.2026, аудит лога партии 21.10) ──
+		# Замок отхода (Unit.RETREAT_LOCK_SEC) — 12 с, а дорога в замок у ИИ —
+		# медиана 116 м, 30-65 с. Через 12 с любой внутренний приказ (роль ИИ,
+		# смыкание, сплочённость) зовёт command_move без keep_retreat, отход
+		# гаснет, сторож ниже видит «идёт без отхода» и отменяет поход: 13 из
+		# 25 отмен в партии — ровно 12.1-18 с. Пока отряд в очереди — продлеваем
+		# каждому идущему (потолок GARRISON_TRIP_MAX_SEC — не вечный отход)
+		var keep_lock: bool = _OptB.garrison_trip_lock and _queue_secs(sid) < GARRISON_TRIP_MAX_SEC
 		# ── ПРИХОД СЧИТАЕТСЯ ОТ ВОРОТ, А НЕ ОТ ЦЕНТРА ЗДАНИЯ ──────────────────
 		# ЗДЕСЬ БЫЛ СОФТЛОК, И ОН БЫЛ ЧИСТО ГЕОМЕТРИЧЕСКИЙ. Бойца ведут в
 		# _gate_position(), то есть на GATE_DISTANCE = 6.5 м от центра замка, а
@@ -656,6 +689,8 @@ func _process_garrison(delta: float) -> void:
 				absorb_unit(u)
 				continue
 			all_in = false
+			if keep_lock and u.retreating:
+				u.lock_retreat(Unit.RETREAT_LOCK_SEC)
 			# ── СТОРОЖ: ОТРЯД ОБЯЗАН ДОЙТИ ────────────────────────────────────
 			# Приказ на вход отдаётся ОДИН раз (request_garrison), и всё, что его
 			# сбило по дороге, оставляло бойца стоять в поле навсегда: он числится
@@ -676,6 +711,8 @@ func _process_garrison(delta: float) -> void:
 			# дороге (упёрся в ствол, потерял приказ), его дожимаем
 			if not u.retreating and u.state != Unit.State.IDLE:
 				cancelled = true
+				cancel_why = {"st": int(u.state), "tgt": u.attack_target != null,
+					"player": u._player_run or u._move_lock > 0.0}
 				break
 			if u.state == Unit.State.IDLE:
 				u.begin_retreat()
@@ -704,7 +741,9 @@ func _process_garrison(delta: float) -> void:
 			# игрок его только что увёл
 			_spill_absorbed(sid)
 			GameManager.squad_mark_to_castle(sid, false)
-			_tm("garrison_cancel", sid, {"secs": _queue_secs(sid)})
+			var cinfo: Dictionary = {"secs": _queue_secs(sid)}
+			cinfo.merge(cancel_why)
+			_tm("garrison_cancel", sid, cinfo)
 			continue
 		if all_in:
 			garrison.append({"sid": sid, "type": GameManager.squad_type(sid), "revive": 0.0,
@@ -790,12 +829,110 @@ func _revive_one(squad_id: int, unit_type: String) -> void:
 
 # Замок игрока капает золото по таймеру — ему покадровый тик нужен всегда.
 # Замок ИИ дохода не имеет, но с гарнизоном тоже обязан тикать
+# ═════════════════════════════════════════════════════════════════════════════
+# УКРЫТИЕ РАБОЧИХ (ТЗ 20.10.2026, блок 5)
+# ═════════════════════════════════════════════════════════════════════════════
+## Рабочие по тревоге (кнопка-колокол) или по своему приказу «в замок» входят
+## в ОДИН ОБЩИЙ СЛОТ — не в гарнизон отрядов (8 слотов там под войска), а в
+## отдельный список. Снятие с карты — тем же absorb_unit, что у гарнизона
+## (строка ядра, сетка, группы, отрисовка); группа "workers" снимается
+## отдельно: по ней ищет жертв конница. Груз, который нёс рабочий, сдаётся
+## при входе — замок и есть склад. Выход: ЛКМ по слоту — один, ПКМ — все,
+## повторный колокол — все во всех замках; вышедший возвращается к работе
+## (Worker.shelter_resume)
+var shelter: Array = []            # рабочие внутри
+var _shelter_in: Array = []        # бегут к воротам
+const SHELTER_ENTER_R := 3.2
+
+func shelter_count() -> int:
+	return shelter.size()
+
+func shelter_incoming() -> int:
+	return _shelter_in.size()
+
+## Принять рабочего в очередь у ворот (он уже бежит сюда)
+func shelter_expect(w: Unit) -> void:
+	if w != null and is_instance_valid(w) and not _shelter_in.has(w) and not shelter.has(w):
+		_shelter_in.append(w)
+		set_process(true)
+
+func _shelter_tick() -> void:
+	if _shelter_in.is_empty():
+		return
+	var gate: Vector3 = _gate_position()
+	var keep: Array = []
+	for w in _shelter_in:
+		if w == null or not is_instance_valid(w) or (w as Unit).is_dead():
+			continue
+		var wk := w as Unit
+		# Новый приказ игрока (рабочий больше не бежит сюда) — снят с очереди
+		if wk.get("shelter_host") != self:
+			continue
+		var p: Vector3 = wk.global_position
+		var near: bool = Vector2(p.x - gate.x, p.z - gate.z).length() <= SHELTER_ENTER_R \
+			or at_deposit(p)
+		# Встал, не дойдя (толчея у ворот) — тоже внутрь, если рядом
+		if not near and wk.state == Unit.State.IDLE \
+				and Vector2(p.x - gate.x, p.z - gate.z).length() <= SHELTER_ENTER_R * 2.5:
+			near = true
+		if near:
+			_shelter_absorb(wk)
+		else:
+			keep.append(w)
+	_shelter_in = keep
+
+func _shelter_absorb(w: Unit) -> void:
+	var carry: float = float(w.get("carrying_amount"))
+	if carry > 0.0:
+		ResourceManager.gather_resource(faction, int(w.get("carrying_type")), carry)
+		w.set("carrying_amount", 0.0)
+	absorb_unit(w)
+	w.remove_from_group("workers")
+	w.set("shelter_host", null)
+	w.end_retreat(true)      # добежал — режим отхода похода больше не нужен
+	shelter.append(w)
+	_tm("shelter_in", 0, {"n": shelter.size()})
+
+## Выпустить n рабочих (n < 0 — всех). Возвращает, сколько вышло
+func shelter_release(n: int = -1) -> int:
+	var gate: Vector3 = _gate_position()
+	var side := Vector3(-spawn_offset.z, 0.0, spawn_offset.x)
+	if side.length() < 0.01:
+		side = Vector3.RIGHT
+	side = side.normalized()
+	var out := 0
+	while not shelter.is_empty() and (n < 0 or out < n):
+		var w = shelter.pop_back()
+		if w == null or not is_instance_valid(w):
+			continue
+		var wk := w as Unit
+		var off: Vector3 = side * ((float(out % 7) - 3.0) * 0.7)
+		release_unit(wk, gate + off)
+		wk.add_to_group("workers")
+		var snap: Dictionary = wk.get("shelter_task")
+		wk.set("shelter_task", {})
+		if wk.has_method("shelter_resume"):
+			wk.call("shelter_resume", snap)
+		out += 1
+	# Идущие к воротам тоже разворачиваются к работе — колокол снят
+	if n < 0:
+		for w2 in _shelter_in:
+			if w2 != null and is_instance_valid(w2) and w2.get("shelter_host") == self:
+				w2.set("shelter_host", null)
+				var snap2: Dictionary = w2.get("shelter_task")
+				w2.set("shelter_task", {})
+				w2.call("shelter_resume", snap2)
+		_shelter_in.clear()
+	return out
+
 func _needs_tick() -> bool:
 	return faction == Constants.FACTION_PLAYER \
-		or not garrison.is_empty() or not _incoming.is_empty()
+		or not garrison.is_empty() or not _incoming.is_empty() or not _shelter_in.is_empty()
 
 func _process(delta: float) -> void:
 	super._process(delta)
+	if not _shelter_in.is_empty():
+		_shelter_tick()
 	if not garrison.is_empty() or not _incoming.is_empty():
 		_process_garrison(delta)
 	if _roof != null:

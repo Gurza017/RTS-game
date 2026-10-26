@@ -190,7 +190,13 @@ func assault_gate() -> Dictionary:
 # ═════════════════════════════════════════════════════════════════════════════
 # ТАКТ
 # ═════════════════════════════════════════════════════════════════════════════
+## Шаг игровых часов (scripts/GameClockStep.gd, аудит 22.10.2026): часы и
+## таймеры этого узла идут от Unit.game_ms(), а не от delta отрисовки —
+## при просадке FPS мир замедляется, и сроки этого узла вместе с ним
+var _gclk = preload("res://scripts/GameClockStep.gd").new()
+
 func _process(delta: float) -> void:
+	delta = _gclk.step()   # игровое время вместо delta отрисовки (GameClockStep)
 	if main == null:
 		return
 	_drain_orders()
@@ -227,7 +233,7 @@ func _spawn_start_reserve() -> void:
 	for t in _Spawn.START_RESERVE:
 		var want: String = String(t)
 		var n: int = int(_GobCfg.SQUAD_SIZE.get(want, 50))
-		if field_units + n > _Spawn.HORDE_FIELD_CAP or horde_alive() + n > _Spawn.HORDE_CAP:
+		if field_units + n > _Spawn.field_cap(clock) or horde_alive() + n > _Spawn.horde_cap(clock):
 			break
 		var slot: int = _free_slot()
 		if slot < 0:
@@ -438,6 +444,10 @@ func _economy_tick(dt: float) -> void:
 	var diff_k: float = _Diff.goblin_hut_food_per_min() / maxf(_GobCfg.HUT_FOOD_PER_MIN, 0.001)
 	income_min = (float(small) * _Spawn.HUT_FOOD_MIN \
 		+ (_Spawn.CHIEF_FOOD_MIN if chief_alive() else 0.0)) * ramp * diff_k
+	# Поздняя орда (ТЗ 23.10.2026, второе письмо, п. 4): после 30-й минуты
+	# доход × LATE_FOOD_MULT — больше покупок, крупнее волны
+	if _Spawn.late_surge(clock):
+		income_min *= _Spawn.LATE_FOOD_MULT
 	upkeep_min = float(field_units) * _Spawn.FOOD_UPKEEP_PER_UNIT_MIN
 	var f: float = ResourceManager.get_amount(Constants.FACTION_GOBLIN, Constants.RESOURCE_FOOD)
 	f = clampf(f + (income_min - upkeep_min) / 60.0 * dt, 0.0, _Spawn.FOOD_BANK_MAX)
@@ -517,7 +527,7 @@ func _production_tick() -> void:
 	if ResourceManager.get_amount(Constants.FACTION_GOBLIN, Constants.RESOURCE_FOOD) < price:
 		return
 	var n: int = int(_GobCfg.SQUAD_SIZE.get(want, 50))
-	if field_units + n > _Spawn.HORDE_FIELD_CAP or horde_alive() + n > _Spawn.HORDE_CAP:
+	if field_units + n > _Spawn.field_cap(clock) or horde_alive() + n > _Spawn.horde_cap(clock):
 		last_action = "потолок орды: %s ждёт" % want
 		return
 	var slot: int = _free_slot()
@@ -569,9 +579,11 @@ func _maybe_launch() -> void:
 	# Не чаще WAVE_GAP_MIN_SEC; дольше WAVE_GAP_MAX_SEC без выхода — план
 	# уходит тем, что набрано (ветка «не набрал состав» ниже)
 	var since: float = clock - _last_launch_clock if _last_launch_clock >= 0.0 else 1.0e9
-	if since < _Spawn.WAVE_GAP_MIN_SEC:
+	# После 30-й минуты паузы × LATE_GAP_MULT (ТЗ 23.10.2026, второе письмо)
+	var gap_k: float = _Spawn.LATE_GAP_MULT if _Spawn.late_surge(clock) else 1.0
+	if since < _Spawn.WAVE_GAP_MIN_SEC * gap_k:
 		return
-	var overdue: bool = since >= _Spawn.WAVE_GAP_MAX_SEC and _last_launch_clock >= 0.0
+	var overdue: bool = since >= _Spawn.WAVE_GAP_MAX_SEC * gap_k and _last_launch_clock >= 0.0
 	if not _ready_q.is_empty():
 		# ── ОДИН ВЫХОД — ВСЁ НАБРАННОЕ (ТЗ 12.10.2026, второе письмо) ───────
 		# Волны выходят раз в 7-10 минут, а не парами по готовности: за паузу
@@ -1034,11 +1046,37 @@ func _guards_tick(dt: float) -> void:
 		if not by_mine.has(m):
 			by_mine[m] = []
 		(by_mine[m] as Array).append(int(sid))
+	var now_ms: int = Unit.game_ms()
 	for m2 in by_mine:
 		var mp: Vector3 = (m2 as Node3D).global_position
 		var foe: Node3D = _nearest_foe(mp, _Spawn.GUARD_WAKE_R)
 		var hit: bool = clock - float(_mine_hit.get(m2, -1.0e9)) < 6.0
 		var threat: bool = foe != null or hit
+		# ── УДАР ПО ЛЮБОМУ ОТРЯДУ ОХРАНЫ — ТРЕВОГА ВСЕЙ ОХРАНЫ РУДНИКА ─────
+		# (ТЗ 22.10.2026). Прежде тревогу поднимали только чужой у самого
+		# рудника и удар по руднику: лучников с 20+ м от поста и копейщиков у
+		# крайнего поста кольца (дальше GUARD_WAKE_R от центра) охрана не
+		# замечала и стояла под ударами. Обидчик — цель (last_hit_by)
+		var striker: Node3D = null
+		for sid_h in (by_mine[m2] as Array):
+			var sqh: Variant = GameManager.squads.get(int(sid_h))
+			if sqh == null:
+				continue
+			if now_ms - int((sqh as Dictionary).get("last_hit_ms", -1000000)) < 6000:
+				threat = true
+				var hb: Variant = (sqh as Dictionary).get("last_hit_by")
+				if hb != null and is_instance_valid(hb) and hb is Unit and not (hb as Unit).is_dead():
+					striker = hb
+			# Чужой у самого отряда (не только у рудника) — тоже тревога
+			if foe == null:
+				var cg: Vector3 = _centre(int(sid_h))
+				if cg.x != INF:
+					var fg: Node3D = _nearest_foe(cg, _Spawn.GUARD_WAKE_R)
+					if fg != null:
+						foe = fg
+						threat = true
+		if foe == null and striker != null:
+			foe = striker
 		for sid2 in (by_mine[m2] as Array):
 			var g2: Dictionary = guards[sid2]
 			var st: String = g2["st"]
@@ -1055,6 +1093,11 @@ func _guards_tick(dt: float) -> void:
 					var pairs: Dictionary = GameManager.front_pairs([sid2], probe, _Spawn.GUARD_WAKE_R + 15.0, Constants.FACTION_GOBLIN)
 					if pairs.has(sid2):
 						_order_attack_squad(sid2, int(pairs[sid2]))
+					elif foe != null and (foe as Unit).squad_id > 0:
+						# Стрелок дальше скана — бьём его отряд напрямую
+						_order_attack_squad(sid2, (foe as Unit).squad_id)
+					elif foe != null:
+						_order_attack_node(sid2, foe)
 				continue
 			if st == "fight":
 				g2["calm"] = float(g2["calm"]) + dt

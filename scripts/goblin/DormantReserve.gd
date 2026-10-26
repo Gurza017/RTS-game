@@ -184,6 +184,11 @@ func _threatened() -> bool:
 			return true
 	return false
 
+## Шаг игровых часов (scripts/GameClockStep.gd, аудит 22.10.2026): часы и
+## таймеры этого узла идут от Unit.game_ms(), а не от delta отрисовки —
+## при просадке FPS мир замедляется, и сроки этого узла вместе с ним
+var _gclk = preload("res://scripts/GameClockStep.gd").new()
+
 func _process(delta: float) -> void:
 	# Часы подсистемы (perf_config.sys_meter, qa_bigstand): одна проверка bool
 	if not _OptSys.sys_meter:
@@ -194,6 +199,7 @@ func _process(delta: float) -> void:
 	_OptSys.sys_add("reserve", Time.get_ticks_usec() - _sys_t0)
 
 func _process_timed(delta: float) -> void:
+	delta = _gclk.step()   # игровое время вместо delta отрисовки (GameClockStep)
 	_tick_t += delta
 	if _tick_t < _GobCfg.RESERVE_TICK_SEC:
 		return
@@ -256,7 +262,7 @@ func _process_timed(delta: float) -> void:
 ## qa_reserve_sleep: двенадцать отрядов в 60-140 м от постов, все MOVING
 func _home_due(s: Dictionary) -> bool:
 	var sid: int = int(s["sid"])
-	var nms: int = Time.get_ticks_msec()
+	var nms: int = Unit.game_ms()
 	if _all_idle(sid) or nms - int(s.get("home_ms", 0)) >= int(_GobCfg.RESERVE_HOME_RETRY_SEC * 1000.0):
 		s["home_ms"] = nms
 		return true
@@ -300,7 +306,7 @@ func _fight() -> void:
 		# ── СБОР ПЕРЕД УДАРОМ (ТЗ 24.09.2026, п. 8) ─────────────────────
 		# Проснувшиеся отряды не бегут на копья по одному: встают линией
 		# перед врагом и уходят одной волной (WaveStager)
-		var gt: Dictionary = stager.gate(sid, c, foe, Time.get_ticks_msec() * 0.001)
+		var gt: Dictionary = stager.gate(sid, c, foe, Unit.game_ms() * 0.001)
 		if gt.has("stage"):
 			var sg: Vector3 = gt["stage"]
 			var prev: Vector3 = s.get("stage_goal", Vector3.INF)

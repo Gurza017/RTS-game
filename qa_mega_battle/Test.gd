@@ -377,6 +377,10 @@ func _b2_passthrough() -> void:
 				if t != null and is_instance_valid(t) and (t as Unit) != null \
 						and (t as Unit).stat_id == "spearman":
 					engaged += 1
+				# Коробка в бою (ТЗ 24.10): задние ряды стоят на своих местах за
+				# передними и цель не берут — марш сброшен, отряд дерётся строем
+				elif k._box_goal.x != INF and k._box_row >= Unit.BOX_STRIKE_ROWS:
+					engaged += 1
 		worst_behind = maxi(worst_behind, behind)
 	behind = worst_behind
 	print("  живых рыцарей %d; линия копейщиков на z=%.1f" % [total, line])
@@ -538,7 +542,7 @@ func _b1_formation() -> void:
 	# на растянутом отряде ответ регулярно оказывался бы дальше
 	var far_from_bearer := 0
 	var have := 0
-	var now: float = float(Time.get_ticks_msec()) * 0.001
+	var now: float = float(Unit.game_ms()) * 0.001   # часы кэша цели отряда — игровые
 	for pair2 in _spear_squads:
 		var sid2: int = int(pair2[0])
 		var alive2 := _live(pair2)

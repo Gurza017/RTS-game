@@ -50,7 +50,7 @@ func _report(tag: String) -> void:
 			gate = "РАБОЧИЙ — строй его не касается"
 		elif GameManager.squad_in_combat(sid):
 			gate = "в бою — строй ждёт"
-		elif Time.get_ticks_msec() - int((GameManager.squads[sid] as Dictionary).get("calm_ms", 0)) 				< int(GameManager.REFORM_SETTLE_SEC * 1000.0):
+		elif Unit.game_ms() - int((GameManager.squads[sid] as Dictionary).get("calm_ms", 0)) 				< int(GameManager.REFORM_SETTLE_SEC * 1000.0):
 			gate = "пауза после воздействия"
 		elif atk > 0:
 			gate = "кто-то занят боем"

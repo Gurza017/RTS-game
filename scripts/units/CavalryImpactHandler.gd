@@ -75,7 +75,7 @@ static var _waves: Dictionary = {}
 
 static func front_wave_frac(spear: Unit) -> float:
 	var key: int = spear.squad_id if spear.squad_id > 0 else -spear.get_instance_id()
-	var now: int = Time.get_ticks_msec()
+	var now: int = Unit.game_ms()
 	var w: Variant = _waves.get(key)
 	if w == null or now - int(w[1]) > WAVE_RESET_MS:
 		_waves[key] = PackedInt64Array([now, now, 1])

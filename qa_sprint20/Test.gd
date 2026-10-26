@@ -370,7 +370,7 @@ func _run() -> void:
 		(u as Unit)._facing = Vector3(1.0, 0.0, 0.0)
 	# Окно залпа от авто-агро закрыто и пауза снята: клик обязан открыть своё
 	(GameManager.squads[asid] as Dictionary)["volley_until"] = 0
-	(GameManager.squads[asid] as Dictionary)["volley_next"] = Time.get_ticks_msec() + 100000
+	(GameManager.squads[asid] as Dictionary)["volley_next"] = Unit.game_ms() + 100000
 	var primes0: int = GameManager.volley_primes
 	var fired0: int = GameManager.arrows_fired
 	sm.select_units(arch)
@@ -422,13 +422,17 @@ func _run() -> void:
 		# РАЗВОРОТ ТЗ 14.10.2026, п. 6: без «три в ряд» копейщики на длинной
 		# линии — одна шеренга, как мечники
 		GameManager.spear_wall_ready(ssid) and rows_wr + 1 == 1
-			and rows_sp + 1 == (GameManager.SPEAR_WALL_ROWS if sm.SPEAR_WALL_DRAG_ROWS else 1))
+			and rows_sp + 1 == 1)
 	var plan_s: Dictionary = sm._mono_formation_slots(ep + Vector3(-1.5, 0.0, 15.0), ep + Vector3(1.5, 0.0, 15.0), sp)
 	var rows_short := 0
 	for r in plan_s["rows"]:
 		rows_short = maxi(rows_short, int(r))
-	verdict("E2 …и на короткой линии тоже ровно %d (глубина не зависит от растяга)" % (rows_short + 1),
-		rows_short + 1 == GameManager.SPEAR_WALL_ROWS)
+	# РАЗВОРОТ ТЗ 21.10.2026: «ровно три шеренги на любой линии» — это и был
+	# замок строя. Теперь на короткой линии глубину задаёт сама линия
+	var per_short: int = maxi(1, int(floor(3.0 / sm.UNIT_SPACING)))
+	var want_short: int = int(ceil(float(sp.size()) / float(per_short)))
+	verdict("E2 …на короткой линии глубину задаёт протяжка (%d шеренг, не замок в три)" % (rows_short + 1),
+		rows_short + 1 == want_short, "ждали %d" % want_short)
 	GameManager.squad_set_ability(ssid, "spearman_1d", false)
 	var plan_off: Dictionary = sm._mono_formation_slots(a, b, sp)
 	var rows_off := 0

@@ -38,6 +38,10 @@ var _log: Array = []
 var _only := "abcde"
 
 func _ready() -> void:
+	# Стенд судит МЕХАНИКУ штурма по табличному составу; поздняя орда
+	# (ТЗ 23.10.2026, второе письмо: штурмы 45:00/60:00 крупнее) — своя ручка,
+	# её стережёт qa_tz1023 R
+	_Opt.goblin_late_surge = false
 	call_deferred("_run")
 	get_tree().create_timer(2700.0).timeout.connect(func():
 		print("  СТОРОЖ: стенд не завершился")

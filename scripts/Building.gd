@@ -664,6 +664,21 @@ func aim_height() -> float:
 		return 0.8
 	return (_draw_base_y + _draw_top_y) * 0.5
 
+## ── ПОПАЛА ЛИ СТРЕЛА, ДОЛЕТЕВШАЯ В ТОЧКУ p (ТЗ 21.10.2026, письмо 4) ──────
+## Прежде попадание мерилось ОБЪЁМНЫМ расстоянием от точки прилёта до
+## основания (global_position) с допуском 6 м. Стрелок же целится в середину
+## РИСУНКА (aim_height), и у высокой постройки эта точка сама лежит выше
+## допуска: главная хата орды (рисунок ×2) не теряла ни очка — стрелы
+## «втыкались в крышу» без урона. Теперь — по плану (XZ) в круге не меньше
+## прежних 6 м и не меньше трёх четвертей большей стороны основания
+const ARROW_HIT_MIN_R := 6.0
+
+func arrow_hits(p: Vector3) -> bool:
+	var r: float = maxf(ARROW_HIT_MIN_R, maxf(build_size.x, build_size.z) * 0.75)
+	var dx: float = p.x - global_position.x
+	var dz: float = p.z - global_position.z
+	return dx * dx + dz * dz <= r * r
+
 ## Куда класть кольцо на земле: середина основания рисунка
 func ring_center() -> Vector3:
 	if _draw_half_w < 0.0:
@@ -775,7 +790,7 @@ func set_selected(value: bool) -> void:
 
 var _dead := false
 
-## Когда по постройке били в последний раз (Time.get_ticks_msec). Событие, а не
+## Когда по постройке били в последний раз (Unit.game_ms). Событие, а не
 ## сигнал: охрана крепости ИИ (scripts/ai/HomeGuard.gd) спрашивает его раз в
 ## такт — «замок под ударом?» — и заводить ради этого подписку незачем
 var last_hit_ms: int = -1000000
@@ -789,7 +804,7 @@ func take_damage(amount: float, attacker: Node = null) -> void:
 			and (attacker as Unit).faction == Constants.FACTION_GOBLIN \
 			and not GameManager.goblin_may_raze(self):
 		return
-	last_hit_ms = Time.get_ticks_msec()
+	last_hit_ms = Unit.game_ms()
 	current_health -= amount
 	_update_hp_bar()
 	if current_health <= 0.0:
@@ -2230,8 +2245,14 @@ func ruin_lifetime() -> float:
 ## Растворить руину за `sec` и освободить. Материал берётся с RuinSprite ПРИ
 ## ЗАПУСКЕ, а не при закладке: загон подменяет спрайт плоским мешем уже после
 ## spawn_ruin (SheepPen.spawn_ruin)
-static func ruin_dissolve(ruin: Node3D, sec: float) -> void:
-	if ruin == null or not is_instance_valid(ruin):
+## Параметр НЕ типизирован (аудит лога 20.10.2026): руина, освобождённая до
+## срабатывания таймера, роняла вызов на приведении типа («Cannot convert
+## argument 1 from Object to Object», 7 строк за партию) раньше проверки
+static func ruin_dissolve(ruin_raw, sec: float) -> void:
+	if ruin_raw == null or not is_instance_valid(ruin_raw):
+		return
+	var ruin: Node3D = ruin_raw as Node3D
+	if ruin == null:
 		return
 	var mi: MeshInstance3D = ruin.get_node_or_null("RuinSprite") as MeshInstance3D
 	var tw := ruin.create_tween()

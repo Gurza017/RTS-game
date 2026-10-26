@@ -23,6 +23,7 @@ extends MeshInstance3D
 
 const _BannerArt := preload("res://scripts/BannerArt.gd")
 const _BBUtil    := preload("res://scripts/BillboardUtil.gd")
+const _UCfgS     := preload("res://scripts/unit_stats_config.gd")
 
 ## ── МИРОВОЙ РАЗМЕР ОДНОГО ПИКСЕЛЯ КАРТИНКИ ─────────────────────────────────
 ## Отсюда и только отсюда берётся масштаб знамени: холст BannerArt задаёт
@@ -66,9 +67,10 @@ const CENTER_Y := 1.70
 static var POLE_OFFSET_X: float = _BannerArt.pole_offset_px() * PIXEL_SIZE
 
 ## ── ШТАНДАРТ ЭЛИТЫ — В ПОЛТОРА РАЗА КРУПНЕЕ (ТЗ 13.10.2026, письмо 7) ──────
-## Красный римский штандарт (BannerArt.vexillum_texture) выдаётся только
-## отряду с индивидуальным званием (GameManager.squad_elite) и рисуется на
-## +50 % к обычному знамени: тот же холст, тот же PIXEL_SIZE, квад × 1.5.
+## Бордовый штандарт (BannerArt.elite_texture, ТЗ 22.10.2026) выдаётся только
+## отряду, которому игрок САМ дал элитный статус (GameManager.squad_elite), и
+## рисуется на +50 % к обычному знамени: тот же холст, тот же PIXEL_SIZE,
+## квад × 1.5; само полотнище на холсте на 20 % крупнее прежнего штандарта.
 ## Растёт ВСЁ полотно с древком, поэтому сдвиг древка от центра квада и
 ## высота центра над землёй считаются от ФАКТИЧЕСКОГО размера (pole_offset,
 ## _center_y), а не от статических чисел
@@ -81,6 +83,8 @@ var shown_level: int = 0
 ## Построено ли знамя как штандарт элиты (см. ELITE_SCALE). GameManager
 ## сравнивает с GameManager.squad_elite и перестраивает картинку на смене
 var shown_elite: bool = false
+## Уровень элиты (римская цифра на штандарте), под который построено знамя
+var shown_elite_lvl: int = 0
 
 ## Сдвиг древка от центра квада и высота центра — под ТЕКУЩИЙ размер квада
 ## (у штандарта элиты они в полтора раза больше статических)
@@ -100,48 +104,100 @@ var _center_y: float = CENTER_Y
 ## пересобирая квад каждый кадр
 var shown_white: bool = false
 
-static func create(level: int, elite: bool = false) -> MeshInstance3D:
+## Знамя орды — рваные «язычки» (BannerArt.goblin_tongue_texture), а не
+## аккуратный вымпел с лычками (ТЗ 20.10.2026, блок 8)
+var shown_goblin: bool = false
+## Цветных мини-флажков лычек сверх легенды под золотым флагом (ТЗ 25.10.2026)
+var shown_flags: int = 0
+
+## ── ЗНАМЯ ОРДЫ КРУПНЕЕ (ТЗ 25.10.2026, блок 3) ─────────────────────────────
+## Гоблин в SIZE_SCALE раз крупнее человека, а лоскуты висели людского
+## размера и терялись над толпой. Квад × GOBLIN_SCALE — как у штандарта элиты
+const GOBLIN_SCALE := 1.45
+## Золотой квадрат легендарных с мини-флажками на древке (ТЗ 25.10.2026)
+const LEGEND_SCALE := 1.3
+
+## ── КАРТИНКА ЗНАМЕНИ — ОДНО РЕШЕНИЕ ДЛЯ ВСЕХ ПОТРЕБИТЕЛЕЙ ──────────────────
+## Живое знамя (build) и упавшее (GameManager._lay_fallen_banner) обязаны
+## выглядеть одинаково (шапка BannerArt), поэтому выбор ленты, масштаба и
+## сдвига древка — здесь, один раз: [текстура, множитель квада, сдвиг древка
+## в метрах при k = 1 (−1 — как у вымпела)].
+##   орда            → зелёные язычки × GOBLIN_SCALE (белые — в панике);
+##   легендарные     → золотой квадрат × LEGEND_SCALE, под ним бордовый
+##                     мини-флажок штандарта игрока (elite, язычков elite_lvl)
+##                     и цветные мини-флажки лычек сверх легенды (flags);
+##   элита не-легенда → бордовый штандарт × ELITE_SCALE (как было);
+##   прочие          → вымпел шкалы
+static func spec(level: int, elite: bool, goblin: bool, elite_lvl: int,
+		flags: int = 0, white: bool = false) -> Array:
+	var lvl: int = maxi(level, 1)
+	if goblin:
+		return [_BannerArt.goblin_tongue_texture(lvl, white), GOBLIN_SCALE, -1.0]
+	if white:
+		return [_BannerArt.white_flag_texture(), 1.0, -1.0]
+	if lvl >= _UCfgS.VET_BANNER_TIERS.size():
+		return [_BannerArt.legend_texture(elite_lvl if elite else 0, flags), LEGEND_SCALE, -1.0]
+	if elite:
+		return [_BannerArt.elite_texture(elite_lvl, level), ELITE_SCALE,
+			_BannerArt.elite_pole_offset_px() * PIXEL_SIZE]
+	return [_BannerArt.texture_for(lvl), 1.0, -1.0]
+
+static func create(level: int, elite: bool = false, goblin: bool = false,
+		elite_lvl: int = 1, flags: int = 0) -> MeshInstance3D:
 	var root := MeshInstance3D.new()
 	root.set_script(load("res://scripts/SquadBanner.gd"))
 	root.name = "SquadBanner"
-	root.build(level, elite)
+	root.build(level, elite, goblin, elite_lvl, flags)
 	return root
 
 ## elite — индивидуальное звание отряда: красный штандарт × ELITE_SCALE вместо
 ## вымпела общего ветеранства (ТЗ 13.10.2026, письмо 7)
-func build(level: int, elite: bool = false) -> void:
+## elite_lvl — уровень элиты (римская цифра), level — общее ветеранство:
+## у штандарта элиты оно рисуется лычками внизу полотнища (ТЗ 22.10.2026)
+## flags — цветные мини-флажки лычек сверх легенды (ТЗ 25.10.2026)
+func build(level: int, elite: bool = false, goblin: bool = false, elite_lvl: int = 1,
+		flags: int = 0) -> void:
 	shown_level = maxi(level, 1)
 	shown_white = false
 	shown_elite = elite
-	if elite:
-		build_texture(_BannerArt.vexillum_texture(shown_level), ELITE_SCALE)
-	else:
-		build_texture(_BannerArt.texture_for(shown_level))
+	shown_elite_lvl = elite_lvl if elite else 0
+	shown_flags = flags
+	if goblin:
+		shown_goblin = true
+	var sp: Array = spec(shown_level, elite, shown_goblin, elite_lvl, flags)
+	build_texture(sp[0], float(sp[1]), float(sp[2]))
 
 ## ── ПОКАЗАТЬ БЕЛОЕ ПОЛОТНИЩЕ ВМЕСТО БОЕВОГО ────────────────────────────────
 ## `level` запоминается даже у отряда БЕЗ звания (там он ноль): по нему знамя
 ## вернётся в боевой вид, когда паника спадёт, — а у новобранца «вернуться»
-## означает «исчезнуть», и это решает GameManager
-func show_white(level: int) -> void:
+## означает «исчезнуть», и это решает GameManager.
+## У ОРДЫ БЕЛЕЕТ ЕЁ ЖЕ ФЛАГ (ТЗ 25.10.2026): те же язычки, белая ткань —
+## а не людской белый вымпел
+func show_white(level: int, goblin: bool = false) -> void:
 	shown_level = level
+	if goblin:
+		shown_goblin = true
 	if shown_white and mesh != null:
 		return
 	shown_white = true
-	build_texture(_BannerArt.white_flag_texture())
+	var sp: Array = spec(level, false, shown_goblin, 0, 0, true)
+	build_texture(sp[0], float(sp[1]), float(sp[2]))
 
 ## Собрать квад под ГОТОВУЮ ленту. Вынесено из build() ради белого флага
 ## паники: у него нет уровня, а всё остальное — размер, ветровой материал,
 ## отключённая тень — обязано совпадать со знаменем до строчки
 ## k — множитель размера квада (штандарт элиты: ELITE_SCALE); сдвиг древка и
 ## высота центра едут за ним: низ древка остаётся на той же высоте над землёй
-func build_texture(tex: Texture2D, k: float = 1.0) -> void:
+## pole_off — сдвиг древка от центра холста в метрах при k = 1 (у штандарта
+## элиты древко стоит правее, см. BannerArt.ELITE_POLE_X); < 0 — как у вымпела
+func build_texture(tex: Texture2D, k: float = 1.0, pole_off: float = -1.0) -> void:
 	if tex == null:
 		mesh = null
 		return
 	var sz: Vector2 = tex.get_size()
 	var quad := QuadMesh.new()
 	quad.size = Vector2(sz.x * PIXEL_SIZE * k, sz.y * PIXEL_SIZE * k)
-	pole_offset = POLE_OFFSET_X * k
+	pole_offset = (POLE_OFFSET_X if pole_off < 0.0 else pole_off) * k
 	# Центр поднимается на половину прибавки высоты: нижний край квада (низ
 	# древка в руке знаменосца) стоит там же, где у обычного знамени
 	var base_h: float = float(_BannerArt.H) * PIXEL_SIZE

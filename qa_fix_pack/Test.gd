@@ -316,7 +316,8 @@ func _d_panel() -> void:
 	_collect_buttons(hud.button_container, btns)
 	var train: Array = []
 	for b in btns:
-		if (b as Button).name != "KeepRankButton":
+		# Колокол и слот укрытых рабочих (ТЗ 20.10.2026) — не кнопки найма
+		if not ((b as Button).name in ["KeepRankButton", "AlertBtn", "ShelterSlot"]):
 			train.append(b)
 	var square := true
 	var sizes := ""
@@ -420,15 +421,9 @@ func _e_formation() -> void:
 	var es: Vector2 = _extent(sm._mono_formation_slots(a, b, spears)["slots"], dir)
 	# РАЗВОРОТ ТЗ 14.10.2026, п. 6: «убрать жёсткое три в ряд при растягивании
 	# ПКМ» — с выключенной ручкой копейщики тянутся свободно, как все
-	if sm.SPEAR_WALL_DRAG_ROWS:
-		verdict("E2 копейщики со «Стеной копий» — ровно в %d шеренги на любом растяге" % GameManager.SPEAR_WALL_ROWS,
-			GameManager.spear_wall_ready(sp_sid)
-				and absf(es.y - float(GameManager.SPEAR_WALL_ROWS - 1) * sm.ROW_DEPTH) <= 0.05,
-			"глубина %.2f м" % es.y)
-	else:
-		verdict("E2 копейщики с «Фалангой» тянутся свободно (не глубже двух шеренг, ТЗ 14.10)",
-			GameManager.spear_wall_ready(sp_sid) and es.y <= sm.ROW_DEPTH * 1.5 + 0.01,
-			"глубина %.2f м" % es.y)
+	verdict("E2 копейщики с «Фалангой» тянутся свободно (не глубже двух шеренг, ТЗ 14.10)",
+		GameManager.spear_wall_ready(sp_sid) and es.y <= sm.ROW_DEPTH * 1.5 + 0.01,
+		"глубина %.2f м" % es.y)
 	var ea2: Vector2 = _extent(sm._mono_formation_slots(a, b, arch)["slots"], dir)
 	verdict("E3 «Стена копий» копейщиков НЕ трогает лучников — те по-прежнему свободны",
 		ea2.y <= sm.ROW_DEPTH * 1.5 + 0.01, "глубина лучников %.2f м" % ea2.y)

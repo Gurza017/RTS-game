@@ -100,6 +100,11 @@ func _contact_stats(men: Array, foes: Array) -> Array:
 			near = minf(near, uu.global_position.distance_to((f as Node3D).global_position))
 		if near > uu.attack_range:
 			continue
+		# КОРОБКА (ТЗ 24.10.2026): по врагу перед фронтом бьют ряды 0-1
+		# (Unit.BOX_STRIKE_ROWS), задним драться не положено — это заказ, а не
+		# «стоит без дела»
+		if uu._box_goal.x != INF and uu._box_row >= Unit.BOX_STRIKE_ROWS:
+			continue
 		can += 1
 		var t = uu.attack_target
 		if t != null and is_instance_valid(t) and not (t as Unit).is_dead():

@@ -706,14 +706,15 @@ func _test_stars() -> void:
 		var t: Dictionary = _UCfg.veteran_banner_tier(lvl)
 		var sh: int = int(t.get("shape", -1))
 		grades.append("%d:%d" % [lvl, sh])
-		var want_shape: int = _UCfg.BANNER_PENNANT
-		if lvl >= 7:
-			want_shape = _UCfg.BANNER_STANDARD
-		elif lvl >= 4:
-			want_shape = _UCfg.BANNER_GUIDON
+		# РАЗВОРОТ ТЗ 20.10.2026: гвидон снят, у всех ступеней треугольный
+		# вымпел (красный 1-3, синий 4-6, красный с белым концом — высший);
+		# штандарт — только элите по награде игрока (ТЗ 22.10.2026)
+		# РАЗВОРОТ ТЗ 25.10.2026: высшая (легендарная) ступень — золотой
+		# квадратный штандарт, остальные — вымпелы
+		var want_shape: int = _UCfg.BANNER_STANDARD if lvl == _UCfg.VET_BANNER_TIERS.size() else _UCfg.BANNER_PENNANT
 		if sh != want_shape:
 			shape_ok = false
-	verdict("E9 формы грейдов: вымпел 1-3, «ласточкин хвост» 4-6, штандарт 7",
+	verdict("E9 формы грейдов: вымпелы, у легенды — штандарт (ТЗ 25.10)",
 		shape_ok, ", ".join(grades))
 
 	for m in men:

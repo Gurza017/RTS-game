@@ -126,9 +126,118 @@ func _auto_release() -> bool:
 func vision_radius() -> float:
 	return _UCfgT.TOWER_VISION
 
-## Тик нужен только с гарнизоном (или очередью ко входу); золота башня не даёт
+## Тик нужен только с гарнизоном (или очередью ко входу) и на время работ по
+## укреплению; золота башня не даёт
 func _needs_tick() -> bool:
-	return not garrison.is_empty() or not _incoming.is_empty()
+	return not garrison.is_empty() or not _incoming.is_empty() or _fort_left > 0.0
+
+# ═════════════════════════════════════════════════════════════════════════════
+# УКРЕПЛЕНИЕ БАШНИ (ТЗ 20.10.2026, блок 4)
+# ═════════════════════════════════════════════════════════════════════════════
+## Ступени — unit_stats_config.TOWER_FORT_LEVELS. Работы идут таймером здания
+## (башня продолжает стоять и стрелять, гарнизон не выходит); по окончании —
+## прибавка к запасу жизни, снижение входящего урона и «каменный» рисунок.
+## Сохраняется (SaveLoadManager: поле "fort")
+signal fortified(level: int)
+var fort_level: int = 0
+var _fort_left: float = 0.0
+var _fort_total: float = 0.0
+
+func fort_max() -> int:
+	return _UCfgT.TOWER_FORT_LEVELS.size()
+
+## Описание СЛЕДУЮЩЕЙ ступени; пусто — предел
+func fort_next() -> Dictionary:
+	if fort_level >= fort_max():
+		return {}
+	return _UCfgT.TOWER_FORT_LEVELS[fort_level]
+
+func fort_cost() -> Dictionary:
+	var n: Dictionary = fort_next()
+	if n.is_empty():
+		return {}
+	var c := {}
+	if float(n.get("cost_wood", 0.0)) > 0.0:
+		c[Constants.RESOURCE_WOOD] = int(n["cost_wood"])
+	if float(n.get("cost_stone", 0.0)) > 0.0:
+		c[Constants.RESOURCE_STONE] = int(n["cost_stone"])
+	return c
+
+func fort_busy() -> bool:
+	return _fort_left > 0.0
+
+func fort_progress() -> float:
+	if _fort_total <= 0.0:
+		return 0.0
+	return clampf(1.0 - _fort_left / _fort_total, 0.0, 1.0)
+
+## Заказать следующую ступень. false — предел, идут работы или не хватает
+func fort_start() -> bool:
+	if fort_busy() or is_dead():
+		return false
+	var n: Dictionary = fort_next()
+	if n.is_empty():
+		return false
+	var c: Dictionary = fort_cost()
+	if not ResourceManager.can_afford(faction, c):
+		return false
+	ResourceManager.spend(faction, c)
+	_fort_total = maxf(float(n.get("time", 0.0)), 0.01)
+	_fort_left = _fort_total
+	set_process(true)
+	return true
+
+## Отменить идущие работы с возвратом цены
+func fort_cancel() -> bool:
+	if not fort_busy():
+		return false
+	var c: Dictionary = fort_cost()
+	for k in c:
+		ResourceManager.add_resource(faction, int(k), float(c[k]))
+	_fort_left = 0.0
+	_fort_total = 0.0
+	return true
+
+## Множитель входящего урона текущей ступени
+func fort_damage_mult() -> float:
+	if fort_level <= 0:
+		return 1.0
+	var d: Dictionary = _UCfgT.TOWER_FORT_LEVELS[mini(fort_level, fort_max()) - 1]
+	return float(d.get("dmg_mult", 1.0))
+
+## Поставить ступень сразу (завершение работ, загрузка сохранения, стенды)
+func fort_apply(level: int) -> void:
+	level = clampi(level, 0, fort_max())
+	var base_hp: float = _UCfgT.building_stat("tower", "max_hp", 1200.0)
+	while fort_level < level:
+		var d: Dictionary = _UCfgT.TOWER_FORT_LEVELS[fort_level]
+		var add: float = base_hp * float(d.get("hp_add", 0.0))
+		max_health += add
+		current_health += add
+		fort_level += 1
+	_fort_look()
+	_update_hp_bar()
+
+func _fort_look() -> void:
+	if _sprite_mat == null:
+		return
+	var tints: Array = _UCfgT.TOWER_FORT_TINT
+	var c: Color = tints[clampi(fort_level, 0, tints.size() - 1)]
+	_sprite_mat.set_shader_parameter("modulate", c)
+
+func _process(delta: float) -> void:
+	super._process(delta)
+	if _fort_left > 0.0:
+		_fort_left -= delta
+		if _fort_left <= 0.0:
+			_fort_left = 0.0
+			fort_apply(fort_level + 1)
+			flash_accept()
+			fortified.emit(fort_level)
+
+## Облицовка режет ВХОДЯЩИЙ урон (стрелы, удары, туши) — до базового расчёта
+func take_damage(amount: float, attacker: Node = null) -> void:
+	super.take_damage(amount * fort_damage_mult(), attacker)
 
 ## ЗАМКОВОЙ МОДЕЛИ У БАШНИ НЕТ. База Castle грузит castle.glb; здесь нужен
 ## только коллайдер и запасной примитив — картинку положит поверх

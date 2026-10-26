@@ -322,6 +322,10 @@ func _b_damage() -> void:
 			await pframes(3)
 		var roof = bb._roof
 		var units: Array = roof.roof_units()
+		# Блок A ранит защитников по жребию: недобитый (запас меньше 48 HP) погиб
+		# бы от замера, и в счёт ушёл бы только его остаток. Ставим полный запас
+		for u in units:
+			(u as Unit).current_health = (u as Unit).max_health
 		var hp_units0: float = 0.0
 		for u in units:
 			hp_units0 += (u as Unit).current_health
@@ -460,6 +464,10 @@ func _d_manual() -> void:
 	verdict("D3 ПКМ выделенной башней = приказ гарнизону (ручная цель в дальнем отряде)",
 		sm.garrison_fire_orders == orders0 + 1 and mt != null and (mt as Unit).squad_id == int(far[0]),
 		"приказов %d, цель %s" % [sm.garrison_fire_orders - orders0, str(mt)])
+	# Стрелы, выпущенные по ближнему ДО приказа, ещё в воздухе: гарнизон без
+	# «Залпового огня» стреляет вразнобой (ТЗ 20.10.2026), и их прилёт
+	# размазан — даём им долететь, прежде чем снимать отсчёт
+	await pframes(90)
 	near_hp0 = _hp_sum(near[1])
 	far_hp0 = _hp_sum(far[1])
 	var wrong := 0

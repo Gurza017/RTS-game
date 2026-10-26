@@ -12,7 +12,23 @@ extends RefCounted
 ## Каждая картинка строится один раз и кэшируется. Горячая точка — там, куда
 ## «смотрит» рисунок: кончик меча, низ дверного проёма, центр знака и боёк.
 
-enum { NONE = 0, HAND = 1, DOOR = 2, FORBID = 3, SWORD = 4, HAMMER = 5 }
+## ── ТЗ 20.10.2026, блок 6 ──────────────────────────────────────────────────
+##   AXE     — рабочий над деревом;
+##   PICKAXE — рабочий над камнем и золотом;
+##   KNIFE   — рабочий над мясом (загон, овца, туша);
+##   FINGER  — пехота/рабочие над своим замком или зданием (ПКМ — «сюда»);
+##   SWORD   — теперь НАКЛОНЁН на 45°: рукоять вверху справа, остриё внизу
+##             слева — горячая точка на острие;
+##   DOOR    — только лучникам над укреплением, которое их примет
+## ── ТЗ 22.10.2026, блок 5 ──────────────────────────────────────────────────
+##   MEDIC — монах над своим раненым отрядом: крест медицины со змеёй (ПКМ —
+##           лечить); меч и топор — шире и жирнее штрихом, под габарит
+##           основной стрелки и перчатки (22-27 px по ширине)
+## ── ТЗ 24.10.2026, второе письмо, блок 1 ───────────────────────────────────
+##   ARROW — стрела наконечником вниз-влево (как меч): выделены ТОЛЬКО стрелки
+##           (лучники, башня/укрепление с гарнизоном) и под курсором враг
+enum { NONE = 0, HAND = 1, DOOR = 2, FORBID = 3, SWORD = 4, HAMMER = 5,
+	AXE = 6, PICKAXE = 7, KNIFE = 8, FINGER = 9, MEDIC = 10, ARROW = 11 }
 
 const SZ := 32
 const OUTLINE := Color(0.07, 0.07, 0.09, 1.0)
@@ -22,12 +38,26 @@ static var _cache: Dictionary = {}
 static func texture(kind: int) -> ImageTexture:
 	if _cache.has(kind):
 		return _cache[kind]
+	# ПАЛЕЦ — ИСХОДНЫЙ АССЕТ, А НЕ РИСУНОК КОДОМ (ТЗ 21.10.2026): владелец
+	# просил вернуть перчатку-указатель из набора интерфейса (Cursor_02).
+	# Рисованный _finger() остался запасным — на случай, если файла нет
+	if kind == FINGER:
+		var orig = load("res://scripts/UIAssets.gd").cursor(2)
+		if orig is ImageTexture:
+			_cache[kind] = orig
+			return orig
 	var img: Image = null
 	match kind:
 		DOOR: img = _door()
 		FORBID: img = _forbid()
 		SWORD: img = _sword()
+		ARROW: img = _arrow()
 		HAMMER: img = _hammer()
+		AXE: img = _axe()
+		PICKAXE: img = _pickaxe()
+		KNIFE: img = _knife()
+		FINGER: img = _finger()
+		MEDIC: img = _medic()
 	if img == null:
 		return null
 	_outline(img)
@@ -38,9 +68,20 @@ static func texture(kind: int) -> ImageTexture:
 static func hotspot(kind: int) -> Vector2:
 	match kind:
 		DOOR: return Vector2(16, 28)
+		MEDIC: return Vector2(16, 16)
 		FORBID: return Vector2(16, 16)
-		SWORD: return Vector2(16, 30)
+		SWORD: return Vector2(3, 28)
+		ARROW: return Vector2(3, 28)
 		HAMMER: return Vector2(9, 8)
+		AXE: return Vector2(AXE_EDGE)
+		PICKAXE: return Vector2(4, 9)
+		KNIFE: return Vector2(4, 4)
+		FINGER:
+			# у исходной перчатки остриё — кончик пальца (верхний левый пиксель)
+			var ui = load("res://scripts/UIAssets.gd")
+			if ui.cursor(2) != null:
+				return ui.cursor_hotspot(2)
+			return Vector2(13, 2)
 	return Vector2.ZERO
 
 static func _blank() -> Image:
@@ -135,25 +176,220 @@ static func _forbid() -> Image:
 				_put(img, x, y, red)
 	return img
 
-## Меч остриём вниз: рукоять сверху, гарда, клинок до нижней кромки
+## Меч, наклонённый на 45° (ТЗ 20.10.2026, блок 6): рукоять вверху справа,
+## клинок уходит вниз влево, остриё — горячая точка. Рисуется в осях клинка
+## (u — вдоль от острия к навершию, v — поперёк), как молоток
 static func _sword() -> Image:
 	var img := _blank()
-	var blade := Color(0.88, 0.90, 0.95)
-	var blade_dk := Color(0.62, 0.66, 0.74)
+	var blade := Color(0.90, 0.92, 0.96)
+	var blade_dk := Color(0.60, 0.64, 0.72)
 	var gold := Color(0.93, 0.76, 0.24)
 	var grip := Color(0.45, 0.28, 0.14)
-	_rect(img, 15, 1, 17, 3, gold)        # навершие
-	_rect(img, 15, 4, 16, 8, grip)        # рукоять
-	_rect(img, 10, 9, 21, 10, gold)       # гарда
-	for y in range(11, 27):
-		_put(img, 15, y, blade)
-		_put(img, 16, y, blade_dk)
-		_put(img, 14, y, blade)
-		_put(img, 17, y, blade_dk)
-	# Остриё сходится в точку
-	_rect(img, 15, 27, 16, 28, blade)
-	_put(img, 16, 29, blade)
-	_put(img, 16, 30, blade_dk)
+	var tip := Vector2(3.0, 28.5)
+	var ax := Vector2(1, -1).normalized()    # от острия к рукояти
+	var px := Vector2(1, 1).normalized()     # поперёк
+	for y in range(SZ):
+		for x in range(SZ):
+			var d := Vector2(float(x) + 0.5, float(y) + 0.5) - tip
+			var u: float = d.dot(ax)
+			var v: float = d.dot(px)
+			if u < 0.0 or u > 33.0:
+				continue
+			if u <= 20.5:
+				# Клинок: сужается к острию в первых 5 пикселях. ШИРЕ
+				# (ТЗ 22.10.2026): было 1.9 — тоньше стрелки курсора вдвое
+				var half: float = 2.8 if u > 5.0 else 0.6 + u * 0.44
+				if absf(v) <= half:
+					_put(img, x, y, blade if v < 0.0 else blade_dk)
+			elif u <= 23.5:
+				if absf(v) <= 6.8:
+					_put(img, x, y, gold)              # гарда
+			elif u <= 29.5:
+				if absf(v) <= 1.9:
+					_put(img, x, y, grip)              # рукоять
+			elif absf(v) <= 2.9:
+				_put(img, x, y, gold)                  # навершие
+	return img
+
+## Стрела по той же диагонали, что меч: наконечник-ромб у горячей точки,
+## древко, оперение двумя «ёлочками» у верхнего правого угла
+static func _arrow() -> Image:
+	var img := _blank()
+	var iron := Color(0.86, 0.88, 0.94)
+	var iron_dk := Color(0.55, 0.58, 0.66)
+	var shaft := Color(0.74, 0.52, 0.28)
+	var shaft_dk := Color(0.52, 0.34, 0.16)
+	var fl := Color(0.92, 0.30, 0.22)
+	var fl_dk := Color(0.66, 0.18, 0.14)
+	var tip := Vector2(3.0, 28.5)
+	var ax := Vector2(1, -1).normalized()
+	var px := Vector2(1, 1).normalized()
+	for y in range(SZ):
+		for x in range(SZ):
+			var d := Vector2(float(x) + 0.5, float(y) + 0.5) - tip
+			var u: float = d.dot(ax)
+			var v: float = d.dot(px)
+			if u < 0.0 or u > 35.0:
+				continue
+			if u <= 8.0:
+				# Наконечник: ширится до 4 px к 6-му пикселю и сходится к древку
+				var half: float = u * 0.62 if u <= 6.0 else 3.7 - (u - 6.0) * 1.2
+				if absf(v) <= maxf(half, 0.6):
+					_put(img, x, y, iron if v < 0.0 else iron_dk)
+			elif u <= 25.0:
+				if absf(v) <= 1.1:
+					_put(img, x, y, shaft if v < 0.0 else shaft_dk)
+			else:
+				# Оперение: два пера, расходящихся назад
+				var w: float = 1.1 + (u - 25.0) * 0.42
+				if absf(v) <= minf(w, 4.2) and absf(v) >= 0.9:
+					_put(img, x, y, fl if v < 0.0 else fl_dk)
+				elif absf(v) <= 1.1:
+					_put(img, x, y, shaft_dk)
+	return img
+
+## Топор: рукоять из правого нижнего угла, головка вверху слева, ЛЕЗВИЕ
+## СМОТРИТ ВНИЗ-ВЛЕВО — в дерево под курсором (ТЗ 21.10.2026, письмо 4:
+## прежде полумесяц глядел вверх-вправо, от ствола). Лезвие расширяется от
+## проуха к выпуклой кромке; горячая точка — середина кромки (AXE_EDGE)
+const AXE_HEAD := Vector2(13.0, 10.0)
+const AXE_EDGE := Vector2(6, 17)
+
+static func _axe() -> Image:
+	var img := _blank()
+	var iron := Color(0.80, 0.82, 0.88)
+	var iron_dk := Color(0.48, 0.50, 0.56)
+	var wood := Color(0.72, 0.47, 0.22)
+	var wood_dk := Color(0.52, 0.32, 0.14)
+	var c := AXE_HEAD
+	var ax := Vector2(1, 1).normalized()      # вдоль рукояти, к руке
+	var px := Vector2(-1, 1).normalized()     # поперёк, к лезвию (вниз-влево)
+	for y in range(SZ):
+		for x in range(SZ):
+			var d := Vector2(float(x) + 0.5, float(y) + 0.5) - c
+			var u: float = d.dot(ax)
+			var v: float = d.dot(px)
+			# Рукоять и лезвие ШИРЕ (ТЗ 22.10.2026): было 1.4 и кромка 9.5
+			if u > -3.0 and u < 23.0 and absf(v) <= 2.0:
+				_put(img, x, y, wood if v < 0.5 else wood_dk)
+			# Лезвие: от проуха (v = 1) к выпуклой кромке, ширина растёт
+			var edge: float = 11.0 - u * u * 0.032
+			if v > 1.5 and v < edge and absf(u) < 2.8 + (v - 1.5) * 0.62:
+				_put(img, x, y, iron if v > edge - 2.6 else iron_dk)
+			# Обух — короткий, по другую сторону рукояти
+			if absf(u) <= 2.6 and v <= -1.5 and v >= -4.0:
+				_put(img, x, y, iron_dk)
+	return img
+
+## Знак медицины (ТЗ 22.10.2026): зелёный крест с белой каймой, по оси —
+## посох со змеёй (жезл Асклепия). Горячая точка — центр знака
+static func _medic() -> Image:
+	var img := _blank()
+	var green := Color(0.20, 0.66, 0.32)
+	var green_dk := Color(0.12, 0.44, 0.20)
+	var rim := Color(0.96, 0.97, 0.94)
+	var staff := Color(0.56, 0.36, 0.18)
+	var snake := Color(0.88, 0.95, 0.80)
+	# Кайма креста (на пиксель шире) и сам крест
+	for y in range(SZ):
+		for x in range(SZ):
+			var dx: int = absi(x - 16)
+			var dy: int = absi(y - 16)
+			var arm: int = 6
+			var reach: int = 14
+			var in_rim: bool = (dx <= arm and dy <= reach) or (dy <= arm and dx <= reach)
+			var in_cross: bool = (dx <= arm - 1 and dy <= reach - 1) or (dy <= arm - 1 and dx <= reach - 1)
+			if in_cross:
+				_put(img, x, y, green if (x + y) % 7 != 0 else green_dk)
+			elif in_rim:
+				_put(img, x, y, rim)
+	# Посох по вертикали
+	_rect(img, 15, 4, 16, 27, staff)
+	# Змея: синусоида вокруг посоха, голова сверху
+	for k in range(0, 44):
+		var t: float = float(k) / 43.0
+		var yy: float = 25.0 - t * 19.0
+		var xx: float = 15.5 + sin(t * TAU * 1.5) * 3.2
+		_put(img, int(round(xx)), int(round(yy)), snake)
+		_put(img, int(round(xx)) + 1, int(round(yy)), snake)
+	_rect(img, 17, 5, 19, 7, snake)
+	return img
+
+## Кирка: дугой поперёк вверху, рукоять вниз вправо; клюв слева — точка удара
+static func _pickaxe() -> Image:
+	var img := _blank()
+	var iron := Color(0.74, 0.76, 0.82)
+	var iron_dk := Color(0.46, 0.48, 0.54)
+	var wood := Color(0.72, 0.47, 0.22)
+	var wood_dk := Color(0.52, 0.32, 0.14)
+	var c := Vector2(13.0, 13.0)
+	var ax := Vector2(1, 1).normalized()
+	var px := Vector2(-1, 1).normalized()
+	for y in range(SZ):
+		for x in range(SZ):
+			var d := Vector2(float(x) + 0.5, float(y) + 0.5) - c
+			var u: float = d.dot(ax)
+			var v: float = d.dot(px)
+			if u > 0.0 and u < 22.0 and absf(v) <= 1.4:
+				_put(img, x, y, wood if v < 0.3 else wood_dk)
+			# Головка: дуга поперёк рукояти, концы загнуты к рукояти
+			var bend: float = 0.06 * v * v
+			if absf(v) <= 12.5 and absf(u + 1.5 - bend) <= 1.6 - absf(v) * 0.07:
+				_put(img, x, y, iron if u < -1.0 + bend else iron_dk)
+	return img
+
+## Нож мясника: широкое лезвие от левого верхнего угла, рукоять вниз вправо
+static func _knife() -> Image:
+	var img := _blank()
+	var blade := Color(0.88, 0.90, 0.94)
+	var blade_dk := Color(0.58, 0.62, 0.70)
+	var wood := Color(0.55, 0.32, 0.16)
+	var rivet := Color(0.93, 0.80, 0.40)
+	var tip := Vector2(4.0, 4.0)
+	var ax := Vector2(1, 1).normalized()
+	var px := Vector2(-1, 1).normalized()
+	for y in range(SZ):
+		for x in range(SZ):
+			var d := Vector2(float(x) + 0.5, float(y) + 0.5) - tip
+			var u: float = d.dot(ax)
+			var v: float = d.dot(px)
+			if u < 0.0:
+				continue
+			if u <= 18.0:
+				# Обух прямой (v ≤ 0), режущая кромка изогнута к острию
+				var belly: float = minf(4.2, 0.6 + u * 0.45)
+				if v >= -1.2 and v <= belly:
+					_put(img, x, y, blade if v < belly - 1.2 else blade_dk)
+			elif u <= 32.0 and absf(v - 1.0) <= 2.0:
+				var r: bool = (int(u) == 22 or int(u) == 28) and absf(v - 1.0) < 0.8
+				_put(img, x, y, rivet if r else wood)
+	return img
+
+## Указательный палец: кисть внизу, палец вверх — горячая точка на кончике
+static func _finger() -> Image:
+	var img := _blank()
+	var skin := Color(0.98, 0.86, 0.70)
+	var skin_dk := Color(0.82, 0.64, 0.48)
+	var cuff := Color(0.30, 0.46, 0.82)
+	# Указательный палец
+	for y in range(2, 16):
+		for x in range(11, 16):
+			var top_round: bool = y > 3 or (x > 11 and x < 15)
+			if top_round:
+				_put(img, x, y, skin_dk if x == 15 else skin)
+	# Кисть с поджатыми пальцами
+	for y in range(13, 26):
+		for x in range(8, 25):
+			if y == 13 and (x < 15 or x > 22):
+				continue
+			var knuckle: bool = y >= 14 and y <= 15 and (x == 18 or x == 21)
+			_put(img, x, y, skin_dk if knuckle or x == 24 or y == 25 else skin)
+	# Большой палец сбоку
+	for y in range(16, 21):
+		for x in range(5, 9):
+			_put(img, x, y, skin if x > 5 else skin_dk)
+	# Манжета
+	_rect(img, 9, 26, 24, 30, cuff)
 	return img
 
 ## Молоток: боёк наискось сверху слева, рукоять вниз вправо. Рисуется по

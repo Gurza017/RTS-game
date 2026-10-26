@@ -35,7 +35,7 @@ var pool: float = 0.0
 var armed: bool = false
 
 ## Реликвии: {"id", "level", "carrier": Unit|null, "pos": Vector3,
-## "node": MeshInstance3D|null, "label": Label3D|null}. carrier == null —
+## "node": MeshInstance3D|null, "shown": уровень на картинке}. carrier == null —
 ## лежит на земле в pos
 var relics: Array = []
 var _next_id: int = 1
@@ -64,7 +64,44 @@ func add_xp(n: float) -> void:
 	pool = minf(pool + n * _RCfg.POOL_PER_KILL, _RCfg.POOL_COST * 9.0)
 	pool_changed.emit(pool)
 	if charged() and not was:
-		AudioManager.play_ui("smith_pick")
+		# Свой светлый перезвон (ТЗ 24.10.2026, второе письмо): прежний
+		# щелчок кузницы не отличался от клика по исследованию
+		AudioManager.play_ui("banner_ready")
+
+## ── КОПИЛКА КРАСНОГО ИИ (ТЗ 23.10.2026, п. 5) ──────────────────────────────
+## Штандарт — награда за общий опыт армии и у ИИ: та же цена POOL_COST, тот же
+## путь grant_to_squad; вручается самому заслуженному полевому отряду (больше
+## всех убийств). Прежде бордовые штандарты у красных были от наград
+## ветеранства (apply_veteran_choice), то есть у каждого опытного отряда
+var ai_pool: float = 0.0
+var ai_grants: int = 0
+
+func add_ai_xp(n: float) -> void:
+	if n <= 0.0:
+		return
+	ai_pool = minf(ai_pool + n * _RCfg.POOL_PER_KILL, _RCfg.POOL_COST * 3.0)
+	if ai_pool < _RCfg.POOL_COST:
+		return
+	var best: int = -1
+	var best_k: int = -1
+	for key in GameManager.squads.keys():
+		var sq: Dictionary = GameManager.squads[key]
+		if int(sq.get("faction", -1)) != Constants.FACTION_ENEMY:
+			continue
+		var t: String = String(sq.get("type", ""))
+		if t == "worker" or t == "monk":
+			continue
+		if _alive_members(int(key)).is_empty():
+			continue
+		var k: int = int(sq.get("kills", 0))
+		if k > best_k:
+			best_k = k
+			best = int(key)
+	if best < 0:
+		return
+	if grant_to_squad(best, true) >= 0:
+		ai_pool -= _RCfg.POOL_COST
+		ai_grants += 1
 
 func charged() -> bool:
 	return pool >= _RCfg.POOL_COST
@@ -168,7 +205,7 @@ func _new_relic(level: int, carrier: Unit, pos: Vector3) -> Dictionary:
 	if carrier != null:
 		cv = carrier
 	var r: Dictionary = {"id": _next_id, "level": level, "carrier": cv,
-		"pos": p0, "node": null, "label": null}
+		"pos": p0, "node": null, "shown": 0}
 	_next_id += 1
 	relics.append(r)
 	_refresh_visual(r)
@@ -343,16 +380,17 @@ func aura_level_on(u: Node) -> int:
 	return 0 if a == null else int((a as Array)[4])
 
 # ═════════════════════════════════════════════════════════════════════════════
-# КАРТИНКА: ЗОЛОТОЙ ШТАНДАРТ НАД НОСИТЕЛЕМ ИЛИ ВОТКНУТЫЙ В ЗЕМЛЮ
+# КАРТИНКА: БОРДОВЫЙ ШТАНДАРТ ЭЛИТЫ (ТЗ 22.10.2026, блок 1)
 # ═════════════════════════════════════════════════════════════════════════════
-
-static var _tex: Texture2D = null
+## Золотой штандарт с подписью «★N» над носителем СНЯТ: жёлтых флагов на
+## карте нет. Реликвия делает отряд элитой (GameManager.grant_squad_level →
+## признак "elite"), и знамя САМОГО отряда превращается в бордовый штандарт
+## с римской цифрой — один отряд, один флагшток. Свой узел реликвия
+## показывает только там, где знамени отряда нет: лежит на земле или её
+## несёт боец, чей отряд не элита (подобрал враг)
 
 static func relic_texture() -> Texture2D:
-	if _tex == null:
-		_tex = _BannerArtR._render({"shape": _UCfgR.BANNER_STANDARD,
-			"cloth": _RCfg.CLOTH, "chevrons": 0, "chevron_dir": 1, "tip": true})
-	return _tex
+	return _BannerArtR.elite_texture(1, 0)
 
 func _host() -> Node:
 	var m = GameManager.main
@@ -369,21 +407,14 @@ func _refresh_visual(d: Dictionary) -> void:
 			return
 		node = _SquadBannerR.create(1)
 		node.name = "RelicBanner"
-		node.build_texture(relic_texture())
 		host.add_child(node)
-		var lab := Label3D.new()
-		lab.billboard = BaseMaterial3D.BILLBOARD_ENABLED
-		lab.pixel_size = 0.008
-		lab.font_size = 56
-		lab.outline_size = 12
-		lab.modulate = Color(1.0, 0.86, 0.3)
-		lab.position = Vector3(0.0, 1.05, 0.0)
-		node.add_child(lab)
 		d["node"] = node
-		d["label"] = lab
-	var l = d["label"]
-	if l != null and is_instance_valid(l):
-		(l as Label3D).text = "★%d" % int(d["level"])
+		d["shown"] = 0
+	# Картинка — штандарт элиты с римской цифрой уровня реликвии
+	if int(d.get("shown", 0)) != int(d["level"]):
+		d["shown"] = int(d["level"])
+		node.build_texture(_BannerArtR.elite_texture(int(d["level"]), 0),
+			_SquadBannerR.ELITE_SCALE, _BannerArtR.elite_pole_offset_px() * _SquadBannerR.PIXEL_SIZE)
 
 const _RelicButtonS := preload("res://scripts/RelicButton.gd")
 var _ui: Node = null
@@ -395,6 +426,7 @@ func _process(_delta: float) -> void:
 		if m != null and is_instance_valid(m) and m.is_inside_tree():
 			_ui = _RelicButtonS.create_layer()
 			m.add_child(_ui)
+	_aura_view_tick(_delta)
 	if relics.is_empty():
 		return
 	var fog = GameManager.fog
@@ -409,6 +441,11 @@ func _process(_delta: float) -> void:
 		var c = d["carrier"]
 		if c != null and is_instance_valid(c) and not (c as Unit).is_dead():
 			var u := c as Unit
+			# Отряд носителя — элита: его знамя уже бордовый штандарт, второй
+			# флагшток над тем же отрядом не ставится
+			if GameManager.squad_elite(u.squad_id):
+				node.visible = false
+				continue
 			# Видна ровно тогда, когда виден носитель (та же логика, что у
 			# знамени отряда: факт отрисовки плюс туман по логической точке)
 			if u.garrisoned or not u.is_inside_tree() or not u.is_drawn():
@@ -418,14 +455,14 @@ func _process(_delta: float) -> void:
 			node.visible = fog == null or not is_instance_valid(fog) or fog.is_lit(gp.x, gp.z)
 			if node.visible:
 				var p: Vector3 = u.draw_position()
-				node.global_position = Vector3(p.x + _SquadBannerR.POLE_OFFSET_X,
+				node.global_position = Vector3(p.x + float(node.get("pole_offset")),
 					GameManager.get_terrain_height(p.x, p.z) + _RCfg.CARRY_Y, p.z)
 			continue
 		# На земле: игроку видна только освещённая (туман войны)
 		var pos: Vector3 = d["pos"]
 		node.visible = fog == null or not is_instance_valid(fog) or fog.is_lit(pos.x, pos.z)
 		if node.visible:
-			node.global_position = Vector3(pos.x + _SquadBannerR.POLE_OFFSET_X,
+			node.global_position = Vector3(pos.x + float(node.get("pole_offset")),
 				GameManager.get_terrain_height(pos.x, pos.z) + _RCfg.GROUND_Y, pos.z)
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -479,3 +516,213 @@ func restore(src: Dictionary, sid_map: Dictionary) -> void:
 				carrier = _central_member(alive)
 		_new_relic(lvl, carrier, pos)
 	pool_changed.emit(pool)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# РАДИУС АУРЫ ПО ВЫДЕЛЕНИЮ (ТЗ 23.10.2026, п. 5)
+#
+# Выделен отряд со штандартом — у носителя тонкий прозрачный зелёный круг
+# радиуса ауры, над каждым своим отрядом в круге — зелёный значок «+».
+# Раз в AURA_VIEW_SEC, узлы переиспользуются; нет выделенного носителя —
+# всё спрятано. Кто в круге — тем же правилом центра отряда, что видит игрок
+# ═════════════════════════════════════════════════════════════════════════════
+const AURA_VIEW_SEC := 0.15
+const AURA_RING_COLOR := Color(0.25, 0.95, 0.35, 0.38)
+const AURA_ICON_COLOR := Color(0.35, 1.0, 0.40, 1.0)
+var _view_t: float = 0.0
+var _rings: Array = []
+var _icons: Array = []
+var aura_view_rings: int = 0      # стендам: сколько кругов показано сейчас
+var aura_view_icons: int = 0      # стендам: сколько значков показано сейчас
+var _ring_mat: StandardMaterial3D = null
+
+func _aura_view_tick(delta: float) -> void:
+	_view_t -= delta
+	if _view_t > 0.0:
+		return
+	_view_t = AURA_VIEW_SEC
+	_update_aura_view()
+
+func _selected_sids() -> Dictionary:
+	var out: Dictionary = {}
+	var m = GameManager.main
+	if m == null or not is_instance_valid(m):
+		return out
+	var sm = m.get("selection_manager")
+	if sm == null or not is_instance_valid(sm):
+		return out
+	for u in sm.selected_units:
+		if u != null and is_instance_valid(u) and u is Unit and (u as Unit).squad_id > 0:
+			out[(u as Unit).squad_id] = true
+	return out
+
+func _update_aura_view() -> void:
+	# Узлы живут на сцене партии: после «Заново» прежние освобождены
+	_rings = _rings.filter(func(n): return n != null and is_instance_valid(n))
+	_icons = _icons.filter(func(n): return n != null and is_instance_valid(n))
+	var sel: Dictionary = _selected_sids()
+	var shown := 0
+	var marked: Dictionary = {}
+	for r in relics:
+		var d: Dictionary = r
+		var c = d["carrier"]
+		if c == null or not is_instance_valid(c) or (c as Unit).is_dead():
+			continue
+		var cu := c as Unit
+		if not sel.has(cu.squad_id):
+			continue
+		var rad: float = _RCfg.aura_radius(int(d["level"]))
+		var ring: MeshInstance3D = _ring_node(shown)
+		var p: Vector3 = cu.global_position
+		ring.global_position = Vector3(p.x, GameManager.get_terrain_height(p.x, p.z) + 0.12, p.z)
+		ring.scale = Vector3(rad, 1.0, rad)
+		ring.visible = true
+		shown += 1
+		# Свои отряды, чей центр в круге, — получают бонус
+		for key in GameManager.squads.keys():
+			var sq: Dictionary = GameManager.squads[key]
+			if int(sq.get("faction", -1)) != cu.faction or marked.has(int(key)):
+				continue
+			var alive: Array = _alive_members(int(key))
+			if alive.is_empty():
+				continue
+			var cen: Vector3 = GameManager._centroid_of(alive)
+			if Vector2(cen.x - p.x, cen.z - p.z).length() <= rad:
+				marked[int(key)] = cen
+	for i in range(shown, _rings.size()):
+		(_rings[i] as MeshInstance3D).visible = false
+	var k := 0
+	for sid in marked:
+		var lab: Label3D = _icon_node(k)
+		var cen2: Vector3 = marked[sid]
+		lab.global_position = cen2 + Vector3(0.0, 3.4, 0.0)
+		lab.visible = true
+		k += 1
+	for j in range(k, _icons.size()):
+		(_icons[j] as Label3D).visible = false
+	aura_view_rings = shown
+	aura_view_icons = k
+	_update_tower_range_view()
+
+# ── РАДИУС ОБСТРЕЛА ВЫДЕЛЕННОЙ БАШНИ (ТЗ 24.10.2026, второе письмо, блок 4) ──
+# Тот же приём, что у ауры штандарта: тонкий прозрачный круг на земле, раз в
+# AURA_VIEW_SEC, узлы переиспользуются. Цвет — тёплый янтарный, чтобы не
+# спутать с зелёной аурой. Радиус — Tower.fire_range() (лучники внутри ×
+# бафф высоты); пустая башня — та дальность, которую дал бы штатный отряд
+# лучников, и круг бледнее: «вот сколько она будет бить с гарнизоном»
+const TOWER_RING_COLOR := Color(1.0, 0.72, 0.25, 0.42)
+const TOWER_RING_EMPTY := Color(1.0, 0.72, 0.25, 0.20)
+var _trings: Array = []
+var _tring_mat: StandardMaterial3D = null
+var _tring_mat_empty: StandardMaterial3D = null
+var tower_view_rings: int = 0     # стендам
+
+func _selected_towers() -> Array:
+	var out: Array = []
+	var m = GameManager.main
+	if m == null or not is_instance_valid(m):
+		return out
+	var sm = m.get("selection_manager")
+	if sm == null or not is_instance_valid(sm):
+		return out
+	for u in sm.selected_units:
+		if u != null and is_instance_valid(u) and u is Building \
+				and String((u as Building).building_id) == "tower" and not (u as Building).is_dead() \
+				and (u as Building).has_method("fire_range"):
+			out.append(u)
+	return out
+
+func _update_tower_range_view() -> void:
+	_trings = _trings.filter(func(n): return n != null and is_instance_valid(n))
+	var shown := 0
+	for t in _selected_towers():
+		var b := t as Building
+		var rad: float = float(b.call("fire_range"))
+		var empty: bool = rad <= 0.0
+		if empty:
+			rad = float(_UCfgR.STATS["archer"].get("attack_range", 15.0)) * _UCfgR.GARRISON_RANGE_MULT
+		var ring: MeshInstance3D = _tower_ring_node(shown)
+		ring.material_override = _tring_mat_empty if empty else _tring_mat
+		var p: Vector3 = b.global_position
+		ring.global_position = Vector3(p.x, GameManager.get_terrain_height(p.x, p.z) + 0.12, p.z)
+		ring.scale = Vector3(rad, 1.0, rad)
+		ring.visible = true
+		shown += 1
+	for i in range(shown, _trings.size()):
+		(_trings[i] as MeshInstance3D).visible = false
+	tower_view_rings = shown
+
+func _tower_ring_node(i: int) -> MeshInstance3D:
+	if _tring_mat == null:
+		for pair in [[TOWER_RING_COLOR, "full"], [TOWER_RING_EMPTY, "empty"]]:
+			var mat := StandardMaterial3D.new()
+			mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+			mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+			mat.albedo_color = pair[0]
+			mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+			if pair[1] == "full":
+				_tring_mat = mat
+			else:
+				_tring_mat_empty = mat
+	while _trings.size() <= i:
+		var host := _host()
+		if host == null:
+			return MeshInstance3D.new()
+		var tm := TorusMesh.new()
+		tm.inner_radius = 0.990
+		tm.outer_radius = 1.0
+		tm.rings = 128
+		tm.ring_segments = 3
+		var mi := MeshInstance3D.new()
+		mi.name = "TowerRangeRing"
+		mi.mesh = tm
+		mi.material_override = _tring_mat
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		host.add_child(mi)
+		_trings.append(mi)
+	return _trings[i]
+
+func _ring_node(i: int) -> MeshInstance3D:
+	while _rings.size() <= i:
+		var host := _host()
+		if host == null:
+			return MeshInstance3D.new()
+		if _ring_mat == null:
+			_ring_mat = StandardMaterial3D.new()
+			_ring_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+			_ring_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+			_ring_mat.albedo_color = AURA_RING_COLOR
+			_ring_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+		# Кольцо единичного радиуса, толщина 0.18 м при радиусе 15 — масштаб
+		# по XZ растягивает его до радиуса ауры
+		var tm := TorusMesh.new()
+		tm.inner_radius = 0.988
+		tm.outer_radius = 1.0
+		tm.rings = 96
+		tm.ring_segments = 3
+		var mi := MeshInstance3D.new()
+		mi.name = "RelicAuraRing"
+		mi.mesh = tm
+		mi.material_override = _ring_mat
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		host.add_child(mi)
+		_rings.append(mi)
+	return _rings[i]
+
+func _icon_node(i: int) -> Label3D:
+	while _icons.size() <= i:
+		var host := _host()
+		var lab := Label3D.new()
+		lab.name = "RelicAuraIcon"
+		lab.text = "+"
+		lab.font_size = 64
+		lab.outline_size = 12
+		lab.modulate = AURA_ICON_COLOR
+		lab.outline_modulate = Color(0.05, 0.25, 0.05, 1.0)
+		lab.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+		lab.no_depth_test = true
+		lab.fixed_size = true
+		lab.pixel_size = 0.0012
+		if host != null:
+			host.add_child(lab)
+		_icons.append(lab)
+	return _icons[i]

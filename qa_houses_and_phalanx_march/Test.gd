@@ -77,8 +77,11 @@ func _a_houses() -> void:
 	verdict("A1 20 домов + крепость — ~2000+ бойцов", cap20 >= 2000 and cap20 <= 2200, "%d" % cap20)
 	verdict("A2 потолок не пробит", _UCfg.pop_army_cap(60, 3) == _UCfg.ARMY_HARD_CAP)
 	var m20: float = _UCfg.building_cost_mult("house", 19)
-	verdict("A3 цена по-прежнему экспонента: 20-й дом ×100 и дороже, 9-й по базе",
-		m20 >= 100.0 and _UCfg.building_cost_mult("house", 8) == 1.0, "20-й ×%.0f" % m20)
+	# РАЗВОРОТ ТЗ 22.10.2026 (блок 8): рост ×1.12 за дом сверх 9 (был ×1.7,
+	# 20-й ×343) — проверка свойства: растёт, 9-й по базе
+	verdict("A3 цена растёт с 10-го дома (×%.2f за дом), 9-й по базе" % _UCfg.HOUSE_COST_GROWTH,
+		m20 > _UCfg.building_cost_mult("house", 10) and _UCfg.building_cost_mult("house", 10) > 1.0
+		and _UCfg.building_cost_mult("house", 8) == 1.0, "20-й ×%.2f" % m20)
 
 func _a_live_houses() -> void:
 	var at := Vector3(-30, 0, -70)

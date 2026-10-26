@@ -164,6 +164,11 @@ var raid_retreats: int = 0
 var mine_sid: int = 0
 var mines_captured: int = 0
 
+## Шаг игровых часов (scripts/GameClockStep.gd, аудит 22.10.2026): часы и
+## таймеры этого узла идут от Unit.game_ms(), а не от delta отрисовки —
+## при просадке FPS мир замедляется, и сроки этого узла вместе с ним
+var _gclk = preload("res://scripts/GameClockStep.gd").new()
+
 func _process(delta: float) -> void:
 	# Часы подсистемы (perf_config.sys_meter, qa_bigstand): одна проверка bool
 	if not _OptEA.sys_meter:
@@ -174,6 +179,7 @@ func _process(delta: float) -> void:
 	_OptEA.sys_add("red_ai", Time.get_ticks_usec() - _sys_t0)
 
 func _process_timed(delta: float) -> void:
+	delta = _gclk.step()   # игровое время вместо delta отрисовки (GameClockStep)
 	if main == null:
 		return
 	clock += delta
@@ -616,7 +622,16 @@ func _no_castle() -> void:
 	# Деньги тут вообще ни при чём: строит здания РАБОЧИЙ (ConstructionSite
 	# набирает бригаду), и без него закладка — это не отсрочка поражения, а
 	# вечно недостроенный камень на карте
-	if not _site_in_progress("castle") and _has_living_units():
+	# ── НЕ ПОД НОСОМ У ВРАГА И НЕ ЧАЩЕ ПАУЗЫ (ТЗ 21.10.2026) ────────────────
+	# Аудит лога партии 21.10: после падения замка ИИ заложил крепость ТРИ раза
+	# за 130 с в 9 м от руин — там, где стояла армия игрока; каждую снесли за
+	# минуту, ушло 3600 дерева, 1200 золота, 2400 камня. Теперь закладка не
+	# чаще CASTLE_REBUILD_COOLDOWN_SEC и только на площадке, где в
+	# CASTLE_REBUILD_SAFE_R нет чужих боевых (игрок и орда); такой нет — ждём
+	var rebuild_spot: Vector3 = Vector3.INF
+	if _rebuild_cooldown_ok():
+		rebuild_spot = _safe_castle_spot(anchor)
+	if rebuild_spot != Vector3.INF and not _site_in_progress("castle") and _has_living_units():
 		var cost: Dictionary = _UCfg.building_cost("castle")
 		# ── БЕЗ ЕДИНОГО СКЛАДА КРЕПОСТЬ ЗАКЛАДЫВАЕТСЯ БЕСПЛАТНО (ТЗ 14.10.2026)
 		# Рабочим некуда нести добычу (склад — только крепость и городской
@@ -627,10 +642,18 @@ func _no_castle() -> void:
 		var free_ok: bool = _AICfg.AI_REBUILD_CASTLE_FREE and no_depot \
 			and not ResourceManager.can_afford(Constants.FACTION_ENEMY, cost)
 		if free_ok or ResourceManager.can_afford(Constants.FACTION_ENEMY, cost):
-			var spot: Vector3 = GameManager.land_target(
-				anchor + Vector3(CASTLE_REBUILD_OFFSET, 0.0, CASTLE_REBUILD_OFFSET))
+			var spot: Vector3 = rebuild_spot
+			# Строить некому — беженцы (см. spawn_config.AI_REBUILD_REFUGEE_WAVES)
+			if free_ok and _living_workers() == 0 					and refugee_waves < _AICfg.AI_REBUILD_REFUGEE_WAVES 					and main.has_method("_spawn_squad_block"):
+				refugee_waves += 1
+				for i in range(_AICfg.AI_REBUILD_CREW):
+					var off := Vector3(float(i % 3) - 1.0, 0.0, float(i / 3)) * 1.2
+					main.call("_spawn_squad_block", "worker", Constants.FACTION_ENEMY,
+						spot + Vector3(0, 0, 6.0) + off, Vector3.FORWARD, Vector3.RIGHT, 1, 1, 1.0)
+				last_action += "|беженцы к новой крепости (%d)" % _AICfg.AI_REBUILD_CREW
 			if _start_site("castle", spot, free_ok, _AICfg.AI_REBUILD_CREW):
 				rebuild_sites += 1
+				_castle_site_ms = Unit.game_ms()
 				last_action += "|закладывается новая крепость%s" % (" (бесплатно: склада нет)" if free_ok else "")
 	# ── 2. ПОСЛЕДНИЙ РУБЕЖ У РУИН ──────────────────────────────────────────
 	last_stand = true
@@ -645,8 +668,77 @@ func _no_castle() -> void:
 	else:
 		_command_scatter_at(anchor)
 
+## Есть ли место в замке (аудит лога 20.10.2026: ИИ слал отряд в полный
+## замок каждые 2 с — 103 отказа «limit» за партию). Уже идущий/внутри — да
+func _castle_has_room(castle: Castle, sid: int) -> bool:
+	if castle == null or not is_instance_valid(castle):
+		return false
+	if castle._slot_of(sid) >= 0 or castle._incoming.has(sid):
+		return true
+	return castle.garrison.size() + castle._incoming.size() < castle.garrison_limit()
+
 ## Насколько в сторону от руин закладывается новая крепость, м
 const CASTLE_REBUILD_OFFSET := 9.0
+## ── ПЕРЕЗАКЛАДКА КРЕПОСТИ (ТЗ 21.10.2026) ─────────────────────────────────
+## Пауза между закладками после потери замка, с
+const CASTLE_REBUILD_COOLDOWN_SEC := 90.0
+## Чужих боевых ближе этого к площадке — площадка не годится, м
+const CASTLE_REBUILD_SAFE_R := 40.0
+## Кольца поиска площадки вокруг руин, м
+const CASTLE_REBUILD_RINGS := [9.0, 22.0, 36.0]
+var _castle_site_ms: int = -1000000
+## Сколько раз закладка отложена: враг у руин (стенды, лог)
+var castle_rebuild_held: int = 0
+
+func _rebuild_cooldown_ok() -> bool:
+	if not _OptEA.castle_rebuild_safe:
+		return true
+	return Unit.game_ms() - _castle_site_ms >= int(CASTLE_REBUILD_COOLDOWN_SEC * 1000.0)
+
+## Площадка под новую крепость: первая по кольцам вокруг руин, где нет
+## чужих боевых в CASTLE_REBUILD_SAFE_R; Vector3.INF — такой нет.
+## Ручка выключена — прежняя точка «9 м по диагонали» без проверки
+func _safe_castle_spot(anchor: Vector3) -> Vector3:
+	var legacy: Vector3 = GameManager.land_target(
+		anchor + Vector3(CASTLE_REBUILD_OFFSET, 0.0, CASTLE_REBUILD_OFFSET))
+	if not _OptEA.castle_rebuild_safe:
+		return legacy
+	var foes: Array = []
+	for fac in [Constants.FACTION_PLAYER, Constants.FACTION_GOBLIN]:
+		for n in main.get_tree().get_nodes_in_group(Constants.unit_group(fac)):
+			if n == null or not is_instance_valid(n) or n is Worker:
+				continue
+			var u := n as Unit
+			if u == null or u.is_dead() or u.garrisoned:
+				continue
+			var p: Vector3 = u.global_position
+			if Vector2(p.x - anchor.x, p.z - anchor.z).length() <= CASTLE_REBUILD_SAFE_R + 40.0:
+				foes.append(Vector2(p.x, p.z))
+	var cands: Array = [legacy]
+	for r in CASTLE_REBUILD_RINGS:
+		for k in range(8):
+			var a: float = TAU * float(k) / 8.0 + 0.39
+			cands.append(GameManager.land_target(anchor + Vector3(cos(a), 0.0, sin(a)) * float(r)))
+	for c in cands:
+		var cp: Vector3 = c
+		var ok := true
+		for f in foes:
+			if (f as Vector2).distance_to(Vector2(cp.x, cp.z)) < CASTLE_REBUILD_SAFE_R:
+				ok = false
+				break
+		if ok:
+			return cp
+	castle_rebuild_held += 1
+	return Vector3.INF
+## Сколько раз за партию к закладке пришли беженцы (стенды, лог)
+var refugee_waves: int = 0
+
+func _living_workers() -> int:
+	var n := 0
+	for w in main.get_tree().get_nodes_in_group("enemy_units"):
+		if is_instance_valid(w) and w is Worker and not (w as Worker).is_dead():
+			n += 1
+	return n
 
 ## Остался ли у ИИ хоть один живой юнит ЛЮБОГО рода — включая рабочих.
 ## Именно любого: крепость строит рабочий, а держит поле боец, и «фракция ещё
@@ -907,7 +999,71 @@ func _house_spot(castle: Castle, idx: int) -> Vector3:
 	p.z = clampf(p.z, -main.GEN_HALF_Z + 6.0, main.GEN_HALF_Z - 6.0)
 	return GameManager.land_target(p)
 
-func _tower_spot(castle: Castle, idx: int) -> Vector3:
+## ── СЛОТЫ БАШЕН У ВХОДОВ, ПЕРВЫЙ СВОБОДНЫЙ (ТЗ 25.10.2026, третье письмо, п. 5)
+## Было: точка — функция ЧИСЛА стоящих башен. Выбили башню №0 при живой №1 —
+## счёт 1, индекс 1, и новая вставала вплотную к уцелевшей («две вышки в
+## одной точке»). Теперь слоты — места у проходов в стене базы (по одному
+## сбоку от каждого входа, изнутри, на кромке прохода — чтобы не запирать
+## его), а точка — первый слот, у которого в TOWER_SLOT_BUSY_R нет живой
+## башни или стройки. Стен нет — прежняя ось к игроку, слоты по очереди
+## слева и справа (TOWER_SIDE), тот же выбор свободного
+const TOWER_SLOT_BUSY_R := 9.0
+const TOWER_EXIT_INSET := 6.0     # м внутрь базы от середины полосы стены
+const TOWER_EXIT_FLANK := 4.0     # м за кромку прохода вдоль стены
+func _tower_slots(castle: Castle) -> Array:
+	var slots: Array = []
+	var exits: Array = main.ai_base_exits() if main.has_method("ai_base_exits") else []
+	for ex in exits:
+		var e: Dictionary = ex
+		var p: Vector3 = e["p"]
+		var inward: Vector3 = e["inward"]
+		var along: Vector3 = e["along"]
+		var half: float = float(e["half"])
+		# Сторона прохода — ближняя к замку: башня прикрывает вход, а не
+		# торчит в поле за ним
+		var flank: float = main.WALL_GAP_W * 0.5 + TOWER_EXIT_FLANK
+		var s: float = 1.0 if (castle.global_position - p).dot(along) >= 0.0 else -1.0
+		slots.append(p + inward * (half + TOWER_EXIT_INSET) + along * flank * s)
+		slots.append(p + inward * (half + TOWER_EXIT_INSET) - along * flank * s)
+	if slots.is_empty():
+		for k in range(maxi(_AICfg.AI_TOWERS, 2) * 2):
+			slots.append(_tower_axis_spot(castle, k))
+	# Сначала по одной башне на вход, потом вторые стороны
+	if exits.size() >= 2:
+		var ordered: Array = []
+		for k in range(0, slots.size(), 2):
+			ordered.append(slots[k])
+		for k in range(1, slots.size(), 2):
+			ordered.append(slots[k])
+		slots = ordered
+	return slots
+
+func _tower_spot(castle: Castle, _idx: int) -> Vector3:
+	var busy: Array = []
+	for b in main.get_tree().get_nodes_in_group("enemy_buildings"):
+		if not is_instance_valid(b):
+			continue
+		var bld := b as Building
+		if bld != null and not bld.is_dead() and (bld.building_id == "tower" \
+				or (bld.get("target_id") != null and String(bld.get("target_id")) == "tower")):
+			busy.append(bld.global_position)
+	for s in main.get_tree().get_nodes_in_group("construction_sites"):
+		if is_instance_valid(s) and (s as Building).faction == Constants.FACTION_ENEMY \
+				and String(s.target_id) == "tower":
+			busy.append((s as Node3D).global_position)
+	var slots: Array = _tower_slots(castle)
+	for sl in slots:
+		var p: Vector3 = GameManager.land_target(sl)
+		var free := true
+		for q in busy:
+			if Vector2(p.x - (q as Vector3).x, p.z - (q as Vector3).z).length() < TOWER_SLOT_BUSY_R:
+				free = false
+				break
+		if free:
+			return p
+	return GameManager.land_target(slots[slots.size() - 1])
+
+func _tower_axis_spot(castle: Castle, idx: int) -> Vector3:
 	var base: Vector3 = _player_base_pos()
 	if base == Vector3.ZERO:
 		base = main.PLAYER_BASE_ANCHOR
@@ -1911,9 +2067,9 @@ func _assign_raid_squad(rest: Array, castle: Castle) -> Array:
 		raid_retreats += 1
 		last_action += "|рейд отходит (%s)" % ("сопротивление" if resisted else "срок")
 		var sid: int = _sid_of(pick)
-		if sid > 0 and castle.request_garrison(sid):
+		if sid > 0 and _castle_has_room(castle, sid) and castle.request_garrison(sid):
 			pick["role"] = ROLE_RETREAT
-			pick["retreat_until"] = Time.get_ticks_msec() + int(_AICfg.RETREAT_MIN_SEC * 1000.0)
+			pick["retreat_until"] = Unit.game_ms() + int(_AICfg.RETREAT_MIN_SEC * 1000.0)
 			pick["issued"] = true
 		else:
 			_set_role(pick, ROLE_GUARD, castle.global_position)
@@ -2201,11 +2357,25 @@ func _guard_post(castle: Castle, idx: int, guard_count: int = 0) -> Vector3:
 func _retreat_locked(sq: Dictionary) -> bool:
 	if String(sq.get("role", "")) != ROLE_RETREAT:
 		return false
-	if Time.get_ticks_msec() >= int(sq.get("retreat_until", 0)):
+	if Unit.game_ms() >= int(sq.get("retreat_until", 0)) \
+			and not (_OptEA.garrison_trip_lock and _heading_to_castle(sq)):
 		return false
 	# Догнали и навязали контакт — разворачиваться можно и нужно: отряд спиной
 	# к врагу не отступает, а гибнет (та же оговорка, что у _try_retreat)
 	return not _in_melee(sq)
+
+## Отряд группы стоит в очереди замка (ТЗ 21.10.2026): срок роли истёк, а
+## дорога ещё идёт — дорога ИИ в замок 30-65 с при сроке роли 12 с, и
+## переназначение роли на полпути отменяло поход (аудит лога партии 21.10)
+func _heading_to_castle(sq: Dictionary) -> bool:
+	for m in sq["members"]:
+		if m == null or not is_instance_valid(m):
+			continue
+		var u := m as Unit
+		if u != null and not u.is_dead() and u.retreating \
+				and GameManager.squad_is_to_castle(u.squad_id):
+			return true
+	return false
 
 ## ── КУРС СТРОЯ ЗАДАЁТ ПЛАНИРОВЩИК, А НЕ ОБСТАНОВКА ────────────────────────
 ## `face` — куда обязан смотреть строй отряда. Задаётся ВМЕСТЕ с постом и вместе
@@ -2415,7 +2585,7 @@ func _try_retreat(sq: Dictionary, castle: Castle) -> bool:
 		if sid <= 0 or seen.has(sid):
 			continue
 		seen[sid] = true
-		if castle.request_garrison(sid):
+		if _castle_has_room(castle, sid) and castle.request_garrison(sid):
 			sent = true
 	if not sent:
 		return false          # гарнизон полон — деремся там, где стоим
@@ -2424,7 +2594,7 @@ func _try_retreat(sq: Dictionary, castle: Castle) -> bool:
 	# До этой отметки отряду не выдадут никакой другой роли, сколько бы раз
 	# такт размышления ни пересчитал цели. Именно пересчёт и разворачивал его
 	# на полпути обратно в бой
-	sq["retreat_until"] = Time.get_ticks_msec() \
+	sq["retreat_until"] = Unit.game_ms() \
 		+ int(_AICfg.RETREAT_MIN_SEC * 1000.0)
 	sq["issued"] = true       # приказ уже отдан замком, свой поверх не нужен
 	last_action += "|отход отряда %s в замок" % String(sq["type"])

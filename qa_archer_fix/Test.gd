@@ -260,7 +260,7 @@ func _a_forge(base: Vector3, attack: bool) -> void:
 							_dumped = true
 							var sqd: Dictionary = GameManager.squads[int(s[0])]
 							print("      отряд %d: reform_at %s, fails %s, next %s, now %d, slots %d" % [int(s[0]), str(sqd.get("reform_at")),
-								str(sqd.get("reform_fails")), str(sqd.get("reform_next_ms")), Time.get_ticks_msec(), (sqd.get("slots", []) as Array).size()])
+								str(sqd.get("reform_fails")), str(sqd.get("reform_next_ms")), Unit.game_ms(), (sqd.get("slots", []) as Array).size()])
 							for u2 in _alive(s[1]):
 								var v := u2 as Unit
 								print("        %s st %d pd %.2f post_valid %s snapdrift %.2f" % [v.name, v.state, _xz(v.global_position, v.post_pos),
@@ -383,6 +383,7 @@ func _d_troll(base: Vector3) -> void:
 	var s1: Array = _squad("archer", F, base, 24)
 	var troll: Unit = _spawn("troll", G, base + Vector3(15.0, 0.0, 0.0))
 	troll.set_tick(false)
+	var troll_pos0: Vector3 = troll.global_position
 	await pframes(30)
 	for u in s1[1]:
 		(u as Unit).command_attack(troll, true, false, true)
@@ -390,8 +391,10 @@ func _d_troll(base: Vector3) -> void:
 	await pframes(60 * 5)
 	var fired1: int = GameManager.arrows_fired
 	verdict("D1 лучники стреляют по троллю", fired1 > fired0 + 10, "выстрелов %d" % (fired1 - fired0))
-	var tpos: Vector3 = troll.global_position
-	troll.take_damage(1e12)
+	# Хитбокс по телу (ТЗ 20.10.2026): лучники добивают тролля сами за 5 с
+	var tpos: Vector3 = troll_pos0
+	if is_instance_valid(troll) and not troll.is_dead():
+		troll.take_damage(1e12)
 	await pframes(2)
 	var fired_dead0: int = GameManager.arrows_fired
 	var stale := 0

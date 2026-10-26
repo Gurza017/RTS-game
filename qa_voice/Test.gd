@@ -243,6 +243,9 @@ func _c_triggers() -> void:
 	_voice_reset()
 	sm._issue_formation_move(base + Vector3(0.0, 0.0, 30.0), false)
 	await frames(2)
+	# ── ТЗ 25.10.2026: 1-4 ОТРЯДАМ — СНОВА ТИШИНА ───────────────────────────
+	# Короткие фразы 24.10 были синтезированы и сняты вместе с файлами:
+	# четыре отряда на приказ отвечают только щелчком
 	verdict("C2 приказ четырём отрядам реплики не даёт",
 		AudioManager.voice_last == "",
 		"порог %d отрядов, было 4, реплика «%s»" % [sm.MASS_ORDER_SQUADS,
@@ -445,8 +448,15 @@ func _c_triggers() -> void:
 			# как чужая. Проверяем, что за рогом НИЧЕГО не поставлено в очередь:
 			# сам механизм цепочки при этом жив и проверяется в C7б-C7г — он
 			# понадобится, когда приедет своя озвучка атаки
-			verdict("C8б за рогом атаки не ставится вторая реплика",
-				AudioManager._voice_queue.is_empty(),
+			# ТЗ 24.10.2026: своя озвучка атаки приехала — РЕДКИЙ клич war_cry
+			# под хвост рога (AudioManager.order_voice, окно 30 с). «Вперёд,
+			# марш» за рогом по-прежнему запрещён; в очереди допустим только клич
+			var only_cry := true
+			for q in AudioManager._voice_queue:
+				if String((q as Array)[0]) != "war_cry":
+					only_cry = false
+			verdict("C8б за рогом атаки — ничего или только клич war_cry",
+				only_cry and AudioManager._voice_queue.size() <= 1,
 				"в очереди %d" % AudioManager._voice_queue.size())
 	if is_instance_valid(foe):
 		foe.queue_free()

@@ -195,7 +195,7 @@ func core_event(victim, pos: Vector3, axis: Vector3) -> void:
 	_progress = 1.0
 	if _hit_node != null and is_instance_valid(_hit_node) and damage > 0.0:
 		var b := _hit_node as Building
-		if b != null and not b.is_dead() 				and global_position.distance_to(b.global_position) <= BUILDING_HIT_RADIUS:
+		if b != null and not b.is_dead() 				and b.arrow_hits(global_position):
 			AudioManager.play_3d("bow_impact", global_position)
 			var who: Node = shooter if (is_instance_valid(shooter) 				and not shooter.is_queued_for_deletion()) else null
 			b.take_damage(damage, who)
@@ -552,7 +552,7 @@ func _process(delta: float) -> void:
 		# одна за всю жизнь стрелы и только у той, которой стрелок дал цель
 		if _hit_node != null and is_instance_valid(_hit_node) and damage > 0.0:
 			var b := _hit_node as Building
-			if b != null and not b.is_dead() 					and global_position.distance_to(b.global_position) <= BUILDING_HIT_RADIUS:
+			if b != null and not b.is_dead() 					and b.arrow_hits(global_position):
 				AudioManager.play_3d("bow_impact", global_position)
 				var who: Node = shooter if (is_instance_valid(shooter) 					and not shooter.is_queued_for_deletion()) else null
 				b.take_damage(damage, who)

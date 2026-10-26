@@ -107,8 +107,16 @@ func _run() -> void:
 	await pframes(4)
 
 	print("\n═════ A. ПУЛ РЕПЛИК ПРИКАЗА ═════")
-	var pool: Array = AudioManager.ORDER_REPLIES
-	verdict("A1 в пуле пять реплик", pool.size() == 5, "%d" % pool.size())
+	# ── ТЗ 24.10.2026: ТАБЛИЦА ФРАЗ ОБЩАЯ, ПУЛЫ — ПО СОБЫТИЯМ ─────────────────
+	# ORDER_REPLIES теперь держит ВСЕ фразы (короткие приказы 1-4 отрядам,
+	# отклики рабочих), а «пул» спринта 18 — это пять фраз марша и строя.
+	# Стенд проверяет тот же набор пяти, но как подмножество таблицы
+	var SPRINT18_IDS := ["hold_line", "go_go_go", "come_on_1", "come_on_2", "come_on_3"]
+	var pool: Array = []
+	for r0 in AudioManager.ORDER_REPLIES:
+		if String((r0 as Dictionary)["id"]) in SPRINT18_IDS:
+			pool.append(r0)
+	verdict("A1 пять реплик спринта 18 на месте в таблице фраз", pool.size() == 5, "%d" % pool.size())
 	var ids: Dictionary = {}
 	var files_ok := true
 	var clips_ok := true
@@ -137,9 +145,17 @@ func _run() -> void:
 			come_files[String((r2 as Dictionary)["file"])] = true
 	verdict("A5 три «Come on!» — куски ОДНОГО файла", come_on == 3 and come_files.size() == 1)
 	# Без повтора подряд и все пять встречаются
+	# Выбор — по пулу события: у массового марша «Come on» ×3, «Go» и
+	# «Forward, march» (ТЗ 24.10.2026: «Hold the line» на марш не звучит),
+	# а у протяжки строя — одна «Hold the line». Пять фраз спринта 18
+	# встречаются на объединении двух событий
 	var seq: Array = []
 	for _i in range(60):
-		seq.append(String((AudioManager._pick_reply() as Dictionary)["id"]))
+		seq.append(String((AudioManager._pick_reply("mass_march") as Dictionary)["id"]))
+	var seen_all: Dictionary = {}
+	for s0 in seq:
+		seen_all[s0] = true
+	seen_all[String((AudioManager._pick_reply("hold_line") as Dictionary)["id"])] = true
 	var repeat := 0
 	var seen: Dictionary = {}
 	for i in range(seq.size()):
@@ -147,7 +163,12 @@ func _run() -> void:
 		if i > 0 and seq[i] == seq[i - 1]:
 			repeat += 1
 	verdict("A6 за 60 выборов ни одного повтора подряд", repeat == 0, "повторов %d" % repeat)
-	verdict("A7 за 60 выборов встретились все пять", seen.size() == 5, str(seen.keys()))
+	var all5 := true
+	for id5 in SPRINT18_IDS:
+		if not seen_all.has(id5):
+			all5 = false
+	verdict("A7 марш + строй: встретились все пять фраз спринта 18, марш без «Hold the line»",
+		all5 and not seen.has("hold_line"), str(seen_all.keys()))
 	# События приказов идут через пул, а имя события остаётся прежним
 	verdict("A8 mass_march и hold_line берут фразу из пула",
 		AudioManager.REPLY_POOL_EVENTS.has("mass_march") and AudioManager.REPLY_POOL_EVENTS.has("hold_line"))

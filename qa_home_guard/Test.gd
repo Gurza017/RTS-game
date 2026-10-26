@@ -185,14 +185,16 @@ func _a_layout() -> void:
 		var k: String = "%s|%d" % [GameManager.squad_type(sid), lvl]
 		got[k] = int(got.get(k, 0)) + 1
 		var tier: Dictionary = _UCfg.veteran_banner_tier(lvl)
-		if lvl == 4 and not tier.is_empty() and int(tier.get("shape", -1)) != _UCfg.BANNER_GUIDON:
+		# ТЗ 20.10.2026: ранги 4-6 — синий ТРЕУГОЛЬНЫЙ вымпел (гвидон снят)
+		if lvl == 4 and not tier.is_empty() and (int(tier.get("shape", -1)) != _UCfg.BANNER_PENNANT
+				or (tier.get("cloth", Color.WHITE) as Color).b < 0.5):
 			tiers_ok = false
 		if lvl == 2 and not tier.is_empty() and int(tier.get("shape", -1)) != _UCfg.BANNER_PENNANT:
 			tiers_ok = false
 	verdict("A5 охрана: %d отрядов, состав и ранг по таблице" % _AICfg.home_guard_squads().size(),
 		guard.squads.size() == _AICfg.home_guard_squads().size() and got == want,
 		"есть %s, надо %s" % [str(got), str(want)])
-	verdict("A5б ранг IV — синий гвидон, ранг II — красный вымпел (VET_BANNER_TIERS)", tiers_ok)
+	verdict("A5б ранг IV — синий вымпел, ранг II — красный вымпел (VET_BANNER_TIERS, ТЗ 20.10.2026)", tiers_ok)
 	# Все отряды укомплектованы и с наградами (picks применены — pending 0)
 	var full_ok := true
 	for s in guard.squads:

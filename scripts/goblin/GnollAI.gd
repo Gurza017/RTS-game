@@ -75,7 +75,7 @@ func forest_spots(lair: Node3D) -> PackedVector3Array:
 	if lair == null or not is_instance_valid(lair):
 		return PackedVector3Array()
 	var key: int = lair.get_instance_id()
-	var now: float = float(Time.get_ticks_msec()) * 0.001
+	var now: float = float(Unit.game_ms()) * 0.001
 	var rec: Variant = _forest.get(key)
 	if rec != null and now - float((rec as Dictionary)["t"]) < FOREST_REFRESH_SEC:
 		return (rec as Dictionary)["pts"]
@@ -164,6 +164,11 @@ func clamp_to_zone(lair: Node3D, p: Vector3) -> Vector3:
 # ═════════════════════════════════════════════════════════════════════════════
 # ОХОТА НА РАБОЧИХ
 # ═════════════════════════════════════════════════════════════════════════════
+## Шаг игровых часов (scripts/GameClockStep.gd, аудит 22.10.2026): часы и
+## таймеры этого узла идут от Unit.game_ms(), а не от delta отрисовки —
+## при просадке FPS мир замедляется, и сроки этого узла вместе с ним
+var _gclk = preload("res://scripts/GameClockStep.gd").new()
+
 func _process(delta: float) -> void:
 	# Часы подсистемы (perf_config.sys_meter, qa_bigstand): одна проверка bool
 	if not _OptSys.sys_meter:
@@ -174,6 +179,7 @@ func _process(delta: float) -> void:
 	_OptSys.sys_add("gnoll_ai", Time.get_ticks_usec() - _sys_t0)
 
 func _process_timed(delta: float) -> void:
+	delta = _gclk.step()   # игровое время вместо delta отрисовки (GameClockStep)
 	_t += delta
 	if _t < _GobCfg.GNOLL_HUNT_TICK:
 		return

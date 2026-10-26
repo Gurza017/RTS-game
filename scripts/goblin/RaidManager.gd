@@ -41,7 +41,11 @@ static func schedule(pair: bool = _Spawn.ASSAULT_EVENT_PAIR,
 		var comps: Array = _Spawn.ASSAULT_EVENT_WAVES
 		for i in range(times.size()):
 			var t: float = float(times[i])
-			var comp: Dictionary = comps[mini(i, comps.size() - 1)]
+			var comp: Dictionary = (comps[mini(i, comps.size() - 1)] as Dictionary).duplicate()
+			# Штурмы после 30-й минуты — крупнее (ТЗ 23.10.2026, второе письмо, п. 4)
+			if t > _Spawn.LATE_SURGE_FROM_SEC and _Spawn.late_surge(t):
+				for k_l in comp.keys():
+					comp[k_l] = int(ceil(float(comp[k_l]) * _Spawn.LATE_ASSAULT_MULT))
 			var lbl: String = "штурм %d:00" % int(t / 60.0)
 			if pair:
 				var halves: Array = split_comp(comp)

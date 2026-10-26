@@ -426,6 +426,13 @@ const AI_GATHER_CARRY_MULT := 1.30
 const AI_REBUILD_SITES := 2
 const AI_REBUILD_CREW := 5
 const AI_REBUILD_CASTLE_FREE := true
+## ── БЕЖЕНЦЫ К БЕСПЛАТНОЙ КРЕПОСТИ (аудит лога 20.10.2026) ──────────────────
+## Партия 20.10 18:07: замок красного пал на 35-й минуте, рабочих не осталось,
+## и 25 минут ИИ закладывал бесплатную крепость 11 раз — строить её было
+## некому (найм рабочих идёт из замка, а замка нет). Теперь к бесплатной
+## закладке без единого живого рабочего приходит артель AI_REBUILD_CREW
+## бесплатных рабочих, не больше AI_REBUILD_REFUGEE_WAVES раз за партию
+const AI_REBUILD_REFUGEE_WAVES := 3
 
 ## ═══════════════════════════════════════════════════════════════════════════
 ## ШТУРМ БАЗЫ ИГРОКА ОТ ГЛАВНОЙ ХАТЫ ОРДЫ (ТЗ 13.10.2026, два письма,
@@ -522,3 +529,27 @@ const ASSAULT_EVENT_PAIR_GAP_SEC := 120.0
 ## Цели рейда: рабочего ищем в RAID_WORKER_R от отряда (по всей базе), прочие
 ## постройки — ближайшие без радиуса. Список целей кэшируется на такт
 const RAID_WORKER_R := 80.0
+
+## ── ПОЗДНЯЯ ОРДА ПЛОТНЕЕ (ТЗ 23.10.2026, второе письмо, п. 4) ──────────────
+## После 30-40 минут армия игрока прокачана, и волны прошиваются мгновенно.
+## С LATE_SURGE_FROM_SEC: доход еды орды × LATE_FOOD_MULT (больше покупок —
+## крупнее волны), паузы между выходами × LATE_GAP_MULT (чаще), потолок
+## волн в поле × LATE_FIELD_CAP_MULT и потолок орды + LATE_HORDE_CAP_EXTRA,
+## штурмы 45:00 и 60:00 × LATE_ASSAULT_MULT отрядов каждого рода.
+## Ручка для A/B — perf_config.goblin_late_surge
+const LATE_SURGE_FROM_SEC := 1800.0
+const LATE_FOOD_MULT := 1.6
+const LATE_GAP_MULT := 0.65
+const LATE_FIELD_CAP_MULT := 1.6
+const LATE_HORDE_CAP_EXTRA := 900
+const LATE_ASSAULT_MULT := 1.4
+const _OptSp := preload("res://scripts/perf_config.gd")
+
+static func late_surge(clock_sec: float) -> bool:
+	return _OptSp.goblin_late_surge and clock_sec >= LATE_SURGE_FROM_SEC
+
+static func field_cap(clock_sec: float) -> int:
+	return int(float(HORDE_FIELD_CAP) * LATE_FIELD_CAP_MULT) if late_surge(clock_sec) else HORDE_FIELD_CAP
+
+static func horde_cap(clock_sec: float) -> int:
+	return HORDE_CAP + LATE_HORDE_CAP_EXTRA if late_surge(clock_sec) else HORDE_CAP

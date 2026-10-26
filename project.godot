@@ -28,6 +28,11 @@ ResourceManager="*res://scripts/ResourceManager.gd"
 GameManager="*res://scripts/GameManager.gd"
 AudioManager="*res://scripts/AudioManager.gd"
 
+[debug]
+
+file_logging/log_path.template="user://logs/exe/godot.log"
+file_logging/max_log_files.template=20
+
 [display]
 
 window/size/viewport_width=1280

@@ -315,16 +315,17 @@ func _h_input(at: Vector3) -> void:
 	rm.add_xp(_RCfg.POOL_COST)
 	rm.arm(true)
 	var spt: Vector2 = cam.unproject_position((hq[1][2] as Unit).global_position)
-	_mouse(MOUSE_BUTTON_RIGHT, true, spt)
-	_mouse(MOUSE_BUTTON_RIGHT, false, spt)
-	await frames(2)
-	verdict("H1 ПКМ снимает взвод, выдачи нет", not rm.armed and rm.relics.size() == n0)
-	rm.arm(true)
-	spt = cam.unproject_position((hq[1][2] as Unit).global_position)
+	# ТЗ 24.10.2026 (второе письмо): ПКМ — выдать, ЛКМ/Esc — отмена
 	_mouse(MOUSE_BUTTON_LEFT, true, spt)
 	_mouse(MOUSE_BUTTON_LEFT, false, spt)
 	await frames(2)
-	verdict("H2 ЛКМ по своему отряду вручает реликвию", rm.relics.size() == n0 + 1
+	verdict("H1 ЛКМ снимает взвод, выдачи нет", not rm.armed and rm.relics.size() == n0)
+	rm.arm(true)
+	spt = cam.unproject_position((hq[1][2] as Unit).global_position)
+	_mouse(MOUSE_BUTTON_RIGHT, true, spt)
+	_mouse(MOUSE_BUTTON_RIGHT, false, spt)
+	await frames(2)
+	verdict("H2 ПКМ по своему отряду вручает реликвию", rm.relics.size() == n0 + 1
 		and rm.relic_of_squad(hsid) != null and not rm.armed,
 		"экран %s, реликвий %d → %d" % [str(spt), n0, rm.relics.size()])
 	rm.arm(true)

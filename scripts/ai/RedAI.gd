@@ -264,7 +264,7 @@ func assign_hunt(rest: Array, castle: Castle) -> Array:
 		var sid: int = ai._sid_of(pick)
 		if sid > 0 and castle.request_garrison(sid):
 			pick["role"] = ai.ROLE_RETREAT
-			pick["retreat_until"] = Time.get_ticks_msec() + int(_AICfg.RETREAT_MIN_SEC * 1000.0)
+			pick["retreat_until"] = Unit.game_ms() + int(_AICfg.RETREAT_MIN_SEC * 1000.0)
 			pick["issued"] = true
 		else:
 			ai._set_role(pick, ai.ROLE_GUARD, castle.global_position)

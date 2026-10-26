@@ -107,7 +107,15 @@ func _run() -> void:
 	var base := Vector3(0.0, 0.0, -400.0)
 
 	print("\n═════ A. БАНК ═════")
-	verdict("A1 knight_angry — четыре файла, все на месте", (AudioManager.SFX_BANK["knight_angry"] as Array).size() == 4 and _files_ok("knight_angry"))
+	# ТЗ 24.10.2026: рык angry*.wav снят с рыцаря («рычание только гоблинам»),
+	# в категории — клич людей и выдохи усилия; число файлов прежнее, и
+	# стенд дополнительно требует, чтобы ни один не был рыком angry*
+	var ka_human := true
+	for f in (AudioManager.SFX_BANK["knight_angry"] as Array):
+		if String(f).begins_with("angry"):
+			ka_human = false
+	verdict("A1 knight_angry — четыре файла, все на месте, без рыка angry*.wav",
+		(AudioManager.SFX_BANK["knight_angry"] as Array).size() == 4 and _files_ok("knight_angry") and ka_human)
 	verdict("A2 knight_victory — один файл на месте", (AudioManager.SFX_BANK["knight_victory"] as Array).size() == 1 and _files_ok("knight_victory"))
 	var nt: int = (AudioManager.SFX_BANK["troll_grunt"] as Array).size()
 	var nb: int = (AudioManager.SFX_BANK["big_grunt"] as Array).size()
@@ -178,6 +186,13 @@ func _run() -> void:
 		(u as Unit).set_tick(false)
 	await pframes(4)
 	var a0: int = _cnt("knight_angry")
+	# ── СЧЁТЧИКИ ПОБЕДЫ СНИМАЮТСЯ ДО РЫВКА (24.10.2026) ────────────────────
+	# Снимались после блока C1, а «Яростная атака» с рассечением выбивает три
+	# гоблина ещё внутри его цикла: отряд погибал раньше снимка, и C3 читал
+	# «живых 0, событий 0» на исправном коде. Свойство то же — ровно одно
+	# событие и один звук победы за весь бой
+	var v0: int = _cnt("knight_victory")
+	var ev0: int = GameManager.knight_victory_events
 	for u in kn[1]:
 		(u as Warrior).start_rage_dash()
 		(u as Unit).command_attack(gob[1][0], true, false, true)
@@ -205,8 +220,6 @@ func _run() -> void:
 	verdict("C2 «Angry» прозвучал ровно один раз на отряд (окно %.1f с)" % AudioManager.KNIGHT_ANGRY_GAP,
 		_cnt("knight_angry") - a0 == 1, "прозвучало %d" % (_cnt("knight_angry") - a0))
 	# Победа: добиваем отряд гоблинов до последнего
-	var v0: int = _cnt("knight_victory")
-	var ev0: int = GameManager.knight_victory_events
 	for f in range(60 * 30):
 		await get_tree().physics_frame
 		if _alive(gob[1]) == 0:
@@ -230,7 +243,13 @@ func _run() -> void:
 	var t_hurt0: int = _cnt("troll_grunt")
 	for u in arch[1]:
 		(u as Unit).command_attack(troll, true, false, true)
-	await pframes(60 * 8)
+	# Ждём СВОЙСТВО с потолком (ТЗ 23.10.2026: перевод огня даёт первый
+	# выстрел сразу, а остаток перезарядки — долгом второму; за ровно 8 с
+	# окон выходило 2 при прежнем темпе стрельбы)
+	for _f in range(60 * 16):
+		await get_tree().physics_frame
+		if AudioManager.squad_voice_calls - c_troll0 >= 3:
+			break
 	verdict("D1 тролль под обстрелом открывает окна грюнта (урон → троллевый пул)",
 		AudioManager.squad_voice_calls - c_troll0 >= 3, "окон %d, прозвучало %d" % [AudioManager.squad_voice_calls - c_troll0, _cnt("troll_grunt") - t_hurt0])
 	for u in arch[1]:

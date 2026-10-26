@@ -23,11 +23,11 @@ func frames(n: int) -> void:
 	for _i in range(n):
 		await get_tree().process_frame
 
-## Ждать по НАСТЕННЫМ часам: часть механик завязана на Time.get_ticks_msec(),
-## а headless крутит кадры быстрее реального времени
+## Ждать по ИГРОВЫМ часам (Unit.game_ms — сумма delta физики, аудит 22.10):
+## сроки механик идут по ним, а headless крутит кадры отрисовки быстрее физики
 func wait_ms(ms: int) -> void:
-	var end: int = Time.get_ticks_msec() + ms
-	while Time.get_ticks_msec() < end:
+	var end: int = Unit.game_ms() + ms
+	while Unit.game_ms() < end:
 		await get_tree().process_frame
 
 ## Ждать, пока отряд перестанет двигаться. Признак — `moved_recently()`, то

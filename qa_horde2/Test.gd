@@ -308,7 +308,7 @@ func _block_g() -> void:
 	print("\n═════ G. ПОЧИНКА ХАТЫ, РАЗГРОМ ЛАГЕРЯ ═════")
 	var chief: Building = gai.chief
 	chief.current_health = chief.max_health * 0.5
-	chief.last_hit_ms = Time.get_ticks_msec() - 60000
+	chief.last_hit_ms = Unit.game_ms() - 60000
 	await pframes(60 * 3)
 	verdict("G1 хата чинится сама, если по ней не бьют", chief.current_health > chief.max_health * 0.5 + 50.0,
 		"запас %.0f" % chief.current_health)

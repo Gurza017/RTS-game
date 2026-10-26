@@ -41,6 +41,7 @@ extends RefCounted
 ## переданный world_root.
 
 const _SHADER := preload("res://shaders/mm_corpse.gdshader")
+const _Opt := preload("res://scripts/perf_config.gd")
 const _ArrowC := preload("res://scripts/Arrow.gd")
 const _Vis := preload("res://scripts/units/UnitVisuals.gd")
 const _UCfgC := preload("res://scripts/unit_stats_config.gd")
@@ -217,6 +218,8 @@ class Bucket:
 	var dirty: bool = false
 	## Мокрый бакет настроен (полоса фигуры и доля погружения в материале)
 	var wet_ready: bool = false
+	## Подтон стороны поставлен в материал (ТЗ 23.10.2026, п. 7)
+	var tint_set: bool = false
 	## Мягкость ступени затемнения кучи (см. _tone_k), считается при создании
 	var tone_k: float = 1.0
 
@@ -500,6 +503,31 @@ func _setup_wet(b, sheet: Texture2D, frames: int, wet: float, fidx: int = 0) -> 
 	mat.set_shader_parameter("fig_left", left)
 	mat.set_shader_parameter("fig_right", right)
 
+## ── ТЕЛА РАЗЛИЧИМЫ ПО СТОРОНАМ (ТЗ 23.10.2026, п. 7) ────────────────────────
+## «Сплошная чёрная масса»: тело тускнело (dead_dim 0.74) и уходило в серый
+## на 40 % — синие, красные и зелёные павшие сливались в один бурый ковёр.
+## Теперь тело светлее и сохраняет цвет своей стороны: серый подмес меньше,
+## тёплый «земляной» подтон заменён подтоном стороны (синий у игрока,
+## красный у красного ИИ, зелёный у орды). Разложение (бурый тон) — прежнее
+const CORPSE_DIM := 0.86
+const CORPSE_DESAT := 0.22
+const CORPSE_TINTS := {
+	Constants.FACTION_PLAYER: Color(0.86, 0.93, 1.0),
+	Constants.FACTION_ENEMY: Color(1.0, 0.84, 0.82),
+	Constants.FACTION_GOBLIN: Color(0.88, 1.0, 0.80),
+}
+
+func _set_faction_tint(b, faction: int) -> void:
+	b.tint_set = true
+	if not _Opt.corpse_faction_tint:
+		return
+	var mat := (b.mm.mesh as QuadMesh).material as ShaderMaterial
+	if mat == null:
+		return
+	mat.set_shader_parameter("dead_dim", CORPSE_DIM)
+	mat.set_shader_parameter("dead_desat", CORPSE_DESAT)
+	mat.set_shader_parameter("dead_tint", CORPSE_TINTS.get(faction, Color(1.0, 0.94, 0.86)))
+
 static func _bucket_key(sheet: Texture2D, frames: int, pixel_size: float) -> String:
 	return "%d|%d|%.5f" % [sheet.get_rid().get_id(), frames, pixel_size]
 
@@ -696,6 +724,8 @@ func spawn(unit: Unit, world_root: Node3D, ground_y: float, live: bool = false) 
 		else:
 			key += "|wet%.2f" % wet
 	var b := _get_or_make_bucket(key, sheet, frames, px, world_root)
+	if not b.tint_set:
+		_set_faction_tint(b, int(unit.faction))
 	if wet > 0.0 and not b.wet_ready:
 		_setup_wet(b, sheet, frames, wet, int(sf[1]))
 	if b.free.is_empty():
@@ -788,12 +818,19 @@ func spawn(unit: Unit, world_root: Node3D, ground_y: float, live: bool = false) 
 
 
 ## Перебор потолка: самые старые начинают гаснуть (см. разбор у вызывающего)
+## СНЯТЫЕ МЕСТА (index < 0) — НЕ ТЕЛА (лог партии 26.10.2026, 5000 тел у
+## потолка 40 минут). До уплотнения (_compact) догоревшее и снятое лежат в
+## очереди с отрицательным fade_left, как лежащее, — и вытеснение пускало их
+## гаснуть ПОВТОРНО: hide_slot(-1) отрицательным индексом Packed-массива
+## гасил ПОСЛЕДНИЙ слот бакета (чужое тело пропадало), в свободный список
+## уходил −1, и новое тело ложилось в тот же последний слот. Они же
+## считались живыми против потолка — гасли лишние
 func _evict_over_limit() -> void:
-	var over: int = (_list.size() - _fading.size()) - MAX_CORPSES
+	var over: int = (_list.size() - _fading.size() - _dead_slots) - MAX_CORPSES
 	var k: int = 0
 	while over > 0 and k < _list.size():
 		var old: Corpse = _list[k]
-		if old.fade_left < 0.0:
+		if old.index >= 0 and old.fade_left < 0.0:
 			_begin_fade(old, FADE_SEC)
 			over -= 1
 		k += 1
@@ -916,6 +953,8 @@ func update(delta: float) -> void:
 	var keep: Array = []
 	for c in _fading:
 		var cc: Corpse = c
+		if cc.index < 0:
+			continue            # снято, пока гасло (см. _evict_over_limit)
 		cc.fade_left -= delta
 		if cc.fade_left <= 0.0:
 			cc.bucket.hide_slot(cc.index)

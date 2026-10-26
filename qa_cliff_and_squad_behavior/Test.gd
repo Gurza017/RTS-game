@@ -565,7 +565,6 @@ func _c_stance() -> void:
 	var p0: Array = []
 	for u in men:
 		p0.append((u as Node3D).global_position)
-	var forms0: int = GameManager.spear_wall_forms
 	# ── ЩИТ ────────────────────────────────────────────────────────────────
 	for u in men:
 		(u as Unit).set_stance("defense")
@@ -588,13 +587,18 @@ func _c_stance() -> void:
 		worst = maxf(worst, d)
 		if d > 0.35:
 			moved += 1
-	print("  сдвинулись %d из %d, худший сдвиг %.2f м, перестроений стены %d" % [
-		moved, men.size(), worst, GameManager.spear_wall_forms - forms0])
+	var going := 0
+	for u in men:
+		if (u as Unit).state == Unit.State.MOVING:
+			going += 1
+	print("  сдвинулись %d из %d, худший сдвиг %.2f м, идут %d" % [
+		moved, men.size(), worst, going])
 	verdict("C1 по кнопке «Защита» с места не сдвинулся никто", moved == 0,
 		"сдвинулись %d, худший %.2f м" % [moved, worst])
-	verdict("C1б перестроения стены копий не было",
-		GameManager.spear_wall_forms == forms0,
-		"построений %d" % (GameManager.spear_wall_forms - forms0))
+	# Перестроения «в три шеренги» больше нет в коде вовсе (ТЗ 21.10.2026) —
+	# судим свойство: после щита никто не получил приказа идти
+	verdict("C1б перестроения стены копий не было (никто не идёт)", going == 0,
+		"идут %d" % going)
 	var down := 0
 	var rows: Dictionary = {}
 	for u in men:

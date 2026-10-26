@@ -365,9 +365,10 @@ func _block_ui() -> void:
 		and (hud._food_upkeep_label.get_theme_color("font_color") as Color).r > 0.8
 		and (hud._food_upkeep_label.get_theme_color("font_color") as Color).g < 0.5)
 	var card: Dictionary = hud._unit_card("spearman", Constants.FACTION_PLAYER, {}, 60)
-	var joined: String = "\n".join(PackedStringArray(card.get("lines", [])))
-	verdict("D4 описание копейщика — новое, про фалангу и стену копий",
-		joined.contains("стену копий") and joined.contains("фалангу"))
+	# ТЗ 20.10.2026: описание — строки «Тип / Умения / Особое умение» (info)
+	var joined: String = "\n".join(PackedStringArray(card.get("lines", []))) + "\n" + str(card.get("info", []))
+	verdict("D4 описание копейщика — про фалангу и строй",
+		joined.to_lower().contains("фаланг") and joined.to_lower().contains("строй"))
 
 # ═════════════════════════════════════════════════════════════════════════════
 # E. СБОР ПЕРЕД УДАРОМ

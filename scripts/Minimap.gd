@@ -1,6 +1,11 @@
 extends CanvasLayer
 ## ═══════════════════════════════════════════════════════════════════════════
-## МИНИ-КАРТА (ТЗ 10.10.2026) — ПРАВЫЙ НИЖНИЙ УГОЛ
+## МИНИ-КАРТА (ТЗ 10.10.2026) — С ТЗ 20.10.2026 ЛЕВЫЙ НИЖНИЙ УГОЛ
+## ═══════════════════════════════════════════════════════════════════════════
+## ТЗ 20.10.2026, блок 2: карта переехала в левый нижний угол и стала на 30 %
+## меньше (240×135 → 168×95). Она — левый «флаг» нижнего интерфейса: нижняя
+## панель выделенного объекта стыкуется к её ПРАВОМУ краю (HUD._dock_bottom_panel
+## читает dock_right_x()), над картой — окошко строя с кнопками-плитками
 ## ═══════════════════════════════════════════════════════════════════════════
 ## Что на ней: ландшафт (трава, река, брод, лес, жилы), граница карты, туман
 ## войны (неразведанное темнее, разведанное, но не видимое — притушено),
@@ -25,15 +30,27 @@ extends CanvasLayer
 const _Opt := preload("res://scripts/perf_config.gd")
 const _FormPanel := preload("res://scripts/FormationPanel.gd")
 ## Окошко строя над картой (ТЗ 11.10.2026): высота и зазор до карты
-const FORM_H := 34.0
-const FORM_GAP := 4.0
+const FORM_H := 40.0
+const FORM_GAP := 3.0
 var formation_panel: Control = null
 
-## Размер картинки = размер на экране (без растяжения): карта 450 × 253 м
-const MAP_W := 240
-const MAP_H := 135
-const MARGIN := 8.0
+## Размер картинки = размер на экране (без растяжения): карта 450 × 253 м.
+## ТЗ 20.10.2026: −30 % (было 240 × 135)
+const MAP_W := 168
+const MAP_H := 95
+## Отступ от левой кромки экрана — та же ось, что у левого столбца HUD
+## (PANEL_LEFT_MIN), от нижней — тот же зазор, что у нижней панели
+const MARGIN := 6.0
+const MARGIN_BOTTOM := 4.0
 const BORDER := 3.0
+## Зазор между картой и пристыкованной к ней нижней панелью
+const DOCK_GAP := 6.0
+
+## Правый край карты в координатах экрана + зазор: отсюда начинается нижняя
+## панель выделенного (HUD). Считается из констант, а не из прямоугольника
+## узла: панель раскладывается раньше, чем карта получает размер
+static func dock_right_x() -> float:
+	return MARGIN + float(MAP_W) + BORDER * 2.0 + DOCK_GAP
 
 const UNIT_INTERVAL := 0.2
 const BLD_INTERVAL := 1.0
@@ -98,14 +115,14 @@ func _ready() -> void:
 	_root = Control.new()
 	_root.name = "MinimapPanel"
 	_root.mouse_filter = Control.MOUSE_FILTER_STOP
-	_root.anchor_left = 1.0; _root.anchor_right = 1.0
+	_root.anchor_left = 0.0; _root.anchor_right = 0.0
 	_root.anchor_top = 1.0; _root.anchor_bottom = 1.0
 	var w: float = MAP_W + BORDER * 2.0
 	var h: float = MAP_H + BORDER * 2.0
-	_root.offset_right = -MARGIN
-	_root.offset_left = -MARGIN - w
-	_root.offset_bottom = -MARGIN
-	_root.offset_top = -MARGIN - h
+	_root.offset_left = MARGIN
+	_root.offset_right = MARGIN + w
+	_root.offset_bottom = -MARGIN_BOTTOM
+	_root.offset_top = -MARGIN_BOTTOM - h
 	_root.tooltip_text = ""
 	_root.draw.connect(_on_draw)
 	_root.gui_input.connect(_on_gui_input)
@@ -114,12 +131,12 @@ func _ready() -> void:
 	var fp := Control.new()
 	fp.set_script(_FormPanel)
 	fp.name = "FormationPanel"
-	fp.anchor_left = 1.0; fp.anchor_right = 1.0
+	fp.anchor_left = 0.0; fp.anchor_right = 0.0
 	fp.anchor_top = 1.0; fp.anchor_bottom = 1.0
-	fp.offset_right = -MARGIN
-	fp.offset_left = -MARGIN - w
-	fp.offset_bottom = -MARGIN - h - FORM_GAP
-	fp.offset_top = -MARGIN - h - FORM_GAP - FORM_H
+	fp.offset_left = MARGIN
+	fp.offset_right = MARGIN + w
+	fp.offset_bottom = -MARGIN_BOTTOM - h - FORM_GAP
+	fp.offset_top = -MARGIN_BOTTOM - h - FORM_GAP - FORM_H
 	add_child(fp)
 	formation_panel = fp
 

@@ -44,8 +44,58 @@ func _finish() -> void:
 	if _done:
 		return
 	_done = true
+	_print_unstick_report()
 	print("\n═════ ИТОГ qa_ai_loop/Smoke: прошло %d, провалов: %d ═════" % [_pass, _fail])
 	get_tree().quit()
+
+## Сводка застреваний и походов в замок (ТЗ 21.10.2026: A/B ручек аудита лога)
+func _print_unstick_report() -> void:
+	var kinds: Dictionary = {}
+	var ds: Array = []
+	var why: Dictionary = {}
+	for e in GameManager.tm_events:
+		var k: String = String((e as Array)[1])
+		kinds[k] = int(kinds.get(k, 0)) + 1
+		if k == "unstuck":
+			var d: Dictionary = (e as Array)[2]
+			why[String(d.get("why", ""))] = int(why.get(String(d.get("why", "")), 0)) + 1
+			if d.has("d"):
+				ds.append(float(d["d"]))
+	ds.sort()
+	var dline := "нет"
+	if not ds.is_empty():
+		var near := 0
+		for x in ds:
+			if float(x) < 2.0:
+				near += 1
+		dline = "медиана %.1f м, p90 %.1f м, ближе 2 м: %d из %d" % [
+			float(ds[ds.size() / 2]), float(ds[int(ds.size() * 0.9)]), near, ds.size()]
+	print("  ЗАСТРЕВАНИЯ: вызволений %d (%s), сдач %d, прибытий «упёрся» %d; до точки приказа: %s" % [
+		Unit.unstuck_total, str(why), Unit.unstuck_giveups, Unit.stall_arrivals, dline])
+	var per: Array = Unit.stall_by_unit.values()
+	per.sort()
+	if not per.is_empty():
+		var over10 := 0
+		for c in per:
+			if int(c) > 10:
+				over10 += 1
+		print("  «УПЁРСЯ» ПО БОЙЦАМ: бойцов %d, медиана %d, p90 %d, худший %d, больше 10 раз: %d" % [
+			per.size(), int(per[per.size() / 2]), int(per[int(per.size() * 0.9)]), int(per[-1]), over10])
+		# Кто упирается чаще всех: род, сторона, точка, пост и проходим ли пост
+		var keys: Array = Unit.stall_by_unit.keys()
+		keys.sort_custom(func(a, b): return int(Unit.stall_by_unit[a]) > int(Unit.stall_by_unit[b]))
+		for k in keys.slice(0, 6):
+			var o = instance_from_id(int(k))
+			if o == null or not is_instance_valid(o) or not (o is Unit):
+				continue
+			var u := o as Unit
+			var pp: Vector3 = u.post_pos
+			print("    упёрся %d раз: %s фр.%d отряд %d в (%.1f, %.1f), пост (%.1f, %.1f) проходим=%s клетка=%s" % [
+				int(Unit.stall_by_unit[k]), u.stat_id, u.faction, u.squad_id, u.global_position.x,
+				u.global_position.z, pp.x, pp.z, GameManager.is_passable(pp.x, pp.z), GameManager.army.nav_free(pp.x, pp.z)])
+	print("  ЗАМОК: заявок %d, вошли %d, отмен %d; крепость пала %d, хижин %d" % [
+		int(kinds.get("garrison_request", 0)), int(kinds.get("garrison_in", 0)),
+		int(kinds.get("garrison_cancel", 0)), int(kinds.get("castle_fell", 0)), int(kinds.get("hut_fell", 0))])
 
 func _count(group: String) -> int:
 	var n := 0

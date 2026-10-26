@@ -80,7 +80,7 @@ func _run() -> void:
 		await get_tree().physics_frame
 		if big.anim_shown() != prev_anim:
 			prev_anim = big.anim_shown()
-			print("  CHANGE f=%d anim %s state %d tgt %s swings %d sweeps %d lock_until %d now %d" % [f2, prev_anim, big.state, str(big.attack_target), big._swings, big.sweeps, big._anim_lock_until_ms, Time.get_ticks_msec()])
+			print("  CHANGE f=%d anim %s state %d tgt %s swings %d sweeps %d lock_until %d now %d" % [f2, prev_anim, big.state, str(big.attack_target), big._swings, big.sweeps, big._anim_lock_until_ms, Unit.game_ms()])
 		if f2 % 30 == 0:
-			print("  after t=%.1f anim %s state %d tgt %s lock_until %d now %d lock_pending %s proc_sleep %s" % [f2 / 60.0, big.anim_shown(), big.state, str(big.attack_target), big._anim_lock_until_ms, Time.get_ticks_msec(), str(big._lock_pending), str(big._proc_sleeping)])
+			print("  after t=%.1f anim %s state %d tgt %s lock_until %d now %d lock_pending %s proc_sleep %s" % [f2 / 60.0, big.anim_shown(), big.state, str(big.attack_target), big._anim_lock_until_ms, Unit.game_ms(), str(big._lock_pending), str(big._proc_sleeping)])
 	get_tree().quit()

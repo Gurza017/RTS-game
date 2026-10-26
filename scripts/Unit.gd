@@ -512,7 +512,7 @@ const CHARGE_ROW_KNOCKDOWN_SEC := 2.0
 ## Прежняя контратака («Плотный строй»: только в «Защите», только когда
 ## всадник целил именно в копейщика, ×2 от копий) СНЯТА ЦЕЛИКОМ. Новый режим —
 ## forge spearman_1d «Стена копий», переключатель: отряд копейщиков в «Защите»
-## смыкается в три шеренги (GameManager.spear_wall_form), а любой, кто налетел
+## опускает копья (строй не трогается — ширину задаёт игрок), а любой, кто налетел
 ## на копья с разгона — конница, тролль, бегущая пехота, — получает
 ## SPEAR_WALL_DMG_MULT от удара копейщика в момент контакта, теряет разгон и
 ## напор (COUNTER_CHARGE_SEC) и замедлен на SPEAR_WALL_SLOW (SPEAR_WALL_SLOW_SEC).
@@ -611,6 +611,13 @@ var attackers: int = 0
 # Счётчик нанесённых ударов — толкание срабатывает раз в PUSH_EVERY ударов
 var _strike_count: int = 0
 var _attack_timer: float  = 0.0
+## ПЕРЕВОД ОГНЯ (ТЗ 23.10.2026, п. 1, ручка perf_config.quick_retarget): часть
+## перезарядки, пропущенная ради мгновенного выстрела по новой цели приказа
+## игрока, — долг следующей перезарядки. Темп стрельбы за бой прежний
+var _reload_debt: float = 0.0
+var _quick_until_ms: int = 0
+const QUICK_RETARGET_SEC := 0.25
+const QUICK_RETARGET_SPREAD := 0.7
 ## Дрёма перезарядки: боец в упоре к цели пережидает остывание удара, свернув
 ## тело _process_attack до тика таймера (см. ворота там же). Снимается сменой
 ## цели и пробуждением за ATK_SNOOZE_SPARE до готовности
@@ -764,6 +771,9 @@ func _arm_autopilot(tu: Unit, rng: float, dist: float) -> void:
 		return
 	if cav and (not _Opt.rider_autopilot or is_charging):
 		return
+	# Цель за поводком отряда — шаг ведёт GDScript (там проверка поводка)
+	if not leash_allows_drive(tu.position if tu._local_xform else tu.global_position):
+		return
 	_auto_pilot = true
 	var eff: float = _effective_speed()
 	# Подтягивание — только у отряда и не под замком цели: ровно те условия,
@@ -773,6 +783,36 @@ func _arm_autopilot(tu: Unit, rng: float, dist: float) -> void:
 		pull_lim = rng + PULL_UP_MAX
 	GameManager.army.autopilot_arm(_soa, eff, eff * PULL_UP_SPEED, stop,
 		pull_lim, AGGRO_INTERVAL_HOT, _side_sign)
+
+## ── ПОДХОД К ЗДАНИЮ — ТОЖЕ В ЯДРЕ (ТЗ 25.10.2026, третье письмо, п. 5) ────
+## Жалоба «армия добивает вышки — минус 20-30 FPS». Зонд qa_tower_assault:
+## 600 бойцов на башню — тик армии 26-30 мс, process_attack 600 вызовов в
+## кадр по 33 мкс; тот же подход к чужому ОТРЯДУ — 4.7 мс и 20 вызовов.
+## Автопилот подхода взводился только на живую строку цели (_arm_autopilot,
+## tu != null), у здания строки нет — и каждый идущий к стене шёл полным
+## GDScript-автоматом каждый кадр. Теперь — режим «к точке» (GateGoal):
+## сектор кольца, пока он ведёт, иначе точка перед стеной по лучу от бойца;
+## у точки, по такту AGGRO_INTERVAL_HOT и от чужого в длине руки — назад
+## в GDScript, который доводит последние метры и бьёт
+const BLD_AUTOPILOT_STOP := 0.6
+func _arm_autopilot_building(mp: Vector3, tp: Vector3, nav_goal: Vector3,
+		rng: float, dist: float) -> void:
+	if not _Opt.approach_autopilot or not _Opt.bld_autopilot or _soa < 0:
+		return
+	if charge_range > 0.0 or _stance_holds_ground() or retreating or sprinting \
+			or _disengaging or _rear_press or _enemy_contact:
+		return
+	var g: Vector3 = nav_goal
+	if g.x == INF:
+		if dist <= 0.01:
+			return
+		var kk: float = maxf(rng - 0.5, 0.0) / dist
+		g = Vector3(tp.x + (mp.x - tp.x) * kk, 0.0, tp.z + (mp.z - tp.z) * kk)
+	if Vector2(g.x - mp.x, g.z - mp.z).length() <= BLD_AUTOPILOT_STOP + AUTOPILOT_ARM_SLACK:
+		return
+	_auto_pilot = true
+	GameManager.army.autopilot_arm_goal(_soa, _effective_speed(), g.x, g.z,
+		BLD_AUTOPILOT_STOP, AGGRO_INTERVAL_HOT)
 
 ## Стойка «оборона» на дистанции: шага нет, боец смотрит на цель и ждёт —
 ## ждать можно и в ядре (скорость 0 = режим «стоять»)
@@ -1313,7 +1353,7 @@ func set_panicked(on: bool) -> void:
 	if on:
 		set_attack_target(null)
 		_atk_pending = false
-		release_target_lock()
+		release_target_lock("panic")
 	else:
 		_wake_process()
 
@@ -1545,12 +1585,43 @@ func _arm_target_lock(target: Node3D) -> void:
 	_lock_pos = target.global_position if target != null else Vector3.ZERO
 	_lock_is_building = target is Building
 
-## Снять замок: приказ отменён или назначенный отряд выбит целиком
-func release_target_lock() -> void:
+## Снять замок: приказ отменён или назначенный отряд выбит целиком.
+## reason — кто снимает (зонд order_override_bug, ТЗ 25.10.2026): «move» и
+## «target_destroyed» — штатное завершение приказа, прочие — внутренняя
+## механика, перебившая приказ игрока, и попадают в лог зонда
+func release_target_lock(reason: String = "") -> void:
+	if target_lock and reason != "" and reason != "move" and reason != "target_destroyed":
+		_probe_override(reason)
 	target_lock  = false
 	_lock_squad  = 0
 	_lock_target = null
 	_lock_is_building = false
+
+## ЗОНД order_override_bug (ТЗ 25.10.2026, блок 5): приказ игрока у этого
+## бойца перебит внутренней механикой. Только событие — покадрового пути нет.
+## Вызывающая функция — из get_stack() (в экспортной сборке стек пуст)
+## request_garrison — тоже обёртка: её зовут и приказ игрока «в замок»
+## (SelectionManager), и лазарет/очередь лечения (GameManager); в логе партии
+## 26.10 зонд останавливался на ней и не называл инициатора
+const _PROBE_SKIP := ["release_target_lock", "command_move", "command_attack",
+	"begin_retreat", "set_panicked", "_probe_override", "request_garrison"]
+func _probe_override(reason: String) -> void:
+	if not _Opt.squad_probes or faction != Constants.FACTION_PLAYER or squad_id <= 0:
+		return
+	var caller: String = ""
+	var st: Array = get_stack()
+	# [0] — эта функция, дальше — точка снятия и её вызывающие. Берём первую
+	# функцию ВЫШЕ служебных обёрток: она и есть инициатор
+	for k in range(1, mini(st.size(), 7)):
+		var fn: String = String((st[k] as Dictionary).get("function", ""))
+		# Attack-Move [A] — это сам приказ игрока: марш с перехватом по
+		# дороге (лог партии 26.10: 335 из 742 «снятий» — SquadCommander._issue)
+		if String((st[k] as Dictionary).get("source", "")).ends_with("SquadCommander.gd"):
+			return
+		if fn != "" and not (fn in _PROBE_SKIP):
+			caller = "%s:%d" % [fn, int((st[k] as Dictionary).get("line", 0))]
+			break
+	GameManager.probes.note_override(self, reason, caller)
 
 ## Точка запертой цели и был ли это дом — см. _arm_target_lock
 var _lock_pos: Vector3 = Vector3.ZERO
@@ -1602,6 +1673,44 @@ func _next_enemy_building() -> Node3D:
 ## иногда за полкарты, — и авто-агро с возвратом на пост уводили его обратно.
 ## На экране это и есть «бойцы бегут в противоположную сторону, на базу».
 ## Пост переносится СЮДА: приказ выполнен там, где боец стоит
+## ── ПОВОДОК СОРВАН — ПОГОНЯ КОНЧЕНА ДЛЯ ВСЕГО ОТРЯДА ───────────────────────
+## Тот же отбой, что у сорвавшего поводок (ветка поводка в _process_attack),
+## каждому, кто ГОНИТ бойца того же отряда-беглеца: цель дальше длины удара.
+## С якорем и БЕЗ: не дотянувшийся ни разу якоря не имеет, поводок его не
+## меряет, и он гнал бы беглеца через всю карту (стенд qa_log_1026 B: 1-2
+## бойца в 64 м от отряда). Кто рубится вплотную или с другим противником —
+## не трогается. Событие, не покадровый путь
+func _end_squad_pursuit(fled_sid: int) -> void:
+	var sq: Variant = GameManager.squads.get(squad_id)
+	if sq == null:
+		return
+	# Состав — напрямую из словаря отряда: squad_members() распускает опустевший
+	for raw in (sq as Dictionary).get("members", []):
+		# Правило 5: живость на сырой ссылке до приведения
+		if raw == null or not is_instance_valid(raw) or raw == self:
+			continue
+		var m := raw as Unit
+		if m == null or m.is_dead() or m.state != State.ATTACKING \
+				or not (m._attack_is_forced or m.target_lock):
+			continue
+		var t = m.attack_target
+		if t == null or not is_instance_valid(t) or not (t is Unit) \
+				or (t as Unit).squad_id != fled_sid:
+			continue
+		if m.global_position.distance_to((t as Unit).global_position) <= m.reach() + 1.0:
+			continue
+		m.set_attack_target(null)
+		if m.target_lock:
+			m._probe_override("pursuit_leash")
+		m.target_lock = false
+		m._pursuit_anchored = false
+		m._engaged_once = false
+		m.velocity = Vector3.ZERO
+		if m._post_valid:
+			m.command_move(m.post_pos)
+		else:
+			m.state = State.IDLE
+
 func _hold_where_i_stand() -> void:
 	post_pos = global_position
 	_post_valid = true
@@ -1663,7 +1772,7 @@ func begin_retreat() -> void:
 	# Отход — это отмена приказа атаки, а не пауза в нём: замок цели снимается,
 	# иначе отряд, отправленный лечиться в замок, по дороге снова полез бы драться
 	_atk_pending = false
-	release_target_lock()
+	release_target_lock("retreat")
 	if stance != "attack":
 		set_stance("attack")
 
@@ -1685,7 +1794,7 @@ func retreat_locked() -> bool:
 
 ## secs <= 0 — без замка (прежнее поведение, отход снимается любым приказом)
 func lock_retreat(secs: float) -> void:
-	_retreat_until_ms = Time.get_ticks_msec() + int(maxf(secs, 0.0) * 1000.0)
+	_retreat_until_ms = Unit.game_ms() + int(maxf(secs, 0.0) * 1000.0)
 
 ## force — снять отход НЕЗАВИСИМО от замка. Так его снимает только прибытие
 ## в замок и отмена похода самим замком: там отход кончился по факту
@@ -1705,6 +1814,28 @@ func _end_retreat_now() -> void:
 ## Бег по двойному ПКМ ИГРОКА: упор в чужой строй — бой (ТЗ 19.09.2026-3),
 ## бег ИИ в обход (ROLE_FLANK) чужой строй по-прежнему обтекает
 var _player_run: bool = false
+## ── МАРШ ПО ПРИКАЗУ ИГРОКА (ТЗ 25.10.2026, третье письмо, п. 4) ─────────
+## Ставит command_move(player_order), снимает command_attack. Пока он стоит и
+## боец ИДЁТ (moved_recently), удар СЗАДИ (обидчик в задней полуплоскости
+## хода — от кого уходим) не разворачивает ни бойца, ни отряд: «отход по
+## приказу не прерывается лёгким уколом». Удар в лоб и упор телом в чужой
+## строй по-прежнему получают ответ (упёрся — дерись)
+var _player_march: bool = false
+
+## Удар пришёл от того, от кого боец уходит по приказу игрока
+func _march_ignores_blow(attacker: Node3D) -> bool:
+	if not _Opt.player_march_hold or not _player_march or state != State.MOVING:
+		return false
+	if attacker == null or not is_instance_valid(attacker) or not moved_recently():
+		return false
+	var g: Vector3 = march_goal()
+	var p: Vector3 = global_position
+	var mx: float = g.x - p.x
+	var mz: float = g.z - p.z
+	if mx * mx + mz * mz < ARRIVE_RADIUS * ARRIVE_RADIUS:
+		return false
+	var q: Vector3 = attacker.global_position
+	return (q.x - p.x) * mx + (q.z - p.z) * mz < 0.0
 ## Бег в замок отложен до выхода из зоны билета отхода (см. command_move)
 var _sprint_after_pass: bool = false
 
@@ -1834,6 +1965,11 @@ func _apply_config_stats(unit_id: String) -> void:
 	if s.is_empty():
 		return
 	max_health      = s.get("health", max_health)
+	# ── БОЙ ДОЛЬШЕ (ТЗ 23.10.2026, второе письмо, п. 3) ────────────────────
+	# Запас жизни основных родов войск обеих сторон × TTK_HEALTH_MULT
+	# симметрично: схватка не кончается за 10 секунд, строй успевает давить
+	if _Opt.ttk_press and unit_id in _UStats.TTK_UNITS:
+		max_health *= _UStats.TTK_HEALTH_MULT
 	move_speed      = s.get("movement_speed", move_speed)
 	attack_damage   = s.get("attack_1", attack_damage)
 	attack_range    = s.get("attack_range", attack_range)
@@ -2117,7 +2253,7 @@ func _resume_attack() -> bool:
 		# Исходная жертва и весь её отряд выбиты — приказ выполнен, замок больше
 		# не за что держать. Дальше решает авто-агро (приоритет №3)
 		if target_lock:
-			release_target_lock()
+			release_target_lock("target_destroyed")
 		return false
 	command_attack(tgt, true, _atk_pending_charge, _atk_pending_lock)
 	return true
@@ -2333,6 +2469,24 @@ func command_move(target_pos: Vector3, slow_march: bool = false, face_dir: Vecto
 	if _Opt.cmd_meter:
 		_Opt.cmd_hit(stat_id, state, squad_id)
 	var _cm_t: int = Time.get_ticks_usec() if _Opt.sys_meter else 0
+	# ЗОНД order_override_bug: приказ на движение НЕ от игрока поверх живого
+	# приказа игрока (замок движения или замок цели) — перебивает его
+	if not player_order and faction == Constants.FACTION_PLAYER \
+			and (_move_lock > 0.0 or target_lock):
+		_probe_override("internal_move_over_lock" if target_lock else "internal_move_over_move")
+	# Любой приказ на движение — новая отправная точка (см. CHASE_LEASH)
+	_leash_from = Vector3.INF
+	# ── НЕДОСТИЖИМАЯ ТОЧКА — НЕ ПЕРЕСПРАШИВАТЬ (аудит лога 20.10.2026) ──────
+	# Отряд 140 красного «сдавался» у лесной стены базы 242 раза за 25 минут:
+	# после сдачи (_unstick → цель недостижима) ИИ через долю секунды снова
+	# слал бойца в ТУ ЖЕ точку, и следующее вызволение сразу кончалось сдачей.
+	# Приказ ИИ (не игрока) в точку, от которой боец только что отказался,
+	# в течение GIVEUP_MEMORY_MS не исполняется — боец стоит, где его вывели
+	if _Opt.giveup_memory and faction != Constants.FACTION_PLAYER and not player_order \
+			and _giveup_until_ms > 0 and Unit.game_ms() < _giveup_until_ms \
+			and Vector2(target_pos.x - _giveup_goal.x, target_pos.z - _giveup_goal.z).length() < GIVEUP_GOAL_R:
+		giveup_orders_skipped += 1
+		return
 	wake_physics()
 	# ── ЗАЛОЧЕННЫЙ СТОЙКОЙ НЕ ИДЁТ НИКУДА, ТОЛЬКО ПОВОРАЧИВАЕТСЯ ───────────
 	# Заказ владельца: в обороне перемещение запрещено на уровне 0.0, разрешён
@@ -2386,8 +2540,12 @@ func command_move(target_pos: Vector3, slow_march: bool = false, face_dir: Vecto
 	_enemy_contact = false
 	# Любой новый приказ движения отменяет отход — кроме самого приказа «в замок»,
 	# который отдаётся с keep_retreat = true (см. Castle.request_garrison)
+	# ПРИКАЗ ИГРОКА СНИМАЕТ ОТХОД ВСЕГДА (ТЗ 21.10.2026): замок отхода держит
+	# его против ВНУТРЕННИХ приказов (смыкание, сплочённость, роли ИИ), а
+	# игрок вправе отменить поход в замок в любую секунду — иначе продление
+	# замка на всю дорогу (Castle, garrison_trip_lock) отняло бы у него это
 	if retreating and not keep_retreat:
-		end_retreat()
+		end_retreat(player_order and _Opt.garrison_trip_lock)
 	# Бег живёт ровно один приказ: новый приказ либо снова просит бежать,
 	# либо возвращает отряд к обычному шагу (и копейщикам — фалангу).
 	# В стойке «Защита» (фаланга) бега нет вовсе (ТЗ 19.09.2026-3, п. 3):
@@ -2404,6 +2562,8 @@ func command_move(target_pos: Vector3, slow_march: bool = false, face_dir: Vecto
 		want_run = false
 	_set_sprinting(want_run)
 	_player_run = sprinting and player_order
+	if player_order:
+		_player_march = true
 	_charge_order = false        # просто идём — копья вверх
 	# И РАЗГОН ТОЖЕ. Приказ на движение отменяет натиск: всадник, которого
 	# игрок увёл в сторону, не должен «донести» накопленный удар до первого
@@ -2423,7 +2583,7 @@ func command_move(target_pos: Vector3, slow_march: bool = false, face_dir: Vecto
 	_atk_pending = false
 	# И ЗАМОК ЦЕЛИ ТОЖЕ: приказ «идти туда» отменяет приказ «бить их».
 	# Это единственный штатный способ снять замок вручную (см. target_lock)
-	release_target_lock()
+	release_target_lock("move")
 	# ПРИКАЗ ИГРОКА ПЕРЕНАЗНАЧАЕТ ПОСТ, а значит и «исходную позицию», куда
 	# отряд возвращается после боя: метка «ушёл помогать» снимается
 	if player_order and squad_id > 0:
@@ -2435,7 +2595,24 @@ func command_move(target_pos: Vector3, slow_march: bool = false, face_dir: Vecto
 		# Разбор — в GameManager.squad_forget_combat
 		GameManager.squad_forget_combat(squad_id)
 	# ЖИВАЯ ЦЕЛЬ ПРЯМО СЕЙЧАС = это приказ выйти из боя (см. _disengaging выше)
+	# ── ВЫХОД ИЗ БОЯ — ВЕСЬ ОТРЯД, А НЕ ТОЛЬКО ТОТ, У КОГО БЫЛА ЦЕЛЬ ─────────
+	# (ТЗ 21.10.2026, письмо 4, п. 3; ручка perf_config.retreat_squad_lock).
+	# Признак ставился только бойцу с живой целью в кадр клика; задние ряды и
+	# лучник, чья жертва только что пала, получали лишь трёхсекундный замок,
+	# а дальше перехват марша брал любого врага в дальности оружия (у лучника
+	# 20 м) — «шаг-два назад и снова в бой». Теперь приказ игрока отряду, который
+	# в бою (squad_in_combat: рубка, обстрел, свежий удар), выводит из боя
+	# каждого бойца до точки приказа. Упор телом в чужой строй (wall) и удар в
+	# упор по стоящему (_may_answer_blow) по-прежнему получают ответ.
+	# Внутренний приказ (сплочённость, смыкание) признак не снимает: иначе
+	# подзыв к отряду на пятой секунде отхода снова открывал перехват
+	var was_dis: bool = _disengaging
 	_disengaging = attack_target != null
+	if _Opt.retreat_squad_lock:
+		if player_order and squad_id > 0 and GameManager.squad_in_combat(squad_id):
+			_disengaging = true
+		elif not player_order and was_dis and state == State.MOVING:
+			_disengaging = true
 	set_attack_target(null)
 	_hunt_sheep = null           # новый приказ снимает охоту на овцу
 	# ЦЕЛЬ В ОЗЕРЕ ПЕРЕНОСИТСЯ НА БЕРЕГ. Точка в воде недостижима в принципе:
@@ -2682,6 +2859,7 @@ func _effective_cooldown() -> float:
 func command_attack(target: Node3D, forced: bool = true, charge: bool = false,
 		lock: bool = false) -> void:
 	wake_physics()
+	_player_march = false
 	# ПАНИКУЮЩИЙ НЕ ДЕРЁТСЯ ВОВСЕ (см. _panicked): ни по приказу игрока, ни по
 	# авто-агро, ни в ответ на удар. Это и есть «враг может безнаказанно их
 	# добивать» из заказа
@@ -2721,6 +2899,10 @@ func command_attack(target: Node3D, forced: bool = true, charge: bool = false,
 		_charge_order = true
 	_settled     = false         # пошёл в бой — якорь снят
 	_disengaging = false         # приказ атаковать перекрывает недавний отход
+	# ЗОНД order_override_bug: атака не по приказу игрока (lock = false)
+	# снимает его живой замок движения
+	if not lock and _move_lock > 0.0 and faction == Constants.FACTION_PLAYER:
+		_probe_override("attack_over_move")
 	_move_lock   = 0.0           # и замок на движение тоже: игрок передумал
 	if forced:
 		# ПРЯМОЙ ПРИКАЗ ОТМЕНЯЕТ НЕЗАКОНЧЕННЫЙ МАРШ. Игрок передумал и указал
@@ -2815,6 +2997,25 @@ func command_attack(target: Node3D, forced: bool = true, charge: bool = false,
 			_facing = tv.normalized()
 			mark_pose_dirty(12)
 		_aggro_timer = 0.0
+		# ── ПЕРЕВОД ОГНЯ БЕЗ ПОТЕРИ ТЕМПА (ТЗ 23.10.2026, п. 1) ────────────
+		# Зонд qa_tz1023/Probe A: отряд, стрелявший по одной цели (или с
+		# марша по подвернувшейся), на ПКМ по новой ждал остаток перезарядки —
+		# 2.9-3.3 с без единой стрелы («кликаешь повторно»). Теперь выстрел
+		# не позже QUICK_RETARGET_SEC, остаток — долг следующей перезарядке
+		# (_reload_debt). Следующий перевод — не раньше, чем выплачен долг
+		# (_quick_until_ms: быстрый выстрел + перезарядка с долгом): за это
+		# окно боец делает ровно те же два выстрела, что и без перевода, и
+		# частые клики темп не поднимают (стенд qa_tz1023 A2)
+		# РАЗБРОС ПО БОЙЦУ (QUICK_RETARGET_SPREAD): с одним сроком весь отряд
+		# стрелял бы одним кадром — залп «по готовности» превращался в пачку
+		# (qa_archer_bench V2: пик 54 выстрела за 0.1 с против 11)
+		var nq: int = Unit.game_ms()
+		var q: float = QUICK_RETARGET_SEC + QUICK_RETARGET_SPREAD \
+			* float(absi(get_instance_id() * 2654435761) % 1009) / 1009.0
+		if _Opt.quick_retarget and nq >= _quick_until_ms and _attack_timer > q:
+			_reload_debt = _attack_timer - q
+			_attack_timer = q
+			_quick_until_ms = nq + int((q + _effective_cooldown() + _reload_debt) * 1000.0)
 		if squad_id > 0:
 			GameManager.squad_volley_prime(squad_id, target)
 			# ── СБРОС ПО КЛИКУ (заказ: «таймер 0.5 с мгновенно обнуляется») ──
@@ -3069,6 +3270,9 @@ func set_attack_target(target: Node3D) -> void:
 	# Габарит цели — сюда же, по тому же поводу: смена цели редка, а читают
 	# поправку каждый кадр (см. _target_pad)
 	_target_pad = _pad_of(target)
+	# Якорь поводка отряда — откуда боец пошёл за этой погоней (см. CHASE_LEASH)
+	if target != null:
+		_leash_note(target)
 	# Полутакт живёт ровно один контакт с одной целью (этап 4)
 	_atk_half_set(false)
 	# Строка цели — в колонку: по ней пакетный бой считает дистанцию, не
@@ -3080,7 +3284,8 @@ func set_attack_target(target: Node3D) -> void:
 			trow = tu2._soa
 		GameManager.army.set_target(_soa, trow)
 	if target != null:
-		target.died.connect(_on_attack_target_died)
+		if not target.died.is_connected(_on_attack_target_died):
+			target.died.connect(_on_attack_target_died)
 		# ВЗЯЛ ЦЕЛЬ — ОТРЯД С ЭТОГО МГНОВЕНИЯ В БОЮ. Ответ запоминается на
 		# физический кадр (GameManager.squad_in_combat), и без сброса тот, кто
 		# спросит следом в этом же кадре, получил бы «не в бою». Событие
@@ -3093,6 +3298,17 @@ func set_attack_target(target: Node3D) -> void:
 			GameManager.army.set_attackers(nu._soa, nu.attackers)
 
 func _on_attack_target_died(who: Node) -> void:
+	# ── ПОДПИСКА СНИМАЕТСЯ ЗДЕСЬ ЖЕ (аудит лога 20.10.2026) ─────────────────
+	# Рудник при «сносе» шлёт died и ОСТАЁТСЯ ЖИТЬ (Mine._die сбрасывает его в
+	# ничейный). Подписка висела: следующий set_attack_target(рудник) падал
+	# «Signal 'died' is already connected» (20 строк в godot.log), а каждый
+	# следующий снос рудника снимал у бившего его когда-то бойца ТЕКУЩУЮ
+	# цель, какой бы она ни была. Сигнал, пришедший не от текущей цели, —
+	# только отписка
+	if who != null and is_instance_valid(who) and who.has_signal("died") 			and who.is_connected("died", _on_attack_target_died):
+		who.disconnect("died", _on_attack_target_died)
+	if who != attack_target:
+		return
 	var u := who as Unit
 	if u != null:
 		u.attackers = maxi(0, u.attackers - 1)
@@ -3565,6 +3781,26 @@ func blood_spots() -> float:
 ## всегда; тролль — красный (goblin_config.TROLL_FLASH_COLOR). Свойство ленты
 func hit_flash_color() -> Color:
 	return Color.WHITE
+
+## ── ПОДМИГИВАНИЕ ЦЕЛИ ПРИКАЗА (ТЗ 24.10.2026, второе письмо, блок 1) ──────
+## Однократное мягкое белое свечение: «атака назначена именно на него». Тот
+## же канал, что вспышка удара (instance-цвет), но пик ниже и гаснет дольше —
+## удар «щёлкает», подмигивание «светится». Звука и стона нет: это не урон
+const WINK_PEAK := 0.55
+const WINK_SEC := 0.45
+var winks: int = 0          # стендам
+func wink() -> void:
+	if is_dead():
+		return
+	winks += 1
+	if _rb_bound and _Opt.vis_core_path and _Opt.vis_quiet_rows and _soa >= 0:
+		_hit_flash = 0.0
+		GameManager.army.vis_hit(_soa, WINK_PEAK, WINK_SEC)
+	else:
+		# Запасная дорога гасит по HIT_FLASH_SEC — пик тот же, хвост короче
+		_hit_flash = HIT_FLASH_SEC
+		_dmg_dirty = true
+		_push_damage_shade()
 
 ## Сила вспышки для шейдера, 0..1
 func hit_flash_level() -> float:
@@ -4376,14 +4612,46 @@ var _mv_moving: bool = false
 ## копейщика. На трёх тысячах это больше тысячи вызовов в кадр только за то,
 ## чтобы узнать одно и то же число.
 ##
-## Значение обновляет GameManager один раз в начале _physics_process и один раз
-## в начале _process (см. там же). Статическое поле СВОЕГО класса читается как
+## Значение — снимок игровых часов Unit.game_ms() (ниже): GameManager берёт его
+## один раз в начале _physics_process и один раз в начале _process. Статическое поле СВОЕГО класса читается как
 ## обычная переменная — межобъектного обращения здесь нет, в отличие от чтения
 ## чужой автозагрузки.
 ##
 ## Точность не страдает: внутри одного кадра время и так одно, а все сроки в
 ## проекте — десятки и сотни миллисекунд
 static var now_ms: int = 0
+
+## ── ИГРОВЫЕ ЧАСЫ: НАКОПЛЕННАЯ ФИЗИЧЕСКАЯ ДЕЛЬТА (аудит партии 22.10.2026) ─
+## Все сроки боя (замки отхода и цели, очередь у ворот замка, сканы командира,
+## окна вызволения, перезарядки приёмов) считались по Time.get_ticks_msec().
+## Лог 22.10: пауза ~3.5 мин после падения крепости красных — «вход в замок»
+## отряда 94 записан за 258.7 с при 45 с партии. Первая починка («стенные
+## минус пауза») закрывала только паузу: при max_physics_steps_per_frame = 1
+## ниже 60 FPS мир замедляется, а стенные часы нет (на 26 FPS сроки истекали
+## в 2.3 раза быстрее мира), и Engine.time_scale их не касался (зонд Smoke
+## на ×4 жил с вчетверо длинными сроками против часов партии Main).
+##
+## ЕДИНСТВЕННЫЙ ИСТОЧНИК — СУММА delta ФИЗИЧЕСКИХ ТАКТОВ. Её наращивает ровно
+## одно место — начало GameManager._physics_process_timed (advance_game_clock).
+## Пауза останавливает физику, а значит и часы; time_scale уже входит в delta;
+## просадка FPS замедляет часы вместе с миром. Часы партии Main
+## (_game_clock, _match_clock) берут приращение отсюда же.
+##
+## Старт — GAME_CLOCK_ORIGIN_SEC, а не ноль: поля «когда было» у бойцов и
+## отрядов по умолчанию 0 или небольшое отрицательное, и окна вида
+## «now − last < 20 с» на нулевых часах считали бы первое событие повтором.
+## Стенные часы на старте партии тоже были далеко не нулём.
+## Интерфейс и звук идут по стенным часам намеренно — им пауза не помеха
+const GAME_CLOCK_ORIGIN_SEC := 600.0
+static var game_sec: float = GAME_CLOCK_ORIGIN_SEC
+
+static func game_ms() -> int:
+	return int(game_sec * 1000.0)
+
+## Шаг игровых часов. Зовёт ТОЛЬКО GameManager из физического такта
+static func advance_game_clock(delta: float) -> void:
+	if delta > 0.0:
+		game_sec += delta
 ## Снимок GameManager.nav_on() раз в кадр: сетка скал есть и границы мира
 ## включены. Читается в горячем пути хода, где два обращения к автозагрузке
 ## на тик каждого идущего — это миллисекунда кадра на тысяче бойцов
@@ -4429,6 +4697,7 @@ func _sample_movement() -> int:
 			var wsec: float = float(win) * 0.001
 			var lim2: float = MOVE_ANIM_MIN_SPEED * MOVE_ANIM_MIN_SPEED * wsec * wsec
 			var d2: float = mdx * mdx + mdz * mdz
+			_mv_speed = sqrt(d2) / maxf(wsec, 0.001)
 			# Лента ходьбы — по СВОЕМУ порогу: толчок в тесноте (0.75 м/с) факт
 			# движения даёт, а ленту шага — нет (см. WALK_ANIM_MIN_SPEED)
 			if d2 > _walk_min2 * wsec * wsec:
@@ -4454,6 +4723,24 @@ func _sample_movement() -> int:
 
 func moved_recently() -> bool:
 	return _mv_moving
+
+## ── ФАКТИЧЕСКАЯ СКОРОСТЬ ДЛЯ УПРЕЖДЕНИЯ (ТЗ 20.10.2026, блок 7) ─────────────
+## velocity — НАМЕРЕНИЕ: гоблин, упёршийся в ствол у кромки леса, «бежит» в
+## дерево с полной скоростью, стоя на месте. Стрелок выносил прицел на эту
+## скорость × время полёта (до ARCHER_LEAD_MAX 14 м) и ещё расширял разброс
+## по ней же — по застрявшему одиночке стрелы ложились мимо. Здесь — по
+## факту смещения за окно замера (_sample_movement): стоит — ноль; идёт — по
+## направлению намерения, но не быстрее, чем реально сместился
+var _mv_speed: float = 0.0
+
+func real_velocity() -> Vector3:
+	if not _mv_moving:
+		return Vector3.ZERO
+	var v := Vector3(velocity.x, 0.0, velocity.z)
+	var vl: float = v.length()
+	if vl < 1e-4:
+		return _mv_dir * _mv_speed
+	return v * (minf(vl, _mv_speed) / vl)
 
 ## Окно смещения плюс признак ходьбы одним шагом. Зовёт преамбула tick_physics,
 ## а у ведомого ядром (BigStand-5: в физтик он не входит) — визуальный тик.
@@ -4597,7 +4884,7 @@ func _apply_flip_to_node() -> void:
 func _play_attack_anim(anim: String, dur_ms: int = 500) -> void:
 	if not _has_anim(anim):
 		return
-	_anim_lock_until_ms = Time.get_ticks_msec() + dur_ms
+	_anim_lock_until_ms = Unit.game_ms() + dur_ms
 	# По истечении замка поза обязана вернуться сама (этап E3)
 	_lock_pending = true
 	# ── ПРИВЯЗАННОЙ СТРОКЕ УДАР СТАВИТ ЯДРО (look_core) ──────────────────
@@ -5891,10 +6178,52 @@ func _tick_stuck(delta: float, dist: float) -> bool:
 	# Застрял у леса-стены, скалы или кромки карты и не продвигается
 	# UNSTICK_STREAK проверок подряд — путь и цель сбрасываются, боец
 	# выводится на ближайшую проходимую точку и БЕГОМ догоняет свой отряд
+	# Дошёл и упёрся в соседа у самой точки — это прибытие (его доделает
+	# _process_move), а не застревание: вызволять нечего
+	if _stall_arrived(dist):
+		return true
 	if _Opt.unstick and _stuck_streak >= UNSTICK_STREAK and _may_unstick():
 		_unstick()
 		return false
 	return true
+
+## ── «ДОШЁЛ, УПЁРСЯ В СОСЕДА» (ТЗ 21.10.2026, аудит лога партии 21.10) ──────
+## Допуск прибытия ARRIVE_RADIUS 0.48 выведен из SEP_MIN_DIST людей ОДНОГО
+## отряда (см. шапку: разбор наложения обязан останавливать бойца внутри
+## допуска). Для всех, чей круг шире, — гоблины и всадники 0.60, туши, тролль
+## 1.42, а у бойцов РАЗНЫХ отрядов всё × SEP_CROSS_SQUAD 1.6, — инвариант
+## нарушен: сосед держит бойца в 0.6-2 м от его места, тот «не продвигается»,
+## через секунду-две его вызволяют, через 20 с он сдаётся и теряет приказ.
+## Лог партии 21.10: 246 из 444 вызволений всадников орды — ближе 1 м к
+## цели, у троллей 60 из 60, у лучников красных 98 из 109; отряды конницы
+## сдавались по 64-84 раза пачками по 15-18 в секунду.
+## Правило: секунду (STALL_ARRIVE_STREAK проверок) без продвижения и ближе
+## личного допуска — встал, приказ исполнен. Допуск — удвоенная дистанция
+## разведения с бойцом чужого отряда, в пределах [MIN, MAX]
+const STALL_ARRIVE_STREAK := 2
+const STALL_ARRIVE_MIN := 1.2
+const STALL_ARRIVE_MAX := 3.0
+static var stall_arrivals: int = 0
+## Стендам и зонду партии: сколько раз встал «упёрся» каждый боец (instance_id
+## → счёт). Событие редкое (~2/с на партию), словарь в покадровый путь не идёт
+static var stall_by_unit: Dictionary = {}
+
+func _stall_arrive_r() -> float:
+	var r: float = sep_radius()
+	if r <= 0.0:
+		r = SEP_MIN_DIST
+	return clampf(2.0 * r * SEP_CROSS_SQUAD, STALL_ARRIVE_MIN, STALL_ARRIVE_MAX)
+
+func _stall_arrived(dist: float) -> bool:
+	if not _Opt.stall_arrive or _stuck_streak < STALL_ARRIVE_STREAK:
+		return false
+	if state != State.MOVING or retreating or _hunt_sheep != null:
+		return false
+	if _route_i < _route.size():
+		return false            # угол обхода — не конечная точка
+	if attack_target != null and is_instance_valid(attack_target):
+		return false
+	return dist < _stall_arrive_r()
 
 ## Сколько проверок STUCK_CHECK_SEC без продвижения до вызволения (≈1 с)
 const UNSTICK_STREAK := 2
@@ -5914,6 +6243,13 @@ var unstuck_count: int = 0
 ## снята), и ждёт нового приказа. Счёт сбрасывается вне окна
 const UNSTICK_REPEAT_SEC := 20.0
 static var unstuck_giveups: int = 0
+## Память недостижимой точки после сдачи (см. command_move): сколько держать
+## и в каком радиусе приказ ИИ считается «тем же»
+const GIVEUP_MEMORY_MS := 30000
+const GIVEUP_GOAL_R := 3.0
+var _giveup_goal: Vector3 = Vector3.ZERO
+var _giveup_until_ms: int = 0
+static var giveup_orders_skipped: int = 0
 var _unstick_last_ms: int = -1000000
 var _unstick_repeat: int = 0
 
@@ -5944,31 +6280,59 @@ func _may_unstick() -> bool:
 	if absf(edge.x - (p.x + UNSTICK_NEAR * signf(p.x))) > 0.01 or absf(edge.y - (p.z + UNSTICK_NEAR * signf(p.z))) > 0.01:
 		_unstick_why = "near_edge"
 		return true
+	# ── СТЕНА — ТОЛЬКО ПО ХОДУ (ТЗ 21.10.2026, аудит лога партии 21.10) ─────
+	# Проба шла в восемь сторон: стена в 4 м СБОКУ или ЗА СПИНОЙ тоже давала
+	# «cliff». Отряд в 26-метровом проходе лесной стены стоит в заторе в
+	# двух шагах от неё — и его вызволяли пачками, через 20 с бойцы сдавались
+	# и вставали в самом проходе, запирая его (лог 21.10: 639 «cliff», 282 у
+	# красных копейщиков у прохода своей базы, все — уходя ОТ стены). Теперь
+	# засчитывается только проба в секторе ±60° от направления хода
+	var hx: float = velocity.x
+	var hz: float = velocity.z
+	if hx * hx + hz * hz < 0.01:
+		hx = move_target.x - p.x
+		hz = move_target.z - p.z
+	var hl: float = sqrt(hx * hx + hz * hz)
+	var ahead: bool = _Opt.unstick_cliff_ahead and hl > 0.1
+	if ahead:
+		hx /= hl
+		hz /= hl
 	for k in range(8):
 		var a: float = TAU * float(k) / 8.0
-		if GameManager.is_cliff(p.x + cos(a) * UNSTICK_NEAR, p.z + sin(a) * UNSTICK_NEAR):
+		var cx: float = cos(a)
+		var cz: float = sin(a)
+		if ahead and cx * hx + cz * hz < UNSTICK_AHEAD_COS:
+			continue
+		if GameManager.is_cliff(p.x + cx * UNSTICK_NEAR, p.z + cz * UNSTICK_NEAR):
 			_unstick_why = "cliff"
 			return true
 	return false
+
+## Сектор «по ходу» для ветки cliff: cos 60°
+const UNSTICK_AHEAD_COS := 0.5
 
 func _unstick() -> void:
 	unstuck_total += 1
 	unstuck_count += 1
 	_reset_stuck()
-	var now_u: int = Time.get_ticks_msec()
+	var now_u: int = Unit.game_ms()
 	if now_u - _unstick_last_ms < int(UNSTICK_REPEAT_SEC * 1000.0):
 		_unstick_repeat += 1
 	else:
 		_unstick_repeat = 0
 	_unstick_last_ms = now_u
 	var p: Vector3 = global_position
-	var free: Vector2 = GameManager.nearest_passable(p.x, p.z)
-	if Vector2(free.x - p.x, free.y - p.z).length() > 0.05:
+	# Не нашлось проходимого (INF) — остаёмся на месте; промах в телеметрии.
+	# За кромку и с разносом соседей (passable_exit, лог 23.10.2026): ровно на
+	# кромке затор вдавливал обратно, соседи ложились в одну точку
+	var free: Vector2 = GameManager.passable_exit(p.x, p.z, GameManager.NP_WHO_UNSTICK, _soa)
+	if free.is_finite() and Vector2(free.x - p.x, free.y - p.z).length() > 0.05:
 		global_position = Vector3(free.x, GameManager.get_terrain_height(free.x, free.y), free.y)
 		sync_row()
 	# Повтор в окне — цель недостижима: встать здесь, без нового приказа туда же
 	if _Opt.unstick_giveup and _unstick_repeat >= 1:
 		unstuck_giveups += 1
+		var gave_up_on: Vector3 = move_target if move_target != Vector3.ZERO else post_pos
 		GameManager.tm_event("unstuck_giveup", {"sid": squad_id, "type": String(stat_id), "fac": faction,
 			"at": [snappedf(global_position.x, 0.1), snappedf(global_position.z, 0.1)]})
 		if attack_target != null and is_instance_valid(attack_target) and not target_lock:
@@ -5976,6 +6340,10 @@ func _unstick() -> void:
 		var here: Vector3 = global_position
 		command_move(here, false, Vector3.ZERO, retreating)
 		hold_post(here)
+		# Память ставится ПОСЛЕ своего «встать здесь» — иначе он сам попал бы
+		# под фильтр, когда место в строю в паре метров
+		_giveup_goal = gave_up_on
+		_giveup_until_ms = Unit.game_ms() + GIVEUP_MEMORY_MS
 		return
 	# Куда: к своему месту в строю, без отряда — к центру отряда, без
 	# того — туда, куда шёл
@@ -5989,7 +6357,10 @@ func _unstick() -> void:
 	GameManager.tm_event("unstuck", {"sid": squad_id, "type": String(stat_id), "fac": faction,
 		"at": [snappedf(p.x, 0.1), snappedf(p.z, 0.1)], "st": int(state),
 		"tgt": attack_target != null and is_instance_valid(attack_target),
-		"why": _unstick_why, "goal": [snappedf(goal.x, 0.1), snappedf(goal.z, 0.1)]})
+		"why": _unstick_why, "goal": [snappedf(goal.x, 0.1), snappedf(goal.z, 0.1)],
+		# Дистанция до своей точки в миг вызволения (ТЗ 21.10.2026, п. 5): < 1 м
+		# — не застревание, а недоход до допуска прибытия
+		"d": snappedf(Vector2(move_target.x - p.x, move_target.z - p.z).length(), 0.1)})
 	# С живой целью (упёрся в препятствие на подходе) — цель НЕ бросаем: вывод
 	# на проходимую точку уже сделан выше, дальше тот же приказ атаки заново
 	# (свежий маршрут). Терять цель по вызволению — это «не держат цель»
@@ -6235,10 +6606,16 @@ func _process_move(delta: float) -> void:
 			if _route_beside_wp(mypos) and not GameManager.nav_blocked(mypos, nxt, _nav_clear):
 				_route_advance()
 				return
-	if dist < ARRIVE_RADIUS:
+	var stall_in: bool = dist >= ARRIVE_RADIUS and _stall_arrived(dist)
+	if dist < ARRIVE_RADIUS or stall_in:
 		# ── ОХОТА НА ОВЦУ: дошли — бьём, ушла — идём за ней ─────────────
 		if _hunt_sheep != null and _hunt_arrival():
 			return
+		if stall_in:
+			stall_arrivals += 1
+			var sk: int = get_instance_id()
+			stall_by_unit[sk] = int(stall_by_unit.get(sk, 0)) + 1
+			_reset_stuck()
 		velocity = Vector3.ZERO
 		state    = State.IDLE
 		_march_pending = false      # дошли — возобновлять больше нечего
@@ -6386,7 +6763,7 @@ func _process_attack(delta: float) -> void:
 			# и дальше боец живёт по приоритету №3 (авто-агро) как обычно.
 			# ПОСТ ПЕРЕНОСИТСЯ СЮДА: иначе и авто-агро, и возврат на пост
 			# потянут бойца туда, откуда отряд вышел (см. _hold_where_i_stand)
-			release_target_lock()
+			release_target_lock("target_destroyed")
 			_hold_where_i_stand()
 			_atk_pending = false
 		# После смерти цели добираем СЛЕДУЮЩУЮ в своём радиусе атаки
@@ -6495,6 +6872,9 @@ func _process_attack(delta: float) -> void:
 	# считаем до СТЕНЫ, иначе пехота лезет внутрь коробки, а стрелок жмётся
 	# к ней вплотную
 	var rng: float = attack_range + _target_pad
+	# ── ПОВОДОК ОТРЯДА (ТЗ 22.10.2026): за агро дальше CHASE_LEASH не уходим ─
+	if _leash_from.x != INF and _leash_check(mp):
+		return
 	# ── ПОЛУТАКТ В КОНТАКТЕ (этап 4, perf_config.atk_half_contact) ──────────
 	# Боец в зоне контакта (цель за досягаемостью, но не дальше ATK_HALF_ZONE;
 	# не конница) решает вдвое реже: TickRows отдаёт его автомату через один
@@ -6534,6 +6914,15 @@ func _process_attack(delta: float) -> void:
 				_charge_path += Vector2(mp.x - _charge_last.x, mp.z - _charge_last.z).length()
 				_charge_last = mp
 			is_charging = true
+	# ── КОРОБКА ОТРЯДА (ТЗ 24.10.2026): ТРЕТИЙ РЯД И ДАЛЬШЕ ПО ФРОНТУ НЕ БЬЁТ ─
+	# Копьё 2.5 м при интервале 0.55 достаёт через четыре шеренги, и без этой
+	# строки в контакте дрались бы все пять (зонд qa_box_front: две трети
+	# контактов — задние ряды). Задний стоит на месте и ждёт своей очереди;
+	# во фланг и в тыл отвечает (см. _box_frontal)
+	var box_hold: bool = _box_on and _box_goal.x != INF and tu != null
+	if box_hold and dist <= rng and _box_row >= BOX_STRIKE_ROWS and _box_frontal(dir, dist):
+		_box_hold(delta, mp, dir, dist, tu, rng)
+		return
 	if dist > rng:
 		# ── УДАР С РАЗГОНА — В КАДР КОНТАКТА, А НЕ В КАДР ТИКА ──────────────
 		# Жалоба владельца: «сначала залетают, а потом спустя время юниты
@@ -6606,10 +6995,28 @@ func _process_attack(delta: float) -> void:
 					var at_reach := _find_nearest_enemy_in_range(attack_range, "hold_at_reach")
 					if at_reach != null and at_reach != attack_target 							and _in_phalanx_front(at_reach):
 						command_attack(at_reach, false)
+			# ── ДЛИННОЕ ОРУЖИЕ БЬЁТ МЕНЯ — ШАГ НАВСТРЕЧУ (ТЗ 21.10.2026) ──────
+			# Цель — тот, чьё оружие достаёт меня, а моё его нет (туша,
+			# тролль), удар свежий: шагаю к нему, но не дальше
+			# HOLD_OUTREACH_STEP от поста. Строй стоит, шагает только задетый
+			if tu != null and tu == _outreach_by and now_ms - _outreach_ms < HOLD_OUTREACH_MS and _Opt.hold_answer_outreach:
+				var hp0: Vector3 = position if _local_xform else global_position
+				if Vector2(hp0.x - post_pos.x, hp0.z - post_pos.z).length() < HOLD_OUTREACH_STEP:
+					outreach_answers += 1
+					velocity = (dir / dist) * _effective_speed()
+					_commit_step(velocity * delta)
+					return
 			# Стоящий в обороне ждёт цели на дистанции — ждёт в ядре
 			# (BigStand, этап 4): шага нет, будят цель на упоре, чужой в
 			# длине руки и плановый возврат раз в AGGRO_INTERVAL_HOT
 			_arm_hold_autopilot(tu, rng)
+			return
+		# ── КОРОБКА ОТРЯДА (ТЗ 24.10.2026) ──────────────────────────────────
+		# Всё, что ниже, — способы сблизиться ПООДИНОЧКЕ (подтягивание рядов,
+		# сцепка, обход свалки, автопилот с обходом своих). В коробке сближается
+		# только отряд целиком (SquadBox подаёт место вперёд), боец идёт к месту
+		if box_hold:
+			_box_hold(delta, mp, dir, dist, tu, rng)
 			return
 		# ПОДТЯГИВАНИЕ ЗАДНИХ РЯДОВ. Отряд стоит в несколько шеренг, и задние
 		# физически не достают до врага: у стрелков это половина отряда, которая
@@ -6739,7 +7146,11 @@ func _process_attack(delta: float) -> void:
 				if sa != Vector3.INF:
 					anch = sa
 			if Vector2(mp.x - anch.x, mp.z - anch.z).length() > pursuit_limit():
+				var fled := attack_target as Unit
+				var fled_sid: int = fled.squad_id if fled != null else 0
 				set_attack_target(null)
+				if target_lock:
+					_probe_override("pursuit_leash")
 				target_lock = false
 				_pursuit_anchored = false
 				_engaged_once = false
@@ -6753,6 +7164,13 @@ func _process_attack(delta: float) -> void:
 					command_move(post_pos)
 				else:
 					state = State.IDLE
+				# ── И ВЕСЬ ОТРЯД ВМЕСТЕ С НИМ (лог партии 26.10.2026) ────────
+				# Снятый якорь отряда не останавливал соседей: каждый мерил
+				# дальше от СВОЕЙ точки касания и срывался поодиночке, через
+				# секунды (отряд 86: срыв каждые 3 с в течение 20 с), — часть
+				# уходила на пост, часть гнала дальше, и отряд рвался надвое
+				if fled_sid > 0 and squad_id > 0 and _Opt.leash_whole_squad:
+					_end_squad_pursuit(fled_sid)
 				return
 		# ── «ДОСТРЕЛИЛ» ЧИТАЕТСЯ И У ОТРЯДА, А НЕ ТОЛЬКО У СЕБЯ ────────────
 		# Личный признак верен для того, кто уже дошёл; заказ спринта 14
@@ -6905,6 +7323,15 @@ func _process_attack(delta: float) -> void:
 					# линию вторая всё равно сменит
 					velocity = Vector3.ZERO
 					_facing = dir
+					# Ждать очереди можно и в ядре (ТЗ 25.10.2026, п. 5): режим
+					# «стоять» (скорость 0), возврат по такту AGGRO_INTERVAL_HOT
+					# и от чужого в длине руки. Без этого вторая линия осады —
+					# сотни бойцов — входила в автомат каждый кадр
+					if _Opt.approach_autopilot and _Opt.bld_autopilot and _soa >= 0 \
+							and not _enemy_contact and not _rear_press:
+						_auto_pilot = true
+						GameManager.army.autopilot_arm_goal(_soa, 0.0, mp.x, mp.z, 0.0,
+							AGGRO_INTERVAL_HOT)
 					return
 		# ── ПОДХОД В ОБХОД СКАЛ И ВОДЫ (спринт 19, письмо 11) ──────────────
 		# Цель за обрывом: прямая упирается в стену, и раньше боец шёл в неё
@@ -6978,7 +7405,10 @@ func _process_attack(delta: float) -> void:
 		# сняты — стражу перехвата, упор и обход своих ведёт само ядро, а
 		# автомат входит по расписанию (см. _arm_autopilot)
 		if not nav_detour:
-			_arm_autopilot(tu, rng, dist)
+			if tu == null and attack_target is Building:
+				_arm_autopilot_building(mp, tp, nav_goal, rng, dist)
+			else:
+				_arm_autopilot(tu, rng, dist)
 		# ── ПОДХОД К ЦЕЛИ ИДЁТ ТЕМ ЖЕ ПАКЕТНЫМ ПУТЁМ, ЧТО И МАРШ ────────────
 		# Замер (qa_fx --prof, 3000, фаза «стоят»): process_attack — 68 % тика
 		# при 11.6 мкс на вызов, и 6.5 из них это mb_enemyblock + mb_trunk +
@@ -7036,7 +7466,8 @@ func _process_attack(delta: float) -> void:
 			# скрывало бы два разных ответа
 			var _prof_s: bool = _prof_on
 			var _t_s: int = Time.get_ticks_usec() if _prof_s else 0
-			_attack_timer = _effective_cooldown()   # в обороне бьют на 25% чаще
+			_attack_timer = _effective_cooldown() + _reload_debt   # в обороне бьют на 25% чаще
+			_reload_debt = 0.0
 			var dmg: float = _strike_damage() + _upgrade_damage_bonus()
 			# Локальная ссылка: take_damage может убить цель, и сигнал died
 			# обнулит attack_target ещё до вызова _on_attack_fired
@@ -7186,6 +7617,205 @@ var _engaged_once: bool = false
 ## сорвался бы законный приказ «атаковать вон тех, в сорока метрах»
 var _pursuit_from: Vector3 = Vector3.ZERO
 var _pursuit_anchored: bool = false
+
+## ── ПОВОДОК ОТРЯДА (ТЗ 22.10.2026, скриншоты 15:52) ────────────────────────
+## Бойцы игрока по 3-8 человек уходили за агро «за полэкрана», пока строй
+## стоял у объекта. Поводок погони выше (PURSUIT_LIMIT) держит только
+## ПРИКАЗНУЮ атаку и считается от ПЕРВОГО КАСАНИЯ: за кайтящим гноллом,
+## прохожим гоблином или разбежавшейся ордой касания нет — нет и поводка
+## (стенд qa_squad_leash_test: 26 / 31 / 44 м). Теперь любая цель, которую
+## боец игрока взял НЕ по ПКМ-замку игрока, держит его в CHASE_LEASH от
+## точки, откуда он за ней пошёл (_leash_from): стоял в строю — от своего
+## поста, иначе — от места, где взял цель. Дальше — цель брошена, боец идёт
+## на пост, отряд CHASE_COOLDOWN_MS не контратакует (иначе тот же гнолл
+## вытянул бы его снова). Здания не убегают — их поводок не держит.
+## Только игрок: ИИ и орда водят отряды своими приказами. Ручка
+## perf_config.squad_leash
+const CHASE_LEASH := 8.0
+## Стоящий ближе этого к своему посту — «в строю»: якорь поводка — пост
+const CHASE_POST_NEAR := 3.0
+var _leash_from: Vector3 = Vector3.INF
+## Стендам: сколько раз поводок оборвал погоню
+static var chase_breaks: int = 0
+
+## ── КОРОБКА ОТРЯДА В БОЮ (ТЗ 24.10.2026, scripts/army/SquadBox.gd) ─────────
+## Поля пишет ТОЛЬКО SquadBox (box_enter / box_set / box_leave). Пока _box_on,
+## боец в атаке к своей цели сам не идёт: шагает к своему месту в коробке и
+## бьёт то, до чего достаёт (_box_hold). Место INF — оно в лесу или воде,
+## боец этим тиком идёт обычной дорогой
+var _box_on: bool = false
+var _box_goal: Vector3 = Vector3.INF
+var _box_row: int = 0
+var _box_moving: bool = false
+var _box_course: Vector3 = Vector3.ZERO
+## По врагу ПЕРЕД ФРОНТОМ бьют только первые ряды коробки (заказ: «1-2
+## ряда»); во фланг и в тыл отвечает любой — иначе задние стояли бы под ударом
+const BOX_STRIKE_ROWS := 2
+## «Перед фронтом» — в пределах ~60° от курса коробки
+const BOX_FRONT_COS := 0.5
+## Ближе этого к своему месту боец стоит; ближе BOX_SLOW_R — сбавляет шаг,
+## чтобы не качаться вокруг точки
+const BOX_ARRIVE := 0.25
+const BOX_SLOW_R := 0.6
+
+func box_enter(course: Vector3) -> void:
+	_box_on = true
+	_box_course = course
+	# Ведомого ядром (автопилот подхода с обходом своих, тыловой напор) —
+	# обратно в автомат: дальше его ведёт место в коробке
+	_core_release()
+	wake_physics()
+
+func box_set(goal: Vector3, row: int, moving: bool) -> void:
+	_box_goal = goal
+	_box_row = row
+	# Коробка тронулась, а боец ждёт в ядре — будим: ожидание в ядре длится
+	# до AGGRO_INTERVAL_HOT, и за полсекунды место уезжает на метр
+	if moving and not _box_moving and _auto_pilot:
+		_core_release()
+	_box_moving = moving
+	if moving:
+		wake_physics()
+
+func box_leave() -> void:
+	_box_on = false
+	_box_goal = Vector3.INF
+	_box_row = 0
+	_box_moving = false
+
+func _box_frontal(dir: Vector3, dist: float) -> bool:
+	if dist < 1e-3:
+		return true
+	return (dir.x * _box_course.x + dir.z * _box_course.z) / dist > BOX_FRONT_COS
+
+## Боец в коробке: к своему месту, а на месте — стоять и бить то, до чего
+## достаёшь. Цель вне досягаемости не бросается (она вернётся сама, когда
+## коробка подойдёт), но тот, кто уже в длине оружия, перебивает её — тот же
+## приём, что у стоящей фаланги (ветка обороны выше в _process_attack)
+func _box_hold(delta: float, mp: Vector3, dir: Vector3, dist: float, tu: Unit, rng: float) -> void:
+	if dist > 1e-3:
+		_facing = dir / dist
+	var gx: float = _box_goal.x - mp.x
+	var gz: float = _box_goal.z - mp.z
+	var gd: float = sqrt(gx * gx + gz * gz)
+	if gd > BOX_ARRIVE:
+		var spd: float = _effective_speed()
+		if gd < BOX_SLOW_R:
+			spd *= maxf(gd / BOX_SLOW_R, 0.4)
+		var mv := Vector3(gx / gd, 0.0, gz / gd)
+		velocity = mv * spd
+		var st: Vector3 = velocity * delta
+		if st.length() > gd:
+			st = mv * gd
+		_commit_step(st)
+		return
+	velocity = Vector3.ZERO
+	_aggro_timer -= delta
+	if _enemy_contact or _aggro_timer <= 0.0:
+		_enemy_contact = false
+		_aggro_timer = AGGRO_INTERVAL_HOT
+		# ЗАМОК — ОТРЯДНЫЙ: боец того же вражеского отряда на длине оружия —
+		# законная цель приказа. Боец коробки к цели не идёт, а назначенный
+		# ему squad_pick_member часто стоит в глубине чужого строя: без этой
+		# подмены передний ряд стоял у тел цели и не бил (qa_target_lock A5:
+		# «выжило 8 из 8»). Замок при подмене сохраняется.
+		# Ищется БОЕЦ ОТРЯДА-ЦЕЛИ, а не «ближайший враг»: ближайшим бывает
+		# ЗДАНИЕ (поиск берёт чужие постройки) — партия 25.10: 313 SCRIPT ERROR
+		# (squad_id у бараков, домов, стрельбища): ошибка обрывала _box_hold до
+		# заводки ожидания в ядре, а бойцу, у которого здание ближе бойцов
+		# цели, подмена не доставалась вовсе (qa_log_1025 A)
+		if target_lock:
+			var tq: int = (attack_target as Unit).squad_id \
+				if attack_target != null and is_instance_valid(attack_target) and attack_target is Unit else 0
+			if tq > 0:
+				var mate: Unit = _squad_member_in_reach(tq, mp)
+				if mate != null and mate != attack_target:
+					command_attack(mate, true, false, true)
+					return
+		var at_reach := _find_nearest_enemy_in_range(attack_range, "box_reach")
+		if at_reach != null and at_reach != attack_target:
+			var ad := Vector3(at_reach.global_position.x - mp.x, 0.0, at_reach.global_position.z - mp.z)
+			# Под замком игрока — только заслон на длину руки, как и везде
+			# (приоритет приказов); иначе стрелки сбоку уводили отряд с цели.
+			# Здание заслоном не бывает: сквозь постройки ходят (building_obstacles)
+			if target_lock and (at_reach is Building or ad.length() > LOCK_BLOCKER_RANGE):
+				pass
+			elif _box_row < BOX_STRIKE_ROWS or not _box_frontal(ad, ad.length()):
+				command_attack(at_reach, false)
+				return
+	# Коробка стоит — ждать можно в ядре. Задним рядам будиться по
+	# досягаемости незачем (бить по фронту им нельзя): только плановый такт
+	if not _box_moving:
+		_arm_hold_autopilot(tu, rng if _box_row < BOX_STRIKE_ROWS else 0.05)
+
+## Ближайший живой боец отряда sid на длине оружия, иначе null. Состав —
+## напрямую из squads (squad_members распускает опустевший отряд в геттере)
+func _squad_member_in_reach(sid: int, mp: Vector3) -> Unit:
+	var sq: Variant = GameManager.squads.get(sid)
+	if sq == null:
+		return null
+	var best: Unit = null
+	var best_d2: float = attack_range * attack_range
+	for m in ((sq as Dictionary)["members"] as Array):
+		if m == null or not is_instance_valid(m):
+			continue
+		var mu: Unit = m
+		if mu.is_dead():
+			continue
+		var p: Vector3 = mu.position if mu._local_xform else mu.global_position
+		var d2: float = (p.x - mp.x) * (p.x - mp.x) + (p.z - mp.z) * (p.z - mp.z)
+		if d2 <= best_d2:
+			best_d2 = d2
+			best = mu
+	return best
+
+func _leash_note(target: Node3D) -> void:
+	if target == null or not (target is Unit) or _leash_from.x != INF:
+		return
+	var mp: Vector3 = position if _local_xform else global_position
+	if _post_valid and state != State.MOVING \
+			and Vector2(mp.x - post_pos.x, mp.z - post_pos.z).length() <= CHASE_POST_NEAR:
+		_leash_from = Vector3(post_pos.x, 0.0, post_pos.z)
+	else:
+		_leash_from = Vector3(mp.x, 0.0, mp.z)
+
+## Можно ли отдать шаг к точке ядру (автопилот подхода, тыловой напор): их
+## ход GDScript-тик пропускает, и поводок отряда там не проверяется. Цель за
+## поводком от якоря — нельзя, ведёт полный автомат (замер qa_squad_leash_test
+## C: напор тыла уводил 5 из 30 за кайтящим гноллом на 30 м)
+func leash_allows_drive(tp: Vector3) -> bool:
+	if _leash_from.x == INF or target_lock or faction != Constants.FACTION_PLAYER \
+			or squad_id <= 0 or not _Opt.squad_leash:
+		return true
+	var lim: float = CHASE_LEASH + attack_range
+	return Vector2(tp.x - _leash_from.x, tp.z - _leash_from.z).length_squared() <= lim * lim
+
+## Ушёл дальше поводка — бросить цель и вернуться. true — погоня оборвана
+func _leash_check(mp: Vector3) -> bool:
+	if _leash_from.x == INF or target_lock or retreating or _disengaging \
+			or faction != Constants.FACTION_PLAYER or squad_id <= 0 \
+			or not _Opt.squad_leash or attack_target is Building:
+		return false
+	var dx: float = mp.x - _leash_from.x
+	var dz: float = mp.z - _leash_from.z
+	if dx * dx + dz * dz <= CHASE_LEASH * CHASE_LEASH:
+		return false
+	var back: Vector3 = _leash_from
+	_leash_from = Vector3.INF
+	chase_breaks += 1
+	set_attack_target(null)
+	_attack_is_forced = false
+	_atk_pending = false
+	_pursuit_anchored = false
+	_engaged_once = false
+	velocity = Vector3.ZERO
+	GameManager.squad_chase_broken(squad_id)
+	# Домой — на пост строя, если он рядом с якорем; иначе к якорю
+	var home: Vector3 = post_pos if _post_valid \
+		and Vector2(post_pos.x - back.x, post_pos.z - back.z).length() <= CHASE_LEASH * 2.0 \
+		else back
+	command_move(GameManager.land_target(home))
+	return true
 
 ## Номер прохода пакетного боя, на котором этот боец попал в список «нужен
 ## полный автомат» (см. GameManager.atk_frame)
@@ -7557,6 +8187,12 @@ func _apply_push(target: Unit, dirn: Vector3) -> void:
 	var after_cap: float = _push_after_cap()
 	if after_cap != 1.0:
 		step *= after_cap
+	# ── НАПОР СТРОЯ ВИДЕН (ТЗ 23.10.2026, второе письмо, п. 3) ─────────────
+	# Пехотный толчок был 1-5 см за удар — вытеснения одного строя другим на
+	# экране не было. Пехоте (не конница, её канал — скорость) шаг ×
+	# INFANTRY_PRESS_MULT: сильный строй заметно теснит слабый за десяток ударов
+	elif _Opt.infantry_press:
+		step *= _UStats.INFANTRY_PRESS_MULT
 	var np := target.global_position + dirn * step
 	# ТОЛЧОК НЕ ВДАВЛИВАЕТ ЖЕРТВУ В ЧУЖОЕ ТЕЛО. Это второе движение, писавшее
 	# координату мимо проверки тел (первое — разлёт, см. _tick_fling): в
@@ -7570,6 +8206,11 @@ func _apply_push(target: Unit, dirn: Vector3) -> void:
 	# B2-1 «за линией» ушёл с 0 до 70 из 202. Выход здесь целиком: ни жертва,
 	# ни вмятина разметки, ни шаг толкающего
 	if GameManager.unit_grid.enemy_block(target, np, BLOCK_RADIUS).length_squared() > 1e-8:
+		return
+	# Толчок не вдавливает в лес-стену и скалу — тем же предикатом, что шаг
+	# (ТЗ 23.10.2026, третье письмо: толчок был одним из путей в ловушку)
+	if _Opt.forest_nav_solid and GameManager.is_cliff(np.x, np.z) \
+			and not GameManager.is_cliff(target.global_position.x, target.global_position.z):
 		return
 	if not GameManager.is_water(np.x, np.z):
 		var lim: Vector2 = GameManager.clamp_to_map(np.x, np.z)
@@ -7687,7 +8328,7 @@ const CAV_REAR_LANE := 0.8
 func _cav_rear_hit(dirn: Vector3) -> bool:
 	if squad_id <= 0:
 		return false
-	var now: int = Time.get_ticks_msec()
+	var now: int = Unit.game_ms()
 	var me: Vector3 = global_position
 	var raw: Variant = _cav_hits.get(squad_id)
 	var arr: Array = raw if raw != null else []
@@ -8112,6 +8753,15 @@ func _tick_fling(delta: float) -> void:
 		_fling_vel = Vector3.ZERO
 		_fling_solid = false
 		return
+	# ── И У СТЕНЫ (ТЗ 23.10.2026, третье письмо: первопричина ловушек) ─────
+	# Разлёт пишет координату мимо пакетного шага — сбитого заносило в лес-
+	# стену и скалу, откуда потом вызволяли. Вход в непроходимое гасит разлёт
+	# тем же предикатом, что у шага (выход из него — можно)
+	if _Opt.forest_nav_solid and GameManager.is_cliff(np.x, np.z) \
+			and not GameManager.is_cliff(global_position.x, global_position.z):
+		_fling_vel = Vector3.ZERO
+		_fling_solid = false
+		return
 	# ── ПРОРЫВ ВСАДНИКА КОНЧАЕТСЯ У ЧУЖОГО ТЕЛА ────────────────────────────
 	# Жалоба владельца (скриншот): «рыцари проникают сквозь строй копейщиков,
 	# разворачиваются на 180° и бьют в спину».
@@ -8219,7 +8869,7 @@ func _answer_far_fire(attacker: Node3D) -> void:
 		return
 	if state != State.IDLE and state != State.MOVING:
 		return
-	if player_order_active():
+	if player_order_active() or (_disengaging and _Opt.retreat_squad_lock):
 		return
 	# Фаланга в «Защите» держит место (её подаёт _sweep_phalanx_press), бегущий
 	# бежит, стрелок на марше доходит до точки (ТЗ 14.09 п. 10), а отряд,
@@ -8300,6 +8950,57 @@ func _target_out_of_reach() -> bool:
 	var d: float = global_position.distance_to(attack_target.global_position)
 	return d > attack_range + _target_pad + 0.3
 
+## ── МЕНЯ ДОСТАЁТ ОРУЖИЕ ДЛИННЕЕ МОЕГО (ТЗ 21.10.2026, письмо 4, п. 1) ─────
+## Туша бьёт дубиной с 4.5 м, тролль — с 3.5, а копьё достаёт на 2.5: задетый
+## копейщик «не доставал» до обидчика, и в стойке [S] (с места не сходит)
+## стоял под ударами, пока игрок не прикажет (qa_tz1021c B1: отвечали 3 из
+## 19). Признак — удар ближнего боя (оружие обидчика не длиннее
+## OUTREACH_MELEE_MAX) с дистанции, где его оружие меня достаёт, а моё — нет
+const OUTREACH_MELEE_MAX := 6.0
+## Сколько после такого удара стоящий в [S] вправе шагнуть навстречу, мс
+const HOLD_OUTREACH_MS := 2500
+## И не дальше скольких метров от своего поста
+const HOLD_OUTREACH_STEP := 3.0
+var _outreach_by: Node3D = null
+var _outreach_ms: int = 0
+var outreach_answers: int = 0          # стендам: сколько раз шагнул навстречу
+
+func _outreached_by(attacker: Node3D) -> bool:
+	if not _Opt.hold_answer_outreach or attacker == null or not is_instance_valid(attacker):
+		return false
+	var au := attacker as Unit
+	if au == null or au.is_dead() or int(au.faction) == int(faction):
+		return false
+	if au.attack_range > OUTREACH_MELEE_MAX or au.attack_range <= attack_range:
+		return false
+	var d: float = global_position.distance_to(au.global_position)
+	return d <= au.attack_range + _pad_of(au) + 1.0
+
+func _note_outreach(attacker: Node3D) -> void:
+	if _outreached_by(attacker):
+		_outreach_by = attacker
+		_outreach_ms = now_ms
+
+## ── ДИКИЙ ПОД ОБСТРЕЛОМ МЕНЯЕТ ДАЛЁКУЮ ЦЕЛЬ НА СТРЕЛКА (ТЗ 21.10.2026, письмо 4)
+## Тролль, туша и гнолл отвечали обидчику, только когда цели не было вовсе:
+## идущий к далёкой цели (овца, пост, рабочий через поле) шёл мимо лучников
+## под стрелами. Меняется цель, которую я сейчас НЕ бью (вне досягаемости), на
+## обидчика, если он ближе; рубку в упор удар издали не перебивает. Замок
+## приказа и уже назначенный обидчик — без перемен
+func should_switch_to_attacker(attacker: Node3D) -> bool:
+	if attacker == null or not is_instance_valid(attacker) or not (attacker is Unit):
+		return false
+	var au := attacker as Unit
+	if au.is_dead() or int(au.faction) == int(faction) or target_lock:
+		return false
+	var t := attack_target
+	if t == null or not is_instance_valid(t) or (t is Unit and (t as Unit).is_dead()):
+		return true
+	if t == attacker or not _target_out_of_reach():
+		return false
+	var p: Vector3 = global_position
+	return p.distance_squared_to(au.global_position) < p.distance_squared_to(t.global_position)
+
 func _may_answer_blow(attacker: Node3D) -> bool:
 	if not _disengaging and _move_lock <= 0.0:
 		# ── ПОЧЕМУ ЗДЕСЬ НЕТ РАЗДЕЛИТЕЛЯ «ИДУ ПРОЧЬ» ──────────────────────
@@ -8326,7 +9027,8 @@ func _may_answer_blow(attacker: Node3D) -> bool:
 		return false
 	var dx: float = attacker.global_position.x - global_position.x
 	var dz: float = attacker.global_position.z - global_position.z
-	return dx * dx + dz * dz <= LOCK_BLOCKER_RANGE * LOCK_BLOCKER_RANGE
+	var arm: float = LOCK_BLOCKER_RANGE + _pad_of(attacker)
+	return dx * dx + dz * dz <= arm * arm
 
 ## ── ЗАМОК СТРЕЛКА ЖИВЁТ ДАЛЬШЕ (ТЗ 18.09.2026, п. 5) ─────────────────────
 ## Приказ ПКМ по отряду за пределом двойной дальности (40 м у лука 20)
@@ -8383,7 +9085,7 @@ func _check_auto_aggro() -> void:
 		# Отряд истреблён или ушёл из виду — приказ исчерпан, живём как обычно.
 		# Пост при этом переносится СЮДА (см. _hold_where_i_stand): без этого
 		# боец разворачивался и уходил на старое место — за полкарты
-		release_target_lock()
+		release_target_lock("lock_lost_sight")
 		_hold_where_i_stand()
 		_atk_pending = false
 	# В стойке ЗАЩИТА боец не сходит с места ради врага: замечает только то,
@@ -8991,7 +9693,7 @@ func _squad_cached_enemy(range_limit: float) -> Node3D:
 	# зовут бой до первого кадра
 	var nms: int = now_ms
 	if nms == 0:
-		nms = Time.get_ticks_msec()
+		nms = Unit.game_ms()
 	var now: float = float(nms) * 0.001
 	var hit: Node3D = GameManager.squad_target_get(squad_id, range_limit, now)
 	if hit != null:
@@ -9141,6 +9843,15 @@ func take_damage(amount: float, attacker: Node3D = null) -> void:
 	if state == State.DEAD:
 		return
 	wake_physics()
+	# ── СПЯЩИЙ ПРОСЫПАЕТСЯ ОТ УДАРА — ВЕСЬ ОТРЯД (ТЗ 22.10.2026) ────────────
+	# Охрана рудника орды (F_DORMANT, физтик снят) будилась только чужим
+	# у САМОГО рудника или ударом по руднику: лучники с 20 м и копейщики у
+	# поста на кольце били её, а она стояла. Удар чужого будит отряд сразу,
+	# ответ на удар ниже уже идёт от бодрствующего; приказ отряду отдаёт его
+	# хозяин (GoblinAI._guards_tick видит свежий удар по отряду)
+	if dormant and attacker != null and is_instance_valid(attacker) \
+			and attacker is Unit and (attacker as Unit).faction != faction:
+		GameManager.wake_dormant_squad(squad_id, self)
 	# ── УКРЫТЫЙ В ЗДАНИИ УРОНА НЕ ПОЛУЧАЕТ — ЕГО ПОЛУЧАЕТ ЗДАНИЕ ────────────
 	# Заказ владельца (09.09.2026): лучники в башне неуязвимы, пока башня
 	# стоит; всё, что прилетело по ним, списывается с её запаса. Из сетки
@@ -9236,9 +9947,13 @@ func take_damage(amount: float, attacker: Node3D = null) -> void:
 		actual = amount
 	if losses_frozen:
 		actual = 0.0
+	# Телеметрия — урон, который запас РЕАЛЬНО потерял (аудит лога 20.10.2026:
+	# «насмерть» снайпера и затаптывание пишут ×100-×1000 запаса, и поля
+	# damage_* лога раздувались до 39 млн за 10 с)
+	var tm_dmg: float = minf(actual, maxf(current_health, 0.0))
 	current_health -= actual
 	if _Opt.telemetry:
-		GameManager.tm_damage(self, attacker, actual)
+		GameManager.tm_damage(self, attacker, tm_dmg)
 	# Здоровье в строку ядра армии — здесь, а не в тике: урон приходит редко,
 	# а тик идёт по всей армии каждый кадр (см. scripts/army/ArmySoA.gd)
 	_soa_push_stats()
@@ -9278,12 +9993,14 @@ func take_damage(amount: float, attacker: Node3D = null) -> void:
 	elif state == State.ATTACKING and attacker is Unit and not target_lock and not retreating \
 			and not sprinting and attack_damage > 0.0 and not (attacker as Unit).is_dead() \
 			and (attacker as Unit).faction != faction and _target_out_of_reach() \
-			and global_position.distance_to(attacker.global_position) <= attack_range + _pad_of(attacker) + 0.3:
+			and (global_position.distance_to(attacker.global_position) <= attack_range + _pad_of(attacker) + 0.3 \
+				or _outreached_by(attacker)):
 		# ── БЬЮТ В УПОР, А СВОЯ ЦЕЛЬ НЕДОСЯГАЕМА — ОТВЕЧАЕМ ОБИДЧИКУ (ТЗ 29.09.2026,
 		# блок 7). Ответ на удар работал только в IDLE/MOVING: гоблин с далёкой
 		# целью умирал от копья соседа, не отвечая. Замок приказа — прежний приоритет
 		command_attack(attacker, false)
 		_melee_grip = true
+		_note_outreach(attacker)
 	elif sprinting and (state == State.IDLE or state == State.MOVING) and attacker \
 			and attack_damage > 0.0 and not retreating and attacker is Unit \
 			and not (attacker as Unit).is_dead() \
@@ -9293,7 +10010,7 @@ func take_damage(amount: float, attacker: Node3D = null) -> void:
 		# сквозь удары молча. Дальний обстрел бегущего по-прежнему не сбивает
 		_set_sprinting(false)
 		command_attack(attacker, false)
-	elif (state == State.IDLE or state == State.MOVING) and attacker and attack_damage > 0.0 and not retreating and not sprinting and _may_answer_blow(attacker):
+	elif (state == State.IDLE or state == State.MOVING) and attacker and attack_damage > 0.0 and not retreating and not sprinting and not _march_ignores_blow(attacker) and _may_answer_blow(attacker):
 		var atk_dist: float = global_position.distance_to(attacker.global_position)
 		# ── «ВПЛОТНУЮ» ПОД ЗАМКОМ — ЭТО ДЛИНА РУКИ, А НЕ ДАЛЬНОСТЬ ОРУЖИЯ ───
 		# Ветка ниже отвечает на удар СВОЕЙ целью, то есть перебивает приказ
@@ -9305,17 +10022,24 @@ func take_damage(amount: float, attacker: Node3D = null) -> void:
 		#
 		# Порог тот же, что у перехвата заслона под замком (LOCK_BLOCKER_RANGE):
 		# помеха обязана быть ФИЗИЧЕСКОЙ. Удар в упор ответ по-прежнему получает
-		var hit_close: float = attack_range
+		# ── ДО КРАЯ ТУШИ, А НЕ ДО ЕЁ ЦЕНТРА (ТЗ 21.10.2026, письмо 4) ──────
+		# Туша бьёт дубиной 4.5 м и свипом, и центр её дальше длины копья:
+		# копейщик в [S], задетый ею, «не доставал» до центра и стоял под
+		# ударами, пока игрок не прикажет (стенд qa_tz1021c B1: отвечали 3 из
+		# 19). Габарит обидчика — тот же _pad_of, что у ветки ATTACKING выше
+		var body: float = _pad_of(attacker)
+		var hit_close: float = attack_range + body
 		if target_lock:
-			hit_close = minf(attack_range, LOCK_BLOCKER_RANGE)
+			hit_close = minf(hit_close, LOCK_BLOCKER_RANGE + body)
 		# ── СТРЕЛОК НА МАРШЕ ОТВЕЧАЕТ ТОЛЬКО НА УДАР В УПОР (ТЗ 14.09.2026, п. 10)
 		# У лучника attack_range 20 м, и «ударили вплотную» на марше читалось
 		# как «в меня попали с двадцати метров»: кость гнолла разворачивала весь
 		# идущий отряд (squad_counter_charge). Приказ движения обязан дойти
 		# до точки; отвечает стрелок, встав (IDLE — ветка ниже, как была)
 		if state == State.MOVING and not pursues_target():
-			hit_close = minf(attack_range, LOCK_BLOCKER_RANGE)
-		if atk_dist <= hit_close:
+			hit_close = minf(hit_close, LOCK_BLOCKER_RANGE + body)
+		if atk_dist <= hit_close or _outreached_by(attacker):
+			_note_outreach(attacker)
 			# КОНТАКТНЫЙ УДАР НА МАРШЕ — РАЗВОРАЧИВАЕТСЯ ВЕСЬ ОТРЯД, а не только
 			# задетый боец. Раньше здесь всегда стоял только персональный ответ
 			# (держит позицию, бьёт в ответ САМ) — колонна, у которой фланг

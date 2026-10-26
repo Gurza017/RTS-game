@@ -1,6 +1,7 @@
 extends Unit
 class_name Archer
 
+const _OptA := preload("res://scripts/perf_config.gd")
 const GLB_PATH    := "res://assets/models/archer.glb"
 const SPRITE_PATH := "res://assets/sprites/units/Archer_Idle.png"
 const MODEL_SCALE := 0.75
@@ -447,8 +448,7 @@ func _snipe_launch() -> void:
 	var speed: float = _arrow_speed_cached() * _UStats.SNIPE_SPEED_MULT
 	# Снайпер бьёт в ТОЧКУ ВСТРЕЧИ (ТЗ 15.09.2026): прямая стрела по бегущему
 	# без выноса ложилась ровно позади цели
-	var tv: Vector3 = tu.velocity
-	tv.y = 0.0
+	var tv: Vector3 = tu.real_velocity() if _OptA.lead_real_velocity else Vector3(tu.velocity.x, 0.0, tu.velocity.z)
 	var tb: Vector3 = tu.global_position + Vector3(0, tu.aim_height(), 0)
 	var s_reach: float = _shot_reach()
 	if _xz_dist(from_pos, tb) > s_reach + SHOT_RANGE_SLACK:
@@ -568,8 +568,8 @@ func _on_attack_fired(target: Node3D, damage: float) -> void:
 	var tvel := Vector3.ZERO
 	var tu := target as Unit
 	if tu != null:
-		tvel = tu.velocity
-		tvel.y = 0.0
+		# Фактическая скорость, а не намерение (ТЗ 20.10.2026, блок 7)
+		tvel = tu.real_velocity() if _OptA.lead_real_velocity else Vector3(tu.velocity.x, 0.0, tu.velocity.z)
 	# ── КООРДИНАТЫ ЦЕЛИ БЕРУТСЯ ЗДЕСЬ, В МОМЕНТ ВЫЛЕТА ──────────────────────
 	# Не при постановке анимации замаха и не при открытии окна залпа: между
 	# этими моментами проходит до кадра анимации, и на бегущем строе выстрел

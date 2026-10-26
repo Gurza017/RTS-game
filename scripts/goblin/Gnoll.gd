@@ -713,8 +713,8 @@ func take_damage(amount: float, attacker: Node3D = null) -> void:
 	# гнолла бьют стрелой с двадцати метров: он продолжал патрулировать под
 	# обстрелом. Обидчик, кем бы он ни был, становится целью — гнолл подбегает
 	# на бросок (Unit.pursues_target у него «да») и метает
-	if attack_target == null and attacker != null and is_instance_valid(attacker) \
-			and attacker is Unit and (attacker as Unit).faction != faction \
-			and not (attacker as Unit).is_dead():
+	# Занятый далёкой целью (идёт к ней, не бьёт) тоже отвечает, если обидчик
+	# ближе (ТЗ 21.10.2026, письмо 4: Unit.should_switch_to_attacker)
+	if should_switch_to_attacker(attacker):
 		aggro_answers += 1
 		command_attack(attacker, true)
