@@ -482,6 +482,112 @@ var box = preload("res://scripts/army/SquadBox.gd").new()
 ## Зонды отрядов: бег на месте, разрыв, сброс приказа (ТЗ 25.10.2026, блок 5)
 var probes = preload("res://scripts/army/SquadProbes.gd").new()
 
+## ── СВИНОБОСС (ТЗ 28.10.2026) — живой босс партии, один на карту ──────────
+## Регистрирует сам PigBoss._ready (и после загрузки партии тоже); читают
+## GoblinAI._new_plan (второго не покупать) и PigBossCommander. Ссылка
+## нетипизированная: освобождённый объект в Variant равен null (правило 5)
+var pig_boss = null
+
+func pig_boss_register(u: Unit) -> void:
+	pig_boss = u
+
+func pig_boss_alive() -> bool:
+	if pig_boss == null or not is_instance_valid(pig_boss):
+		return false
+	return not (pig_boss as Unit).is_dead()
+
+## ── СВИНОБОСС УМИРАЕТ ОКОНЧАТЕЛЬНО (ТЗ 29.10.2026) ───────────────────────────
+## Разбор партии 29.10 (телеметрия): шесть отрядов босса за партию, пять
+## смертей. Узел не воскресал — расписание волн (GoblinAI._new_plan) и
+## Main.spawn_boss_squad спрашивали только «жив ли босс СЕЙЧАС», и после
+## каждой смерти следующий же план орды становился волной полководца.
+## Признак ставит PigBoss._die; живёт в сохранении (meta.pig_boss_fallen),
+## сбрасывается при старте партии (Main.start_game)
+var pig_boss_fallen: bool = false
+
+## ── СТУПЕНИ РАЗБЛОКИРОВКИ ПОСТРОЕК РАБОЧЕГО (ТЗ 30.10.2026, ручка build_unlock)
+## 0 — только крепость; 1 — построена крепость: + овцеферма; 2 — построена
+## овцеферма: + дома и склады; 3 — построен дом или склад: всё. Ступень только
+## растёт (снесённый дом не запирает открытое), живёт в сохранении
+## (meta.build_unlock); сбрасывается при старте партии (Main.start_game).
+## Только игрок: ИИ строит своими путями
+const BUILD_UNLOCK_ALL := 3
+var build_unlock: Dictionary = {}
+signal build_unlock_changed(faction: int, stage: int)
+
+func build_unlock_stage(f: int) -> int:
+	var st: int = int(build_unlock.get(f, 0))
+	if st >= BUILD_UNLOCK_ALL:
+		return st
+	var have: int = _build_unlock_have(f)
+	if have > st:
+		build_unlock[f] = have
+		st = have
+	return st
+
+## Ступень по стоящим (достроенным) постройкам стороны
+func _build_unlock_have(f: int) -> int:
+	var castle := false
+	var pen := false
+	var home := false
+	for b in nodes_in_group_cached(Constants.building_group(f)):
+		if b == null or not is_instance_valid(b) or not (b is Building) or b is _CSite:
+			continue
+		var bb := b as Building
+		if bb.is_dead():
+			continue
+		var id: String = String(bb.building_id)
+		if bb is Castle and (bb as Castle).is_stronghold():
+			castle = true
+		elif id == "sheep_pen":
+			pen = true
+		elif id == "storehouse" or _UCfg.is_house(id):
+			home = true
+	for p in get_tree().get_nodes_in_group("sheep_pens"):
+		if is_instance_valid(p) and int(p.get("faction")) == f and not (p as Building).is_dead():
+			pen = true
+	if castle and pen and home:
+		return 3
+	if castle and pen:
+		return 2
+	return 1 if castle else 0
+
+## Ступень, с которой открывается постройка
+static func build_unlock_need(id: String) -> int:
+	if id == "castle":
+		return 0
+	if id == "sheep_pen":
+		return 1
+	if id == "storehouse" or _UCfg.is_house(id):
+		return 2
+	return BUILD_UNLOCK_ALL
+
+func build_unlocked(f: int, id: String) -> bool:
+	if not _Opt.build_unlock or f != Constants.FACTION_PLAYER:
+		return true
+	return build_unlock_stage(f) >= build_unlock_need(id)
+
+## Подсказка на замке: что построить, чтобы открыть
+static func build_unlock_hint(id: String) -> String:
+	match build_unlock_need(id):
+		1: return "Откроется после постройки крепости"
+		2: return "Откроется после постройки овцефермы"
+		3: return "Откроется после постройки дома или склада"
+	return ""
+
+## Достроено здание — пересчитать ступень (ConstructionSite._complete и
+## мгновенные постройки); выросла — HUD перестраивает панель рабочего
+func note_building_done(f: int) -> void:
+	if f != Constants.FACTION_PLAYER:
+		return
+	var was: int = int(build_unlock.get(f, 0))
+	var now: int = build_unlock_stage(f)
+	if now > was:
+		build_unlock_changed.emit(f, now)
+
+func pig_boss_may_spawn() -> bool:
+	return not pig_boss_fallen and not pig_boss_alive()
+
 func register_row(row: int, u: Unit) -> void:
 	if row < 0:
 		return
@@ -543,10 +649,24 @@ func _physics_process_timed(delta: float) -> void:
 	# delta уже несёт Engine.time_scale; при просадке FPS (один шаг физики на
 	# кадр) часы замедляются вместе с миром
 	Unit.advance_game_clock(delta)
+	# Пол сближения своих в бою (ArmyCore.SetAllyFloor, ТЗ 26.10.2026): ручку
+	# переключают на живой сцене (стенды A/B), поэтому — каждый физкадр, один
+	# переход границы на кадр
+	if army != null:
+		# Коробки (box_front) задают плотность местами сами — пол с ними спорил
+		# (qa_box_front C1/C5/C6)
+		army.set_ally_floor((Unit.ALLY_FLOOR_OWN if _Opt.ally_floor_wide else Unit.ALLY_FLOOR_OWN_TIGHT) if _Opt.ally_floor and not _Opt.box_front else 0.0,
+			Unit.ALLY_FLOOR_CROSS, Unit.State.ATTACKING, Unit.SEP_MIN_DIST)
+		army.set_ally_queue(Unit.ALLY_QUEUE_GAP if _Opt.ally_queue and not _Opt.box_front else 0.0,
+			Unit.ALLY_QUEUE_COS, Unit.ALLY_QUEUE_REACH_PAD)
+		# Детектор застревания аренды марша — те же пороги, что _tick_stuck
+		army.set_march_stuck(Unit.STUCK_CHECK_SEC, Unit.STUCK_PROGRESS)
+	var _sy0: int = Time.get_ticks_usec() if _Opt.sys_meter else 0
 	if _forest_nav_dirty and Unit.game_ms() >= _forest_nav_next_ms:
 		_forest_nav_rebuild()
 	if _Opt.trap_sweep and world_bounds_enabled and cliff_cells > 0 and army != null:
 		_sweep_trapped()
+	if _Opt.sys_meter: _sys_lap("t_pre_trap", _sy0)
 	# ── ТИК АРМИИ НА ПОЛОВИННОЙ ЧАСТОТЕ (этап C.2) ──────────────────────────
 	# Весь обход армии идёт каждый army_tick_div-й такт движка с НАКОПЛЕННОЙ
 	# дельтой: вся логика ниже дельта-честная, и для неё это неотличимо от
@@ -769,11 +889,12 @@ func _physics_process_timed(delta: float) -> void:
 		if _prof: _Opt.prof_add("rear_press", Time.get_ticks_usec() - _t0)
 	# ── АВТОПИЛОТ ПОДХОДА: ШАГИ ОТ ЯДРА (этап D1) ───────────────────────────
 	# Стража «враг в длине руки» — каждые 12 тактов на строку (5 Гц при 60):
-	# та же редкость, что у личного опроса перехвата в полном автомате
+	# та же редкость, что у личного опроса перехвата в полном автомате;
+	# ручка guard_3hz — раз в 20 тактов (3 Гц, ТЗ 01.11.2026)
 	if _Opt.approach_autopilot:
 		if _prof: _t0 = Time.get_ticks_usec()
 		army.autopilot_pass(delta, shards, army_ticks % maxi(shards, 1),
-			army_ticks, 12, Unit.LOCK_BLOCKER_RANGE + Unit.INTERCEPT_MARGIN,
+			army_ticks, 20 if _Opt.guard_3hz else 12, Unit.LOCK_BLOCKER_RANGE + Unit.INTERCEPT_MARGIN,
 			Unit.FLANK_TRIGGER_DIST, Unit.FLANK_RECHECK_FRAMES, Unit.FLANK_STRENGTH)
 		if _prof: _Opt.prof_add("autopilot", Time.get_ticks_usec() - _t0)
 	if _Opt.batch_move:
@@ -795,6 +916,19 @@ func _physics_process_timed(delta: float) -> void:
 		# Пары [строка, секунд с взвода] плоско (BigStand-5, этап 4: прежний
 		# Godot-массив создавался КАЖДЫЙ тик и, как финализируемый, набивал gen1)
 		var pwoken: PackedFloat32Array = army.take_press_woken_f()
+		if _prof:
+			var why: PackedInt32Array = army.ap_why_take()
+			var wn := ["apw цель", "apw срок", "apw дистанция", "apw чужой рядом",
+				"apw вне окна", "apw поводок"]
+			for wi in range(why.size()):
+				_Opt._prof_calls[wn[wi]] = int(_Opt._prof_calls.get(wn[wi], 0)) + why[wi]
+				_Opt._prof_usec[wn[wi]] = int(_Opt._prof_usec.get(wn[wi], 0))
+			var quick := 0
+			for qi in range(1, pwoken.size(), 2):
+				if pwoken[qi] < 0.05:
+					quick += 1
+			_Opt._prof_calls["apw быстрее 0.05 с"] = int(_Opt._prof_calls.get("apw быстрее 0.05 с", 0)) + quick
+			_Opt._prof_usec["apw быстрее 0.05 с"] = 0
 		var pi := 0
 		while pi + 1 < pwoken.size():
 			var pr: int = int(pwoken[pi])
@@ -836,6 +970,9 @@ func _physics_process_timed(delta: float) -> void:
 func _physics_tail(delta: float) -> void:
 	var _prof: bool = _Opt.profile_physics
 	var _t0: int = Time.get_ticks_usec() if _prof else 0
+	# Часы хвоста по свипам (sys_meter, qa_bigstand): раскладка «вне тика армии»
+	var _sy: bool = _Opt.sys_meter
+	var _s0: int = Time.get_ticks_usec() if _sy else 0
 	# Спящий (_proc_sleeping) дальний юнит не крутит свой _process и потому сам
 	# не заметит, что камера подошла и он снова near_view — например, игрок
 	# подводит камеру к стоящему на месте вражескому гарнизону. Реестр дальних
@@ -847,15 +984,23 @@ func _physics_tail(delta: float) -> void:
 	# Развалившийся строй смыкается сам (см. _sweep_reform). Свой редкий такт,
 	# к шардам отношения не имеет: отрядов десятки, а не тысячи
 	_sweep_reform(delta)
+	if _sy: _s0 = _sys_lap("t_reform", _s0)
 	if _prof: _Opt.prof_add("tail_reform", Time.get_ticks_usec() - _t0); _t0 = Time.get_ticks_usec()
 	# Фаланга в обороне подаётся к врагу ЦЕЛИКОМ (спринт 20, модуль 4.3)
 	_sweep_phalanx_press(delta)
+	if _sy: _s0 = _sys_lap("t_phalanx", _s0)
 	if _prof: _Opt.prof_add("tail_phalanx", Time.get_ticks_usec() - _t0); _t0 = Time.get_ticks_usec()
 	# Мораль и паника — тоже вопрос ОТРЯДА (см. _sweep_morale), и такт у них
 	# свой, редкий: отрядов десятки
 	_sweep_morale(delta)
+	if _sy: _s0 = _sys_lap("t_morale", _s0)
 	if _prof: _Opt.prof_add("tail_morale", Time.get_ticks_usec() - _t0); _t0 = Time.get_ticks_usec()
+	if _Opt.mass_push:
+		_sweep_mass(delta)
+	if _sy: _s0 = _sys_lap("t_mass", _s0)
+	_sweep_wall_shuffle(delta)
 	_sweep_food(delta)
+	if _sy: _s0 = _sys_lap("t_food", _s0)
 	# Давление овец: пень и тролли-воры (спринт 18, уточнение владельца)
 	_sheep_pressure_t -= delta
 	if _sheep_pressure_t <= 0.0:
@@ -866,9 +1011,11 @@ func _physics_tail(delta: float) -> void:
 	if _lair_thaw_t <= 0.0:
 		_lair_thaw_t = _GobCfgGM.LAIR_THAW_CHECK_SEC
 		_lair_thaw_check()
+	if _sy: _s0 = _sys_lap("t_sheep_lair", _s0)
 	# Топот марширующих отрядов (см. _sweep_march_audio) — там же и по той же
 	# причине: вопрос задаётся ОТРЯДУ, а не бойцу
 	_sweep_march_audio(delta)
+	if _sy: _s0 = _sys_lap("t_march_audio", _s0)
 	if _prof: _Opt.prof_add("tail_food_audio", Time.get_ticks_usec() - _t0); _t0 = Time.get_ticks_usec()
 	# ── МЕТКИ ПОД НОГАМИ ЖИВУТ В ОТРИСОВОЧНОМ ТИКЕ, А НЕ ЗДЕСЬ ──────────────
 	# Кольца, тени и полоски здоровья берут НАРИСОВАННУЮ точку бойца
@@ -878,6 +1025,12 @@ func _physics_tail(delta: float) -> void:
 	# другую долю шага. См. _process выше
 
 const FAR_WAKE_CHECK_FRAMES := 15
+
+## Круг часов хвоста: записать отрезок и вернуть новую отметку
+func _sys_lap(bucket: String, t0: int) -> int:
+	var t1: int = Time.get_ticks_usec()
+	_Opt.sys_add(bucket, t1 - t0)
+	return t1
 
 # ═══════════════════════════════════════════════════════════════════════════
 # ДВИЖЕНИЕ ОТРЯДА МАТРИЦЕЙ (Этап 1)
@@ -1557,6 +1710,16 @@ func _squad_sleep_decide_rows(sid: int, sq: Dictionary, box: PackedFloat32Array,
 			continue
 		if u._phys_asleep or not u.tick_on:
 			continue
+		# ── СОСТОЯНИЕ — ЖИВОЕ, А НЕ ИЗ ЯДРА (разбор партии 27.10.2026) ─────
+		# Ядро отбирает кандидатов по СВОЕЙ копии состояния, а она пишется
+		# тиком бойца (шарды — до трёх кадров запаздывания). Свежий приказ ИИ
+		# уже перевёл бойца в MOVING, ядро ещё видит IDLE, сдвинуться он не
+		# успел — и засыпал посреди хода, «бегом на месте», пока к отряду не
+		# подойдёт враг (зонд stuck_running: четыре отряда копейщиков красных,
+		# 30-43 из 60 по 500 с, ни одного вызволения — тика не было). Путь без
+		# ядра (_squad_sleep_decide) это условие проверял всегда
+		if _Opt.sleep_live_state and u.state != Unit.State.IDLE:
+			continue
 		if u.attack_target != null or u.retreating or u._panicked or u.player_order_active() \
 				or u.moved_recently() or u._march_pending or not u.may_sleep_physics():
 			continue
@@ -1734,9 +1897,13 @@ func _cohesion_limit(sid: int) -> float:
 func _cohesion_guard(sid: int, live: Array, cx: float, cz: float, now: int) -> void:
 	if int(_cohesion_last.get(sid, 0)) > now:
 		return
-	_cohesion_last[sid] = now + _UCfg.SQUAD_COHESION_COOLDOWN_MS
+	var strict: bool = _Opt.cohesion_strict
+	_cohesion_last[sid] = now + (_UCfg.COHESION_STRICT_CD_MS if strict else _UCfg.SQUAD_COHESION_COOLDOWN_MS)
 	var lim: float = _cohesion_limit(sid)
 	var lim2: float = lim * lim
+	# Допуск дерущемуся (в зонах): прежде — две зоны (lim2 × 4)
+	var fight_k2: float = _UCfg.COHESION_FIGHT_ZONES * _UCfg.COHESION_FIGHT_ZONES if strict else 4.0
+	var forced_k2: float = _UCfg.COHESION_FORCED_ZONES * _UCfg.COHESION_FORCED_ZONES
 	var idle_st: int = Unit.State.IDLE
 	var called := 0
 	for m in live:
@@ -1745,6 +1912,10 @@ func _cohesion_guard(sid: int, live: Array, cx: float, cz: float, now: int) -> v
 			continue
 		# ── ПРИКАЗ ИГРОКА И ОТХОД НЕПРИКОСНОВЕННЫ ──────────────────────────
 		if u.target_lock or u.retreating or u.garrisoned:
+			continue
+		# Спящему подзыв не шлём: тик снят, MOVING остался бы бегом на месте
+		# до пробуждения (reform_skip_dormant, зонд qa_crash1101/Dorm)
+		if _Opt.reform_skip_dormant and u.dormant:
 			continue
 		# ── ПРИКАЗ ИГРОКА ПОДЗЫВОМ НЕ ПЕРЕБИВАЕТСЯ ─────────────────────────
 		# Сплочённость шлёт `command_move` в точку В ДВУХ ШАГАХ от бойца — и
@@ -1784,15 +1955,33 @@ func _cohesion_guard(sid: int, live: Array, cx: float, cz: float, now: int) -> v
 		# 20.7 м от цели при зоне 14). Погоню за убегающим держит поводок
 		# PURSUIT_LIMIT, колбасу — замок приказа игрока; идущему в атаку по
 		# приказу подзыв не нужен
-		if u._attack_is_forced and u.attack_target != null and is_instance_valid(u.attack_target) 				and u.state == Unit.State.ATTACKING:
-			continue
+		if u._attack_is_forced and u.attack_target != null and is_instance_valid(u.attack_target) \
+				and u.state == Unit.State.ATTACKING:
+			# Суровая сплочённость (ТЗ 27.10.2026, четвёртое письмо, п. 2):
+			# голову колонны в атаке на БОЙЦА держим до COHESION_FORCED_ZONES,
+			# дальше — отозвана; на здание (осада, обход стены) — как было
+			if not strict or u.attack_target is Building:
+				continue
+			var fdx: float = (u.position.x if u._local_xform else u.global_position.x) - cx
+			var fdz: float = (u.position.z if u._local_xform else u.global_position.z) - cz
+			if fdx * fdx + fdz * fdz <= lim2 * forced_k2:
+				continue
 		# ── ДОШЕДШИЙ ДО СВОЕГО ПОСТА — НЕ ОТСТАВШИЙ ─────────────────────────
 		# Передние ряды приходят на свои точки раньше, чем медиана отряда
 		# дотянется за угол дома. Пост — куда его поставили
+		# ── …ЕСЛИ САМ ПОСТ ЛЕЖИТ В ЗОНЕ ОТРЯДА (разбор партии 27.10.2026) ──
+		# Пост переписывают поштучно: исчерпанный приказ и конец погони ставят
+		# «встаю, где стою» (Unit._hold_where_i_stand) тем, кто дрался, а
+		# недравшиеся остаются на старых постах. Обе кучи стоят «на своих
+		# местах», подзыв не трогает никого — отряд 169 игрока стоял 48 + 12
+		# в 12.9 м друг от друга больше 200 с (зонд squad_split, вне боя).
+		# Пост дальше зоны от медианы — устаревший, а не «куда поставили»
 		if u._post_valid and u.state == idle_st:
 			var pdx: float = u.post_pos.x - (u.position.x if u._local_xform else u.global_position.x)
 			var pdz: float = u.post_pos.z - (u.position.z if u._local_xform else u.global_position.z)
-			if pdx * pdx + pdz * pdz <= lim2:
+			var post_in_zone: bool = not _Opt.cohesion_post_zone \
+				or (u.post_pos.x - cx) * (u.post_pos.x - cx) + (u.post_pos.z - cz) * (u.post_pos.z - cz) <= lim2
+			if pdx * pdx + pdz * pdz <= lim2 and post_in_zone:
 				continue
 		# ── ДЕРУЩЕГОСЯ ВДАЛИ ОТ СВОИХ — ЗОВЁМ ОБРАТНО ──────────────────────
 		# Прежде здесь стоял ранний выход по «занят»: не в покое или есть цель —
@@ -1820,7 +2009,7 @@ func _cohesion_guard(sid: int, live: Array, cx: float, cz: float, now: int) -> v
 		# дальше ДВУХ зон (тот самый «колбасой» из qa_mass_siege) зовём
 		# по-прежнему, дерущегося в пределах — оставляем драться
 		if u.state == Unit.State.ATTACKING and u.attack_target != null \
-				and dx * dx + dz * dz <= lim2 * 4.0:
+				and dx * dx + dz * dz <= lim2 * fight_k2:
 			continue
 		if not busy_here:
 			# Вне зоны и при этом занят: снимаем цель — она увела его от своих
@@ -1832,7 +2021,9 @@ func _cohesion_guard(sid: int, live: Array, cx: float, cz: float, now: int) -> v
 		var tx: float = u.global_position.x - dx / d * back
 		var tz: float = u.global_position.z - dz / d * back
 		if _Opt.cmd_meter: _Opt.cmd_src = "cohesion"
+		probes.ctx = "cohesion"
 		u.command_move(Vector3(tx, get_terrain_height(tx, tz), tz))
+		probes.ctx = ""
 		if _Opt.cmd_meter: _Opt.cmd_src = ""
 		called += 1
 	if called == 0:
@@ -2780,6 +2971,7 @@ func finish_research(faction: int, upgrade_id: String) -> void:
 			if n != null and is_instance_valid(n) and n is Spearman:
 				(n as Unit).mark_pose_dirty()
 				(n as Unit)._wake_process()
+	research_finished.emit(faction, upgrade_id)
 
 ## ── БОНУСНЫЙ СТОЛБЕЦ ДАРОМ БОЛЬШЕ НЕ ВЫДАЁТСЯ (ТЗ-B 19.09.2026) ────────────
 ## Заказ: «улучшения НЕ должны выдаваться автоматически при открытии ряда,
@@ -2864,8 +3056,9 @@ func reset_research() -> void:
 ## Кузница фракции, у которой слот стоит в работе или в очереди (null — ничья)
 func research_owner(faction: int, upgrade_id: String) -> Node:
 	for b in get_tree().get_nodes_in_group(Constants.building_group(faction)):
-		if is_instance_valid(b) and b is Smithy and not (b as Building).is_dead() \
-				and (b as Smithy).queue_position(upgrade_id) >= 0:
+		# Кузница гоблинов (ТЗ 28.10.2026) держит очередь тем же методом queue_position
+		if is_instance_valid(b) and (b is Smithy or b.has_method("queue_position")) \
+				and not (b as Building).is_dead() and int(b.call("queue_position", upgrade_id)) >= 0:
 			return b
 	return null
 
@@ -3159,6 +3352,8 @@ func new_squad(p_faction: int, unit_type: String) -> int:
 		"counter_ms": 0,          # когда отряд последний раз шёл в контратаку
 		# ── ПОДТЯГИВАНИЕ ХВОСТА (см. squad_note_arrival) ──
 		"arrived": 0,             # сколько бойцов уже добрались до своих мест
+		# Отряд объявил прибытие в зону цели (см. squad_note_zone)
+		"arrived_zone": false,
 		"catch_up": false,        # хвост получил прибавку к скорости
 		# ── МОРАЛЬ И ПАНИКА (см. _sweep_morale) ──
 		# −1 означает «ещё не заведена»: базовое значение берётся из состава,
@@ -3204,6 +3399,7 @@ func add_to_squad(squad_id: int, unit: Node) -> void:
 	sqd["cor_dirty"] = true
 	if unit is Unit and (unit as Unit)._phys_asleep:
 		sqd["phys_sleepers"] = true
+	squad_members_changed.emit(squad_id)
 
 func remove_from_squad(unit: Node) -> void:
 	if unit == null:
@@ -3235,6 +3431,9 @@ func remove_from_squad(unit: Node) -> void:
 	var members: Array = sq["members"]
 	members.erase(unit)
 	unit.squad_id = 0
+	# Интерфейсу — до распуска: слушатель только взводит флаг, запись отряда
+	# ему в этот момент ещё видна
+	squad_members_changed.emit(sid)
 	# ── ГДЕ СТОЯЛ ПОСЛЕДНИЙ ─────────────────────────────────────────────────
 	# Пишется на КАЖДОМ выбывшем, а не только на последнем: узнать, что боец
 	# последний, можно лишь после members.erase, а к моменту гибели последнего
@@ -3266,6 +3465,8 @@ func remove_from_squad(unit: Node) -> void:
 	if sq.get("bearer") == unit:
 		sq["bearer"] = null
 		_assign_bearer(sid, up if up != Vector3.INF else Vector3.INF)
+		if _Opt.probes_ext and unit is Unit and (unit as Unit).is_dead():
+			probes.note_banner(sid, unit as Unit, sq.get("bearer"))
 	# Знамя — узел в МИРЕ (см. refresh_squad_banner), а не ребёнок знаменосца,
 	# поэтому гибель бойца его с собой не уносит. Освобождённый узел всё же
 	# подчищаем — на него могли сослаться извне
@@ -3399,6 +3600,13 @@ func _assign_bearer(sid: int, near: Vector3 = Vector3.INF,
 		sq["bearer"] = null
 		return null
 	var best: Unit = null
+	# Знамя отряда Свинобосса несёт сам босс — за спиной (ТЗ 30.10.2026);
+	# прежде его подхватывал крайний всадник свиты
+	if _Opt.boss_banner_back and bool(sq.get("boss", false)):
+		for u in live:
+			if (u as Unit).is_pig_boss():
+				sq["bearer"] = u
+				return u
 	# ── ЗНАМЯ СТОИТ В [РЯД 0, КОЛОНКА 0], И ЭТО СИЛЬНЕЕ ВСЕХ ПРОЧИХ ПРАВИЛ ──
 	# Заказ владельца (скриншот с флагами посреди отрядов): знаменосец ВСЕГДА
 	# занимает передний левый угол строя относительно его фронта.
@@ -3916,6 +4124,7 @@ func _formation_settle(sid: int) -> void:
 		u.post_pos = p
 		u._post_valid = true
 		u._settled = true
+		u._post_loose = false
 		# Застывший «как есть» смотрит по курсу отряда, а не по ходу (ТЗ 29.09.2026)
 		if course.length_squared() > 1e-6:
 			u._facing = course.normalized()
@@ -3982,7 +4191,9 @@ var _reform_cursor: int = 0
 func _reform_check_squad(sid: int, now: int) -> void:
 	var sq: Dictionary = squads[sid]
 	var slots: Array = sq.get("slots", [])
-	if slots.is_empty():
+	# Разметки нет — строиться не во что, КРОМЕ отряда, вставшего концом боя
+	# «где стоит»: ему разметку достроит squad_close_ranks (ТЗ 31.10.2026, вечер)
+	if slots.is_empty() and not (_Opt.idle_form_up and _squad_has_loose(sq)):
 		return
 	# ── РАБОЧИХ НЕ СТРОИМ НИКОГДА ──────────────────────────────────────
 	# Рабочий числится отрядом из одного человека, и разметка у такого
@@ -3993,6 +4204,12 @@ func _reform_check_squad(sid: int, now: int) -> void:
 	# работа и свой автомат состояний, и строй к нему отношения не имеет
 	if String(sq.get("type", "")) == "worker":
 		return
+	# Спящий отряд в очередь смыкания не ставим: squad_close_ranks ему
+	# откажет (reform_skip_dormant), а очередь разбирается по отряду за кадр
+	if _Opt.reform_skip_dormant:
+		var mm: Array = sq["members"]
+		if not mm.is_empty() and is_instance_valid(mm[0]) and (mm[0] as Unit).dormant:
+			return
 	# ── В БОЮ НЕ СТРОИМСЯ, И ПОСЛЕ БОЯ — НЕ СРАЗУ ──────────────────────
 	# Часы «когда нас перестали трогать» взводятся ЗДЕСЬ и только здесь.
 	# Бой — это и есть внешнее воздействие; пока он идёт, отряду не до
@@ -4037,6 +4254,12 @@ func _reform_check_squad(sid: int, now: int) -> void:
 			break
 		if not u._post_valid:
 			continue
+		# ── ПОСТ «ГДЕ СТОЮ» ПОСЛЕ БОЯ — НЕ СТРОЙ (ТЗ 31.10.2026, вечер) ──────
+		# «Догнал, уничтожил — собрался в строй»: дрейф от такого поста нулевой,
+		# и отряд стоял бы россыпью. Считается дрейфом — отряд смыкается по месту
+		if u._post_loose and _Opt.idle_form_up:
+			drift += 1
+			continue
 		# Точка бойца — ОДНИМ чтением и по дешёвому пути (правило 2).
 		# Здесь стояли ДВА обращения к global_position подряд, а свойство
 		# это, а не поле: каждое проверяет мировую матрицу. Обход идёт по
@@ -4048,6 +4271,10 @@ func _reform_check_squad(sid: int, now: int) -> void:
 			drift += 1
 	if busy or live == 0 or moving * 2 > live:
 		return
+	# Все на постах, но посты разъехались кучами (см. _posts_scattered) —
+	# это тоже дрейф строя, а не «цел»
+	if drift == 0 and moving == 0 and _posts_scattered(sid, men):
+		drift = 1
 	if drift == 0:
 		sq["reform_fails"] = 0
 		return
@@ -4338,18 +4565,19 @@ func _drop_squad_banner(sid: int) -> void:
 		call_deferred("_lay_fallen_banner", lvl, at, sid, squad_elite(sid),
 			int((squads[sid] as Dictionary).get("faction", 0)) == Constants.FACTION_GOBLIN if squads.has(sid) else false,
 			squad_elite_level(sid),
-			int((squads[sid] as Dictionary).get("legend_flags", 0)) if squads.has(sid) else 0)
+			squad_legend_marks(sid) if squads.has(sid) else 0,
+			_BannerArt.side_of(int((squads[sid] as Dictionary).get("faction", 0))) if squads.has(sid) else 0)
 
 ## Положить упавшее знамя. Отложенный хвост _drop_squad_banner — см. разбор там.
 ## elite — штандарт индивидуального звания: та же картинка и тот же масштаб,
 ## что висели над знаменосцем (SquadBanner.ELITE_SCALE)
 func _lay_fallen_banner(lvl: int, at: Vector3, seed_id: int, elite: bool = false,
-		goblin: bool = false, elite_lvl: int = 1, flags: int = 0) -> void:
+		goblin: bool = false, elite_lvl: int = 1, flags: int = 0, side: int = 0) -> void:
 	if main == null or not is_instance_valid(main):
 		return
 	# Картинка и масштаб — тем же решением, что у живого знамени
 	# (SquadBanner.spec): упавшее не может разъехаться с тем, что висело
-	var sp: Array = _SquadBanner.spec(lvl, elite, goblin, elite_lvl, flags)
+	var sp: Array = _SquadBanner.spec(lvl, elite, goblin, elite_lvl, flags, false, false, side)
 	var tex: Texture2D = sp[0]
 	if tex == null:
 		return
@@ -4517,6 +4745,20 @@ func squad_members(squad_id: int) -> Array:
 	if alive.size() != members.size():
 		squads[squad_id]["members"] = alive
 	if alive.is_empty():
+		# ── ЕЩЁ НЕ РОДИВШИЙСЯ ОТРЯД НЕ РАСПУСКАЕТСЯ (аудит 27.10.2026) ──────
+		# Бараки заводят запись в момент готовности заказа, а бойцов ставят
+		# на карту следующим кадром (_pending_spawns, ROW_RELEASE_SEC). Такт
+		# ИИ между ними (_auto_veteran → squads_of_faction → сюда) распускал
+		# пустую запись, add_to_squad по снятому номеру молча выходил, и ВСЯ
+		# партия выходила с squad_id 0: без знамени, разметки и сплочённости,
+		# _regroup собирал их поштучно (зонд qa_tz1027d/Loose: 24 лучника
+		# шеренгой у отряда 7; Diag: группы ИИ сплошь из «без отряда»).
+		# Отряд, в котором никого ещё не было, — пуст по построению, а не по
+		# потерям: его уберёт первый же опустевший состав или сама постройка
+		# (Building._die по незавершённым заявкам)
+		if _Opt.squad_keep_unborn and not had_dead \
+				and int(squads[squad_id].get("full", 0)) == 0:
+			return alive
 		_disband_squad(squad_id, had_dead)
 	return alive
 
@@ -4548,6 +4790,7 @@ func squad_set_formation(sid: int, slots: Array, course: Vector3, slow: bool) ->
 		return
 	var sq: Dictionary = squads[sid]
 	sq["slots"]      = slots.duplicate()
+	sq.erase("wall_k")
 	# Новая разметка — новая линия: накопленная вмятина от конницы обнуляется,
 	# иначе потолок DENT_MAX_TOTAL остался бы выбранным на всю партию
 	sq["dent"]       = 0.0
@@ -4564,6 +4807,12 @@ func squad_set_formation(sid: int, slots: Array, course: Vector3, slow: bool) ->
 	sq["arrived"]    = 0
 	sq["catch_up"]   = false
 	_push_catch_up(sid, false)
+	# Новый приказ — новая зона прибытия (см. squad_note_zone)
+	if bool(sq.get("arrived_zone", false)):
+		sq["arrived_zone"] = false
+		for m in sq["members"]:
+			if m != null and is_instance_valid(m):
+				(m as Unit)._squad_arrived = false
 
 ## ── ПОДТЯГИВАНИЕ ХВОСТА ─────────────────────────────────────────────────────
 ## Отряд идёт единым квадратом, но приходит он всегда «рассыпухой»: передние
@@ -4592,6 +4841,70 @@ func squad_note_arrival(sid: int) -> void:
 	if float(n) / float(total) >= CATCH_UP_TRIGGER:
 		squad_set_catch_up(sid, true)
 
+## ── ВАЛИДАТОР ПРИБЫТИЯ ОТРЯДА (ТЗ 28.10.2026, вечер; см. Unit.SQUAD_ARRIVE_TOL)
+## Боец докладывает о входе в зону своей ячейки один раз на приказ. Доля
+## живых в зоне (считается по факту, без счётчика — счётчик пережил бы
+## приказ, выданный в обход squad_set_formation) достигла ARRIVE_ZONE_SHARE —
+## отряд прибыл: флаг бойцам, один проход settle_in_zone по всем. Дальше до
+## нового приказа отряд не опрашивается вовсе
+const ARRIVE_ZONE_SHARE := 0.5
+static var squad_arrive_validations: int = 0
+static var squad_arrive_settled: int = 0
+static var squad_arrive_by_sid: Dictionary = {}     # стендам: sid → проходов
+
+func squad_note_zone(sid: int) -> void:
+	if not _Opt.squad_arrive_validate or sid <= 0 or not squads.has(sid):
+		return
+	var sq: Dictionary = squads[sid]
+	if bool(sq.get("arrived_zone", false)):
+		return
+	var members: Array = sq["members"]
+	var total := 0
+	var in_zone := 0
+	var tol2: float = Unit.SQUAD_ARRIVE_TOL * Unit.SQUAD_ARRIVE_TOL
+	for m in members:
+		if m == null or not is_instance_valid(m):
+			continue
+		var u := m as Unit
+		if u == null or u.is_dead() or u.garrisoned:
+			continue
+		total += 1
+		if u._zone_told:
+			in_zone += 1
+			continue
+		# Стоящий (дошёл до порога или встал) — тоже в зоне, если у ячейки
+		if u.state != Unit.State.MOVING:
+			var p: Vector3 = u.position if u._local_xform else u.global_position
+			var dx: float = u.post_pos.x - p.x
+			var dz: float = u.post_pos.z - p.z
+			if dx * dx + dz * dz < tol2:
+				in_zone += 1
+	if total <= 0 or float(in_zone) < float(total) * ARRIVE_ZONE_SHARE:
+		return
+	_squad_arrive_validate(sid, sq)
+
+func _squad_arrive_validate(sid: int, sq: Dictionary) -> void:
+	sq["arrived_zone"] = true
+	squad_arrive_validations += 1
+	squad_arrive_by_sid[sid] = int(squad_arrive_by_sid.get(sid, 0)) + 1
+	for m in sq["members"]:
+		if m == null or not is_instance_valid(m):
+			continue
+		var u := m as Unit
+		if u == null or u.is_dead():
+			continue
+		u._squad_arrived = true
+		if u.settle_in_zone():
+			squad_arrive_settled += 1
+	if _Opt.warrior_wall_tight and String(sq.get("type", "")) == "warrior":
+		var lead: Unit = null
+		for m2 in sq["members"]:
+			if m2 != null and is_instance_valid(m2) and not (m2 as Unit).is_dead():
+				lead = m2
+				break
+		if lead != null and lead.stance == "defense":
+			squad_shield_wall(sid, true, true)
+
 ## ── ПРИБАВКА РАЗДАЁТСЯ, А НЕ ОПРАШИВАЕТСЯ ───────────────────────────────────
 ## Признак общий на весь отряд и переключается ровно дважды за марш (взводится
 ## здесь, снимается новым приказом), а спрашивал его КАЖДЫЙ идущий боец в
@@ -4611,6 +4924,7 @@ func _push_catch_up(sid: int, value: bool) -> void:
 		var u := m as Unit
 		if u != null:
 			u._catch_up = value
+			u._march_release()   # прибавка хвосту — скорость пересчитает GDScript
 
 ## Пора ли отстающим прибавить шагу
 func squad_catching_up(sid: int) -> bool:
@@ -4970,7 +5284,22 @@ func _reform_check(sid: int) -> void:
 	# Сомкнёт его сам командир — по прибытии (SquadCommander, шаг 4)
 	if _am_marching(sid):
 		return
+	# В [A] после стычки строй не смыкается вовсе, даже пока командир ещё
+	# числит отряд в бою (ТЗ 29.10.2026, п. 4): смыкание шло ПОД марш,
+	# раньше resume_march, и задние ряды пятились к перецентрованной разметке.
+	# Строй собирает командир — маршем и по прибытии
+	if _Opt.am_cone_memory and _am_active(sid):
+		return
 	squad_close_ranks(sid, true)
+
+func _am_active(sid: int) -> bool:
+	if main == null or not is_instance_valid(main):
+		return false
+	var sm = main.get("selection_manager")
+	if sm == null or not is_instance_valid(sm) or not sm.has_method("squad_commander"):
+		return false
+	var sc = sm.squad_commander()
+	return sc != null and bool(sc.is_attack_moving(sid))
 
 func _am_threat_ok(sid: int, threat: Node3D) -> bool:
 	if main == null or not is_instance_valid(main):
@@ -5005,7 +5334,86 @@ func _am_marching(sid: int) -> bool:
 ## (в покое 600+ приказов/с у армии из 130 отрядов, все — отряды с потерями,
 ## то есть стоящие среди своих же павших). Центр считается по тем ячейкам,
 ## которые будут заняты: живые на своих местах → разница ноль → приказов ноль
-func _slots_recentered(slots: Array, men: Array) -> Array:
+const REFORM_FRONT_Q := 0.9
+const REFORM_DISPLACED_M := 3.0
+## Сдвиг разметки при смыкании меньше этого — разметка остаётся на месте (м)
+const REFORM_RECENTER_MIN := 0.5
+const REFORM_FACE_AGREE := 0.6
+const REFORM_FACE_TURN_COS := 0.5
+## Поворот разметки отряда к среднему взгляду бойцов (см. squad_close_ranks)
+func _reform_face_turn(sq: Dictionary, men: Array) -> void:
+	var crs: Vector3 = sq.get("course", Vector3.ZERO)
+	crs.y = 0.0
+	var slots: Array = sq.get("slots", [])
+	if crs.length_squared() < 1e-4 or slots.is_empty():
+		return
+	crs = crs.normalized()
+	var f := Vector3.ZERO
+	var n := 0
+	for m in men:
+		var u := m as Unit
+		if u != null and not u.is_dead():
+			f += Vector3(u._facing.x, 0.0, u._facing.z).normalized()
+			n += 1
+	if n == 0:
+		return
+	f /= float(n)
+	if f.length() < REFORM_FACE_AGREE:
+		return
+	f = f.normalized()
+	if f.dot(crs) >= REFORM_FACE_TURN_COS:
+		return
+	# Поворот — только отряду, ушедшему от разметки ТУДА, куда он смотрит
+	# (пошёл в атаку вбок); оттеснённый назад лицом к врагу курса не меняет,
+	# как и стоящий, у которого взгляд случаен (qa_tz1031 F)
+	var mc := Vector3.ZERO
+	for m2 in men:
+		var u2 := m2 as Unit
+		if u2 != null and not u2.is_dead():
+			mc += u2.global_position
+	mc /= float(n)
+	var used: int = mini(n, slots.size())
+	var sc := Vector3.ZERO
+	for i in range(used):
+		sc += slots[i] as Vector3
+	sc /= float(used)
+	var disp := Vector3(mc.x - sc.x, 0.0, mc.z - sc.z)
+	if disp.length() <= REFORM_DISPLACED_M or disp.normalized().dot(f) < REFORM_FACE_TURN_COS:
+		return
+	var ang: float = atan2(crs.x, crs.z) - atan2(f.x, f.z)
+	var c0 := Vector3.ZERO
+	for s0 in slots:
+		c0 += s0 as Vector3
+	c0 /= float(slots.size())
+	var out: Array = []
+	for s1 in slots:
+		var o: Vector3 = (s1 as Vector3) - c0
+		out.append(c0 + Vector3(o.x, 0.0, o.z).rotated(Vector3.UP, -ang) + Vector3(0.0, o.y, 0.0))
+	sq["slots"] = out
+	sq["course"] = f
+	reform_face_turns += 1
+static var reform_face_turns: int = 0
+## Насколько центр живых ушёл от центра занятых ими ячеек разметки (XZ, м)
+func _slots_displaced(slots: Array, men: Array) -> float:
+	if slots.is_empty() or men.is_empty():
+		return 0.0
+	var c := Vector3.ZERO
+	var n := 0
+	for m in men:
+		var u := m as Unit
+		if u != null and not u.is_dead():
+			c += u.global_position
+			n += 1
+	if n == 0:
+		return 0.0
+	c /= float(n)
+	var used: int = mini(n, slots.size())
+	var c0 := Vector3.ZERO
+	for i in range(used):
+		c0 += (slots[i] as Vector3)
+	c0 /= float(used)
+	return Vector2(c.x - c0.x, c.z - c0.z).length()
+func _slots_recentered(slots: Array, men: Array, course: Vector3 = Vector3.ZERO) -> Array:
 	if slots.is_empty() or men.is_empty():
 		return slots
 	var new_center := Vector3.ZERO
@@ -5025,10 +5433,130 @@ func _slots_recentered(slots: Array, men: Array) -> Array:
 	old_center /= float(used)
 	var delta := new_center - old_center
 	delta.y = 0.0
+	# ── ПЕРЕДНЯЯ ШЕРЕНГА — У ПЕРЕДНИХ (ТЗ 31.10.2026) ─────────────────────
+	# По центру масс растянутый после рубки отряд строился в середине: всё,
+	# что впереди центра, шло назад (зонд qa_army_front: смыкание — главный
+	# источник «пошли назад» после прямой атаки). Вдоль курса передняя
+	# шеренга ложится на REFORM_FRONT_Q бойцов по курсу — хвост подтягивается
+	# вперёд; не дальше назад, чем по центру масс. Целый строй: сдвиг ноль
+	if _Opt.reform_front_anchor and course.length_squared() > 1e-4:
+		var c := Vector3(course.x, 0.0, course.z).normalized()
+		var pr: Array = []
+		for m2 in men:
+			var u2 := m2 as Unit
+			if u2 != null and not u2.is_dead():
+				pr.append(u2.global_position.dot(c))
+		pr.sort()
+		var q: float = float(pr[int(float(pr.size() - 1) * REFORM_FRONT_Q)])
+		var front: float = -INF
+		for i2 in range(used):
+			front = maxf(front, (slots[i2] as Vector3).dot(c))
+		var along0: float = delta.dot(c)
+		var along1: float = q - front
+		if along1 > along0:
+			delta += c * (along1 - along0)
+		# Сдвиг меньше REFORM_RECENTER_MIN — строй стоит, выбит один-два:
+		# разметка на месте, иначе ни один пост не совпал бы с ячейкой и
+		# стоящие пересаживались каскадом (qa_reform_idle C2)
+		if delta.length() < REFORM_RECENTER_MIN:
+			return slots
 	var out: Array = []
 	for s in slots:
 		out.append((s as Vector3) + delta)
 	return out
+
+## ── ЦЕПОЧКА ЗАМКА ЦЕЛИ ПО ОТРЯДАМ (ТЗ 29.10.2026) ───────────────────────────
+## Отряд sid добил запертый отряд from_sid: соседний вражеский отряд, на
+## который переходит замок. Решение одно на отряд (первый спросивший ищет от
+## себя в LOCK_CHAIN_RANGE, остальные берут его ответ LOCK_CHAIN_KEEP_MS),
+## иначе бойцы разошлись бы по разным соседям. 0 — соседа нет. Бегущий в
+## панике соседом не считается: за ним не гонятся (ТЗ 29.10, п. 4)
+const LOCK_CHAIN_RANGE := 16.0
+const LOCK_CHAIN_KEEP_MS := 1500
+var _lock_chain: Dictionary = {}
+static var lock_chains: int = 0
+func squad_lock_chain(sid: int, from_sid: int, asker: Unit) -> int:
+	var now: int = Unit.game_ms()
+	var c: Variant = _lock_chain.get(sid)
+	if c != null and int((c as Array)[0]) == from_sid and now < int((c as Array)[2]):
+		var to0: int = int((c as Array)[1])
+		if squad_pick_member(to0, asker.global_position, null) != null:
+			return to0
+	if asker == null or not is_instance_valid(asker):
+		return 0
+	var best: Node3D = unit_grid.best_enemy(asker, LOCK_CHAIN_RANGE, 0.0)
+	if not (best is Unit):
+		return 0
+	var bu := best as Unit
+	if bu.is_dead() or bu._panicked or bu._ghost or bu.squad_id == 0 or bu.squad_id == from_sid:
+		return 0
+	_lock_chain[sid] = [from_sid, bu.squad_id, now + LOCK_CHAIN_KEEP_MS]
+	lock_chains += 1
+	return bu.squad_id
+
+## ── ПОСТЫ РАЗЪЕХАЛИСЬ (разбор партии 27.10.2026) ────────────────────────────
+## Пост бойца переписывается ПОШТУЧНО: исчерпанный замок цели
+## (target_destroyed, lock_lost_sight) и тупик погони ставят дравшемуся
+## «встаю, где стою» (Unit._hold_where_i_stand), а недравшиеся остаются на
+## старых постах. Каждый стоит на своём посту, дрейфа нет — и смыкание,
+## и сплочённость (кучи ближе её зоны) молчат: отряд 169 игрока простоял
+## 48 + 12 в 12.9 м друг от друга больше 200 с (зонд squad_split, вне боя).
+## Посты разъехались, если чей-то пост дальше габарита разметки (наибольший
+## отступ слота от её центра) плюс POST_SCATTER_PAD от медианы постов
+const POST_SCATTER_PAD := 3.0
+func _posts_scattered(sid: int, men: Array) -> bool:
+	if not _Opt.reform_post_scatter or not squads.has(sid):
+		return false
+	var slots: Array = (squads[sid] as Dictionary).get("slots", [])
+	if slots.size() < 2:
+		return false
+	var sx := 0.0
+	var sz := 0.0
+	for s in slots:
+		sx += (s as Vector3).x
+		sz += (s as Vector3).z
+	sx /= float(slots.size())
+	sz /= float(slots.size())
+	var r2 := 0.0
+	for s2 in slots:
+		var v: Vector3 = s2
+		r2 = maxf(r2, (v.x - sx) * (v.x - sx) + (v.z - sz) * (v.z - sz))
+	var lim: float = sqrt(r2) + POST_SCATTER_PAD
+	var xs: Array = []
+	var zs: Array = []
+	for m in men:
+		var u := m as Unit
+		if u == null or u.is_dead() or not u._post_valid:
+			continue
+		xs.append(u.post_pos.x)
+		zs.append(u.post_pos.z)
+	if xs.size() < 3:
+		return false
+	xs.sort()
+	zs.sort()
+	var mx: float = xs[xs.size() / 2]
+	var mz: float = zs[zs.size() / 2]
+	var lim2: float = lim * lim
+	for m2 in men:
+		var u2 := m2 as Unit
+		if u2 == null or u2.is_dead() or not u2._post_valid:
+			continue
+		var dx: float = u2.post_pos.x - mx
+		var dz: float = u2.post_pos.z - mz
+		if dx * dx + dz * dz > lim2:
+			return true
+	return false
+
+## Есть живой боец с постом «где стою» после боя (Unit._hold_loose). Состав —
+## напрямую из словаря: squad_members() распускает опустевший отряд
+func _squad_has_loose(sq: Dictionary) -> bool:
+	for raw in sq.get("members", []):
+		if raw == null or not is_instance_valid(raw):
+			continue
+		var u := raw as Unit
+		if u != null and not u.is_dead() and not u.garrisoned and u._post_loose:
+			return true
+	return false
 
 ## Все живые стоят (не идут) в допуске прибытия от своего поста — строй цел
 func _formation_intact(men: Array) -> bool:
@@ -5050,8 +5578,19 @@ func _formation_intact(men: Array) -> bool:
 ## сама решает, надо ли перестраиваться прямо сейчас (см. пороги в SquadFormation)
 ## Сколько смыканий после боя отодвинуто с места своего соседа (стендам)
 var reform_unboxed: int = 0
+## Отряды в [A], ещё не дошедшие до точки (ведёт SquadCommander): смыкание
+## их не трогает (ручка am_no_reform) — строй собирает марш командира
+var am_marching: Dictionary = {}
+
 func squad_close_ranks(sid: int, force: bool = false) -> bool:
 	if sid <= 0 or not squads.has(sid):
+		return false
+	# ── [A] НА МАРШЕ НЕ СМЫКАЕТСЯ (ТЗ 31.10.2026) ──────────────────────────
+	# Выход из стычки (Unit), потеря бойца и обход _sweep_reform центрировали
+	# разметку по МЕСТУ СТЫЧКИ и рассаживали бойцов: ушедшие вперёд получали
+	# задние места и шли назад, а через такт командир [A] гнал всех вперёд к
+	# точке (зонд qa_army_front: 82 % отметок «пошёл назад» — смыкание)
+	if _Opt.am_no_reform and am_marching.has(sid):
 		return false
 	var sq: Dictionary = squads[sid]
 	var men := squad_members(sid)
@@ -5065,6 +5604,14 @@ func squad_close_ranks(sid: int, force: bool = false) -> bool:
 	for m in men:
 		var lu := m as Unit
 		if lu != null and not lu.is_dead() and lu.target_lock:
+			return false
+		# ── СПЯЩИЙ ОТРЯД НЕ СМЫКАЕТСЯ (разбор вылета .exe 01.11.2026) ──────
+		# Сон (привал волны, площадка сбора, охрана) снимает физтик, а
+		# command_move ставит MOVING: тик, который довёл бы бойца до места,
+		# погашен — лента ходьбы листается на месте до пробуждения (зонд
+		# qa_crash1101/Dorm: 220-1094 бойцов разом, источник — _sweep_reform и
+		# _reform_check). Проснётся — обход сомкнёт его штатно
+		if _Opt.reform_skip_dormant and lu != null and lu.dormant:
 			return false
 		# ── И ВЫХОД ИЗ БОЯ ПО ПРИКАЗУ ИГРОКА (ТЗ 21.10.2026, письмо 4, п. 3) ──
 		# Проверка строя взводится последним ударом боя и срабатывает, когда
@@ -5121,29 +5668,39 @@ func squad_close_ranks(sid: int, force: bool = false) -> bool:
 	# пересаживало стрелков по новой разметке, сдвинутой на разницу центров
 	# (среднее ячеек против медианы людей), — 3-5 лучников уходили на 1-3 м
 	# «переставиться» (qa_archer_fix A4, «рассыпание на одиночные ноды»)
-	if force and _formation_intact(men):
+	if force and _formation_intact(men) and not _posts_scattered(sid, men) \
+			and not (_Opt.idle_form_up and _squad_has_loose(sq)):
 		return false
 	sq["reshuffled"] = now
 	var use_slots: Array = slots
-	if force:
-		# ГДЕ ИМЕННО СТРОИТЬСЯ ПОСЛЕ БОЯ — ДВА РАЗНЫХ СЛУЧАЯ.
-		#
-		# 1) ОТРЯД ПОСЛАЛИ (приказ игрока): строится ПО МЕСТУ БОЯ. Иначе отряд,
-		#    выигравший драку не там, куда его изначально вели, маршировал бы
-		#    обратно на устаревшую точку (это уже чинили — см. _slots_recentered).
-		# 2) ОТРЯД УШЁЛ ПОМОГАТЬ САМ (авто-агро, метка "helped"): возвращается на
-		#    СВОЙ ПОСТ — «после победы полностью восстанавливает исходную позицию
-		#    и шеренгу». Пост у бойцов уже есть (Unit.post_pos), его назначает
-		#    последний приказ на движение, поэтому «исходная позиция» — это
-		#    именно то место, откуда сосед сорвался на помощь
-		var anchor := Vector3.INF
-		if bool(sq.get("helped", false)):
-			anchor = _squad_post_centre(men)
-		if anchor.x != INF:
-			use_slots = _slots_moved_to(slots, anchor)
-			sq["helped"] = false
-		else:
-			use_slots = _slots_recentered(slots, men)
+	# ── СМЫКАНИЕ ПО ПОТЕРЯМ — ТОЖЕ ПО МЕСТУ (ТЗ 31.10.2026) ─────────────────
+	# Смерть бойца (Unit._die) смыкает без force, по ПРЕЖНЕЙ разметке, а после
+	# атаки она лежит там, откуда отряд ушёл в бой: выжившие шли назад, на
+	# исходную линию (зонд qa_army_front). Отряд, ушедший от своей разметки
+	# дальше REFORM_DISPLACED_M, строится там, где стоит
+	var recenter: bool = force
+	if not force and _Opt.reform_front_anchor and _slots_displaced(slots, men) > REFORM_DISPLACED_M:
+		recenter = true
+	if recenter:
+		# ── ЛИЦОМ ТУДА, ГДЕ ДРАЛИСЬ (ТЗ 31.10.2026) ─────────────────────────
+		# Курс разметки остаётся от прошлого строевого приказа, а отряд мог
+		# уйти в атаку в другую сторону: передняя кромка смыкания ложилась
+		# бы по чужому курсу (зонд qa_army_front: курс·ось −1, строились
+		# лицом назад). После рубки бойцы смотрят на врага — согласный
+		# взгляд (средний вектор длиннее REFORM_FACE_AGREE) дальше
+		# REFORM_FACE_TURN_COS от курса поворачивает разметку
+		if _Opt.reform_front_anchor:
+			_reform_face_turn(sq, men)
+			slots = sq.get("slots", slots)
+		# ПОСЛЕ БОЯ ОТРЯД СТРОИТСЯ ПО МЕСТУ БОЯ — ВСЕГДА (29.10.2026).
+		# Прежде была вторая ветка: отряд, ушедший помогать по авто-агро
+		# (метка «helped»), возвращался на исходные посты — «после победы
+		# полностью восстанавливает исходную позицию». Это и был откат отряда
+		# назад после победы у стоящего строя; заказ развёрнут владельцем:
+		# «никаких возвратов на старые точки». Отряд, выигравший драку не там,
+		# куда его вели, маршировал бы обратно на устаревшую точку — поэтому
+		# разметка перецентруется по живым (см. _slots_recentered)
+		use_slots = _slots_recentered(slots, men, sq.get("course", Vector3.ZERO))
 		# ── ПОСЛЕ СВАЛКИ — КАЖДЫЙ В СВОЮ КОРОБКУ (ТЗ 23.10.2026, п. 2) ──────
 		# Разметка центрируется по ТЕКУЩЕМУ центру, а после общей рубки центры
 		# своих отрядов лежат в 3-8 м друг от друга: каждый смыкался в своей
@@ -5155,9 +5712,29 @@ func squad_close_ranks(sid: int, force: bool = false) -> bool:
 				c0 += s0 as Vector3
 			c0 /= float(use_slots.size())
 			var c1: Vector3 = free_squad_spot(sid, c0)
+			# ── СВОБОДНОЕ МЕСТО — НЕ ПОЗАДИ (ТЗ 31.10.2026) ──────────────────
+			# После общей рубки рядом стоят соседи, и свободное место искалось
+			# в любую сторону: отряд, выигравший бой, шёл назад строиться
+			# (зонд qa_army_front). Сдвиг назад по курсу отряда снимается —
+			# только вбок или вперёд
+			if _Opt.am_no_reform:
+				var crs: Vector3 = sq.get("course", Vector3.ZERO)
+				crs.y = 0.0
+				if crs.length_squared() > 1e-4:
+					crs = crs.normalized()
+					var back: float = (c1.x - c0.x) * crs.x + (c1.z - c0.z) * crs.z
+					if back < 0.0:
+						c1 -= crs * back
 			if Vector2(c1.x - c0.x, c1.z - c0.z).length() > 0.3:
 				use_slots = _slots_moved_to(use_slots, c1)
 				reform_unboxed += 1
+	# ── РАЗМЕТКА ЕДЕТ ЗА БОЕМ (29.10.2026) ───────────────────────────────
+	# Перецентрованная разметка жила только в этом вызове, а в отряде
+	# оставалась старая, с точки приказа: следующее же смыкание (по потере
+	# в Unit._die, по обходу _sweep_reform) уводило победивший отряд назад к
+	# ней. Теперь после боя строй числится там, где бой закончился
+	if recenter:
+		sq["slots"] = use_slots
 	if _Opt.cmd_meter: _Opt.cmd_src = "close_ranks"
 	_SqFormation.close_ranks(men, use_slots, sq.get("course", Vector3.ZERO),
 		bool(sq.get("slow", false)))
@@ -5366,21 +5943,9 @@ func selection_battle_cry(units: Array, chance: float = 1.0,
 func order_battle_cry(units: Array) -> int:
 	return selection_battle_cry(units, CRY_ORDER_CHANCE, CRY_ORDER_COOLDOWN_MS)
 
-## ── «ОТРЯД УХОДИЛ ПОМОГАТЬ СОСЕДУ» ──────────────────────────────────────────
-## Ставит авто-агро, когда боец идёт к врагу, а не бьёт с места (Unit.
-## _check_auto_aggro); снимает любой приказ игрока на движение. По этой метке
-## squad_close_ranks решает, ГДЕ строиться после боя: помогавший сосед
-## возвращается на свой пост, а посланный игроком отряд встаёт по месту боя
-func squad_mark_helped(sid: int) -> void:
-	if sid > 0 and squads.has(sid):
-		(squads[sid] as Dictionary)["helped"] = true
-
-func squad_clear_helped(sid: int) -> void:
-	if sid > 0 and squads.has(sid):
-		(squads[sid] as Dictionary)["helped"] = false
-
-## Центр постов отряда — «исходная позиция», с которой он ушёл помогать.
-## Vector3.INF, если постов не назначено (отряд никогда никуда не ставили)
+## Центр постов отряда. Vector3.INF, если постов не назначено (отряд
+## никогда никуда не ставили). Метка «ушёл помогать» (squad_mark_helped) и
+## возврат на исходные посты после боя сняты 29.10.2026 — см. squad_close_ranks
 func _squad_post_centre(men: Array) -> Vector3:
 	var c := Vector3.ZERO
 	var n := 0
@@ -5449,6 +6014,8 @@ func spear_wall_ready(sid: int) -> bool:
 ## Смена стойки отряда: точка подключения для всех, кто ставит стойку отрядом
 ## (кнопки панели, голос). Возвращает true, если стена построилась
 func on_squad_stance(sid: int, stance_id: String) -> bool:
+	if _Opt.warrior_wall_tight:
+		squad_shield_wall(sid, stance_id == "defense")
 	if stance_id != "defense" or not spear_wall_ready(sid):
 		return false
 	# ── СТОЯЩИЙ ОТРЯД В ОБОРОНУ ВСТАЁТ МГНОВЕННО (ТЗ 14.09.2026, п. 8) ────
@@ -5469,6 +6036,151 @@ func on_squad_stance(sid: int, stance_id: String) -> bool:
 	# ни рядов, ни подачи к врагу
 	_formation_in_place(sid)
 	return false
+
+## ── «СТЕНА ЩИТОВ» СМЫКАЕТ РЯДЫ (ТЗ 31.10.2026, ручка warrior_wall_tight) ──
+## Мечники в «Защите» стоят плотнее: разметка сжимается к ПЕРЕДНЕЙ шеренге
+## (передняя линия на месте, тыл подходит к ней) до интервала WALL_SPACING
+## поперёк и WALL_DEPTH вглубь — оба больше Unit.SEP_MIN_DIST 0.417, иначе
+## разведение своих спорило бы с разметкой. Сжатие только у стоящего отряда;
+## идущий сожмётся по прибытии (_squad_arrive_validate). Выход из «Защиты»
+## разжимает стоящий отряд теми же множителями от той же линии
+const WALL_SPACING := 0.44
+const WALL_DEPTH := 0.46
+var wall_tightens: int = 0
+
+func squad_shield_wall(sid: int, on: bool, force: bool = false) -> bool:
+	var sqv: Variant = squads.get(sid)
+	if sqv == null:
+		return false
+	var sq: Dictionary = sqv
+	if String(sq.get("type", "")) != "warrior":
+		return false
+	if not on:
+		var kv: Variant = sq.get("wall_k")
+		if kv == null:
+			return false
+		sq.erase("wall_k")
+		if not squad_standing(sid):
+			return false
+		var k0: Vector2 = kv
+		return _wall_scale(sid, sq, Vector2(1.0 / k0.x, 1.0 / k0.y), sq.get("wall_front"))
+	if sq.get("wall_k") != null or (not force and not squad_standing(sid)):
+		return false
+	_formation_in_place(sid)
+	var slots: Array = sq.get("slots", [])
+	var course: Vector3 = squad_course(sid)
+	if slots.size() < 2 or course.length_squared() < 1e-6:
+		return false
+	course.y = 0.0
+	course = course.normalized()
+	var side := Vector3(-course.z, 0.0, course.x)
+	# Передняя линия: самый передний по курсу, поперёк — середина разметки
+	var fd := -INF
+	var lsum := 0.0
+	for s in slots:
+		fd = maxf(fd, (s as Vector3).dot(course))
+		lsum += (s as Vector3).dot(side)
+	var front: Vector3 = course * fd + side * (lsum / float(slots.size()))
+	# Шаг строя: медиана зазоров передней шеренги поперёк и рядов вглубь
+	var lat: Array = []
+	var dep: Array = []
+	for s in slots:
+		var d: float = (s as Vector3).dot(course) - fd
+		dep.append(d)
+		if d > -0.15:
+			lat.append((s as Vector3).dot(side))
+	var pl: float = _median_gap(lat, 0.05)
+	var pd: float = _median_gap(dep, 0.15)
+	var k := Vector2(1.0, 1.0)
+	if pl > WALL_SPACING:
+		k.x = WALL_SPACING / pl
+	if pd > WALL_DEPTH:
+		k.y = WALL_DEPTH / pd
+	if k.x > 0.97 and k.y > 0.97:
+		return false
+	sq["wall_k"] = k
+	sq["wall_front"] = front
+	wall_tightens += 1
+	return _wall_scale(sid, sq, k, front)
+
+## Медиана зазоров между соседними значениями (меньше min_gap — одна линия)
+func _median_gap(vals: Array, min_gap: float) -> float:
+	if vals.size() < 2:
+		return 0.0
+	vals.sort()
+	var gaps: Array = []
+	for i in range(1, vals.size()):
+		var g: float = float(vals[i]) - float(vals[i - 1])
+		if g > min_gap:
+			gaps.append(g)
+	if gaps.is_empty():
+		return 0.0
+	gaps.sort()
+	return float(gaps[gaps.size() / 2])
+
+## Масштаб разметки от передней линии (k.x поперёк, k.y вглубь) и смыкание
+func _wall_scale(sid: int, sq: Dictionary, k: Vector2, frontv: Variant) -> bool:
+	var slots: Array = sq.get("slots", [])
+	var course: Vector3 = squad_course(sid)
+	if slots.is_empty() or frontv == null or course.length_squared() < 1e-6:
+		return false
+	course.y = 0.0
+	course = course.normalized()
+	var side := Vector3(-course.z, 0.0, course.x)
+	var front: Vector3 = frontv
+	var out: Array = []
+	for s in slots:
+		var v: Vector3 = (s as Vector3) - front
+		var d: float = v.dot(course)
+		var l: float = v.dot(side)
+		var p: Vector3 = front + course * (d * k.y) + side * (l * k.x)
+		p.y = (s as Vector3).y
+		out.append(p)
+	sq["slots"] = out
+	_SqFormation.close_ranks(squad_members(sid), out, course, false)
+	_wall_shuffle[sid] = Unit.game_ms() + WALL_SHUFFLE_MS
+	return true
+
+## ── ПЕРЕСТУПАНИЕ К СОМКНУТЫМ МЕСТАМ ─────────────────────────────────────────
+## Сдвиг смыкания — десятки сантиметров, меньше порога прибытия
+## (ARRIVE_RADIUS 0.48): приказ движения «прибывал» сразу, и бойцы стояли
+## на прежних местах. WALL_SHUFFLE_MS стоящий боец сам переступает к посту
+## шагом WALL_SHUFFLE_SPEED (в чужое тело и непроходимое — нет)
+const WALL_SHUFFLE_MS := 2500
+const WALL_SHUFFLE_SPEED := 0.9
+var _wall_shuffle: Dictionary = {}
+
+func _sweep_wall_shuffle(delta: float) -> void:
+	if _wall_shuffle.is_empty():
+		return
+	var now: int = Unit.game_ms()
+	var step_max: float = WALL_SHUFFLE_SPEED * delta
+	for sid in _wall_shuffle.keys():
+		var sqv: Variant = squads.get(sid)
+		if sqv == null or now > int(_wall_shuffle[sid]):
+			_wall_shuffle.erase(sid)
+			continue
+		for m in (sqv as Dictionary)["members"]:
+			if m == null or not is_instance_valid(m):
+				continue
+			var u := m as Unit
+			if u.is_dead() or u.garrisoned or u.state != Unit.State.IDLE or not u._post_valid:
+				continue
+			var p: Vector3 = u.global_position
+			var dx: float = u.post_pos.x - p.x
+			var dz: float = u.post_pos.z - p.z
+			var d: float = sqrt(dx * dx + dz * dz)
+			if d < 0.02:
+				continue
+			var s: float = minf(d, step_max) / d
+			var np := Vector3(p.x + dx * s, 0.0, p.z + dz * s)
+			if not is_passable(np.x, np.z):
+				continue
+			if unit_grid.enemy_block(u, np, Unit.BLOCK_RADIUS).length_squared() > 1e-8:
+				continue
+			np.y = get_terrain_height(np.x, np.z)
+			u.global_position = np
+			u.sync_row()
 
 ## Разметка «где стоим» без единого шага: слоты = текущие точки, курс = средний
 ## взгляд. Нужна стоящему отряду, у которого разметки нет (иначе у фаланги нет
@@ -5547,6 +6259,8 @@ func _default_block_slots(sid: int, men: Array) -> Array:
 	# Раскладка та же, что при рождении, — по диску золотого угла
 	if squad_is_horde(sid):
 		var hk: float = maxf(1.0, _block_slot_step(men) / _GobCfgGM.HORDE_SPOT)
+		if hk > 1.0:
+			hk *= _GobCfgGM.big_wide()
 		for i in range(n):
 			var ho: Vector2 = _GobCfgGM.horde_offset(i, n, sid) * hk
 			out.append(centre + Vector3(ho.x, 0.0, ho.y))
@@ -5555,10 +6269,16 @@ func _default_block_slots(sid: int, men: Array) -> Array:
 	var cols: int = maxi(1, int(ceil(sqrt(float(n)))))
 	var step: float = _block_slot_step(men)
 	var depth: float = maxf(BLOCK_ROW_DEPTH, step)
+	# Неполная последняя шеренга — по центру, а не от левого края (ТЗ
+	# 27.10.2026, третье письмо, п. 6: «цельный кирпичик без огрызков»)
+	var tail_from: int = (n / cols) * cols
 	for i in range(n):
 		var col: int = i % cols
 		var row: int = i / cols
-		var off_x: float = (float(col) - float(cols - 1) * 0.5) * step
+		var row_n: int = cols
+		if _Opt.formation_centred_tail and i >= tail_from:
+			row_n = n - tail_from
+		var off_x: float = (float(col) - float(row_n - 1) * 0.5) * step
 		var off_z: float = float(row) * depth
 		out.append(centre + across * off_x - course * off_z)
 	return out
@@ -5961,6 +6681,16 @@ var radar_fires: int = 0
 ## ранги идут лестницей, и второй способ описать то же самое разошёлся бы с
 ## первым на первой же загрузке партии
 signal keep_vet_changed(faction: int, level: int)
+
+## ── СОБЫТИЯ ДЛЯ ИНТЕРФЕЙСА (ТЗ 28.10.2026, реактивный HUD) ──────────────────
+## Исследование кузницы завершено (бонус уже накоплен). HUD по нему
+## перерисовывает ОТКРЫТОЕ окно кузницы: раньше он ловил только опустевший
+## research_id раз в кадр, а при очереди id менялся «a → b» в одном кадре —
+## изученный узел так и стоял «в работе» до перезахода в окно
+signal research_finished(faction: int, upgrade_id: String)
+## Состав отряда реестра изменился (гибель, перевод, пополнение). HUD считал
+## численность один раз при выделении — цифра «60» стояла весь бой
+signal squad_members_changed(squad_id: int)
 
 var keep_vet_level: Dictionary = {}
 
@@ -6854,9 +7584,45 @@ var tm_damage_out: Dictionary = {}   # сторона → род → урон н
 var tm_abilities: Dictionary = {}    # "сторона:способность" → счёт
 var tm_events: Array = []            # [t, вид, подробности]
 var knight_victory_events: int = 0   # стендам: побед мечников над отрядом
-const TM_EVENTS_MAX := 4000
+const TM_EVENTS_MAX := 6000
+## Доля буфера, с которой один вид событий считается шумом и режется первым
+const TM_NOISY_FRAC := 0.25
 ## Сколько старейших событий выброшено при переполнении (скользящий буфер)
 var tm_events_dropped: int = 0
+
+## ── ПЕРЕПОЛНЕНИЕ: СНАЧАЛА РЕЖЕМ САМЫЙ ЧАСТЫЙ ВИД (разбор партии .exe
+## 28.10.2026). Прежний срез «старейшая восьмая часть» за 82 минуты
+## прокрутил буфер так, что события до 55-й минуты пропали целиком: четыре
+## вида (unstuck 928, order_override 797, panic_capped 649, unstuck_giveup
+## 610) занимали 80 % места. Теперь, если один вид держит больше
+## TM_NOISY_FRAC буфера, выбрасывается старейшая половина ИМЕННО ЕГО записей;
+## редкие события (castle_fell, guard_alarm, panic) переживают спам
+func _tm_trim() -> void:
+	if _Opt.tm_trim_by_kind:
+		var counts: Dictionary = {}
+		for e in tm_events:
+			var k: String = String((e as Array)[1])
+			var c: Variant = counts.get(k)
+			counts[k] = 1 + (0 if c == null else int(c))
+		var top: String = ""
+		var top_n: int = 0
+		for k in counts:
+			if int(counts[k]) > top_n:
+				top_n = int(counts[k])
+				top = String(k)
+		if top_n >= int(float(TM_EVENTS_MAX) * TM_NOISY_FRAC):
+			var drop: int = top_n / 2
+			var kept: Array = []
+			for e in tm_events:
+				if drop > 0 and String((e as Array)[1]) == top:
+					drop -= 1
+					continue
+				kept.append(e)
+			tm_events_dropped += tm_events.size() - kept.size()
+			tm_events = kept
+			return
+	tm_events = tm_events.slice(TM_EVENTS_MAX / 8)
+	tm_events_dropped += TM_EVENTS_MAX / 8
 
 func tm_reset() -> void:
 	tm_damage_in.clear()
@@ -6908,8 +7674,7 @@ func tm_event(kind: String, detail: Dictionary = {}) -> void:
 	# переполнении снимается старейшая восьмая часть разом (сдвиг массива раз
 	# в TM_EVENTS_MAX/8 событий, а не на каждое)
 	if tm_events.size() >= TM_EVENTS_MAX:
-		tm_events = tm_events.slice(TM_EVENTS_MAX / 8)
-		tm_events_dropped += TM_EVENTS_MAX / 8
+		_tm_trim()
 	var t: float = 0.0
 	if main != null and is_instance_valid(main):
 		t = float(main.get("_match_clock"))
@@ -7030,6 +7795,9 @@ func _lair_thaw_check() -> void:
 			continue
 		if not bool(l.get("frozen")) or bool(l.get("thawing")):
 			continue
+		# Оживший пень будит только удар (ТЗ 31.10.2026, lair_revive)
+		if bool(l.get("sealed")):
+			continue
 		var side: int = int(main.call("river_side", (l as Node3D).global_position))
 		var on_bank: bool
 		if checked.has(side):
@@ -7057,6 +7825,10 @@ func _sheep_pressure_check() -> void:
 			continue
 		var l: Node = lair_for(f)
 		if l == null:
+			# Оживление по часам (ТЗ 31.10.2026, LairDirector) заменяет
+			# восстановление давлением овец
+			if _Opt.lair_revive:
+				continue
 			# ТАЙМАУТ ВОССТАНОВЛЕНИЯ (спринт 20): снесённый пень ждёт
 			# LAIR_REGEN_SEC, сколько бы овец ни было у стороны
 			if not lair_regen_ready(f):
@@ -7071,7 +7843,7 @@ func _sheep_pressure_check() -> void:
 
 ## Поставить пень заново на его точке: руина снимается, логово новое (со
 ## своей отарой из _start_flock), стражей не выпускает — их даст давление овец
-func restore_lair(f: int) -> Node:
+func restore_lair(f: int, sealed: bool = false) -> Node:
 	if main == null or not lair_spots.has(f):
 		return null
 	var at: Vector3 = lair_spots[f]
@@ -7085,6 +7857,13 @@ func restore_lair(f: int) -> Node:
 	var lair: Building = load("res://scripts/goblin/TrollLair.gd").new()
 	lair.faction = Constants.FACTION_GOBLIN
 	lair.set("side_faction", f)
+	# ОЖИВШИЙ ПЕНЬ (ТЗ 31.10.2026): запечатан и заморожен ДО add_child —
+	# отложенные спавны _ready лягут в счётчики, своих часов у него нет
+	if sealed:
+		lair.set("sealed", true)
+		lair.call("freeze")
+		lair.set("virt_trolls", _Spawn.LAIR_REVIVE_TROLLS)
+		lair.set("virt_gnoll_squads", _Spawn.LAIR_REVIVE_GNOLLS)
 	main.world_add(lair)
 	lair.global_position = Vector3(at.x, main.get_terrain_height(at.x, at.z), at.z)
 	# Первое логово партии обязано остаться «логовом игрока» (месть орды, стенды)
@@ -7269,6 +8048,27 @@ func raise_spot(corpse) -> Vector3:
 const RAISE_FRAME_PAD := 0.8
 var raise_in_frame: int = 0
 
+## ЕСТЬ ЛИ В ОТРЯДЕ МЕСТО ДЛЯ ЕЩЁ ОДНОГО БОЙЦА (разбор партии 29.10.2026):
+## живых (и в гарнизоне тоже) меньше штата рода. Крепость доукомплектовывала
+## отряд до штата, а монахи в то же время поднимали в него павших с поля —
+## отряд выходил из ворот с 72 бойцами при штате 60, и «full» (пик) уезжал
+## следом, сдвигая пороги паники. Одиночные агенты (монах) — всегда есть
+func squad_has_room(sid: int) -> bool:
+	var raw: Variant = squads.get(sid)
+	if raw == null or not _Opt.raise_squad_cap:
+		return true
+	var sq: Dictionary = raw
+	if SINGLE_AGENT_TYPES.has(String(sq.get("type", ""))):
+		return true
+	var n := 0
+	for m in (sq["members"] as Array):
+		if m != null and is_instance_valid(m) and not (m as Unit).is_dead():
+			n += 1
+	return n < _UCfg.squad_size(String(sq.get("type", "")))
+
+## Тела, не поднятые из-за полного отряда (зонд и стенд)
+var raise_refused_full: int = 0
+
 func raise_fallen(corpse, monk: Node = null) -> Unit:
 	tm_ability("resurrect", int((monk as Unit).faction) if monk != null and is_instance_valid(monk) and monk is Unit else -1)
 	if corpse == null or main == null or corpses == null:
@@ -7277,6 +8077,11 @@ func raise_fallen(corpse, monk: Node = null) -> Unit:
 		return null
 	var uid: String = String(corpse.get("unit_id"))
 	if not Building.PRELOAD_SCENES.has(uid):
+		return null
+	# Полный отряд павшего не растёт сверх штата — тело остаётся лежать
+	var sid0: int = int(corpse.get("squad_id"))
+	if sid0 > 0 and not squad_has_room(sid0):
+		raise_refused_full += 1
 		return null
 	var fac: int = int(corpse.get("faction"))
 	var at: Vector3 = land_target(raise_spot(corpse))
@@ -7386,7 +8191,8 @@ func gnoll_squads_alive_all() -> int:
 	return n
 
 func gnoll_squads_room() -> int:
-	return maxi(_Spawn.MAX_STUMP_GNOLLS - gnoll_squads_alive_all(), 0)
+	var cap: int = _Spawn.MAX_STUMP_GNOLLS * (_Spawn.LAIR_GUARD_MULT if _Opt.lair_guard_x3 else 1)
+	return maxi(cap - gnoll_squads_alive_all(), 0)
 
 func trolls_alive_all() -> int:
 	var n := 0
@@ -7466,10 +8272,12 @@ func _grant_auto_veterancy(sid: int, from_lvl: int, to_lvl: int) -> void:
 		return
 	var sq: Dictionary = squads[sid]
 	var utype: String = String(sq["type"])
-	var step: Dictionary = _UCfg.vet_auto_step(utype)
 	var b: Dictionary = sq["bonuses"]
 	var members: Array = sq["members"]
 	for lvl in range(from_lvl + 1, to_lvl + 1):
+		# Прибавки по цвету лычек ступени: белые / красные / золотые (легенда — как золотые)
+		# Ступени 1-9 — числа; легенда даёт правило (перк ниже), а не цифру
+		var step: Dictionary = {} if lvl >= _UCfg.LEGEND_TIER else _UCfg.vet_auto_step(utype, lvl)
 		for key in step:
 			var short: String = _UCfg.modifier_stat_name(String(key))
 			var value: float = float(step[key])
@@ -7509,18 +8317,29 @@ var vet_auto_grants: int = 0
 ## ═══════════════════════════════════════════════════════════════════════════
 ## ЛЫЧКИ СВЕРХ ЛЕГЕНДЫ (ТЗ 25.10.2026, блок 3)
 ## ═══════════════════════════════════════════════════════════════════════════
-## Легендарный отряд копит опыт дальше и берёт до LEGEND_EXTRA_MAX лычек по
-## растущим порогам (unit_stats_config.legend_extra_threshold). Каждая — ещё
-## ступень прибавок рода (тем же путём, что у порога ветеранства). Дальше —
-## развилка заказа: отряд НЕСЁТ ШТАНДАРТ игрока (элита/реликвия) → уровень
-## элиты +1 (язычок на мини-флажке) и реликвия отряда +1 (её аура); НЕ НЕСЁТ
-## → цветной мини-флажок на древке (legend_flags). Счётчик всего —
-## legend_extra; поля живут в записи отряда и в сохранении
+## Легендарный отряд копит опыт дальше и берёт до LEGEND_EXTRA_MAX ступеней
+## престижа по растущим порогам (unit_stats_config.legend_extra_threshold).
+## Первые LEGEND_EXTRA_BONUS_MAX — ещё ступень прибавок рода (тем же путём,
+## что у порога ветеранства); отряд, НЕСУЩИЙ штандарт игрока (элита/реликвия),
+## получает с ними и уровень элиты +1 (аура реликвии). На знамени ступень —
+## хвост под золотом (BannerArt.legend_tail_spec), одна шкала у всех: цветных
+## мини-флажков и бордового отростка под золотом больше нет (ТЗ 28.10.2026).
+## Счётчик — legend_extra, живёт в записи отряда и в сохранении
 var legend_extra_grants: int = 0
+
+## Ступень престижа легенды на знамени отряда (0..LEGEND_EXTRA_MAX)
+func squad_legend_marks(sid: int) -> int:
+	var sq: Variant = squads.get(sid)
+	if sq == null:
+		return 0
+	return int((sq as Dictionary).get("legend_extra", 0))
 
 func _check_legend_extra(sid: int) -> void:
 	var sq: Dictionary = squads[sid]
-	if int(sq["faction"]) == Constants.FACTION_GOBLIN:
+	# Орда: престиж легенды — только знак (шевроны рваного штандарта), без
+	# прибавок (ТЗ 29.10.2026, скетч владельца)
+	var gob: bool = int(sq["faction"]) == Constants.FACTION_GOBLIN
+	if gob and not _Opt.goblin_legend_marks:
 		return
 	var utype: String = String(sq["type"])
 	if int(sq["level"]) < _UCfg.max_veteran_level(utype):
@@ -7531,10 +8350,15 @@ func _check_legend_extra(sid: int) -> void:
 	var want: int = _UCfg.legend_extra_for_kills(utype, int(sq["kills"]))
 	if want <= have:
 		return
-	var step: Dictionary = _UCfg.vet_auto_step(utype)
+	var step: Dictionary = _UCfg.vet_auto_step(utype, _UCfg.LEGEND_TIER)
 	var b: Dictionary = sq["bonuses"]
 	var members: Array = sq["members"]
 	for _k in range(have, want):
+		# Сверх LEGEND_EXTRA_BONUS_MAX — только знак на знамени (ТЗ 27.10.2026,
+		# третье письмо, п. 5): прибавок и роста штандарта нет
+		if gob or _k >= _UCfg.LEGEND_EXTRA_BONUS_MAX:
+			legend_extra_grants += 1
+			continue
 		for key in step:
 			var short: String = _UCfg.modifier_stat_name(String(key))
 			var value: float = float(step[key])
@@ -7548,7 +8372,9 @@ func _check_legend_extra(sid: int) -> void:
 				if (m as Unit).is_dead():
 					continue
 				_apply_bonus_to_unit(m, short, value)
-		if squad_elite(sid):
+		# Личный опыт штандарт не растит (ТЗ 29.10.2026): его уровень — только
+		# от общего опыта (RelicManager._grant_standard)
+		if squad_elite(sid) and not _Opt.standard_squad:
 			sq["elite_lvl"] = int(sq.get("elite_lvl", 1)) + 1
 			var rm = relic_mgr()
 			if rm != null:
@@ -7556,8 +8382,6 @@ func _check_legend_extra(sid: int) -> void:
 				if r != null:
 					(r as Dictionary)["level"] = int((r as Dictionary)["level"]) + 1
 					rm._refresh_visual(r)
-		else:
-			sq["legend_flags"] = int(sq.get("legend_flags", 0)) + 1
 		legend_extra_grants += 1
 	sq["legend_extra"] = want
 	refresh_squad_banner(sid)
@@ -7575,9 +8399,9 @@ func grant_squad_level(sid: int) -> bool:
 	if cur >= _UCfg.max_veteran_level(utype):
 		# ── ШТАНДАРТ ЛЕГЕНДЕ (ТЗ 25.10.2026, блок 3) ─────────────────────
 		# Ступени расти некуда, но выдать свой штандарт легендарным игрок
-		# вправе: прежде реликвия здесь молча не давала элиты, и мини-флажка
-		# под золотым флагом не было бы никогда. Уровень элиты +1 — ещё
-		# язычок. Ответ по-прежнему false: ступень не выдана
+		# вправе: признак элиты и уровень элиты +1 (аура реликвии). На знамени
+		# легенды это не рисуется — золотой квадрат чист (ТЗ 28.10.2026).
+		# Ответ по-прежнему false: ступень не выдана
 		if int(sq["faction"]) == Constants.FACTION_GOBLIN:
 			return false
 		sq["elite"] = true
@@ -7631,6 +8455,14 @@ func squad_elite(sid: int) -> bool:
 	if int(sq.get("faction", 0)) == Constants.FACTION_GOBLIN:
 		return false
 	return bool(sq.get("elite", false))
+
+## Уровень реликвии, которую несёт живой боец отряда (0 — не несёт). Менеджер
+## реликвий не заводится ради вопроса: нет его — нет и реликвий
+func squad_relic_level(sid: int) -> int:
+	if _relic_mgr == null or not is_instance_valid(_relic_mgr):
+		return 0
+	var r: Variant = _relic_mgr.relic_of_squad(sid)
+	return 0 if r == null else int((r as Dictionary)["level"])
 
 ## Уровень элиты отряда — римская цифра на бордовом штандарте (0 — не элита)
 func squad_elite_level(sid: int) -> int:
@@ -7838,7 +8670,11 @@ func refresh_squad_banner(squad_id: int) -> void:
 	# у ветерана он есть всегда, у новобранца заводится на время паники и
 	# исчезает вместе с ней. Отсюда и оба условия ниже
 	var white: bool = squad_panicked(squad_id)
-	if (lvl <= 0 and not white) or members.is_empty():
+	# Отряд свинобосса носит знамя полководца и без звания (ТЗ 28.10.2026)
+	var boss: bool = bool(sq.get("boss", false))
+	# Штандарт за общий опыт вешается и новобранцам (ТЗ 29.10.2026)
+	var std_own: bool = _Opt.standard_squad and squad_elite(squad_id)
+	if (lvl <= 0 and not white and not boss and not std_own) or members.is_empty():
 		if banner != null and is_instance_valid(banner):
 			banner.queue_free()
 		sq["banner"] = null
@@ -7851,7 +8687,22 @@ func refresh_squad_banner(squad_id: int) -> void:
 	var elite: bool = squad_elite(squad_id)
 	var elite_lvl: int = squad_elite_level(squad_id)
 	var goblin: bool = int(sq.get("faction", 0)) == Constants.FACTION_GOBLIN
-	var flags: int = int(sq.get("legend_flags", 0))
+	var side: int = _BannerArt.side_of(int(sq.get("faction", 0)))
+	var flags: int = squad_legend_marks(squad_id)
+	# ── ПОДОБРАННАЯ РЕЛИКВИЯ СРАСТАЕТСЯ СО ЗНАМЕНЕМ ОТРЯДА (ТЗ 26.10.2026) ──
+	# Скриншот владельца: над отрядом-ветераном, подобравшим чужую (павшую)
+	# реликвию, торчали ДВА флага — штандарт «I» над носителем и вымпел
+	# ветеранства над знаменосцем. Теперь знамя отряда само становится
+	# штандартом с уровнем реликвии (лычки — на полотнище), у легенды —
+	# только в записи (золотой квадрат чист, ТЗ 28.10.2026), у орды — штандартом вместо
+	# язычков (трофей старше лоскута). Узел реликвии при этом не рисуется
+	# (RelicManager._process). Отряд без звания знамени не имеет — там
+	# реликвия висит своим узлом, как прежде: флагшток всё равно один
+	var relic_lvl: int = squad_relic_level(squad_id) if _Opt.relic_merge_banner else 0
+	if relic_lvl > 0:
+		elite = true
+		elite_lvl = maxi(elite_lvl, relic_lvl)
+		goblin = false
 	if banner != null and is_instance_valid(banner):
 		# Уже висит. Но отряд мог подрасти в звании (тогда картинку надо
 		# ПЕРЕСТРОИТЬ, иначе на пятом уровне так и висел бы вымпел первого),
@@ -7861,14 +8712,17 @@ func refresh_squad_banner(squad_id: int) -> void:
 			banner.show_white(lvl, goblin)
 		elif bool(banner.shown_white) or int(banner.shown_level) != lvl \
 				or bool(banner.shown_elite) != elite or int(banner.shown_elite_lvl) != elite_lvl \
-				or int(banner.shown_flags) != flags:
-			banner.build(lvl, elite, goblin, elite_lvl, flags)
+				or int(banner.shown_flags) != flags or bool(banner.shown_goblin) != goblin \
+				or bool(banner.shown_boss) != boss or int(banner.shown_side) != side:
+			banner.build(lvl, elite, goblin, elite_lvl, flags, boss, side)
+		banner.squad_id = squad_id
 		return
 	var host: Node = main if main != null and is_instance_valid(main) else null
 	if host == null:
 		# Мира ещё нет (стенд поднимает отряды до сцены) — попробуем в следующий раз
 		return
-	var fresh: MeshInstance3D = _SquadBanner.create(maxi(lvl, 1), elite, goblin, elite_lvl, flags)
+	var fresh: MeshInstance3D = _SquadBanner.create(maxi(lvl, 1), elite, goblin, elite_lvl, flags, boss, side)
+	fresh.squad_id = squad_id
 	if white:
 		fresh.show_white(lvl, goblin)
 	host.add_child(fresh)
@@ -8300,6 +9154,104 @@ var food_upkeep_rate: Dictionary = {}
 var food_upkeep_workers: Dictionary = {}
 var food_upkeep_squads: Dictionary = {}
 
+## ── ТОЛЧОК МАССОЙ (ТЗ 31.10.2026, ручки mass_push, mass_impact) ──────────
+## Раз в MASS_SEC у каждого дерущегося отряда снимается соотношение сил вокруг
+## его центра: по каждой стороне — сумма отрядов в MASS_R с весом «живые /
+## штат» (паритет — на уровне отрядов, а не голов: сотня гоблинов против
+## шестидесяти копейщиков — один отряд на один). Толчок по отряду
+## (Unit._apply_push) × (чужие/свои)^MASS_EXP в [MASS_MIN, MASS_MAX], при
+## перевесе ещё + MASS_DIFF × (k − 1) к разнице напора — кулак продавливает и
+## того, кто сильнее поодиночке. Отряды за спиной толкаемого входят в «своих»:
+## три отряда вглубь держат. Первые MASS_IMPACT_SEC контакта атакующего —
+## удар: множитель от MASS_IMPACT_PEAK к 1
+const MASS_SEC := 0.5
+const MASS_R := 14.0
+const MASS_EXP := 0.6
+const MASS_MIN := 0.5
+const MASS_MAX := 3.0
+const MASS_DIFF := 2.0
+const MASS_IMPACT_SEC := 5.0
+const MASS_IMPACT_PEAK := 1.6
+var _mass_t: float = 0.0
+## sid → PackedFloat32Array: вес сторон 0..FACTION_COUNT-1 и сторона отряда
+var _mass: Dictionary = {}
+## sid → игровые мс начала контакта
+var _mass_contact: Dictionary = {}
+var mass_sweeps: int = 0
+
+func _sweep_mass(delta: float) -> void:
+	_mass_t -= delta
+	if _mass_t > 0.0:
+		return
+	_mass_t = MASS_SEC
+	mass_sweeps += 1
+	var now: int = Unit.game_ms()
+	var ids := PackedInt32Array()
+	var xs := PackedFloat32Array()
+	var zs := PackedFloat32Array()
+	var fs := PackedInt32Array()
+	var ws := PackedFloat32Array()
+	for sid in squads:
+		var sq: Dictionary = squads[sid]
+		var n: int = (sq["members"] as Array).size()
+		if n <= 0:
+			continue
+		var f: int = int(sq.get("faction", -1))
+		if f < 0 or f >= Constants.FACTION_COUNT:
+			continue
+		var c: Variant = _squad_centre.get(sid)
+		if c == null:
+			continue
+		var cv: Vector2 = c
+		if not cv.is_finite():
+			continue
+		var full: int = maxi(int(sq.get("full", 0)), n)
+		ids.append(int(sid))
+		xs.append(cv.x)
+		zs.append(cv.y)
+		fs.append(f)
+		ws.append(float(n) / float(full))
+	var fresh: Dictionary = {}
+	var r2: float = MASS_R * MASS_R
+	for i in range(ids.size()):
+		var sid_i: int = ids[i]
+		if not squad_in_combat(sid_i):
+			continue
+		var acc := PackedFloat32Array()
+		acc.resize(Constants.FACTION_COUNT + 1)
+		for j in range(ids.size()):
+			var dx: float = xs[j] - xs[i]
+			var dz: float = zs[j] - zs[i]
+			if dx * dx + dz * dz <= r2:
+				acc[fs[j]] += ws[j]
+		acc[Constants.FACTION_COUNT] = float(fs[i])
+		fresh[sid_i] = acc
+		if not _mass_contact.has(sid_i):
+			_mass_contact[sid_i] = now
+	for k in _mass_contact.keys():
+		if not fresh.has(k):
+			_mass_contact.erase(k)
+	_mass = fresh
+
+## Множитель толчка по отряду t_sid от стороны att_fac (атакующий отряд att_sid)
+func mass_push_mult(t_sid: int, att_fac: int, att_sid: int) -> float:
+	var a: Variant = _mass.get(t_sid)
+	if a == null or att_fac < 0 or att_fac >= Constants.FACTION_COUNT:
+		return 1.0
+	var acc: PackedFloat32Array = a
+	var own: float = acc[int(acc[Constants.FACTION_COUNT])]
+	var foe: float = acc[att_fac]
+	var k: float = 1.0
+	if own > 0.0 and foe > 0.0:
+		k = clampf(pow(foe / own, MASS_EXP), MASS_MIN, MASS_MAX)
+	if _Opt.mass_impact and att_sid > 0:
+		var t0: Variant = _mass_contact.get(att_sid)
+		if t0 != null:
+			var u: float = float(Unit.game_ms() - int(t0)) / (MASS_IMPACT_SEC * 1000.0)
+			if u < 1.0:
+				k *= 1.0 + (MASS_IMPACT_PEAK - 1.0) * (1.0 - u)
+	return k
+
 func _sweep_food(delta: float) -> void:
 	_food_timer -= delta
 	if _food_timer > 0.0:
@@ -8310,6 +9262,7 @@ func _sweep_food(delta: float) -> void:
 		var workers := 0
 		var combat := 0
 		var soldiers := 0.0
+		var heads_raw := 0.0
 		var food_extra := 0.0
 		var gold_rate := 0.0
 		for key in squads:
@@ -8336,6 +9289,7 @@ func _sweep_food(delta: float) -> void:
 				var heads: float = float(mem.size()) \
 					* float(_UCfg.FOOD_UPKEEP_UNIT_MULT.get(String(sq["type"]), 1.0))
 				soldiers += heads
+				heads_raw += float(mem.size())
 				combat += 1
 				# ── ЭЛИТА ЕСТ БОЛЬШЕ, И ЕЩЁ ЗОЛОТО (заказ 13.09.2026) ──────
 				# Отряд с лычками содержится дороже новобранца: еды больше на
@@ -8347,8 +9301,12 @@ func _sweep_food(delta: float) -> void:
 					food_extra += heads * _UCfg.FOOD_UPKEEP_SOLDIER_PER_SEC \
 						* (_UCfg.keep_food_mult(vet) - 1.0)
 					gold_rate += _UCfg.keep_gold_rate(vet)
+		# ── БОЛЬШАЯ АРМИЯ ЕСТ ДОРОЖЕ (ТЗ 28.10.2026, блок 2) ─────────────────
+		# Сверх FOOD_UPKEEP_BIG_ARMY_HEADS живых голов ставка на голову растёт
+		# (unit_stats_config.food_upkeep_mult; ручка perf_config.food_big_army):
+		# 40+ отрядов без «выхода мяса» из кузницы — дефицит, а не склад
 		var rate: float = float(workers) * _UCfg.FOOD_UPKEEP_WORKER_PER_SEC \
-			+ soldiers * _UCfg.FOOD_UPKEEP_SOLDIER_PER_SEC + food_extra
+			+ soldiers * _UCfg.FOOD_UPKEEP_SOLDIER_PER_SEC * _UCfg.food_upkeep_mult(heads_raw) + food_extra
 		food_upkeep_rate[f] = rate
 		food_upkeep_workers[f] = workers
 		food_upkeep_squads[f] = combat
@@ -8372,6 +9330,8 @@ func is_starving(faction: int) -> bool:
 
 func _sweep_morale(delta: float) -> void:
 	_drain_panic_queue()
+	if not _shove.is_empty():
+		_tick_shoves()
 	# Часы идут КАЖДЫЙ кадр, а не только при пустой очереди: иначе период
 	# удлинялся бы на время разбора (до целого такта), и голод тянул мораль
 	# вдвое медленнее (qa_food_economy C3)
@@ -8457,6 +9417,9 @@ func _sweep_morale(delta: float) -> void:
 		var full_n: int = squad_full_size(sid)
 		if alive_n <= 0 or alive_n >= full_n:
 			continue
+		# Легенда при половине состава уходит в крепость восстановиться
+		if _Opt.legend_retreat and _legend_retreat(sid, sq, alive_n, full_n):
+			continue
 		if float(alive_n) > float(full_n) * _UCfg.PANIC_ALIVE_FRAC:
 			continue
 		# ── ЖРЕБИЙ, А НЕ ГАРАНТИЯ: одна попытка на каждую НОВУЮ потерю ─────
@@ -8467,10 +9430,7 @@ func _sweep_morale(delta: float) -> void:
 		if int(sq.get("panic_roll_alive", -1)) == alive_n:
 			continue
 		sq["panic_roll_alive"] = alive_n
-		var chance: float = _UCfg.PANIC_CHANCE if panic_chance_override < 0.0 else panic_chance_override
-		var mult: float = _legend_morale_mult(sid)
-		if mult > 0.0:
-			chance = minf(chance / mult, 1.0)
+		var chance: float = panic_chance_of(sid)
 		var broke: bool = AudioManager.rng.randf() < chance
 		panic_rolls += 1
 		sq["panic_rolls"] = int(sq.get("panic_rolls", 0)) + 1
@@ -8484,9 +9444,15 @@ func _sweep_morale(delta: float) -> void:
 			if int(sq.get("panic_runs", 0)) >= _UCfg.PANIC_MAX_RUNS:
 				# Событие — «предел держит», а не «паника»: аудит партии 29.09
 				# насчитал 552 «паники», из них большинство — повторные срывы
-				# порога у уже отбегавшего отряда, которые предел глушил
-				tm_event("panic_capped", {"sid": sid, "type": String(sq.get("type", "")),
-					"fac": int(sq.get("faction", -1)), "alive": alive_n, "full": full_n})
+				# порога у уже отбегавшего отряда, которые предел глушил.
+				# ОДИН РАЗ НА ОТРЯД (разбор партии .exe 28.10.2026): жребий
+				# бросается на каждую новую потерю, и отряд 564 орды дал 21
+				# событие за 14 с — 649 «пределов» (18 % событий) выталкивали
+				# из буфера телеметрии всё остальное
+				if not bool(sq.get("panic_capped_noted", false)):
+					sq["panic_capped_noted"] = true
+					tm_event("panic_capped", {"sid": sid, "type": String(sq.get("type", "")),
+						"fac": int(sq.get("faction", -1)), "alive": alive_n, "full": full_n})
 				if not bool(sq.get("heal_queue", false)):
 					_enter_heal_queue(sid)
 				continue
@@ -8516,6 +9482,46 @@ func _enter_heal_queue(sid: int) -> void:
 func squad_queue_heal(sid: int) -> void:
 	if sid > 0 and squads.has(sid):
 		_enter_heal_queue(sid)
+
+## Шанс срыва отряда на новой потере ниже порога: PANIC_CHANCE, аура легенды
+## делит (чужая — умножает), опыт держит строй — × (1 − vet_panic_resist(ранг))
+func panic_chance_of(sid: int) -> float:
+	var chance: float = _UCfg.PANIC_CHANCE if panic_chance_override < 0.0 else panic_chance_override
+	var mult: float = _legend_morale_mult(sid)
+	if mult > 0.0:
+		chance = minf(chance / mult, 1.0)
+	var raw: Variant = squads.get(sid)
+	if _Opt.vet_panic_resist and raw != null:
+		chance *= 1.0 - _UCfg.vet_panic_resist(int((raw as Dictionary).get("level", 0)))
+	return chance
+
+## ── ОТХОД ЛЕГЕНДЫ НА ВОССТАНОВЛЕНИЕ (ТЗ 30.10.2026, ручка legend_retreat) ──
+## Легендарный отряд (ранг LEGEND_TIER) в бою при LEGEND_RETREAT_FRAC живых от
+## штата уходит в крепость штатным «в замок» (squad_to_castle): отход сквозь
+## своих, лазарет, доукомплектование до штата, выход с прежним рангом. Не чаще
+## LEGEND_RETREAT_CD_SEC; орда — нет (у неё свой отход к хижинам). Последнего
+## бойца легенды держит «последний выживший» без узла кузницы (Unit._try_last_stand)
+var legend_retreats: int = 0
+
+func _legend_retreat(sid: int, sq: Dictionary, alive_n: int, full_n: int) -> bool:
+	if int(sq["faction"]) == Constants.FACTION_GOBLIN or bool(sq.get("boss", false)):
+		return false
+	if int(sq.get("level", 0)) < _UCfg.LEGEND_TIER or squad_is_single_agent(sid):
+		return false
+	if float(alive_n) > float(full_n) * _UCfg.LEGEND_RETREAT_FRAC:
+		return false
+	if squad_is_to_castle(sid) or squad_panicked(sid):
+		return false
+	var now: int = Unit.game_ms()
+	var last: Variant = sq.get("legend_retreat_ms")
+	if last != null and now - int(last) < int(_UCfg.LEGEND_RETREAT_CD_SEC * 1000.0):
+		return false
+	if not squad_to_castle(sid):
+		return false
+	sq["legend_retreat_ms"] = now
+	legend_retreats += 1
+	tm_event("legend_retreat", {"sid": sid, "fac": int(sq["faction"]), "alive": alive_n, "full": full_n})
+	return true
 
 ## ── «В ЗАМОК» ИГРОКА ДЛЯ ОДНОГО ОТРЯДА (ТЗ 22.10.2026, блок 2) ─────────────
 ## Ближайшая своя крепость, где есть место, принимает отряд штатно
@@ -8567,6 +9573,134 @@ func squad_is_to_castle(sid: int) -> bool:
 			return (m as Unit).retreating
 	return false
 
+## ── НАТИСК ФАЛАНГИ: СИНХРОННЫЕ РЫВКИ СТРОЕМ (ТЗ 29.10.2026, п. 5) ─────────
+## Жалоба: «толчок срабатывает в пустоту рядом с врагом». Причина — раздача
+## по двойному ПКМ: приказ атаки уже отдан, а следом шло смыкание рядов
+## (squad_close_ranks → command_move каждому), снимавшее атаку: отряд уходил
+## к своим ячейкам, а сам натиск жил только множителем на удар.
+## Теперь натиск — ОТРЯДНЫЙ: взвод ждёт замеса (squad_in_combat) до
+## SHOVE_WAIT_SEC и в замесе раз в SHOVE_PERIOD_SEC делает рывок разом: все
+## вражеские отряды, чьи бойцы стоят перед фронтом на длине копья, отлетают
+## назад по оси «наш центр → их центр» (push_smooth — тот же канал разлёта,
+## что у тарана), а свой строй подаётся следом на SHOVE_SELF_DIST, упираясь
+## в чужие тела (solid). Фаланга врага в обороне упирается (push_resist),
+## гиганты не сдвигаются. Ручка perf_config.phalanx_shove
+const SHOVE_PERIOD_SEC := 1.2
+const SHOVE_PULSES := 6
+const SHOVE_ENEMY_DIST := 1.1
+const SHOVE_SELF_DIST := 0.8
+const SHOVE_CONTACT := 1.2
+const SHOVE_WAIT_SEC := 22.0
+const SHOVE_DEPTH := 14.0
+var _shove: Dictionary = {}
+## Стенды: сколько рывков сделано и сколько чужих бойцов отброшено
+var shove_pulses: int = 0
+var shove_pushed: int = 0
+
+func squad_start_shove(sid: int) -> void:
+	if sid <= 0 or not squads.has(sid) or not _Opt.phalanx_shove:
+		return
+	_shove[sid] = {"until": Unit.game_ms() + int(SHOVE_WAIT_SEC * 1000.0),
+		"next": 0, "left": SHOVE_PULSES}
+
+func squad_shove_left(sid: int) -> int:
+	var st: Variant = _shove.get(sid)
+	return 0 if st == null else int((st as Dictionary)["left"])
+
+func _tick_shoves() -> void:
+	var now: int = Unit.game_ms()
+	for sid in _shove.keys():
+		var st: Dictionary = _shove[sid]
+		if not squads.has(sid) or now > int(st["until"]) or int(st["left"]) <= 0:
+			_shove.erase(sid)
+			continue
+		if now < int(st["next"]) or not squad_in_combat(int(sid)):
+			continue
+		if _shove_pulse(int(sid)):
+			st["left"] = int(st["left"]) - 1
+			st["next"] = now + int(SHOVE_PERIOD_SEC * 1000.0)
+			# Пока идут рывки, ждать замеса больше не нужно — срок от рывка
+			st["until"] = maxi(int(st["until"]), now + int(SHOVE_PERIOD_SEC * 3000.0))
+
+func _shove_pulse(sid: int) -> bool:
+	var sq: Dictionary = squads[sid]
+	var fac: int = int(sq["faction"])
+	var mine: Array = []
+	var mc := Vector3.ZERO
+	for m in (sq["members"] as Array):
+		var u := m as Unit
+		if u == null or not is_instance_valid(u) or u.is_dead() or u.garrisoned or u.is_panicked():
+			continue
+		mine.append(u)
+		mc += u.global_position
+	if mine.is_empty():
+		return false
+	mc /= float(mine.size())
+	# Кто в контакте: цель бойца на длине копья
+	var foe_sids: Dictionary = {}
+	var fc := Vector3.ZERO
+	var nf := 0
+	for u in mine:
+		var tg = (u as Unit).attack_target
+		if tg == null or not is_instance_valid(tg) or not (tg is Unit):
+			continue
+		var t := tg as Unit
+		if t.is_dead() or t.faction == fac or t.squad_id <= 0:
+			continue
+		if (u as Unit).global_position.distance_to(t.global_position) > (u as Unit).reach() + SHOVE_CONTACT:
+			continue
+		foe_sids[t.squad_id] = true
+		fc += t.global_position
+		nf += 1
+	if nf == 0:
+		return false
+	fc /= float(nf)
+	var course := Vector3(fc.x - mc.x, 0.0, fc.z - mc.z)
+	if course.length_squared() < 1e-4:
+		return false
+	course = course.normalized()
+	# Чужие отряды — назад целиком (кто перед нашим фронтом, в глубину SHOVE_DEPTH)
+	for fsid in foe_sids:
+		if not squads.has(fsid):
+			continue
+		for m2 in (squads[fsid]["members"] as Array):
+			var e := m2 as Unit
+			if e == null or not is_instance_valid(e) or e.is_dead() or e.garrisoned or e.giant_class():
+				continue
+			var rel: Vector3 = e.global_position - mc
+			var ahead: float = rel.x * course.x + rel.z * course.z
+			if ahead < 0.0 or ahead > SHOVE_DEPTH + 8.0:
+				continue
+			var k: float = _UCfg.stance_stat(e.stance, "push_resist", 1.0)
+			e.push_smooth(course, SHOVE_ENEMY_DIST * k)
+			shove_pushed += 1
+	# Свой строй — следом, упираясь в чужие тела
+	for u2 in mine:
+		(u2 as Unit).push_smooth(course, SHOVE_SELF_DIST, true)
+	shove_pulses += 1
+	tm_event("phalanx_shove", {"sid": sid, "foes": foe_sids.size()})
+	return true
+
+## Отряд после паники вне управления игрока (см. _end_panic)
+func squad_no_control(sid: int) -> bool:
+	if sid <= 0:
+		return false
+	var raw: Variant = squads.get(sid)
+	return raw != null and bool((raw as Dictionary).get("no_control", false))
+
+func _drop_from_control(sid: int) -> void:
+	var sm = main.get("selection_manager") if main != null else null
+	for m in (squads[sid]["members"] as Array):
+		var u := m as Unit
+		if u == null or not is_instance_valid(u):
+			continue
+		if sm != null and is_instance_valid(sm):
+			if sm.has_method("forget_unit"):
+				sm.forget_unit(u)
+			if sm.has_method("forget_in_groups"):
+				sm.forget_in_groups(u)
+		u.set_selected(false)
+
 func squad_in_heal_queue(sid: int) -> bool:
 	var raw: Variant = squads.get(sid)
 	return raw != null and bool((raw as Dictionary).get("heal_queue", false))
@@ -8584,6 +9718,7 @@ func squad_note_healed(sid: int) -> void:
 		var sq: Dictionary = raw
 		sq["panic_runs"] = 0
 		sq.erase("heal_queue")
+		sq.erase("no_control")
 
 var heal_queue_entries: int = 0      # стендам и телеметрии
 var heal_queue_garrisoned: int = 0
@@ -8625,6 +9760,7 @@ func _tick_heal_queue(sid: int, sq: Dictionary, now: int) -> void:
 	if castle == null:
 		sq.erase("heal_queue")
 		sq.erase("heal_run")
+		sq.erase("no_control")     # лечиться негде — управление возвращается
 		return
 	var cs := castle as Castle
 	if cs.request_garrison(sid):
@@ -8734,7 +9870,7 @@ func _start_panic(sid: int) -> void:
 	# Разница на экране решающая: раньше диск разлёта равнялся дальности
 	# бегства, и отряд рвало пополам; теперь отряд уезжает кучей, а внутри
 	# кучи у каждого своё направление и своя дистанция.
-	var away: Vector3 = -squad_enemy_dir(sid)
+	var away: Vector3 = _panic_away(sid, base) if _Opt.panic_away_enemy 		else -squad_enemy_dir(sid)
 	away.y = 0.0
 	if away.length_squared() < 1e-6:
 		# Противник неизвестен (сорвались от потерь, а не от того, с кем
@@ -8754,7 +9890,13 @@ func _start_panic(sid: int) -> void:
 		var u := men[i] as Unit
 		if u == null or not is_instance_valid(u) or u.is_dead():
 			continue
-		# ── КОНУС, А НЕ ПОЛНЫЙ КРУГ ────────────────────────────────────────
+		# ── ПОЛКОВОДЕЦ НЕ ПАНИКУЕТ (ТЗ 29.10.2026, разбор партии) ──────────
+		# Свиту выбивали до 3-9 из 31, отряд срывался в панику вместе с
+		# боссом при почти полном здоровье: паникующий не слушает ни отхода
+		# мозга (withdraw_to), ни атаки — бежал в толпу и гиб под снайперами.
+		# Своё самосохранение у босса — отход PigBossCommander
+		if u.is_pig_boss():
+			continue
 		# Направление внутри ±PANIC_CONE_DEG от вектора бегства. Жребий
 		# детерминированный (золотой угол по номеру бойца, сбитый номером
 		# узла): два прогона одного боя обязаны давать одно поле
@@ -8770,6 +9912,62 @@ func _start_panic(sid: int) -> void:
 		u.set_panicked(true)
 		_panic_queue.append([u, land_target(_panic_inside(spot))])
 	_show_panic_flag(sid, true)
+
+## ── ВЕКТОР БЕГСТВА — ПРОЧЬ ОТ ВРАГА (ТЗ 29.10.2026) ─────────────────────────
+## Прежний источник — кэш курса `_squad_face`, а его пишут только копейщики в
+## стойке «Защита» (squad_enemy_point из _update_live_rank). У орды кэш пуст,
+## и срабатывал запасной «от центра карты»: волна у базы игрока стоит между
+## центром и базой, «от центра» — это ВПЕРЁД, сквозь строй игрока, у всех
+## отрядов одинаково. Теперь угроза ищется сканом сетки вокруг отряда: сумма
+## векторов «враг → центр отряда» с весом ближних. Врагов нет или они со всех
+## сторон поровну — к своей крепости (у орды — хижине: GoblinHut — Castle).
+## Один скан на срыв отряда, покадрового пути здесь нет
+func _panic_away(sid: int, base: Vector3) -> Vector3:
+	var fac: int = int(squads[sid].get("faction", -1))
+	var v := Vector3.ZERO
+	if unit_grid != null:
+		var rows: PackedInt32Array = unit_grid.query_radius_rows(base, _UCfg.PANIC_THREAT_R)
+		var cap: int = _row_units.size()
+		var wsum := 0.0
+		for row in rows:
+			if row >= cap:
+				continue
+			var raw = _row_units[row]
+			if raw == null or not is_instance_valid(raw):
+				continue
+			var u := raw as Unit
+			if u == null or u.is_dead() or u.faction == fac or u.garrisoned:
+				continue
+			var p: Vector3 = u.position if u._local_xform else u.global_position
+			var d := Vector3(base.x - p.x, 0.0, base.z - p.z)
+			var l: float = d.length()
+			if l < 1e-3:
+				continue
+			var w: float = 1.0 / (1.0 + l)
+			v += d / l * w
+			wsum += w
+		# Враги со всех сторон поровну — сумма гаснет: направления нет
+		if wsum > 0.0 and v.length() > 0.25 * wsum:
+			v = v.normalized()
+			var home: Vector3 = _panic_home_dir(fac, base)
+			# Дом в полусфере «прочь» — тянем к нему: бегут к своим, а не
+			# просто куда глаза глядят
+			if home != Vector3.ZERO and home.dot(v) > 0.0:
+				v = (v * 2.0 + home).normalized()
+			return v
+	v = -squad_enemy_dir(sid)
+	v.y = 0.0
+	if v.length_squared() > 1e-6:
+		return v.normalized()
+	return _panic_home_dir(fac, base)
+
+## Курс к ближайшей своей крепости (у орды — хижине); ZERO — дома нет или рядом
+func _panic_home_dir(fac: int, base: Vector3) -> Vector3:
+	var c: Node = _nearest_heal_castle(fac, base)
+	if c == null:
+		return Vector3.ZERO
+	var d := Vector3((c as Node3D).global_position.x - base.x, 0.0, (c as Node3D).global_position.z - base.z)
+	return d.normalized() if d.length_squared() > 4.0 else Vector3.ZERO
 
 ## ── ЦЕНТР ОТРЯДНОГО ПРИКАЗА ДЕРЖИТСЯ ОТ КРОМКИ НА ПОЛУРАЗМЕР СТРОЯ (ТЗ 25.09.2026) ──
 ## Та же ловушка, что у паники (ниже), но для ЛЮБОГО отрядного приказа:
@@ -8877,6 +10075,14 @@ func _end_panic(sid: int) -> void:
 	_show_panic_flag(sid, false)
 	# Отбежал — в замок лечиться (ТЗ 19.09.2026), второй паники не будет
 	_enter_heal_queue(sid)
+	# ── ОТСТУПИВШИЙ НЕУПРАВЛЯЕМ (ТЗ 29.10.2026, п. 3) ─────────────────────
+	# Отряд, завершивший бегство, идёт в замок сам: не выделяется, выпадает
+	# из выделения и из групп Ctrl+1…9, приказов игрока не получает (их
+	# раздаёт только выделение). Снимает признак выход из лазарета
+	# (squad_note_healed) или отсутствие крепостей (_tick_heal_queue)
+	if bool(sq.get("heal_queue", false)):
+		sq["no_control"] = true
+		_drop_from_control(sid)
 
 ## Кого отряд сейчас считает своим противником (для относительного порога).
 ## Берётся из уже готовой боевой бухгалтерии, своего скана здесь нет
@@ -9124,7 +10330,10 @@ func _update_squad_banners() -> void:
 		# физическими шагами тем же механизмом, что и сам спрайт, и только на
 		# ней знамя не дрожит относительно хозяина
 		var p: Vector3 = u.draw_position()
-		banner.place_at(p, get_terrain_height(p.x, p.z))
+		var gy: float = get_terrain_height(p.x, p.z)
+		# Свое место знамени у знаменосца (Свинобосс — за спиной, ТЗ 30.10.2026)
+		var bo: Vector3 = u.banner_offset() if _Opt.boss_banner_back else Vector3.ZERO
+		banner.place_at(Vector3(p.x + bo.x, p.y, p.z + bo.z), gy + bo.y)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # СТРОЙКА РАБОЧИМ
@@ -9507,13 +10716,18 @@ func try_worker_build(worker: Node, build_id: String, crew: Array = []) -> void:
 	# Крепостей на игрока не больше CASTLE_MAX_COUNT, цена прогрессивная
 	if build_id == "castle" and not castle_allowed(worker.faction):
 		if main != null and main.get("hud") != null and worker.faction == Constants.FACTION_PLAYER:
-			main.hud.show_placement_hint("Крепостей не больше %d!" % _UCfg.CASTLE_MAX_COUNT)
+			main.hud.show_notice("Крепостей не больше %d!" % _UCfg.CASTLE_MAX_COUNT)
 		return
 	# Загонов на игрока не больше SHEEP_PEN_MAX_COUNT (ТЗ 19.09.2026), отказ
 	# стоит ДО списания и до режима размещения — как у крепости
+	# Ступенчатая разблокировка (ТЗ 30.10.2026): закрытое не строится
+	if not build_unlocked(worker.faction, build_id):
+		if main != null and main.get("hud") != null and worker.faction == Constants.FACTION_PLAYER:
+			main.hud.show_notice(build_unlock_hint(build_id))
+		return
 	if build_id == "sheep_pen" and not sheep_pen_allowed(worker.faction):
 		if main != null and main.get("hud") != null and worker.faction == Constants.FACTION_PLAYER:
-			main.hud.show_placement_hint("Загонов не больше %d!" % _UCfg.SHEEP_PEN_MAX_COUNT)
+			main.hud.show_notice("Загонов не больше %d!" % _UCfg.SHEEP_PEN_MAX_COUNT)
 		return
 	var cost: Dictionary = build_cost_for(worker.faction, build_id)
 	if not ResourceManager.spend(worker.faction, cost):
@@ -9540,6 +10754,9 @@ func try_worker_build(worker: Node, build_id: String, crew: Array = []) -> void:
 	# (ConstructionSite._make_target) — второго списка «id → класс» в проекте
 	# быть не должно, забытая там строка означала бы вечный фундамент
 	var instant: bool = bool(_UCfg.building_cfg(build_id).get("instant_build", false))
+	# Овцеферму игрок строит рабочими, как всё (ТЗ 30.10.2026, ручка pen_construct)
+	if build_id == "sheep_pen" and _Opt.pen_construct:
+		instant = false
 	main.enter_building_placement(cost, size,
 		func(pos: Vector3):
 			if instant:
@@ -9551,6 +10768,7 @@ func try_worker_build(worker: Node, build_id: String, crew: Array = []) -> void:
 					made.set("stock_on_ready", true)
 				main.world_add(made)
 				made.global_position = pos
+				note_building_done(f)
 				return
 			var site: Building = _CSite.new()
 			site.faction     = f
@@ -10805,7 +12023,9 @@ func squad_pick_member(target_squad: int, from_pos: Vector3, fallback: Node3D) -
 	var best_score := INF
 	for m in squad_members(target_squad):
 		var u := m as Unit
-		if u == null or u.is_dead():
+		# Призрак «последнего выжившего» — не жертва (Unit._ghost): замок по
+		# выбитому отряду снимается, как по уничтоженному
+		if u == null or u.is_dead() or u._ghost:
 			continue
 		# Дистанция + штраф за уже целящихся: залп размазывается по шеренге
 		var score: float = from_pos.distance_to(u.global_position) \
@@ -10835,6 +12055,58 @@ func squad_pick_member(target_squad: int, from_pos: Vector3, fallback: Node3D) -
 ## меньше одного). Холодный путь: зовётся раз в такт решения на группу, а не
 ## покадрово; скан один (query_radius), обход — по чужим бойцам в радиусе
 const FRONT_PAIR_MAX_FOES := 600
+## ── ОСЬ ЧУЖОГО ФРОНТА ВОКРУГ ТОЧКИ (ТЗ 28.10.2026, мозг свинобосса) ───────
+## Тот же расчёт, что у EnemyAI._enemy_front_normal (ковариация XZ и atan2),
+## но по СТРОКАМ ЯДРА в радиусе (query_radius_rows), для любой стороны:
+## все живые не моей фракции. Ответ — единичная нормаль к линии чужих,
+## направленная НА них от центра; ZERO — чужих меньше трёх или облако круглое
+func enemy_front_axis(center: Vector3, my_faction: int, radius: float) -> Vector3:
+	if unit_grid == null:
+		return Vector3.ZERO
+	var rows: PackedInt32Array = unit_grid.query_radius_rows(center, radius)
+	var cap: int = _row_units.size()
+	var sx := 0.0
+	var sz := 0.0
+	var n := 0
+	var xs := PackedFloat32Array()
+	var zs := PackedFloat32Array()
+	for row in rows:
+		if row >= cap:
+			continue
+		var raw = _row_units[row]
+		if raw == null or not is_instance_valid(raw):
+			continue
+		var u := raw as Unit
+		if u == null or u.is_dead() or u.faction == my_faction or u.garrisoned:
+			continue
+		var p: Vector3 = u.position if u._local_xform else u.global_position
+		xs.append(p.x)
+		zs.append(p.z)
+		sx += p.x
+		sz += p.z
+		n += 1
+	if n < 3:
+		return Vector3.ZERO
+	var mx: float = sx / float(n)
+	var mz: float = sz / float(n)
+	var cxx := 0.0
+	var czz := 0.0
+	var cxz := 0.0
+	for i in range(n):
+		var ax: float = xs[i] - mx
+		var az: float = zs[i] - mz
+		cxx += ax * ax
+		czz += az * az
+		cxz += ax * az
+	if absf(cxx - czz) < 0.01 and absf(cxz) < 0.01:
+		return Vector3.ZERO
+	var ang: float = 0.5 * atan2(2.0 * cxz, cxx - czz)
+	var nrm := Vector3(-sin(ang), 0.0, cos(ang))
+	var to := Vector3(mx - center.x, 0.0, mz - center.z)
+	if nrm.dot(to) < 0.0:
+		nrm = -nrm
+	return nrm
+
 func front_pairs(my_sids: Array, around: Vector3, radius: float, my_faction: int) -> Dictionary:
 	var out: Dictionary = {}
 	if my_sids.is_empty() or unit_grid == null:
@@ -10920,6 +12192,35 @@ var front_pairs_made: int = 0
 ## sink — если передан (Array), пары [боец, цель] складываются туда вместо
 ## немедленного command_attack: очередь приказов командира Attack-Move
 ## раздаёт их с бюджетом на кадр (ТЗ 10.10.2026). Разбор целей — тот же
+## ── «ВОЛЬНО»: АГРО ОТРЯДОМ (ТЗ 31.10.2026, ручка ease_squad_engage) ───────
+## Боец отряда копейщиков или мечников в стойке «Атака» заметил чужого —
+## весь отряд берёт целью его отряд (squad_attack_squad), не чаще
+## EASE_ENGAGE_CD_MS; при ease_rush всем — окно рывка перед столкновением
+const EASE_ENGAGE_CD_MS := 3000
+var ease_engages: int = 0
+
+func squad_ease_engage(sid: int, foe: Unit) -> bool:
+	var sqv: Variant = squads.get(sid)
+	if sqv == null or foe == null or not is_instance_valid(foe) or foe.is_dead() or foe.squad_id <= 0:
+		return false
+	var sq: Dictionary = sqv
+	var ty: String = String(sq.get("type", ""))
+	if ty != "spearman" and ty != "warrior":
+		return false
+	var now: int = Unit.game_ms()
+	var nx: Variant = sq.get("ease_engage_ms")
+	if nx != null and now < int(nx):
+		return false
+	sq["ease_engage_ms"] = now + EASE_ENGAGE_CD_MS
+	if squad_attack_squad(sid, foe.squad_id, true) <= 0:
+		return false
+	ease_engages += 1
+	if _Opt.ease_rush:
+		for m in (sq["members"] as Array):
+			if m != null and is_instance_valid(m) and not (m as Unit).is_dead():
+				(m as Unit).start_ease_rush()
+	return true
+
 func squad_attack_squad(sid: int, foe_sid: int, forced: bool = false, sink: Variant = null) -> int:
 	var sq: Variant = squads.get(sid)
 	var fsq: Variant = squads.get(foe_sid)
@@ -11395,6 +12696,13 @@ func build_route(from_p: Vector3, goal: Vector3, lane_dz: float, lat: Vector2, c
 ## разнесённую своим смещением (_nav_spread). Первый угол не виден с его
 ## точки (ствол, выступ) — личный обход ДО него, а не своя дорога
 var _squad_route_cache: Dictionary = {}
+## Группы Attack-Move (ТЗ 28.10.2026, пятое письмо): sid → номер группы клика
+## и номер группы → медиана центров её отрядов (ведёт SquadCommander). Дорога
+## отряда в группе строится от центра ГРУППЫ — все отряды клика идут в один
+## проход, а не фланги в разные (ручка am_group_route)
+var am_group_of: Dictionary = {}
+var am_group_centre: Dictionary = {}
+var am_group_legs: int = 0
 var _squad_route_frame: int = -1
 const SQUAD_ROUTE_FRAMES := 120
 ## Полуширина строя для отжима углов отрядной дороги: половина NAV_LAT_MAX —
@@ -11424,6 +12732,15 @@ func squad_leg(sid: int, from_p: Vector3, goal: Vector3, lat: Vector2, clear: fl
 	var c: Vector2 = squad_centre_xz(sid)
 	if c.x == INF:
 		return nav_route(from_p, goal, clear)
+	# ── ОТСТАВШИЙ ИДЁТ СВОЕЙ ДОРОГОЙ (разбор партии 27.10.2026) ─────────────
+	# Дорога отряда строится от его центра и разносится на смещение бойца, а
+	# разнос не шире NAV_LAT_MAX. Боец, оторвавшийся дальше (подзыв
+	# сплочённости, смыкание разъехавшихся постов), получал углы, сдвинутые
+	# на 6 м вместо его 12-22: шёл к чужому углу, разворачивался к следующему
+	# и ходил кругами в десятке метров от своих (qa_tz1027 C: 25 с, отрыв
+	# 22 м не сократился). Он не в колонне — дорога ему своя
+	if _Opt.straggler_own_leg and lat.length() > NAV_LAT_MAX:
+		return nav_route(from_p, goal, clear)
 	var f: int = Engine.get_physics_frames()
 	if f - _squad_route_frame >= SQUAD_ROUTE_FRAMES:
 		_squad_route_cache.clear()
@@ -11438,6 +12755,15 @@ func squad_leg(sid: int, from_p: Vector3, goal: Vector3, lat: Vector2, clear: fl
 	# тормозят»). Начало ноги далеко от центра — дорога строится от него
 	if Vector2(from_p.x - c.x, from_p.z - c.y).length() > SQUAD_LEG_FAR:
 		from_c = Vector3(from_p.x - lat.x, 0.0, from_p.z - lat.y)
+	elif _Opt.am_group_route and not am_group_of.is_empty():
+		# ── ОДНА ДОРОГА НА ГРУППУ [A] (ТЗ 28.10.2026, пятое письмо) ────────
+		# Дорога от центра отряда вела фланги в РАЗНЫЕ проходы стены (зонд
+		# qa_am_map D: разрыв 52 м, увод 22-32 м). От центра группы A* у всех
+		# отрядов выбирает один проход; цель у каждого своя (последняя точка)
+		var gc: Variant = am_group_centre.get(int(am_group_of.get(sid, 0)))
+		if gc != null:
+			from_c = gc as Vector3
+			am_group_legs += 1
 	# ── ПОЛОСА ОТРЯДА ШИРИНОЙ В СМЕЩЕНИЕ БОЙЦА (ТЗ 19.09.2026, единство строя)
 	# Дорога центра считалась свободной, пока свободна ПРЯМАЯ центра; фланг,
 	# упиравшийся в башню, строил свою дорогу — и обходил её с другой стороны

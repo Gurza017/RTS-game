@@ -27,6 +27,21 @@ const _BBUtilL := preload("res://scripts/BillboardUtil.gd")
 const _TrollScene := preload("res://scenes/units/Troll.tscn")
 const _SheepScript := preload("res://scripts/goblin/Sheep.gd")
 const _GnollScene := preload("res://scenes/units/Gnoll.tscn")
+const _OptL := preload("res://scripts/perf_config.gd")
+const _SpawnL := preload("res://scripts/spawn_config.gd")
+
+## Множитель охраны пня (ТЗ 31.10.2026, ручка lair_guard_x3)
+static func guard_mult() -> int:
+	return _SpawnL.LAIR_GUARD_MULT if _OptL.lair_guard_x3 else 1
+
+## ── ОЖИВШИЙ ПЕНЬ (ТЗ 31.10.2026, ручка lair_revive) ───────────────────────
+## Запечатан: своих часов спавна нет, потолки не держат, переход игрока на
+## берег его не будит — внутри LAIR_REVIVE_TROLLS троллей и
+## LAIR_REVIVE_GNOLLS отрядов гноллов, и они вываливаются по одному в
+## LAIR_REVIVE_STEP_SEC только от удара по пню. Ставит GameManager.restore_lair
+var sealed: bool = false
+## Пень поднят из сохранения: стая уже в слепке, новой не заводить
+var from_save: bool = false
 
 const ART_DIR := "res://assets/factions/orc/Troll/Root Troll/"
 const TREE_SPRITE := ART_DIR + "Dead Tree.png"
@@ -126,7 +141,7 @@ func begin_thaw() -> void:
 		_thaw_timer.one_shot = false
 		add_child(_thaw_timer)
 		_thaw_timer.timeout.connect(_thaw_step)
-	_thaw_timer.wait_time = _GobCfgL.LAIR_THAW_STEP_SEC
+	_thaw_timer.wait_time = _SpawnL.LAIR_REVIVE_STEP_SEC if sealed else _GobCfgL.LAIR_THAW_STEP_SEC
 	_thaw_timer.start()
 	_thaw_step()
 
@@ -263,7 +278,10 @@ var _troll_timer: Timer = null
 var respawned_total: int = 0
 
 func _start_troll_respawn() -> void:
-	if _troll_timer != null:
+	if _troll_timer != null or sealed:
+		return
+	# Снесённый загрузкой партии — как у _start_gnoll_pack (отложенный старт)
+	if not is_inside_tree() or is_queued_for_deletion():
 		return
 	_troll_timer = Timer.new()
 	_troll_timer.wait_time = _DiffL.mob_gap(_GobCfgL.TROLL_RESPAWN_SEC)
@@ -277,7 +295,7 @@ func _on_troll_respawn() -> void:
 		if _troll_timer != null:
 			_troll_timer.stop()
 		return
-	if trolls_alive() + virt_trolls >= _DiffL.mob_count(_GobCfgL.TROLL_GUARDS_MAX):
+	if trolls_alive() + virt_trolls >= _DiffL.mob_count(_GobCfgL.TROLL_GUARDS_MAX) * guard_mult():
 		return
 	var fresh: Array = spawn_guards(1)
 	respawned_total += fresh.size() if not frozen else 1
@@ -329,7 +347,8 @@ func spawn_big_squads(n: int) -> int:
 		var px: float = global_position.x + cos(a) * r
 		var pz: float = global_position.z + sin(a) * r
 		var base: Vector3 = GameManager.land_target(Vector3(px, 0.0, pz))
-		var sid: int = int(main.call("spawn_goblin_squad", "big_goblin", size, base))
+		var sid: int = int(main.call("spawn_goblin_squad", "big_goblin", size, base,
+			false, 0, not _OptL.lair_spawn_at_lair))
 		if sid <= 0:
 			continue
 		big_squads.append(sid)
@@ -347,10 +366,13 @@ func spawn_gnoll_squads(n: int) -> int:
 	var size: int = int(_GobCfgL.SQUAD_SIZE.get("gnoll", 12))
 	# ПОТОЛОК ЖИВЫХ НА ПЕНЬ (19.09.2026, лог партии: гноллы копились до 312 и
 	# давали половину A*): волна выходит только в свободные места
-	var room: int = _DiffL.mob_count(_GobCfgL.GNOLL_MAX_ALIVE) - gnolls_alive() - virt_gnoll_squads * size
-	n = mini(n, int(floor(float(room) / float(maxi(size, 1)))))
-	# ОБЩИЙ ПОТОЛОК ОТРЯДОВ ОТ ВСЕХ ПНЕЙ (ТЗ 14.10.2026, п. 3: MAX_STUMP_GNOLLS)
-	n = mini(n, GameManager.gnoll_squads_room())
+	var room: int = _DiffL.mob_count(_GobCfgL.GNOLL_MAX_ALIVE) * guard_mult() \
+		- gnolls_alive() - virt_gnoll_squads * size
+	# Запечатанный пень потолков не знает: его стая уже посчитана при оживлении
+	if not sealed:
+		n = mini(n, int(floor(float(room) / float(maxi(size, 1)))))
+		# ОБЩИЙ ПОТОЛОК ОТРЯДОВ ОТ ВСЕХ ПНЕЙ (ТЗ 14.10.2026, п. 3: MAX_STUMP_GNOLLS)
+		n = mini(n, GameManager.gnoll_squads_room())
 	gnoll_capped += 1 if n <= 0 else 0
 	if n <= 0:
 		return 0
@@ -368,7 +390,8 @@ func spawn_gnoll_squads(n: int) -> int:
 		var pz: float = global_position.z + sin(a) * r
 		var base: Vector3 = GameManager.land_target(
 			Vector3(px, 0.0, pz))
-		var sid: int = int(main.call("spawn_goblin_squad", "gnoll", size, base))
+		var sid: int = int(main.call("spawn_goblin_squad", "gnoll", size, base,
+			false, 0, not _OptL.lair_spawn_at_lair))
 		if sid <= 0:
 			continue
 		gnoll_squads.append(sid)
@@ -380,14 +403,35 @@ func spawn_gnoll_squads(n: int) -> int:
 				continue
 			u.set("lair", self)
 			u.set("home_pos", global_position)
-			(u as Unit).post_pos = (u as Unit).global_position
+			var hg: Vector3 = (u as Unit).horde_goal
+			(u as Unit).post_pos = hg if hg.is_finite() else (u as Unit).global_position
 			gnolls.append(u)
 	return made
 
 ## Стартовая стая: GNOLL_START_SQUADS отрядов при появлении пня.
 ## Отложенно, как и стадо: в _ready точка узла ещё нулевая
 func _start_gnoll_pack() -> void:
-	if is_dead():
+	if is_dead() or sealed:
+		return
+	# Снесённый загрузкой партии (SaveLoadManager._wipe_live_world снимает
+	# узел с дерева до queue_free): отложенный старт стаи заводить нельзя
+	if not is_inside_tree() or is_queued_for_deletion():
+		return
+	# Стая — СВОЯ у каждого пня (ТЗ 31.10.2026, при lair_guard_x3): прежде
+	# любой отряд гноллов на карте отменял стаю, и второй пень оставался без неё
+	if _OptL.lair_guard_x3 and not from_save:
+		for sid in GameManager.squads:
+			var sq: Dictionary = GameManager.squads[sid]
+			if int(sq.get("faction", -1)) != Constants.FACTION_GOBLIN \
+					or String(sq.get("type", "")) != "gnoll":
+				continue
+			var c: Vector2 = GameManager.squad_centre_xz(int(sid))
+			if c.is_finite() and c.distance_to(Vector2(global_position.x, global_position.z)) \
+					<= _GobCfgL.GNOLL_HOME_ADOPT_R:
+				_arm_gnoll_clock(_DiffL.mob_gap(_GobCfgL.GNOLL_SPAWN_SEC))
+				return
+		spawn_gnoll_squads(_DiffL.mob_count(_GobCfgL.GNOLL_START_SQUADS) * guard_mult())
+		_arm_gnoll_clock(_DiffL.mob_gap(_GobCfgL.GNOLL_SPAWN_SEC))
 		return
 	# ── ЗАГРУЖЕННАЯ ПАРТИЯ СТАЮ УЖЕ ВЕЗЁТ В СЛЕПКЕ ────────────────────────
 	# Логово из сохранения рождало вторую стаю поверх восстановленной (поймал
@@ -580,6 +624,9 @@ func _on_gnoll_wave() -> void:
 func _start_flock() -> void:
 	if not _SheepScript.sheets_ok() or is_dead():
 		return
+	# Снесённый загрузкой партии — как у _start_gnoll_pack (отложенный старт)
+	if not is_inside_tree() or is_queued_for_deletion():
+		return
 	spawn_sheep(_GobCfgL.SHEEP_START)
 	_flock_timer = Timer.new()
 	_flock_timer.wait_time = _GobCfgL.SHEEP_BREED_SEC
@@ -704,6 +751,9 @@ func _needs_tick() -> bool:
 ## маркер выделения. Точки детерминированы от номера узла: два прогона
 ## стенда дают одно логово
 func _build_decor() -> void:
+	# Снесённый загрузкой партии — как у _start_gnoll_pack (отложенный старт)
+	if not is_inside_tree() or is_queued_for_deletion():
+		return
 	var rng := RandomNumberGenerator.new()
 	rng.seed = int(get_instance_id() % 100003)
 	var ring: float = maxf(build_size.x, build_size.z) * 0.5 + _GobCfgL.LAIR_DECOR_RING
@@ -927,6 +977,8 @@ func take_damage(amount: float, attacker: Node = null) -> void:
 		# ЧАСЫ ВОССТАНОВЛЕНИЯ (спринт 20): пень заново ставится не раньше
 		# LAIR_REGEN_SEC после сноса — даже при тридцати овцах у стороны
 		GameManager.note_lair_fell(side_faction)
+		if _OptL.lair_reward:
+			_reward_killer(attacker)
 		# Пень снесён — укрывшиеся выходят наружу, прятаться больше негде
 		for raw in _hidden_gnolls.duplicate():
 			if raw != null and is_instance_valid(raw):
@@ -935,3 +987,75 @@ func take_damage(amount: float, attacker: Node = null) -> void:
 ## Логово зачищено: хоть один тролль когда-то был, и живых нет
 func is_cleared() -> bool:
 	return _spawned_total > 0 and trolls_alive() == 0
+
+## ── НАГРАДА ЗА СНЕСЁННЫЙ ПЕНЬ (ТЗ 31.10.2026, ручка lair_reward) ──────────
+## Снёс игрок — «дзынь», над пнём всплывает слиток с «+N», камера к пню, если
+## он вне кадра, и золото на счёт. Кто снёс — по добивающему (у стрелы — её
+## стрелок), иначе — по последнему обидчику стражи
+var rewarded: int = 0
+
+func _killer_faction(attacker: Node) -> int:
+	var a: Node = attacker
+	if a == null or not is_instance_valid(a):
+		a = _last_attacker
+	if a == null or not is_instance_valid(a):
+		return -1
+	var f: Variant = a.get("faction")
+	if f == null:
+		var sh: Variant = a.get("shooter")
+		if sh != null and is_instance_valid(sh):
+			f = (sh as Node).get("faction")
+	return int(f) if f != null else -1
+
+func _reward_killer(attacker: Node) -> void:
+	if _killer_faction(attacker) != Constants.FACTION_PLAYER:
+		return
+	rewarded = _SpawnL.LAIR_REWARD_GOLD
+	ResourceManager.add_resource(Constants.FACTION_PLAYER, Constants.RESOURCE_GOLD,
+		_SpawnL.LAIR_REWARD_GOLD)
+	AudioManager.play_ui("banner_ready")
+	var main = GameManager.main
+	var at: Vector3 = global_position + Vector3(0.0, build_size.y * 0.8, 0.0)
+	var fx := Node3D.new()
+	fx.name = "LairReward"
+	var host: Node = get_parent()
+	if host == null:
+		return
+	host.add_child(fx)
+	fx.global_position = at
+	var ingot := Sprite3D.new()
+	ingot.texture = load("res://assets/factions/humans/icons/hud/Gold_Resource.png")
+	ingot.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	ingot.no_depth_test = true
+	ingot.render_priority = 10
+	if ingot.texture != null:
+		ingot.pixel_size = 2.2 / maxf(float(ingot.texture.get_width()), 1.0)
+	fx.add_child(ingot)
+	var lbl := Label3D.new()
+	lbl.text = "+%d" % _SpawnL.LAIR_REWARD_GOLD
+	lbl.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	lbl.no_depth_test = true
+	lbl.render_priority = 11
+	lbl.font_size = 96
+	lbl.outline_size = 18
+	lbl.pixel_size = 0.012
+	lbl.modulate = Color(1.0, 0.85, 0.25)
+	lbl.position = Vector3(0.0, 1.6, 0.0)
+	fx.add_child(lbl)
+	var tw := fx.create_tween()
+	tw.set_parallel(true)
+	tw.tween_property(fx, "position", fx.position + Vector3(0.0, _SpawnL.LAIR_REWARD_RISE, 0.0),
+		_SpawnL.LAIR_REWARD_SEC)
+	tw.tween_property(ingot, "modulate:a", 0.0, _SpawnL.LAIR_REWARD_SEC * 0.4) \
+		.set_delay(_SpawnL.LAIR_REWARD_SEC * 0.6)
+	tw.tween_property(lbl, "modulate:a", 0.0, _SpawnL.LAIR_REWARD_SEC * 0.4) \
+		.set_delay(_SpawnL.LAIR_REWARD_SEC * 0.6)
+	tw.chain().tween_callback(fx.queue_free)
+	# Пень вне кадра — камера к нему
+	var vp := get_viewport()
+	var cam: Camera3D = vp.get_camera_3d() if vp != null else null
+	if cam != null and not cam.is_position_in_frustum(global_position) \
+			and main != null and is_instance_valid(main):
+		var rc: Variant = main.get("_camera")
+		if rc != null and is_instance_valid(rc) and (rc as Node).has_method("jump_to"):
+			(rc as Node).call("jump_to", global_position)

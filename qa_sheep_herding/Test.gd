@@ -255,9 +255,15 @@ func _a_select() -> void:
 	_Opt.cmd_meter = true
 	_Opt.cmd_reset()
 	await _click_world(MOUSE_BUTTON_LEFT, s0.global_position)
+	# РАЗВОРОТ ТЗ 31.10.2026 (ручка pen_hover): клик по своей овце выделяет и
+	# её овцеферму — бойцов в выделении нет, постройка может быть
+	var no_men := true
+	for su in sm.selected_units:
+		if su is Unit:
+			no_men = false
 	verdict("A1 ЛКМ по овце — она выделена и подсвечена кольцом, бойцов в выделении нет",
 		sm.selected_sheep.size() == 1 and sm.selected_sheep[0] == s0
-			and bool(s0.call("is_selected")) and sm.selected_units.is_empty(),
+			and bool(s0.call("is_selected")) and no_men,
 		"овец выделено %d, кольцо=%s" % [sm.selected_sheep.size(), str(s0.call("is_selected"))])
 	# ПКМ по земле — овце ничего не приказывается
 	var tgt0: Vector3 = s0.call("current_target")

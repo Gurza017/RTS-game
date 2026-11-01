@@ -74,12 +74,23 @@ func is_running() -> bool:
 
 func _strike_damage() -> float:
 	_combo_step += 1
+	var dmg: float = attack_damage
 	if _combo_step >= STRONG_EVERY:
 		_combo_step = 0
 		_play_attack_anim("attack2", 600)
-		return _strong_damage
-	_play_attack_anim("attack1", 380)
-	return attack_damage
+		dmg = _strong_damage
+	else:
+		_play_attack_anim("attack1", 380)
+	# ── «ЗАЗУБРЕННЫЕ ПИКИ» (кузница гоблинов, ТЗ 28.10.2026) ────────────────
+	# Урон по крупной цели — конница (charge_range > 0), туша, тролль:
+	# Unit.giant_class — ×(1 + bonus_giant_melee); тот же приём, что «Приём
+	# копья» у копейщика людей (Spearman._strike_damage), но по своему роду
+	var tgt = attack_target
+	if tgt != null and is_instance_valid(tgt) and tgt is Unit and (tgt as Unit).giant_class():
+		var gm: float = GameManager.unit_bonus(faction, stat_id, "bonus_giant_melee")
+		if gm > 0.0:
+			dmg *= 1.0 + gm
+	return dmg
 
 ## ── ЛИЧНЫЙ ГАБАРИТ ─────────────────────────────────────────────────────────
 ## Спрайт гоблина в SIZE_SCALE раз крупнее людского, и общая на всю армию

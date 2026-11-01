@@ -70,6 +70,9 @@ func _all_dormant(sid: int) -> bool:
 	return not _alive(sid).is_empty()
 
 func _run() -> void:
+	# Площадку сбора/спавн у пня стенд проверяет на точке: вход орды из-за
+	# кромки (ТЗ 31.10.2026, стережёт qa_tz1031c) увёл бы отряды к краю карты
+	preload("res://scripts/perf_config.gd").horde_edge_entry = false
 	for a in OS.get_cmdline_user_args():
 		var s := String(a)
 		if s.begins_with("only="):

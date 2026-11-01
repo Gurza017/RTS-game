@@ -66,6 +66,8 @@ var _g: Unit = null
 var _archer: Unit = null
 
 func _run() -> void:
+	# Разворот ТЗ 31.10.2026 (гноллы без отступления): стенд стережёт прежнюю механику
+	preload("res://scripts/perf_config.gd").gnoll_no_retreat = false
 	main = load("res://scenes/Main.tscn").instantiate()
 	get_tree().root.add_child(main)
 	await frames(8)

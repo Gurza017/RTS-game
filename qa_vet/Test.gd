@@ -149,9 +149,10 @@ func _test_config() -> void:
 				String(d["name"]), String(d["stat"]), float(d["value"])])
 		print("    уровень %d, порог %3d убийств: %s" % [
 			lvl, _UCfg.veteran_threshold(utype, lvl), ", ".join(names)])
+	# Шкала ТЗ 30.10.2026: ступени без карточек, уровней = порогов (9 + легенда)
 	var ok: bool = (_UCfg.VET_CONFIG[utype]["thresholds"] as Array).size() \
-		== (_UCfg.VET_CONFIG[utype]["bonuses"] as Array).size()
-	verdict("1 длина порогов = длине таблицы бонусов", ok)
+		== _UCfg.max_veteran_level(utype) and _UCfg.max_veteran_level(utype) == _UCfg.LEGEND_TIER
+	verdict("1 длина порогов = числу ступеней шкалы", ok)
 
 ## ЗОНД КОНФИГА. Печатает три числа, которые ОБЯЗАНЫ измениться, если поправить
 ## unit_stats_config.gd: порог 1-го уровня, уровень ровно на этом числе фрагов
@@ -555,7 +556,6 @@ func _test_all_levels() -> void:
 	# ── ЛЕСТНИЦА ПРОХОДИТСЯ САМА (ТЗ 23.09.2026) ──────────────────────────
 	# Прежний цикл ждал pending и кликал apply_veteran_choice. Кликать
 	# больше некому: довели счёт до порога — ступень уже применена
-	var step_sum: float = _auto_step_sum("spearman")
 	var guard := 0
 	while GameManager.squad_level(squad) < maxlvl and guard < 50:
 		guard += 1
@@ -566,7 +566,9 @@ func _test_all_levels() -> void:
 		var gained: int = GameManager.squad_level(squad) - lvl0
 		if gained <= 0:
 			break
-		want_total += step_sum * float(gained)
+		for l in range(lvl0 + 1, lvl0 + gained + 1):
+			if l < _UCfg.LEGEND_TIER:
+				want_total += _auto_step_sum("spearman", l)
 		awarded += gained
 		var grade: int = _banner_grade(squad)
 		if grade != GameManager.squad_level(squad):
@@ -622,7 +624,10 @@ func _test_all_levels() -> void:
 	# не выбирают; в `chosen` теперь метки выданных ступеней и легендарный
 	# перк, а величины лежат в одной таблице на весь род войск — значит и
 	# ожидание считается одним умножением, а не перебором
-	var want_cfg: float = _auto_step_sum("spearman") * float(maxlvl)
+	# Прибавки по цвету лычек ступени; легенда — перк без числа (ТЗ 30.10.2026)
+	var want_cfg := 0.0
+	for l in range(1, mini(maxlvl, _UCfg.LEGEND_TIER - 1) + 1):
+		want_cfg += _auto_step_sum("spearman", l)
 	print("  ступеней пройдено: %d, записей в chosen: %s" % [maxlvl, str(chosen)])
 	verdict("6 сумма начисленного равна лестнице ступеней",
 		absf(total - want_cfg) < 0.01,
@@ -1162,8 +1167,8 @@ func _test_load() -> void:
 ## промахнулся на 0.35: у копейщика ступень даёт ещё и −0.05 с к перезарядке,
 ## и копилка отряда её считает. Перебираем сам словарь ступени — тогда новый
 ## ключ в таблице доедет сюда сам
-func _auto_step_sum(unit_type: String) -> float:
-	var step: Dictionary = _UCfg.vet_auto_step(unit_type)
+func _auto_step_sum(unit_type: String, lvl: int = 1) -> float:
+	var step: Dictionary = _UCfg.vet_auto_step(unit_type, lvl)
 	var total := 0.0
 	for k in step:
 		total += float(step[k])

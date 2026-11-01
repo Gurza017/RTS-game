@@ -167,6 +167,10 @@ func _give(f: int, amount: float) -> void:
 
 # ═════════════════════════════════════════════════════════════════════════════
 func _run() -> void:
+	# Разворот ТЗ 31.10.2026 (охрана пня ×3): стенд стережёт прежнюю механику
+	preload("res://scripts/perf_config.gd").lair_guard_x3 = false
+	# Третий (зеркальный) пень ел бы общий потолок стай (ТЗ 31.10.2026)
+	preload("res://scripts/perf_config.gd").lair_layout_v2 = false
 	main = load("res://scenes/Main.tscn").instantiate()
 	get_tree().root.add_child(main)
 	await pframes(10)
@@ -197,7 +201,15 @@ func _run() -> void:
 # ═════════════════════════════════════════════════════════════════════════════
 func _block_a(castle: Building) -> void:
 	print("\n═════ A. РАСПИСАНИЕ РЕЙДОВ И ПРИОРИТЕТ ЦЕЛЕЙ ═════")
-	var sched: Array = ev.schedule()
+	# БАЗОВОЕ расписание — без поздних рейдов и штурмов после часа (ТЗ
+	# 27.10.2026, второе письмо, п. 1): их сроки стережёт qa_tz1027b, а здесь
+	# A1 сверяет только 10/12/15 и сдвоенные 30/45/60
+	# (ev.schedule() — расписание, собранное при старте события, ручку уже
+	# не видит; берём тот же расчёт RaidManager.schedule заново)
+	var late0: bool = _Opt.goblin_late_raids
+	_Opt.goblin_late_raids = false
+	var sched: Array = _Raid.schedule()
+	_Opt.goblin_late_raids = late0
 	var times: Array = []
 	for e in sched:
 		times.append(int(float(e["t"])))

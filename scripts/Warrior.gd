@@ -310,6 +310,8 @@ func _effective_cooldown() -> float:
 	var c: float = super._effective_cooldown()
 	if rage_active():
 		c *= maxf(RAGE_COOLDOWN_MULT - vet_rage_cd, RAGE_CD_FLOOR)
+	elif _Opt.warrior_shield_wall and _stance_holds_ground():
+		c *= WALL_CD_MULT
 	return c
 
 ## ── НАПОР В НАБЕГЕ ────────────────────────────────────────────────────────
@@ -363,6 +365,36 @@ const GUARD_CUT_RANGED := 0.70
 ## Косинус границы фронтального сектора. 0.0 — ровно передняя полусфера:
 ## всё, что прилетело сзади, щит не видит (backstab бьёт в полную силу)
 const GUARD_FRONT_COS := 0.0
+## ТЗ 31.10.2026 (второе письмо): «Стена щитов» в стойке «Защита» режет и
+## стрелы, и сталь на WALL_CUT, а удары идут в WALL_CD_MULT раз реже
+const GUARD_CUT_WALL := 0.80
+const WALL_CD_MULT := 3.0
+## Рукопашная: щит поднят между ударами; после MELEE_SERIES ударов — окно
+## MELEE_OPEN_MS без щита (мечника можно пробить). Контакт держится
+## MELEE_CONTACT_MS после последнего удара по нему или им
+const MELEE_SERIES := 3
+const MELEE_OPEN_MS := 1200
+const MELEE_CONTACT_MS := 2500
+var _melee_strikes: int = 0
+var _melee_open_until_ms: int = 0
+var _melee_until_ms: int = 0
+## Стенды: сколько раз открывался после серии
+var melee_opens: int = 0
+
+## Дальнобойный ли обидчик: лучник — всегда; при ручке — любой стрелок
+## (гнолл с костями, attack_range > RANGED_ATTACK_MIN)
+func _ranged_foe(a: Node3D) -> bool:
+	if a is Archer:
+		return true
+	if _Opt.warrior_shield_dynamic and a is Unit:
+		return (a as Unit)._is_ranged()
+	return false
+
+## Щит в рукопашной поднят: контакт свежий и окно «открыт» прошло
+func melee_guard_up() -> bool:
+	return _Opt.warrior_melee_guard and now_ms < _melee_until_ms \
+		and now_ms >= _melee_open_until_ms and state == State.ATTACKING
+
 ## Скорость под щитом: −35% (просили 30–40%). Мечник не останавливается,
 ## а идёт под обстрелом медленнее, прикрываясь на ходу
 const GUARD_SPEED_FACTOR := 0.65
@@ -393,6 +425,10 @@ func _mark_threat() -> void:
 
 ## Щит поднят? Читает HUD для подсветки и стенды QA
 func is_guarding() -> bool:
+	# Стена щитов последних метров набега — сразу, не дожидаясь визуального
+	# тика (он шардирован, щит запаздывал на треть секунды)
+	if not _guard_active and _Opt.warrior_shield_dynamic and rage_active() and shield_wall_active():
+		return true
 	return _guard_active
 
 func set_auto_guard(on: bool) -> void:
@@ -433,8 +469,10 @@ func take_damage(amount: float, attacker: Node3D = null) -> void:
 	super.take_damage(amount, attacker)
 	if state == State.DEAD or not auto_guard:
 		return
-	if attacker is Archer:
+	if attacker != null and is_instance_valid(attacker) and _ranged_foe(attacker):
 		_mark_threat()
+	elif attacker != null and is_instance_valid(attacker):
+		_melee_until_ms = now_ms + MELEE_CONTACT_MS
 
 ## Долевое снижение входящего урона щитом
 func _incoming_damage_factor(attacker: Node3D) -> float:
@@ -452,7 +490,10 @@ func _incoming_damage_factor(attacker: Node3D) -> float:
 	# Стрелы щит держит лучше, чем сталь в упор. Множители ПЕРЕМНОЖАЮТСЯ, а не
 	# заменяют друг друга: щит и легендарный перк — разные вещи, и оба должны
 	# работать. Ноля при этом не выходит ни при каких числах
-	var cut: float = GUARD_CUT_RANGED if attacker is Archer else GUARD_CUT_MELEE
+	var ranged: bool = attacker != null and is_instance_valid(attacker) and _ranged_foe(attacker)
+	var cut: float = GUARD_CUT_RANGED if ranged else GUARD_CUT_MELEE
+	if _Opt.warrior_shield_wall and _stance_holds_ground():
+		cut = GUARD_CUT_WALL
 	return base * (1.0 - cut)
 
 ## Атакующий во фронтальном секторе?
@@ -496,7 +537,13 @@ func _update_guard() -> void:
 		# ЩИТ В НАБЕГЕ ПОДНЯТ БЕЗУСЛОВНО (заказ: «рывок с зафиксированными
 		# щитами»), и требование auto_guard тут не при чём — режим включил сам
 		# игрок двойным ПКМ
-		want = _threatened() or _stance_holds_ground() or rage_active()
+		if _Opt.warrior_shield_dynamic:
+			# Щит по делу: обстрел, «Защита», последние метры рывка, рукопашная
+			# между ударами. На бегу рывка и в покое — опущен
+			want = _threatened() or _stance_holds_ground() or shield_wall_active() \
+				or melee_guard_up()
+		else:
+			want = _threatened() or _stance_holds_ground() or rage_active()
 	if want != _guard_active:
 		# Щит поднялся или опустился — поза обязана смениться В ЭТОМ ЖЕ КАДРЕ.
 		# Обычный пересчёт идёт раз в ANIM_EVERY кадров, и стрела вполне
@@ -550,6 +597,9 @@ func _process_can_sleep() -> bool:
 	if Unit.game_ms() < _anim_lock_until_ms:
 		return false
 	if _threatened() or rage_active():
+		return false
+	# В рукопашной щит поднимается и опускается по ритму ударов
+	if _Opt.warrior_melee_guard and now_ms < _melee_until_ms:
 		return false
 	# Ленту привязанной строки ведёт ядро (look_core): спрашиваем базу —
 	# она сверяет текущую ленту ядра с покоем; щит — принуждение, не покой
@@ -623,5 +673,12 @@ func _setup_warrior_visual() -> void:
 ## приёма повода не даёт
 func _on_attack_fired(target: Node3D, damage: float) -> void:
 	super._on_attack_fired(target, damage)
+	# Ритм щита в рукопашной: серия ударов — окно без щита
+	_melee_until_ms = now_ms + MELEE_CONTACT_MS
+	_melee_strikes += 1
+	if _melee_strikes >= MELEE_SERIES:
+		_melee_strikes = 0
+		_melee_open_until_ms = now_ms + MELEE_OPEN_MS
+		melee_opens += 1
 	if _Opt.rage_auto and squad_id > 0 and not rage_active() and attack_range <= 3.0:
 		GameManager.squad_start_rage(squad_id, true)

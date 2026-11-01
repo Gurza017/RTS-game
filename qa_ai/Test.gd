@@ -13,6 +13,7 @@ extends Node
 ##  а тест 7 эту армию уничтожает)
 
 const _AICfg := preload("res://scripts/ai_start_army_limit.gd")
+const _Opt := preload("res://scripts/perf_config.gd")
 const _UCfg  := preload("res://scripts/unit_stats_config.gd")
 
 var main: Node = null
@@ -319,8 +320,10 @@ func _test_economy_and_build() -> void:
 	for i in range(maxi(0, ai_log.size() - 6), ai_log.size()):
 		log_tail.append(String(ai_log[i]))
 	print("  последние записи журнала: %s" % str(log_tail))
-	verdict("3 рабочие до WORKER_LIMIT", workers == _AICfg.WORKER_LIMIT,
-		"%d из %d" % [workers, _AICfg.WORKER_LIMIT])
+	# С экономикой v2 (ТЗ 30.10.2026) потолок рабочих — eco.worker_limit(), база — WORKER_LIMIT
+	var wcap: int = ai.eco.worker_limit() if _Opt.ai_eco_v2 else _AICfg.WORKER_LIMIT
+	verdict("3 рабочие до WORKER_LIMIT", workers >= _AICfg.WORKER_LIMIT and workers <= wcap,
+		"%d из %d (потолок %d)" % [workers, _AICfg.WORKER_LIMIT, wcap])
 	verdict("3 барак и кузница построены",
 		names.has("Бараки") and names.has("Кузница"), str(names))
 	verdict("3 ПЕРВЫЙ барак куплен за ресурсы (не бесплатно)", not free_early)
@@ -344,7 +347,10 @@ func _test_training_to_limits() -> void:
 		await flush(castle, 80)
 		await flush(_enemy_archery(), 80)
 		_snap_surplus()
-		if ai.army_ready():
+		# С 27.10.2026 army_ready() — доля ASSAULT_READY_FRACTION лимита (штурм
+		# раньше полного набора); проверка 4 ниже — про ПОЛНЫЙ лимит, поэтому
+		# ждём и готовности, и набора всех родов до SQUAD_LIMIT
+		if ai.army_ready() and _at_limits():
 			break
 		if step % 40 == 0:
 			print("    шаг %3d: %s" % [step, ai.report()])
@@ -420,6 +426,14 @@ func _guard_want_total() -> int:
 		n += _guard_want(String(t))
 	return n
 ## Поймать момент, когда гарнизон уже укомплектован, а лимит армии ещё нет
+## Все боевые рода набраны до squad_limit (проверка 4 — «найм до лимитов»)
+func _at_limits() -> bool:
+	for t in _AICfg.combat_types():
+		var uid: String = String(t)
+		if ai.squad_count(uid) < _AICfg.squad_limit(uid):
+			return false
+	return true
+
 func _snap_surplus() -> void:
 	if not surplus_snap.is_empty() or ai.army_ready():
 		return

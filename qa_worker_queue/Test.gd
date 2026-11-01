@@ -134,6 +134,8 @@ func _run() -> void:
 			Constants.RESOURCE_STONE, Constants.RESOURCE_FOOD]:
 		ResourceManager.add_resource(F, int(t), 90000.0)
 	print("\n═════ qa_worker_queue ═════")
+	# Ступени построек (ТЗ 30.10.2026) стенд не проверяет — открыто всё
+	GameManager.build_unlock = {Constants.FACTION_PLAYER: GameManager.BUILD_UNLOCK_ALL}
 	await _a_chain()
 	await _b_panel()
 	_finish()

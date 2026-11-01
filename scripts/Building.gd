@@ -32,6 +32,7 @@ const PRELOAD_SCENES := {
 	"troll":           preload("res://scenes/units/Troll.tscn"),
 	"gnoll":           preload("res://scenes/units/Gnoll.tscn"),
 	"big_goblin":      preload("res://scenes/units/BigGoblin.tscn"),
+	"pig_boss":        preload("res://scenes/units/PigBoss.tscn"),
 }
 
 ## Есть ли чем исполнить заказ на такого бойца. Спрашивают и очередь найма, и
@@ -436,6 +437,39 @@ func _maybe_load_building_sprite() -> void:
 	_fit_marker_to_sprite(tex, quad)
 	# И ФОРМА ПОПАДАНИЯ ЛУЧА — ТУДА ЖЕ (см. _fit_pick_to_sprite)
 	_fit_pick_to_sprite(tex, quad)
+	_add_ground_shadow()
+
+# ── ТЕНЬ У ОСНОВАНИЯ (ТЗ 30.10.2026, скриншот Tiny Swords) ───────────────────
+# Готовых подложек у построек нет — постройка «парила» над травой. Плоский
+# эллипс на земле под нарисованным основанием: по ширине рисунка, центр чуть
+# за его передней кромкой, затемнение тает к краю (shaders/ground_shadow)
+const GROUND_SHADOW_SHADER := preload("res://shaders/ground_shadow.gdshader")
+const SHADOW_W_MULT := 1.12      ## ширина эллипса к ширине рисунка
+const SHADOW_DEPTH_MULT := 0.62  ## глубина эллипса к ширине рисунка
+const SHADOW_BACK := 0.0         ## доля глубины за передней кромкой рисунка (0 — эллипс целиком за кромкой, видна полоса у основания)
+const SHADOW_LIFT := 0.04        ## над грунтом, м
+var _ground_shadow: MeshInstance3D = null
+
+func _add_ground_shadow() -> void:
+	if not _OptB.building_shadow or _draw_half_w <= 0.0:
+		return
+	if _ground_shadow != null and is_instance_valid(_ground_shadow):
+		_ground_shadow.queue_free()
+	var w: float = _draw_half_w * 2.0 * SHADOW_W_MULT
+	var d: float = _draw_half_w * 2.0 * SHADOW_DEPTH_MULT
+	var pm := PlaneMesh.new()
+	pm.size = Vector2(w, d)
+	var mat := ShaderMaterial.new()
+	mat.shader = GROUND_SHADOW_SHADER
+	mat.render_priority = -20
+	pm.material = mat
+	var mi := MeshInstance3D.new()
+	mi.name = "GroundShadow"
+	mi.mesh = pm
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mi.position = Vector3(_draw_cx, SHADOW_LIFT, _draw_z - d * (0.5 - SHADOW_BACK))
+	add_child(mi)
+	_ground_shadow = mi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # РАМКА ВЫДЕЛЕНИЯ ПО РИСУНКУ, А НЕ ПО КОРОБКЕ
@@ -612,6 +646,20 @@ func _set_accept_flash(v: float) -> void:
 	if _sprite_mat != null:
 		_sprite_mat.set_shader_parameter("flash", v)
 
+## ── ПОДСВЕТКА ПОД КУРСОРОМ (ТЗ 31.10.2026, овцеферма) ──────────────────────
+## Тот же uniform `flash`, что у моргания, но ровно и слабее; идущее моргание
+## не перебивается. Стендам — hover_glow
+const HOVER_GLOW := 0.14
+var hover_glow: bool = false
+
+func set_hover_glow(on: bool) -> void:
+	if hover_glow == on:
+		return
+	hover_glow = on
+	if _accept_tween != null and _accept_tween.is_valid():
+		return
+	_set_accept_flash(HOVER_GLOW if on else 0.0)
+
 ## Сила моргания сейчас (стендам)
 func accept_flash_level() -> float:
 	if _sprite_mat == null:
@@ -624,6 +672,8 @@ func accept_flash_level() -> float:
 const SPRITE_FRONT_FRAC := {
 	"castle": 0.30, "tower": 0.30, "barracks": 0.30, "archery": 0.30,
 	"house": 0.30, "house2": 0.30, "house3": 0.30,
+	"market": 0.30, "storehouse": 0.30,
+	"goblin_forge": 0.30,   # кузница гоблинов (ТЗ 28.10.2026) — как у прочих зданий
 }
 ## Включатель (стенды, A/B на глаз)
 static var sprite_front_on: bool = true
@@ -2131,6 +2181,17 @@ func _die() -> void:
 	if _dead:
 		return
 	_dead = true
+	# Заявки, не вышедшие на карту, уносят с собой свои ещё пустые записи
+	# реестра (squad_keep_unborn держит их до первого бойца)
+	var unborn: Dictionary = {}
+	for job in _pending_spawns:
+		var sid: int = int((job as Dictionary).get("squad", 0))
+		if sid > 0 and GameManager.squads.has(sid) \
+				and (GameManager.squads[sid]["members"] as Array).is_empty():
+			unborn[sid] = true
+	_pending_spawns.clear()
+	for sid in unborn:
+		GameManager._disband_squad(int(sid))
 	_drop_obstacle()
 	died.emit(self)
 	spawn_ruin()

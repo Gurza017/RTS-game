@@ -79,6 +79,13 @@ func _sum(d: Dictionary) -> int:
 	return s
 
 func _run() -> void:
+	# Разворот ТЗ 31.10.2026 (охрана пня ×3): стенд стережёт прежнюю механику
+	preload("res://scripts/perf_config.gd").lair_guard_x3 = false
+	# Третий (зеркальный) пень ел бы общий потолок стай (ТЗ 31.10.2026)
+	preload("res://scripts/perf_config.gd").lair_layout_v2 = false
+	# Площадку сбора/спавн у пня стенд проверяет на точке: вход орды из-за
+	# кромки (ТЗ 31.10.2026, стережёт qa_tz1031c) увёл бы отряды к краю карты
+	preload("res://scripts/perf_config.gd").horde_edge_entry = false
 	main = load("res://scenes/Main.tscn").instantiate()
 	get_tree().root.add_child(main)
 	await frames(10)

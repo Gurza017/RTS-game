@@ -138,7 +138,7 @@ func _ordered(keys: Array) -> Array:
 	for k in keys:
 		var raw: Variant = GameManager.squads.get(int(k))
 		var t: String = String((raw as Dictionary).get("type", "")) if raw != null else ""
-		if t == "big_goblin" or t == "troll" or t == "goblin_rider":
+		if t == "big_goblin" or t == "troll" or t == "goblin_rider" or t == "pig_boss":
 			side.append(k)
 		else:
 			inf.append(k)

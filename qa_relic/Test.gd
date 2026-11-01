@@ -122,6 +122,10 @@ func _squad(utype: String, fac: int, pos: Vector3, n: int, step: float = 2.0) ->
 		(u2 as Unit).set_tick(false)
 	return [sid, us]
 
+## Зарядить копилку на одну выдачу (add_xp множит на POOL_PER_KILL)
+func _charge() -> void:
+	rm.add_xp(_RCfg.POOL_COST / _RCfg.POOL_PER_KILL)
+
 func _wait_until(cond: Callable, cap: int) -> bool:
 	for _i in range(cap):
 		if cond.call():
@@ -150,7 +154,7 @@ func _run_tests(base: Vector3) -> void:
 	# Копим чужим отрядом-кормильцем: порогами убийств он сам дойдёт до
 	# потолка званий, а проверяемому отряду нужен запас для «+1 уровня»
 	var feeder: Array = await _squad("spearman", F, base + Vector3(-30.0, 0.0, 20.0), 1)
-	GameManager.credit_kills(int(feeder[0]), int(_RCfg.POOL_COST) - 10, foe)
+	GameManager.credit_kills(int(feeder[0]), int(ceil((_RCfg.POOL_COST - rm.pool) / _RCfg.POOL_PER_KILL)), foe)
 	verdict("A4 на %d — заряжена" % int(_RCfg.POOL_COST), rm.charged(), "копилка %.0f" % rm.pool)
 	var lvl0: int = GameManager.squad_level(sid)
 
@@ -171,9 +175,11 @@ func _run_tests(base: Vector3) -> void:
 	verdict("B2 клик по чужому — выдачи нет, режим держится", rm.armed and rm.relics.is_empty())
 	rm.click_unit(members[0])
 	verdict("B3 выдача сняла взвод", not rm.armed)
-	var lvl_cap: int = preload("res://scripts/unit_stats_config.gd").max_veteran_level("spearman")
-	verdict("B4 отряду +1 уровень", GameManager.squad_level(sid) == mini(lvl0 + 1, lvl_cap),
-		"%d → %d" % [lvl0, GameManager.squad_level(sid)])
+	# РАЗВОРОТ ТЗ 29.10.2026: штандарт за общий опыт ранг НЕ поднимает
+	# (прежде «+1 уровень» — пять кликов делали из новобранцев легенду)
+	verdict("B4 ранг отряда не изменился, штандарт уровня 1 в записи отряда",
+		GameManager.squad_level(sid) == lvl0 and GameManager.squad_elite_level(sid) == 1,
+		"ранг %d → %d, штандарт %d" % [lvl0, GameManager.squad_level(sid), GameManager.squad_elite_level(sid)])
 	verdict("B5 одна реликвия уровня 1", rm.relics.size() == 1
 		and int(rm.relics[0]["level"]) == 1)
 	var carrier: Unit = rm.relics[0]["carrier"] if rm.relics.size() == 1 else null
@@ -212,12 +218,14 @@ func _run_tests(base: Vector3) -> void:
 	# ── D. ПРОКАЧКА ─────────────────────────────────────────────────────────
 	print("\n═════ D. ПРОКАЧКА ═════")
 	var lvl1: int = GameManager.squad_level(sid)
-	rm.add_xp(_RCfg.POOL_COST)
+	_charge()
 	rm.arm(true)
 	rm.click_unit(members[1])
 	verdict("D1 та же реликвия, уровень 2", rm.relics.size() == 1 and int(rm.relics[0]["level"]) == 2)
-	verdict("D2 отряду ещё +1 уровень", GameManager.squad_level(sid) == mini(lvl1 + 1, lvl_cap))
-	verdict("D3 радиус %.0f м" % _RCfg.aura_radius(2), is_equal_approx(_RCfg.aura_radius(2), r1 + 5.0))
+	verdict("D2 второй штандарт не выдан — улучшен этот; ранг прежний",
+		GameManager.squad_level(sid) == lvl1 and GameManager.squad_elite_level(sid) == 2)
+	verdict("D3 радиус ауры растёт существенно: %.0f → %.0f м" % [r1, _RCfg.aura_radius(2)],
+		_RCfg.aura_radius(2) >= r1 * 1.4)
 	await _wait_until(func(): return rm.aura_level_on(far) == 2 and rm.aura_level_on(near) == 2, 90)
 	verdict("D4 союзник в %.0f м теперь под аурой ур. 2" % (r1 + 1.0), rm.aura_level_on(far) == 2)
 	verdict("D5 атака у ближнего +%.1f (не сложилась с ур. 1)" % _RCfg.aura_attack(2),
@@ -225,7 +233,7 @@ func _run_tests(base: Vector3) -> void:
 		"Δ %.2f" % (near.vet_attack - near_atk))
 	# Вторая реликвия другому отряду
 	var sq2: Array = await _squad("spearman", F, base + Vector3(-30.0, 0.0, -20.0), 3)
-	rm.add_xp(_RCfg.POOL_COST)
+	_charge()
 	rm.arm(true)
 	rm.click_unit(sq2[1][0])
 	verdict("D6 другой отряд — вторая реликвия", rm.relics.size() == 2)
@@ -233,14 +241,30 @@ func _run_tests(base: Vector3) -> void:
 	# ── E. ВЫПАДЕНИЕ ────────────────────────────────────────────────────────
 	print("\n═════ E. ВЫПАДЕНИЕ ═════")
 	var rel: Dictionary = rm.relics[0]
-	var drop_at: Vector3 = carrier.global_position
+	# Штандарт — свойство отряда (ТЗ 29.10.2026): пал носитель — несёт сосед
+	carrier.take_damage(1e9, null)
+	await _wait_until(func(): return rm.passes >= 1, 60)
+	var heir = rel["carrier"]
+	verdict("E0 носитель пал — штандарт у соседа по отряду, на землю не упал",
+		heir != null and is_instance_valid(heir) and (heir as Unit).squad_id == sid and rm.drops == 0,
+		"передач %d, выпадений %d" % [rm.passes, rm.drops])
+	await _wait_until(func(): return rm.aura_level_on(near) == 2, 60)
+	verdict("E0б аура не прерывалась", rm.aura_level_on(near) == 2)
+	# На землю — только когда в отряде никого не осталось
+	for m in members:
+		if m != heir and is_instance_valid(m) and not (m as Unit).is_dead():
+			(m as Unit).take_damage(1e9, null)
+	await pframes(30)
+	var drop_at: Vector3 = (heir as Unit).global_position
+	carrier = heir
 	carrier.take_damage(1e9, null)
 	await _wait_until(func(): return rm.drops >= 1, 60)
-	verdict("E1 носитель пал — реликвия на земле", rel["carrier"] == null and rm.drops >= 1,
+	verdict("E1 отряд выбит целиком — штандарт на земле", rel["carrier"] == null and rm.drops >= 1,
 		"носитель %s, выпадений %d, мёртв %s" % [str(rel["carrier"]), rm.drops,
 		str(carrier.is_dead()) if is_instance_valid(carrier) else "освобождён"])
 	verdict("E2 лежит там, где пал носитель",
-		Vector2(rel["pos"].x - drop_at.x, rel["pos"].z - drop_at.z).length() < 0.6)
+		Vector2(rel["pos"].x - drop_at.x, rel["pos"].z - drop_at.z).length() < 0.6,
+		"лежит %s, пал %s, передач %d" % [str(rel["pos"]), str(drop_at), rm.passes])
 	await _wait_until(func(): return rm.aura_level_on(near) == 0, 90)
 	verdict("E3 аура с союзника снята, атака вернулась", rm.aura_level_on(near) == 0
 		and is_equal_approx(near.vet_attack, near_atk) and is_equal_approx(near.attack_cooldown, near_cd)
@@ -291,6 +315,48 @@ func _run_tests(base: Vector3) -> void:
 		ok_g = ok_g and r["carrier"] != null
 	verdict("G2 восстановление: копилка, уровни, носители", ok_g, "уровни %s" % str(lv))
 
+	# ── J. ОДИН ШТАНДАРТ НА ОТРЯД, ПОТОЛОК УЛУЧШЕНИЙ, ЛЕГЕНДА (ТЗ 29.10.2026) ─
+	print("\n═════ J. ПОТОЛОК И ЛЕГЕНДА ═════")
+	var sq3: Array = await _squad("spearman", F, base + Vector3(30.0, 0.0, -20.0), 6)
+	var s3: int = int(sq3[0])
+	var ids: Dictionary = {}
+	for _i in range(_RCfg.STANDARD_MAX_LEVEL):
+		_charge()
+		ids[rm.grant_to_squad(s3)] = true
+	var pool_cap: float = rm.pool
+	_charge()
+	var pool_before: float = rm.pool
+	var over: int = rm.grant_to_squad(s3)
+	verdict("J1 %d выдач — один штандарт уровня %d, седьмая отклонена без списания" % [
+		_RCfg.STANDARD_MAX_LEVEL, _RCfg.STANDARD_MAX_LEVEL],
+		ids.size() == 1 and GameManager.squad_elite_level(s3) == _RCfg.STANDARD_MAX_LEVEL
+		and over == -1 and is_equal_approx(rm.pool, pool_before),
+		"штандартов %d, уровень %d, ответ %d, копилка %.0f → %.0f (до заряда %.0f)" % [
+		ids.size(), GameManager.squad_elite_level(s3), over, pool_before, rm.pool, pool_cap])
+	verdict("J2 ранг новобранцев не вырос", GameManager.squad_level(s3) == 0)
+	# Легенда: золотой квадрат сменяется бордовым штандартом с жёлтым пятаком
+	# и одной лычкой (уровень штандарта 1)
+	var sq4: Array = await _squad("spearman", F, base + Vector3(30.0, 0.0, 20.0), 6)
+	var s4: int = int(sq4[0])
+	var top: int = preload("res://scripts/unit_stats_config.gd").max_veteran_level("spearman")
+	GameManager.credit_kills(s4, preload("res://scripts/unit_stats_config.gd").veteran_threshold("spearman", top), foe)
+	await pframes(3)
+	var bn0 = GameManager.squads[s4].get("banner")
+	var gold0: bool = bn0 != null and is_instance_valid(bn0) and not bool(bn0.shown_elite)
+	_charge()
+	rm.grant_to_squad(s4)
+	await pframes(3)
+	var bn = GameManager.squads[s4].get("banner")
+	verdict("J3 легенда со штандартом: ранг легенды на месте, знамя — бордовый штандарт ур. 1",
+		gold0 and GameManager.squad_level(s4) == top and bn != null and bool(bn.shown_elite)
+		and int(bn.shown_elite_lvl) == 1,
+		"золото до: %s, ранг %d, штандарт %s/%d" % [gold0, GameManager.squad_level(s4),
+		str(bn.shown_elite) if bn != null else "-", int(bn.shown_elite_lvl) if bn != null else -1])
+	var sp: Array = preload("res://scripts/SquadBanner.gd").spec(top, true, false, 1)
+	var ba = preload("res://scripts/BannerArt.gd")
+	verdict("J4 картинка — бордовая, на синем пятаке ранг легенды (elite_texture(1, top)), лычки ступени 1 — белые",
+		sp[0] == ba.elite_texture(1, top) and ba.elite_chevron_color(1) == preload("res://scripts/unit_stats_config.gd").CHEV_WHITE)
+
 	# ── H. НАСТОЯЩИЙ ВВОД: КНОПКА → ЛКМ ПО ОТРЯДУ, ПКМ ОТМЕНЯЕТ ────────────────
 	print("\n═════ H. НАСТОЯЩИЙ ВВОД ═════")
 	await _h_input(base + Vector3(0.0, 0.0, -25.0))
@@ -312,7 +378,7 @@ func _h_input(at: Vector3) -> void:
 	await frames(3)
 	cam.set_process(false)
 	var n0: int = rm.relics.size()
-	rm.add_xp(_RCfg.POOL_COST)
+	_charge()
 	rm.arm(true)
 	var spt: Vector2 = cam.unproject_position((hq[1][2] as Unit).global_position)
 	# ТЗ 24.10.2026 (второе письмо): ПКМ — выдать, ЛКМ/Esc — отмена

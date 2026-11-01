@@ -24,6 +24,7 @@ extends RefCounted
 ## Файл намеренно без class_name: подключается через preload.
 
 const _UCfg := preload("res://scripts/unit_stats_config.gd")
+const _OptB := preload("res://scripts/perf_config.gd")
 
 ## ── РАЗМЕР ХОЛСТА ──────────────────────────────────────────────────────────
 ## Пропорции важнее абсолютных чисел: холст обязан вмещать древко во весь рост
@@ -127,12 +128,13 @@ static func pole_offset_px() -> float:
 static var _cache: Dictionary = {}
 
 ## Текстура знамени для уровня ветеранства (1..7). 0 и меньше — знамени нет
-static func texture_for(level: int) -> Texture2D:
+static func texture_for(level: int, side: int = 0) -> Texture2D:
 	if level <= 0:
 		return null
 	var tier: Dictionary = _UCfg.veteran_banner_tier(level)
 	if tier.is_empty():
 		return null
+	_side_tier(tier, side)
 	# ── ПРЕЖНИЕ ВЫМПЕЛЫ ВОЗВРАЩЕНЫ (ТЗ 13.10.2026, письмо 7) ─────────────────
 	# ТЗ 12.10.2026 подменило ЭТУ функцию римским штандартом, и красное
 	# полотнище получал каждый отряд с рангом — «автоматическая выдача всем
@@ -140,12 +142,29 @@ static func texture_for(level: int) -> Texture2D:
 	# (вымпел → гвидон → золотой штандарт, VET_BANNER_TIERS); красный
 	# штандарт — ТОЛЬКО у отряда с индивидуальным званием (vexillum_texture,
 	# решает GameManager.squad_elite)
-	var key: int = int(tier.get("key", level))
+	var key: int = int(tier.get("key", level)) + side * SIDE_KEY
 	if _cache.has(key):
 		return _cache[key]
 	var tex := _render(tier)
 	_cache[key] = tex
 	return tex
+
+## ── ЦВЕТ СТОРОНЫ (ТЗ 31.10.2026) ──────────────────────────────────────────
+## side 0 — игрок (синее поле), 1 — красный ИИ: то же знамя с красным полем и
+## теми же лычками; красная лычка «Ветеранов» на красном поле получает светлый
+## кант (rim), иначе она слилась бы с тканью. Орда рисуется своими язычками
+const SIDE_KEY := 100000
+const SIDE_RED := 1
+
+static func side_of(faction: int) -> int:
+	return SIDE_RED if _OptB.faction_banners and faction == 1 else 0
+
+static func _side_tier(tier: Dictionary, side: int) -> void:
+	if side != SIDE_RED:
+		return
+	tier["cloth"] = _UCfg.BANNER_RED
+	if (tier.get("chevron_col", Color.WHITE) as Color).is_equal_approx(_UCfg.CHEV_RED):
+		tier["rim"] = _UCfg.CHEV_WHITE
 
 ## Прямоугольник холста с полотнищем обычного знамени — обрезок для флажка
 ## в панели (HUD._vet_flag). Для штандарта — vexillum_crop()
@@ -202,8 +221,9 @@ static func vexillum_texture(level: int) -> Texture2D:
 ## награда его рукой — GameManager.squad_elite), — прежний вертикальный
 ## бордовый штандарт (_render_vexillum), но на ~20 % крупнее и чуть шире; по
 ## центру — римская цифра уровня элиты, внизу — лычки общего ветеранства:
-## «Опытные» (1-3) — белые полосы по бордо, «Ветераны» (4-6) — синяя плашка
-## с лычками, «Легендарные» — синяя плашка с тремя лычками и белой каймой.
+## пятачок всегда ярко-жёлтый (ТЗ 28.10.2026): «Опытные» (1-3) — красные
+## лычки, «Ветераны» (4-6) — синие, «Легендарные» — три синие и белая
+## кайма.
 ## Отряд один — флагшток один: штандарт ЗАМЕНЯЕТ вымпел, а реликвия своего
 ## флага над носителем больше не ставит (золотой штандарт «★N» снят).
 ## Ни одного жёлтого пикселя.
@@ -219,8 +239,6 @@ const ELITE_H := 80                 ## высота полотнища (было
 const ELITE_FRINGE := 5
 const ELITE_CLOTH := Color(0.47, 0.05, 0.11)       ## бордо
 const ELITE_CLOTH_DARK := Color(0.30, 0.02, 0.07)  ## складки и кайма
-const ELITE_PLATE := Color(0.16, 0.34, 0.70)       ## синяя плашка ветеранов
-const ELITE_PLATE_DARK := Color(0.09, 0.20, 0.45)
 const ELITE_KEY_BASE := 3000
 
 ## Римские цифры 7 строк высотой, засечками сверху и снизу
@@ -251,17 +269,17 @@ static func elite_crop() -> Rect2:
 
 ## Текстура бордового штандарта: elite_lvl — уровень элиты (римская цифра),
 ## vet_lvl — общее ветеранство (лычки внизу)
-static func elite_texture(elite_lvl: int, vet_lvl: int = 0) -> Texture2D:
+static func elite_texture(elite_lvl: int, vet_lvl: int = 0, side: int = 0) -> Texture2D:
 	var e: int = clampi(elite_lvl, 1, 39)
-	var v: int = clampi(vet_lvl, 0, 7)
-	var key: int = ELITE_KEY_BASE + e * 10 + v
+	var v: int = clampi(vet_lvl, 0, _UCfg.VET_BANNER_TIERS.size())
+	var key: int = ELITE_KEY_BASE + e * 10 + v + side * SIDE_KEY
 	if _cache.has(key):
 		return _cache[key]
-	var tex := _render_elite(e, v)
+	var tex := _render_elite(e, v, side)
 	_cache[key] = tex
 	return tex
 
-static func _render_elite(elite_lvl: int, vet_lvl: int) -> ImageTexture:
+static func _render_elite(elite_lvl: int, vet_lvl: int, side: int = 0) -> ImageTexture:
 	var img := Image.create_empty(W, H, false, Image.FORMAT_RGBA8)
 	img.fill(Color(0, 0, 0, 0))
 	var cx: int = ELITE_POLE_X + POLE_W / 2
@@ -295,7 +313,7 @@ static func _render_elite(elite_lvl: int, vet_lvl: int) -> ImageTexture:
 	# Римская цифра уровня элиты — по центру верхней части полотнища
 	_draw_roman(img, cx, ELITE_TOP + 14, roman(elite_lvl), x1 - x0 - 6)
 	# Лычки ветеранства — внизу полотнища
-	_draw_elite_rank(img, cx, x0, x1, y1, vet_lvl)
+	_draw_elite_rank(img, cx, x0, x1, y1, vet_lvl, side)
 	_outline(img)
 	return ImageTexture.create_from_image(img)
 
@@ -321,34 +339,54 @@ static func _draw_roman(img: Image, cx: int, y0: int, txt: String, max_w: int) -
 						img.set_pixel(x + c * k + dx, y0 + r * k + dy, VEX_SIGN)
 		x += (gw + 1) * k
 
-## Низ штандарта: «Опытные» — белые полосы-лычки по бордо; «Ветераны» —
-## синяя плашка с лычками; «Легендарные» — плашка, три лычки, белая кайма
-static func _draw_elite_rank(img: Image, cx: int, x0: int, x1: int, y1: int, vet_lvl: int) -> void:
+## Низ штандарта игрока (ТЗ 28.10.2026, письмо о знамёнах, п. 3, и
+## уточнение владельца): пятачок ВСЕГДА ярко-жёлтый и чуть крупнее прежней
+## синей плашки, меняется только цвет лычек — «Опытные» (1-3) красные 1-3,
+## «Ветераны» (4-6) синие 1-3, легенда — три синие и белая кайма над пятаком
+## (у легендарного отряда в мире висит золотой квадрат — spec SquadBanner;
+## сюда легенда попадает из панели HUD)
+## Пятак ранга — синий квадрат отряда (ТЗ 30.10.2026), лычки цвета ступени
+const ELITE_PLATE := Color(0.16, 0.34, 0.70)
+const ELITE_PLATE_DARK := Color(0.08, 0.18, 0.42)
+const ELITE_GOLD_STEP := 9                             ## шаг лычек (у прежней синей 7)
+const ELITE_GOLD_PAD := 1                              ## пятак шире прежней плашки на пиксель с каждой стороны
+
+## Цвет лычек на пятаке по общему ветеранству — стендам и рисунку
+static func elite_chevron_color(vet_lvl: int) -> Color:
+	var t: Dictionary = _UCfg.veteran_banner_tier(vet_lvl)
+	if bool(t.get("legend", false)):
+		return _UCfg.CHEV_ORANGE
+	return t.get("chevron_col", _UCfg.CHEV_WHITE) as Color
+
+static func _draw_elite_rank(img: Image, cx: int, x0: int, x1: int, y1: int, vet_lvl: int, side: int = 0) -> void:
 	if vet_lvl <= 0:
 		return
 	var tier: Dictionary = _UCfg.veteran_banner_tier(vet_lvl)
-	var n: int = clampi(int(tier.get("chevrons", 1)), 1, 3)
-	var plate: bool = vet_lvl >= 4
-	var legend: bool = bool(tier.get("white_tip", false))
+	var legend: bool = bool(tier.get("legend", false))
+	# Легенда — три оранжевые лычки в фиолетовой рамке пятака; у красного ИИ
+	# пятак красный (ТЗ 31.10.2026)
+	var n: int = 3 if legend else clampi(int(tier.get("chevrons", 1)), 1, 3)
 	var bottom: int = y1 - 3
-	var top: int = bottom - 7 * n - 3
-	if plate:
-		for y in range(top, bottom + 1):
-			for x in range(x0 + 2, x1 - 1):
-				var e2: bool = y == top or y == bottom or x == x0 + 2 or x == x1 - 2
-				img.set_pixel(x, y, ELITE_PLATE_DARK if e2 else ELITE_PLATE)
-		if legend:
-			for x in range(x0 + 2, x1 - 1):
-				img.set_pixel(x, top - 1, VEX_SIGN)
-				img.set_pixel(x, top - 2, VEX_SIGN)
-	# Лычки — шевроны остриём вниз, толщиной 2
-	var half_w: int = ELITE_HALF - 5
+	# Пятак ПОСТОЯННОГО размера (под три лычки): при одной лычке он не
+	# сжимается в полоску, а лычки стоят по его центру
+	var top: int = bottom - ELITE_GOLD_STEP * 3 - 4
+	var lead: int = top + 3 + (3 - n) * ELITE_GOLD_STEP / 2
+	var gx0: int = x0 + 2 - ELITE_GOLD_PAD
+	var gx1: int = x1 - 2 + ELITE_GOLD_PAD
+	for y in range(top, bottom + 1):
+		for x in range(gx0, gx1 + 1):
+			var eg: bool = y == top or y == bottom or x == gx0 or x == gx1
+			var red: bool = side == SIDE_RED
+			var edge_col: Color = _UCfg.BANNER_PURPLE if legend else (_UCfg.BANNER_RED.darkened(0.45) if red else ELITE_PLATE_DARK)
+			img.set_pixel(x, y, edge_col if eg else (_UCfg.BANNER_RED if red else ELITE_PLATE))
+	var col: Color = elite_chevron_color(vet_lvl)
+	var hw: int = ELITE_HALF - 4
 	for k in range(n):
-		var yt: int = top + 3 + k * 7
-		for dx in range(-half_w, half_w + 1):
-			var yy: int = yt + (half_w - absi(dx)) / 3
-			for t in range(2):
-				img.set_pixel(cx + dx, yy + t, BANNER_CHEVRON_COL)
+		var yt: int = lead + k * ELITE_GOLD_STEP
+		for dx in range(-hw, hw + 1):
+			var yy: int = yt + (hw - absi(dx)) / 3
+			for t in range(3):
+				img.set_pixel(cx + dx, yy + t, col)
 
 const BANNER_CHEVRON_COL := Color(0.97, 0.97, 0.95)
 
@@ -475,122 +513,240 @@ const GOB_POLE_DARK := Color(0.22, 0.15, 0.08)
 const GOB_CLOTHS := [Color(0.13, 0.62, 0.16), Color(0.24, 0.74, 0.12), Color(0.08, 0.50, 0.20)]
 const GOB_CLOTHS_WHITE := [Color(0.96, 0.96, 0.93), Color(0.90, 0.90, 0.86), Color(0.98, 0.98, 0.96)]
 
-static func goblin_tongue_texture(level: int, white: bool = false) -> Texture2D:
+## ── ЗНАМЁНА ОРДЫ ПО СКЕТЧАМ ВЛАДЕЛЬЦА (ТЗ 29.10.2026) ─────────────────────
+## Ранги 1-6 — длинный горизонтальный зелёный вымпел с волнистыми краями, у
+## древка вертикальные лычки: 1-3 красные (ранги 1-3), 1-3 синие (ранги 4-6).
+## Легенда — рваный зелёный штандарт на перекладине (бахрома и дыры снизу) с
+## шевронами «^»: красный 1-3, синий 1-3, жёлтый 1-3 — ступень = 1 + престиж
+## легенды (goblin_rag_texture). В панике тот же рисунок белеет, без знаков.
+## Прежние «язычки» (три лоскута по рангу) сняты. Имя функции оставлено:
+## это единая точка выбора картинки знамени орды
+static func goblin_tongue_texture(level: int, white: bool = false, extra: int = 0) -> Texture2D:
 	var lvl: int = maxi(level, 1)
-	var tongues: int = clampi(1 + (lvl - 1) / 3, 1, 3)
-	var key: int = GOB_KEY_BASE + tongues + (100 if white else 0)
+	if lvl >= _UCfg.VET_BANNER_TIERS.size():
+		return goblin_rag_texture(0 if white else 1 + maxi(extra, 0), white)
+	return goblin_pennant_texture(lvl, white)
+
+const GOB_PEN_LEN := 96          ## длина вымпела, пикселей
+const GOB_PEN_H := 16            ## высота у древка
+const GOB_STRIPE_W := 3          ## толщина лычки
+const GOB_STRIPE_STEP := 6       ## шаг лычек
+const GOB_STRIPE_X0 := 5         ## отступ первой лычки от древка
+const GOB_RED := Color(0.80, 0.12, 0.12)
+const GOB_BLUE := Color(0.16, 0.36, 0.86)
+const GOB_YELLOW := Color(0.98, 0.84, 0.16)
+
+## Цвет знака орды по ступени 1-9: красный 1-3, синий 4-6, жёлтый 7-9
+static func goblin_mark_color(step: int) -> Color:
+	if step <= 3:
+		return GOB_RED
+	if step <= 6:
+		return GOB_BLUE
+	return GOB_YELLOW
+
+static func goblin_pennant_texture(level: int, white: bool = false) -> Texture2D:
+	var lvl: int = clampi(level, 1, 9)
+	var key: int = GOB_KEY_BASE + lvl + (100 if white else 0)
+	if _cache.has(key):
+		return _cache[key]
+	var cloths: Array = GOB_CLOTHS_WHITE if white else GOB_CLOTHS
+	var img := Image.create_empty(W, H, false, Image.FORMAT_RGBA8)
+	img.fill(Color(0, 0, 0, 0))
+	var top_y: Array = []
+	var bot_y: Array = []
+	for i in range(GOB_PEN_LEN):
+		var f: float = float(i) / float(GOB_PEN_LEN)
+		# Верх и низ волнятся каждый по-своему, к концу полотно сужается и
+		# чуть провисает; самый конец скруглён
+		var yt: float = float(FLAG_TOP) + sin(float(i) * 0.13) * 1.4 + f * 3.0
+		var hh: float = float(GOB_PEN_H) * (1.0 - 0.30 * f)
+		var yb: float = yt + hh + sin(float(i) * 0.21 + 1.3) * 1.3
+		if i > GOB_PEN_LEN - 6:
+			var k: float = float(i - (GOB_PEN_LEN - 6)) / 6.0
+			var mid: float = (yt + yb) * 0.5
+			yt = lerpf(yt, mid - 1.0, k * k)
+			yb = lerpf(yb, mid + 1.0, k * k)
+		top_y.append(int(round(yt)))
+		bot_y.append(int(round(yb)))
+	for i in range(GOB_PEN_LEN):
+		var x: int = FLAG_X0 + i
+		if x >= W:
+			break
+		var y0: int = int(top_y[i])
+		var y1: int = int(bot_y[i])
+		for y in range(y0, y1 + 1):
+			if y < 0 or y >= H:
+				continue
+			var cloth: Color = cloths[(i / 14) % cloths.size()]
+			var shade: Color = cloth.darkened(0.28) if (y == y1 or y == y0) else cloth
+			img.set_pixel(x, y, shade)
+	if not white:
+		var n: int = (lvl - 1) % 3 + 1
+		var col: Color = goblin_mark_color(lvl)
+		for s in range(n):
+			var i0: int = GOB_STRIPE_X0 + s * GOB_STRIPE_STEP
+			for w in range(GOB_STRIPE_W):
+				var i: int = i0 + w
+				var x2: int = FLAG_X0 + i
+				for y in range(int(top_y[i]) + 1, int(bot_y[i])):
+					# Лычка чуть наклонена — как на скетче
+					var xs: int = x2 + (y - int(top_y[i])) / 7
+					if xs < W:
+						img.set_pixel(xs, y, col)
+	_draw_goblin_pole(img, POLE_X, FLAG_TOP - 10)
+	_outline(img)
+	var tex := ImageTexture.create_from_image(img)
+	_cache[key] = tex
+	return tex
+
+## Кривое древко орды: два пикселя, без копейного навершия, верх обломан
+static func _draw_goblin_pole(img: Image, px: int, top: int) -> void:
+	for y in range(top, H):
+		var off: int = 1 if (y / 23) % 2 == 1 else 0
+		for x in range(px + off, px + off + 2):
+			img.set_pixel(x, y, GOB_POLE_DARK if x == px + off + 1 else GOB_POLE)
+
+## ── РВАНЫЙ ШТАНДАРТ ОРДЫ (легенда орды и Свинобосс) ──────────────────────
+## Ось древка — ELITE_POLE_X (сдвиг над бойцом — elite_pole_offset_px, как у
+## бордового штандарта). steps — ступень шевронов 1-9 (0 — без знаков),
+## boss — знамя полководца: крупнее рвань и больше дыр, знаков нет
+const GOB_RAG_KEY := 6000
+const RAG_BAR_Y := 17
+const RAG_TOP := 19
+const RAG_H := 68
+const RAG_HALF_TOP := 19
+const RAG_HALF_BOT := 12
+const RAG_TATTER := 10
+
+static func goblin_rag_texture(steps: int, white: bool = false, boss: bool = false) -> Texture2D:
+	var st: int = clampi(steps, 0, 9)
+	var key: int = GOB_RAG_KEY + st * 10 + (1 if white else 0) + (2 if boss else 0)
 	if _cache.has(key):
 		return _cache[key]
 	var cloths: Array = GOB_CLOTHS_WHITE if white else GOB_CLOTHS
 	var img := Image.create_empty(W, H, false, Image.FORMAT_RGBA8)
 	img.fill(Color(0, 0, 0, 0))
 	var rng := RandomNumberGenerator.new()
-	rng.seed = 7919 + tongues
-	# Лоскуты — ДО древка: древко ложится поверх их корня
-	for k in range(tongues):
-		var root_y: int = FLAG_TOP - 2 + k * 12
-		var length: int = 58 + rng.randi_range(0, 14) - k * 6
-		var width: int = 11 - k * 2
-		var cloth: Color = cloths[k % cloths.size()]
-		var droop: float = 0.30 + 0.12 * float(k)
-		for i in range(length):
-			var x: int = FLAG_X0 + i
-			# Ось лоскута провисает и чуть волнится
-			var cy: float = float(root_y) + droop * float(i) + sin(float(i) * 0.35 + float(k)) * 1.6
-			# К концу язычок сужается
-			var w: float = float(width) * (1.0 - 0.45 * float(i) / float(length))
-			var y0: int = int(round(cy - w * 0.5))
-			var y1: int = int(round(cy + w * 0.5))
-			# Рваный край: последние пиксели обкусаны через раз
-			if i > length - 9 and rng.randf() < 0.45:
-				y0 += rng.randi_range(0, 2)
-				y1 -= rng.randi_range(0, 2)
-			for y in range(y0, y1 + 1):
-				if x < 0 or x >= W or y < 0 or y >= H:
-					continue
-				# Дыры в ткани
-				if i > 6 and rng.randf() < 0.07:
-					continue
-				var shade: Color = cloth.darkened(0.25) if y == y1 else cloth
-				img.set_pixel(x, y, shade)
-	# Кривое древко: два пикселя, без копейного навершия, верх обломан
-	for y in range(FLAG_TOP - 10, H):
-		var off: int = 1 if (y / 23) % 2 == 1 else 0
-		for x in range(POLE_X + off, POLE_X + off + 2):
-			img.set_pixel(x, y, GOB_POLE_DARK if x == POLE_X + off + 1 else GOB_POLE)
+	rng.seed = 4243 + (17 if boss else 0)
+	var cx: int = ELITE_POLE_X + POLE_W / 2
+	# Древко — под полотнищем: видно над перекладиной и под бахромой
+	_draw_goblin_pole(img, ELITE_POLE_X, RAG_BAR_Y - 9)
+	# Навершие — загнутый крючок
+	img.set_pixel(ELITE_POLE_X + 2, RAG_BAR_Y - 10, GOB_POLE)
+	img.set_pixel(ELITE_POLE_X + 2, RAG_BAR_Y - 11, GOB_POLE)
+	img.set_pixel(ELITE_POLE_X + 1, RAG_BAR_Y - 12, GOB_POLE)
+	var y_end: int = RAG_TOP + RAG_H
+	# Полотнище — трапеция, сужается книзу, бока волнятся
+	for y in range(RAG_TOP, y_end + 1):
+		var t: float = float(y - RAG_TOP) / float(RAG_H)
+		var half: float = lerpf(float(RAG_HALF_TOP), float(RAG_HALF_BOT), t)
+		var wl: int = int(round(sin(float(y) * 0.23) * 1.3))
+		var wr: int = int(round(sin(float(y) * 0.19 + 2.0) * 1.3))
+		var x0: int = cx - int(half) + wl
+		var x1: int = cx + int(half) + wr
+		for x in range(x0, x1 + 1):
+			var cloth: Color = cloths[((x - x0) / 7) % cloths.size()]
+			var edge: bool = x <= x0 or x >= x1
+			img.set_pixel(x, y, cloth.darkened(0.28) if edge else cloth)
+	# Рваный низ: язычки разной длины, местами нитка через пиксель
+	var hb: int = RAG_HALF_BOT + 1
+	var tat: int = RAG_TATTER + (4 if boss else 0)
+	for x in range(cx - hb, cx + hb + 1):
+		var ln: int = rng.randi_range(0, tat)
+		if rng.randf() < 0.25:
+			ln = 0
+		var thin: bool = rng.randf() < 0.3
+		var cloth2: Color = cloths[((x - cx + hb) / 7) % cloths.size()]
+		for y in range(y_end + 1, y_end + 1 + ln):
+			if thin and (y % 2 == 0):
+				continue
+			img.set_pixel(x, y, cloth2.darkened(0.18))
+	# Дыры в нижней половине и укусы по краю
+	var holes: int = 9 if boss else 5
+	for _h in range(holes):
+		var hx: int = cx + rng.randi_range(-RAG_HALF_BOT + 2, RAG_HALF_BOT - 5)
+		var hy: int = RAG_TOP + RAG_H / 2 + rng.randi_range(0, RAG_H / 2 - 2)
+		# Не меньше 3×3: обводка заливает край дыры, сквозной остаётся середина
+		var hw: int = rng.randi_range(3, 4)
+		var hh: int = rng.randi_range(3, 4)
+		for yy in range(hy, hy + hh):
+			for xx in range(hx, hx + hw):
+				img.set_pixel(xx, yy, Color(0, 0, 0, 0))
+	for _b in range(4 if boss else 2):
+		var by: int = RAG_TOP + rng.randi_range(RAG_H / 3, RAG_H - 4)
+		var side: int = -1 if rng.randf() < 0.5 else 1
+		var half2: int = int(lerpf(float(RAG_HALF_TOP), float(RAG_HALF_BOT), float(by - RAG_TOP) / float(RAG_H)))
+		for yy in range(by, by + 3):
+			for d in range(0, 3):
+				img.set_pixel(cx + side * (half2 + 1 - d), yy, Color(0, 0, 0, 0))
+	# Перекладина поверх верха полотнища
+	for y in range(RAG_BAR_Y, RAG_BAR_Y + 2):
+		for x in range(cx - RAG_HALF_TOP - 4, cx + RAG_HALF_TOP + 5):
+			img.set_pixel(x, y, GOB_POLE if y == RAG_BAR_Y else GOB_POLE_DARK)
+	# Шевроны «^» по центру полотнища
+	if st > 0 and not white and not boss:
+		var n: int = (st - 1) % 3 + 1
+		var col: Color = goblin_mark_color(st)
+		var hwc: int = 9
+		var y0c: int = RAG_TOP + 14
+		for k in range(n):
+			var yt: int = y0c + k * 8
+			for dx in range(-hwc, hwc + 1):
+				var yy2: int = yt + absi(dx) * 2 / 3
+				for t2 in range(3):
+					img.set_pixel(cx + dx, yy2 + t2, col)
 	_outline(img)
 	var tex := ImageTexture.create_from_image(img)
 	_cache[key] = tex
 	return tex
 
 # ═════════════════════════════════════════════════════════════════════════════
-# ЛЕГЕНДАРНЫЕ: ЗОЛОТОЙ КВАДРАТ И МИНИ-ФЛАЖКИ НА ДРЕВКЕ (ТЗ 25.10.2026, блок 3)
+# ЛЕГЕНДАРНЫЕ: ЗОЛОТОЙ КВАДРАТ И ХВОСТ ПРЕСТИЖА (ТЗ 25.10 → 27.10 → 28.10.2026)
 # ═════════════════════════════════════════════════════════════════════════════
-## Заказ: у легендарной пехоты — «оригинальный красивый жёлтый/золотистый
-## квадратный флаг», а не бордовый штандарт игрока. Если игрок выдал отряду
-## свой штандарт (реликвию, признак элиты), под золотым флагом на ТОМ ЖЕ
-## древке висит бордовый мини-флажок, у которого с каждым уровнем элиты
-## прибавляется язычок (elite_lvl). Лычки сверх легенды (GameManager.
-## _grant_legend_extra) при штандарте поднимают его уровень (+язычок), без
-## штандарта — вешают цветной мини-флажок (LEGEND_MINI_COLORS по порядку).
-## Один флагшток на отряд, как и прежде.
+## Иерархия знамён (ТЗ 28.10.2026, письмо о знамёнах), строго и без лишнего:
+##   1. базовые ступени — вымпелы шкалы VET_BANNER_TIERS (красные → синие);
+##   2. легенда — ЧИСТЫЙ золотой квадрат, под ним ничего;
+##   3. престиж легенды 1-3 (опыт сверх легенды) — под золотом красный хвост
+##      СРАЗУ с одной белой лычкой, затем две и три;
+##   4. престиж 4-6 — синий хвост с 1-3 лычками.
+## Бордовый мини-флажок штандарта игрока под золотом («бордовый отросток»
+## на скриншоте владельца) и цветные мини-флажки СНЯТЫ ВОВСЕ: штандарт игрока
+## виден на бордовом полотнище до легенды (_draw_elite_rank), а уровень
+## элиты у легендарного отряда живёт только в записи (аура реликвии).
+## Один флагшток на отряд, как и прежде
 const LEGEND_KEY_BASE := 4000
-const MINI_TOP := STD_TOP + STD_H + FRINGE + 4   ## верх первого мини-флажка
-const MINI_H := 10
-const MINI_STEP := 13
-const MINI_LEN := 34
-const MINI_MAX := 4
 
-## elite_lvl > 0 — бордовый флажок элиты с elite_lvl язычками; flags —
-## число цветных флажков лычек сверх легенды (без штандарта)
-static func legend_texture(elite_lvl: int, flags: int) -> Texture2D:
-	var e: int = clampi(elite_lvl, 0, 9)
+## flags — ступень престижа легенды (GameManager.squad_legend_marks, 0..LEGEND_EXTRA_MAX)
+static func legend_texture(flags: int, side: int = 0) -> Texture2D:
 	var f: int = clampi(flags, 0, _UCfg.LEGEND_EXTRA_MAX)
-	var key: int = LEGEND_KEY_BASE + e * 10 + f
+	var key: int = LEGEND_KEY_BASE + f + side * SIDE_KEY
 	if _cache.has(key):
 		return _cache[key]
+	# Вымпел той же формы, что у ступеней 1-9: поле стороны в фиолетовой
+	# рамке, оранжевые лычки — одна за легенду и по одной за ступень престижа
+	# (ТЗ 31.10.2026; золотого флага больше нет)
 	var tier: Dictionary = _UCfg.veteran_banner_tier(_UCfg.VET_BANNER_TIERS.size())
-	var img := Image.create_empty(W, H, false, Image.FORMAT_RGBA8)
-	img.fill(Color(0, 0, 0, 0))
-	_draw_standard(img, tier.get("cloth", _UCfg.BANNER_GOLD) as Color, tier)
-	var slot := 0
-	if e > 0:
-		_draw_mini(img, slot, _UCfg.LEGEND_ELITE_MINI, clampi(e, 1, 5))
-		slot += 1
-	for k in range(f):
-		if slot >= MINI_MAX:
-			break
-		var cols: Array = _UCfg.LEGEND_MINI_COLORS
-		_draw_mini(img, slot, cols[k % cols.size()] as Color, 1)
-		slot += 1
-	_draw_pole(img)
-	_outline(img)
-	var tex := ImageTexture.create_from_image(img)
+	tier["chevrons"] = int(tier.get("chevrons", 1)) + f
+	_side_tier(tier, side)
+	var tex := _render(tier)
 	_cache[key] = tex
 	return tex
 
-## Мини-флажок на древке под легендарным полотнищем: прямоугольник длиной
-## MINI_LEN, свободный край которого разрезан на `tongues` язычков
-static func _draw_mini(img: Image, slot: int, cloth: Color, tongues: int) -> void:
-	var y0: int = MINI_TOP + slot * MINI_STEP
-	var x0: int = FLAG_X0
-	var x1: int = FLAG_X0 + MINI_LEN
-	var cut0: int = x1 - 8                       ## откуда начинаются язычки
-	var n: int = maxi(tongues, 1)
-	var dark: Color = cloth.darkened(0.30)
-	for x in range(x0, x1 + 1):
-		for y in range(y0, y0 + MINI_H + 1):
-			if y >= H:
-				continue
-			if x > cut0:
-				# Каждый язычок — клин остриём вправо; между ними вырезы
-				var band: float = float(MINI_H + 1) / float(n)
-				var yy: float = fmod(float(y - y0), band) / band   # 0..1 внутри язычка
-				var reach: float = 1.0 - absf(yy - 0.5) * 2.0       # 1 на оси язычка
-				if float(x - cut0) > reach * 8.0:
-					continue
-			var edge: bool = y == y0 + MINI_H
-			img.set_pixel(x, y, dark if edge else cloth)
+## ── ЗНАМЯ СВИНОБОССА (ТЗ 28.10.2026 → 29.10.2026) ─────────────────────────
+## Рваный зелёный штандарт орды (goblin_rag_texture, boss = true): рвань
+## длиннее и дыр больше, знаков нет. Цифра и синий хвост сняты по скетчу
+
+## Знамя Свинобосса — общая шкала (ТЗ 30.10.2026): синий вымпел с лычками
+## ранга его отряда, не ниже BOSS_BANNER_MIN_TIER (три белые); легенда — золото
+static func boss_texture(level: int = 0) -> Texture2D:
+	# Орда — только зелёные знамёна (ТЗ 31.10.2026): язычки ранга отряда
+	if _OptB.faction_banners:
+		return goblin_tongue_texture(maxi(level, BOSS_BANNER_MIN_TIER))
+	if level >= _UCfg.LEGEND_TIER:
+		return legend_texture(0)
+	return texture_for(maxi(level, BOSS_BANNER_MIN_TIER))
+
+const BOSS_BANNER_MIN_TIER := 3
 
 static func clear_cache() -> void:
 	_cache.clear()
@@ -710,7 +866,32 @@ static func _draw_pennant(img: Image, cloth: Color, tier: Dictionary) -> void:
 			col = _UCfg.BANNER_TIP_COLOR
 		for y in range(y_top, y_bot + 1):
 			img.set_pixel(x, y, col)
+	if tier.has("edge"):
+		_frame_cloth(img, tier["edge"] as Color, FLAG_X0 + POLE_W, FLAG_TOP, x1, FLAG_TOP + FLAG_H)
 	_draw_chevrons(img, tier, FLAG_TOP, FLAG_H)
+
+## Рамка полотнища в FRAME_PX пикселей: ткань, у которой в этом радиусе есть
+## пустота, — край (фиолетовая рамка легенды, ТЗ 31.10.2026)
+const FRAME_PX := 2
+
+static func _frame_cloth(img: Image, col: Color, xa: int, ya: int, xb: int, yb: int) -> void:
+	var src := Image.create_from_data(W, H, false, Image.FORMAT_RGBA8, img.get_data())
+	for y in range(ya, yb + 1):
+		for x in range(xa, xb + 1):
+			if src.get_pixel(x, y).a <= 0.5:
+				continue
+			var edge := false
+			for dy in range(-FRAME_PX, FRAME_PX + 1):
+				for dx in range(-FRAME_PX, FRAME_PX + 1):
+					var nx: int = x + dx
+					var ny: int = y + dy
+					if nx < 0 or nx >= W or ny < 0 or ny >= H or src.get_pixel(nx, ny).a <= 0.5:
+						edge = true
+						break
+				if edge:
+					break
+			if edge:
+				img.set_pixel(x, y, col)
 
 ## ── ГВИДОН, «ЛАСТОЧКИН ХВОСТ» (грейды 4-6) ────────────────────────────────
 ## Прямоугольник, из свободного края которого вырезан клин. Клин делается
@@ -800,7 +981,7 @@ static func _draw_chevrons(img: Image, tier: Dictionary, top: int, h: int) -> vo
 	if n <= 0:
 		return
 	var dir: int = int(tier.get("chevron_dir", 1))
-	var col: Color = _UCfg.BANNER_CHEVRON
+	var col: Color = tier.get("chevron_col", _UCfg.BANNER_CHEVRON) as Color
 	var mid: int = top + h / 2
 	var half: int = CHEV_H / 2
 	# ── ОТСТУП ОТ ДРЕВКА ОДИН И ТОТ ЖЕ, КУДА БЫ ЛЫЧКА НИ СМОТРЕЛА ──────────
@@ -815,6 +996,23 @@ static func _draw_chevrons(img: Image, tier: Dictionary, top: int, h: int) -> vo
 	var lead: int = FLAG_X0 + CHEV_X0
 	if dir < 0:
 		lead += half
+	# Кант лычки (красная на красном поле): тот же шеврон шире на пиксель
+	# со всех сторон, светлым — под основной
+	if tier.has("rim"):
+		var rim: Color = tier["rim"] as Color
+		for k in range(n):
+			var rb: int = lead + k * CHEV_STEP
+			for dy in range(-half - 1, half + 2):
+				var rr: int = half - absi(dy)
+				var rx: int = rb + dir * rr
+				for t in range(-1, CHEV_T + 1):
+					var rpx: int = rx + dir * t
+					var ry: int = mid + dy
+					if rpx < 0 or rpx >= W or ry < 0 or ry >= H:
+						continue
+					if img.get_pixel(rpx, ry).a <= 0.5:
+						continue
+					img.set_pixel(rpx, ry, rim)
 	for k in range(n):
 		var base: int = lead + k * CHEV_STEP
 		for dy in range(-half, half + 1):

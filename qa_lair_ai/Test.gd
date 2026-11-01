@@ -66,6 +66,8 @@ func _xz(a: Vector3, b: Vector3) -> float:
 	return Vector2(a.x - b.x, a.z - b.z).length()
 
 func _run() -> void:
+	# Разворот ТЗ 31.10.2026 (пень в секции у кромки): стенд стережёт прежнюю механику
+	preload("res://scripts/perf_config.gd").lair_layout_v2 = false
 	main = load("res://scenes/Main.tscn").instantiate()
 	get_tree().root.add_child(main)
 	await frames(8)

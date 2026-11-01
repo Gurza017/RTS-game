@@ -551,6 +551,13 @@ func _formation_key(keycode: Key) -> bool:
 	_fp_pending = true
 	return true
 
+## Вычеркнуть бойца из всех групп Ctrl+1…9 (отступивший после паники)
+func forget_in_groups(node: Node) -> void:
+	for i in range(_groups.size()):
+		var g: Array = _groups[i]
+		if node in g:
+			g.erase(node)
+
 func _save_group(idx: int) -> void:
 	_purge_invalid()
 	_groups[idx] = selected_units.duplicate()
@@ -562,7 +569,7 @@ func _recall_group(idx: int) -> void:
 	_last_group_pressed    = idx
 	_last_group_press_time = now
 
-	var grp: Array = _groups[idx].filter(func(u): return is_instance_valid(u))
+	var grp: Array = _groups[idx].filter(func(u): return is_instance_valid(u) and not (u is Unit and GameManager.squad_no_control((u as Unit).squad_id)))
 	_groups[idx] = grp
 	if grp.is_empty():
 		return
@@ -1402,7 +1409,14 @@ func _order_leftovers(movable: Array, served: Array, fallback: Vector3,
 	last_unordered = n
 	return n
 
-func _execute_line_formation(line_start: Vector3, line_end: Vector3) -> void:
+## keep_am — вызов из строя по линии С БОЕМ (attack_move_line): режим [A]
+## ставится следом, снимать его здесь нечего
+func _execute_line_formation(line_start: Vector3, line_end: Vector3, keep_am: bool = false) -> void:
+	# ПРОТЯЖКА — ТОЖЕ ПРИКАЗ ИГРОКА: снимает Attack-Move, как ПКМ в точку
+	# (ТЗ 28.10.2026, пятое письмо; прежде командир возвращал отряд к точке
+	# [A] после первой же стычки, то есть отменял приказ игрока)
+	if not keep_am and _squad_commander != null and is_instance_valid(_squad_commander):
+		_squad_commander.call("_cancel_for_selection", self)
 	var movable: Array = []
 	for u in selected_units:
 		if is_instance_valid(u) and u.has_method("command_move"):
@@ -1884,6 +1898,10 @@ func disband_selected() -> int:
 		# руина, реестры, условие победы — всё тем же путём, что от врага
 		if u is Building:
 			var b := u as Building
+			# Клик по овце выделяет и её ферму (ТЗ 31.10.2026): Delete в таком
+			# выделении утилизирует овец, а ферму не сносит
+			if sheep_gone > 0:
+				continue
 			if b.faction == Constants.FACTION_PLAYER and not b.is_dead():
 				razed.append(b)
 			continue
@@ -1902,6 +1920,9 @@ func disband_selected() -> int:
 		GameManager.on_selection_changed(selected_units)
 		return razed.size() + sheep_gone
 	if doomed.is_empty():
+		if sheep_gone > 0 and not selected_units.is_empty():
+			_clear_selection()
+			GameManager.on_selection_changed(selected_units)
 		return sheep_gone
 	# Выделение снимается ПЕРЕД казнью: кольца выделения гасятся штатным путём,
 	# а панель получает пустой набор один раз, а не по разу на каждого павшего
@@ -1926,6 +1947,11 @@ func _handle_single_click(screen_pos: Vector2, additive: bool) -> void:
 			call_deferred("_deselect_click_sfx")
 		_clear_selection()
 	var pick := _pick_at(screen_pos, Constants.LAYER_UNITS | Constants.LAYER_BUILDINGS)
+	# Знамя над отрядом сильнее бойца под ним (ТЗ 31.10.2026): клик по
+	# полотнищу выбирает его отряд — как клик по его бойцу
+	var by_banner: Unit = banner_unit_at(screen_pos)
+	if by_banner != null:
+		pick["target"] = by_banner
 	# ── ЛКМ ПО ОВЦЕ — ПОДСВЕТКА (ТЗ 19.09.2026, блок 2) ──────────────────────
 	# Тело овцы лежит на слое ресурсов (Sheep._build_pick_body), в маску бойцов
 	# и зданий оно не входит; спрашиваем ОТДЕЛЬНО и только когда под курсором
@@ -1961,21 +1987,31 @@ func _handle_single_click(screen_pos: Vector2, additive: bool) -> void:
 			# Двойной клик по юниту → выделить всех однотипных юнитов на экране
 			var now := Time.get_ticks_msec() / 1000.0
 			# ТЗ 24.10.2026 (второе письмо, блок 4): двойной клик по БАШНЕ —
-			# все свои башни в кадре камеры
-			var is_tower: bool = target is Building and String((target as Building).building_id) == "tower"
-			var is_double: bool = (target is Unit or is_tower) \
+			# все свои башни в кадре камеры. ТЗ 27.10.2026 (UI/UX, п. 3): то же
+			# у КАЗАРМ и СТРЕЛКОВОЙ — все постройки того же типа в кадре
+			# (ручка bld_double_click); Ctrl+N хранит их как любое выделение
+			var bid: String = String((target as Building).building_id) if target is Building else ""
+			var is_multi_bld: bool = bid == "tower" \
+				or (_OptSys.bld_double_click and (bid == "barracks" or bid == "archery"))
+			var is_double: bool = (target is Unit or is_multi_bld) \
 				and target.get_instance_id() == _last_lmb_click_id \
 				and (now - _last_lmb_click_time) < DOUBLE_CLICK_TIME
 			_last_lmb_click_time = now
 			_last_lmb_click_id   = target.get_instance_id()
-			if is_double and is_tower:
-				_select_towers_on_screen()
+			if is_double and is_multi_bld:
+				_select_buildings_on_screen(bid)
 			elif is_double:
 				_select_same_type_on_screen(target)
 			else:
 				_select(target)
 	elif sheep_hit != null:
 		_click_sheep(sheep_hit, additive)
+		# Клик по своей овце открывает и её овцеферму (ТЗ 31.10.2026): овца
+		# подсвечена (Delete по-прежнему её), панель — фермы
+		if _OptSys.pen_hover:
+			var pen_s := _own_pen_for(sheep_hit, pick["position"])
+			if pen_s != null and not pen_s.is_in_group("construction_sites"):
+				_select(pen_s)
 	# Досюда доходит только клик, который разведкой НЕ стал (на чужой ветке
 	# стоит return): значит открытую карточку пора закрыть
 	clear_recon()
@@ -1999,12 +2035,20 @@ func _select_same_type_on_screen(sample: Unit) -> void:
 ## укреплений уже умеет приказ гарнизону по ПКМ (_try_garrison_fire_order) —
 ## теперь залп всех башен в кадре отдаётся одним кликом
 func _select_towers_on_screen() -> void:
+	_select_buildings_on_screen("tower")
+
+## Все СВОИ достроенные постройки вида bid, чей центр в кадре камеры (башни —
+## ТЗ 24.10.2026; казармы и стрелковая — ТЗ 27.10.2026, UI/UX, п. 3). Отбор
+## по building_id, а не по классу: казарма мечников (Barracks extends Castle)
+## и стрелковая (Archery extends Building) — разные типы, и двойной клик по
+## одной не должен собирать другую
+func _select_buildings_on_screen(bid: String) -> void:
 	var vp_rect := get_viewport().get_visible_rect()
 	for b in GameManager.nodes_in_group_cached(Constants.building_group(Constants.FACTION_PLAYER)):
 		if not is_instance_valid(b) or not (b is Building):
 			continue
 		var bb := b as Building
-		if String(bb.building_id) != "tower" or bb.is_dead():
+		if String(bb.building_id) != bid or bb.is_dead():
 			continue
 		if bb.is_in_group("construction_sites"):
 			continue
@@ -2088,6 +2132,9 @@ func _select_one(node) -> void:
 	# замёрзшей нарисованной точке — у ворот, на пустой траве («кольца висят
 	# там, где стояли юниты»). Того, кого нет на карте, выделять нечем
 	if node is Unit and (node as Unit).garrisoned:
+		return
+	# Отступивший после паники неуправляем (ТЗ 29.10.2026, п. 3)
+	if node is Unit and GameManager.squad_no_control((node as Unit).squad_id):
 		return
 	selected_units.append(node)
 	_sel_set[node] = true
@@ -2184,6 +2231,67 @@ func _visible_to_player(u: Unit) -> bool:
 	if fog == null or not is_instance_valid(fog) or not fog.enabled:
 		return true
 	return fog.is_lit(u.global_position.x, u.global_position.z)
+
+## ── КЛИК ПО ЗНАМЕНИ — ВЫБОР ОТРЯДА (ТЗ 31.10.2026) ─────────────────────────
+## В месиве по мелкому спрайту бойца легко промахнуться, а знамя висит над
+## головами крупно. Ответ — живой боец отряда, чьё полотнище под курсором
+## (верхние BANNER_CLOTH_FRAC квада, древко ниже не в счёт), или null. Квад
+## повёрнут к камере вокруг вертикали и растянут шейдером на V_STRETCH —
+## экранный прямоугольник считается теми же правилами. Один обход отрядов на
+## клик, покадрового пути нет
+const BANNER_CLOTH_FRAC := 0.6
+const _BBUtilS := preload("res://scripts/BillboardUtil.gd")
+
+func banner_unit_at(screen_pos: Vector2) -> Unit:
+	if not _OptSys.banner_click or camera == null:
+		return null
+	var right: Vector3 = camera.global_transform.basis.x
+	right.y = 0.0
+	if right.length_squared() < 1e-6:
+		return null
+	right = right.normalized()
+	var best: Unit = null
+	var best_d := INF
+	for sid in GameManager.squads:
+		var sq: Dictionary = GameManager.squads[sid]
+		var b = sq.get("banner")
+		if b == null or not is_instance_valid(b) or not (b as Node3D).is_visible_in_tree():
+			continue
+		var qm := (b as MeshInstance3D).mesh as QuadMesh
+		if qm == null:
+			continue
+		var c: Vector3 = (b as Node3D).global_position
+		if camera.is_position_behind(c):
+			continue
+		var half_h: float = qm.size.y * 0.5 * _BBUtilS.V_STRETCH
+		var top: Vector2 = camera.unproject_position(c + Vector3.UP * half_h)
+		var bot: Vector2 = camera.unproject_position(c - Vector3.UP * half_h)
+		var l: Vector2 = camera.unproject_position(c - right * qm.size.x * 0.5)
+		var r: Vector2 = camera.unproject_position(c + right * qm.size.x * 0.5)
+		var y0: float = minf(top.y, bot.y)
+		var y1: float = y0 + absf(bot.y - top.y) * BANNER_CLOTH_FRAC
+		if screen_pos.x < minf(l.x, r.x) or screen_pos.x > maxf(l.x, r.x) \
+				or screen_pos.y < y0 or screen_pos.y > y1:
+			continue
+		var d: float = screen_pos.distance_squared_to(Vector2((l.x + r.x) * 0.5, (y0 + y1) * 0.5))
+		if d >= best_d:
+			continue
+		# Состав — напрямую из словаря (squad_members() распускает пустой отряд)
+		var pick_u: Unit = null
+		for raw in sq.get("members", []):
+			if raw == null or not is_instance_valid(raw):
+				continue
+			var u := raw as Unit
+			if u != null and not u.is_dead() and not u.garrisoned:
+				pick_u = u
+				break
+		if pick_u == null:
+			continue
+		if pick_u.faction != Constants.FACTION_PLAYER and not _visible_to_player(pick_u):
+			continue
+		best = pick_u
+		best_d = d
+	return best
 
 ## Чужой боец под курсором. `use_zone` — разрешить попадание «рядом со строем»
 ## (тот же SQUAD_CLICK_REACH, что у приказа атаки): игрок целится в отряд, а не
@@ -2669,6 +2777,10 @@ func hover_cursor_kind(screen_pos: Vector2) -> int:
 		return _CursorArt.NONE
 	_purge_invalid()
 	if selected_units.is_empty():
+		# Без выделения над построенной своей овцефермой (или её овцой) —
+		# палец: клик откроет панель фермы (ТЗ 31.10.2026)
+		if hover_pen(screen_pos) != null:
+			return _CursorArt.FINGER
 		return _CursorArt.NONE
 	var pick := _pick_at(screen_pos, order_pick_mask())
 	var t = pick["target"]
@@ -2677,6 +2789,11 @@ func hover_cursor_kind(screen_pos: Vector2) -> int:
 			and _squad_hurt(t as Unit):
 		return _CursorArt.MEDIC
 	var has_worker: bool = selection_has_worker()
+	# Рабочие над своим золотым рудником — кирка: ПКМ поведёт их внутрь
+	# (ТЗ 31.10.2026)
+	if _OptSys.mine_confirm and has_worker and t != null and is_instance_valid(t) and t is Mine \
+			and (t as Mine).faction == Constants.FACTION_PLAYER and not (t as Mine).is_dead():
+		return _CursorArt.PICKAXE
 	if t != null and is_instance_valid(t):
 		if t is Castle and (t as Castle).faction == Constants.FACTION_PLAYER and not (t as Castle).is_dead():
 			# ТЗ 20.10.2026, блок 6: открытая дверь — ЛУЧНИКАМ над укреплением,
@@ -2765,6 +2882,24 @@ func _own_pen_for(target, pos: Vector3) -> Building:
 		if absf(pos.x - b.global_position.x) <= hx and absf(pos.z - b.global_position.z) <= hz:
 			return b
 	return null
+
+## Построенная своя овцеферма под курсором (по самой ферме или по её овце);
+## null — нет или ручка pen_hover снята. Один разбор клика на опрос курсора
+func hover_pen(screen_pos: Vector2) -> Building:
+	if not _OptSys.pen_hover or camera == null or _over_ui(screen_pos):
+		return null
+	var pick := _pick_at(screen_pos, Constants.LAYER_BUILDINGS)
+	var t = pick["target"]
+	if t == null:
+		var sp = _pick_at(screen_pos, Constants.LAYER_RESOURCES)["target"]
+		if _sheep_selectable(sp):
+			t = sp
+	if t == null:
+		return null
+	var pen := _own_pen_for(t, pick["position"])
+	if pen == null or pen.is_in_group("construction_sites"):
+		return null
+	return pen
 
 func resource_under_cursor(screen_pos: Vector2) -> ResourceNode:
 	if camera == null or _over_ui(screen_pos):
@@ -3249,14 +3384,49 @@ signal attack_move_changed(armed: bool)
 ## возвращает ту форму, которую ведёт курсор-палец (_apply_finger_cursor)
 var _swords_cursor: ImageTexture = null
 var swords_cursor_on: bool = false
+## В режиме [A] стоит стрела (выделены одни стрелки), а не мечи
+var _swords_ranged: bool = false
+## Вид скрещённых стрел в [A]: CursorArt.ARROWS_X (достают) / ARROWS_X_FAR
+var _attack_arrows_kind: int = 13
+
+## Main: досягаемость под курсором сменилась — перекрасить стрелы [A]
+func set_attack_arrows_kind(kind: int) -> void:
+	if kind == _attack_arrows_kind:
+		return
+	_attack_arrows_kind = kind
+	if swords_cursor_on and _swords_ranged:
+		_apply_attack_cursor(true)
+
+## Вид курсора режима [A]: стрела у одних стрелков, мечи у пехоты и
+## смешанного выделения (ТЗ 28.10.2026, пятое письмо; ручка am_ranged_cursor)
+func attack_cursor_ranged() -> bool:
+	return _OptSys.am_ranged_cursor and selection_ranged_only()
+
+## Выделение сменилось при взведённом [A] — курсор перерисовать (зовёт
+## Main._update_hover_cursor раз в CURSOR_POLL)
+func refresh_attack_cursor() -> void:
+	if swords_cursor_on and attack_cursor_ranged() != _swords_ranged:
+		_apply_attack_cursor(true)
 
 func _apply_attack_cursor(on: bool) -> void:
 	swords_cursor_on = on
 	if on:
-		if _swords_cursor == null:
-			_swords_cursor = _make_swords_cursor()
-		Input.set_custom_mouse_cursor(_swords_cursor, Input.CURSOR_ARROW, Vector2(16, 16))
-		Input.set_custom_mouse_cursor(_swords_cursor, Input.CURSOR_POINTING_HAND, Vector2(16, 16))
+		_swords_ranged = attack_cursor_ranged()
+		var tex: Texture2D = null
+		var hot := Vector2(16, 16)
+		if _swords_ranged:
+			# ТЗ 29.10.2026, п. 2: у одних стрелков — ДВЕ СКРЕЩЁННЫЕ СТРЕЛЫ;
+			# оперение по досягаемости цели под курсором (вид ведёт Main)
+			var kx: int = _attack_arrows_kind
+			tex = _CursorArt.texture(kx)
+			hot = _CursorArt.hotspot(kx)
+		if tex == null:
+			if _swords_cursor == null:
+				_swords_cursor = _make_swords_cursor()
+			tex = _swords_cursor
+			hot = Vector2(16, 16)
+		Input.set_custom_mouse_cursor(tex, Input.CURSOR_ARROW, hot)
+		Input.set_custom_mouse_cursor(tex, Input.CURSOR_POINTING_HAND, hot)
 		Input.set_default_cursor_shape(Input.CURSOR_ARROW)
 	else:
 		# Игровые стрелка и палец — обратно (их ставит UIAssets); курсор
@@ -3352,7 +3522,7 @@ func attack_move_line(line_start: Vector3, line_end: Vector3) -> int:
 	if selected_units.is_empty():
 		return 0
 	_squad_cmd().prepare_attack_move(self)
-	_execute_line_formation(line_start, line_end)
+	_execute_line_formation(line_start, line_end, true)
 	var n: int = _squad_cmd().attack_move(self, (line_start + line_end) * 0.5, false, false)
 	if n > 0:
 		AudioManager.play_ui("order_attack_move")
@@ -4246,6 +4416,11 @@ func _try_enter_mine(target) -> bool:
 		if is_instance_valid(u) and u is Worker and not (u as Unit).garrisoned:
 			(u as Worker).command_build(m as Node3D)
 			sent += 1
+	# Отклик приказа (ТЗ 31.10.2026): рудник мигает, рабочие отвечают
+	# «Go / Come on» (своё окно повтора у реплики)
+	if sent > 0 and _OptSys.mine_confirm:
+		m.flash_accept()
+		AudioManager.play_voice("worker_gold")
 	return sent > 0
 
 func _try_release_mine(target) -> bool:
@@ -4406,12 +4581,55 @@ func selection_ranged_only() -> bool:
 			if (u as Unit).stat_id != "archer":
 				return false
 			any = true
-		elif u is Castle and (u as Castle).faction == Constants.FACTION_PLAYER \
-				and (u as Castle).has_roof_garrison():
-			any = true
+		elif u is Castle and (u as Castle).faction == Constants.FACTION_PLAYER:
+			# ТЗ 29.10.2026, п. 2: среди нескольких выделенных башен пустая
+			# НЕЙТРАЛЬНА — хватает одной со стрелками, чтобы курсор стал
+			# стрелой (прежде пустая башня давала «не стрелки» и меч)
+			if (u as Castle).has_roof_garrison():
+				any = true
 		else:
 			return false
 	return any
+
+## ДОСЯГАЕМОСТЬ ЦЕЛИ ДЛЯ ВЫДЕЛЕННЫХ СТРЕЛКОВ (ТЗ 27.10.2026, UI/UX, п. 2):
+## true — хотя бы один выделенный лучник или своё укрепление с гарнизоном
+## достаёт до точки point (по XZ). Постройка-цель меряется до края её
+## рисунка (Unit._pad_of — тем же правилом, что бой и RoofGarrison), боец и
+## точка земли — как есть. Ответ красит оперение курсора-стрелы
+## (CursorArt.ARROW / ARROW_FAR); сам приказ он не ограничивает
+func selection_reaches(target, point: Vector3) -> bool:
+	var pad: float = 0.0
+	if target != null and is_instance_valid(target) and target is Node3D:
+		pad = Unit._pad_of(target as Node3D)
+	for u in selected_units:
+		if not is_instance_valid(u):
+			continue
+		if u is Unit:
+			var un := u as Unit
+			if un.is_dead() or un.stat_id != "archer":
+				continue
+			var p: Vector3 = un.global_position
+			var d: float = Vector2(p.x - point.x, p.z - point.z).length()
+			if d <= un.attack_range + pad:
+				return true
+		elif u is Castle and (u as Castle).faction == Constants.FACTION_PLAYER \
+				and not (u as Castle).is_dead() and (u as Castle).has_roof_garrison():
+			var c := u as Castle
+			var r: float = float(c._roof.fire_range())
+			if r <= 0.0:
+				continue
+			var cp: Vector3 = c.global_position
+			var dc: float = Vector2(cp.x - point.x, cp.z - point.z).length()
+			if dc <= r + pad:
+				return true
+	return false
+
+## Точка земли под экранной точкой; Vector3.INF — луч мимо карты
+func ground_under_cursor(screen_pos: Vector2) -> Vector3:
+	var hit := _screen_ray_hit(screen_pos, Constants.LAYER_GROUND)
+	if hit.is_empty():
+		return Vector3.INF
+	return hit["position"]
 
 ## В выделении есть своё укрепление со стрелками на крыше (башня, бараки,
 ## крепость). Нужно прицелу курсора (Main._update_enemy_hover): прежде он
@@ -4618,7 +4836,17 @@ func _trigger_double_rmb_abilities() -> void:
 		# СТРОЙ СМЫКАЕТСЯ ОДНИМ ОТРЯДНЫМ ДЕЙСТВИЕМ (заказ: «сомкнуть ряды»).
 		# Поштучного возврата в проекте нет и не будет — разбор в CLAUDE.md
 		if utype == "spearman":
-			GameManager.squad_close_ranks(id, true)
+			# Смыкание — только без приказа атаки: его command_move каждому
+			# снимал только что отданную атаку, и натиск уходил «в пустоту»
+			# (ТЗ 29.10.2026, п. 5). Рывки строем ведёт GameManager
+			var attacking := false
+			for u0 in GameManager.squad_members(id):
+				if u0 != null and is_instance_valid(u0) and (u0 as Unit).attack_target != null:
+					attacking = true
+					break
+			if not attacking or not _OptSys.phalanx_shove:
+				GameManager.squad_close_ranks(id, true)
+			GameManager.squad_start_shove(id)
 		for u in GameManager.squad_members(id):
 			if u == null or not is_instance_valid(u):
 				continue

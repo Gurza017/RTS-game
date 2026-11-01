@@ -35,6 +35,7 @@ extends Unit
 
 const _SSParser := preload("res://scripts/SpriteSheetParser.gd")
 const _GobCfgB  := preload("res://scripts/goblin/goblin_config.gd")
+const _OptBG    := preload("res://scripts/perf_config.gd")
 
 ## Ленты — ГОБЛИНСКИЕ, просто крупнее. Отдельного арта у туши нет и не нужно
 const SHEET_DIR := "res://assets/factions/Goblin/"
@@ -239,6 +240,7 @@ func tick_physics(delta: float, prof: bool = false, bm: bool = true,
 		if _combo_left <= 0.0:
 			_combo_left = 0.0
 			_sweep_now(false)
+			_hit_building()
 	# ── ТЯЖЁЛЫЙ ШАГ ───────────────────────────────────────────────────────
 	# Редкий глухой удар ноги, пока туша ИДЁТ ПО ЛЕНТЕ (и на марше, и на
 	# подходе к цели). Своего узла звука не заводим — это обычный 3D-голос
@@ -472,10 +474,32 @@ func _strike_damage() -> float:
 		if to.length_squared() > 1e-4:
 			_facing = to.normalized()
 	_sweep_now(true)
+	_hit_building()
 	if combo:
 		# Двойной взмах: второй удар — отложенный, его выпустит тик
 		_combo_left = _GobCfgB.BIG_COMBO_GAP
 	return attack_damage
+
+## Удар по ПОСТРОЙКЕ-цели (ТЗ 27.10.2026, второе письмо, п. 6). Свип ищет
+## по сетке бойцов, и здание в него не попадает: прежде туша, получившая
+## приказ снести башню, махала по ней без единой единицы урона. Цель — на
+## длине удара до СТЕНЫ (reach), урон — удар × BIG_BUILDING_DMG_MULT
+func _hit_building() -> void:
+	if not _OptBG.big_bld_damage:
+		return
+	var t := attack_target
+	if t == null or not is_instance_valid(t) or not (t is Building) or (t as Building).is_dead():
+		return
+	var tp: Vector3 = (t as Node3D).global_position
+	var mp: Vector3 = position if _local_xform else global_position
+	var r: float = attack_range + _pad_of(t) + MELEE_HIT_MISS_SLACK + _GobCfgB.BIG_SWEEP_HALF_W
+	if Vector2(tp.x - mp.x, tp.z - mp.z).length_squared() > r * r:
+		return
+	var dmg: float = (attack_damage + _upgrade_damage_bonus()) * _GobCfgB.BIG_BUILDING_DMG_MULT
+	(t as Building).take_damage(dmg, self)
+	building_hits += 1
+
+var building_hits: int = 0
 
 func _damage_on_strike() -> bool:
 	return false          # урон несёт свип, а не одиночный удар

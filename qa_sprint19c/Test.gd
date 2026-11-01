@@ -144,6 +144,8 @@ func _run() -> void:
 	var cp: Vector3 = main.PLAYER_BASE_ANCHOR + Vector3(0.0, 0.0, 26.0)
 	_castle.global_position = _g(cp)
 	await pframes(6)
+	# Ступени построек (ТЗ 30.10.2026) стенд не проверяет — открыто всё
+	GameManager.build_unlock = {Constants.FACTION_PLAYER: GameManager.BUILD_UNLOCK_ALL}
 
 	await _a_economy()
 	await _b_rally()
@@ -170,7 +172,9 @@ func _a_economy() -> void:
 	# колонке D, стройка отдельной колонкой C. Свойство прежнее: и то и другое есть
 	for c in cells:
 		var node: Dictionary = _Forge.get_node(_Forge.node_id("worker", c))
-		if float(node.get("bonus_train", 0.0)) > 0.0:
+		# ТЗ 28.10.2026 (блок 2): 4d/5d — ускорение Кузницы (bonus_research_pct),
+		# колонка D — «обучение и учёба»: найм рабочих или темп исследований
+		if float(node.get("bonus_train", 0.0)) > 0.0 or float(node.get("bonus_research_pct", 0.0)) > 0.0:
 			train_cells += 1
 		var cnode: Dictionary = _Forge.get_node(_Forge.node_id("worker", c.replace("d", "c")))
 		if float(cnode.get("bonus_build", 0.0)) > 0.0:
@@ -490,9 +494,16 @@ func _f_monks() -> void:
 	verdict("F4 половина запаса одиночным лечением за %.1f с (ожидание ~%.0f с, не быстрее %.0f)" % [
 			float(healed_at) / 60.0, expect, expect * 0.7],
 		healed_at > 0 and float(healed_at) / 60.0 >= expect * 0.7)
-	# ── Благодать (2d): отряд разом, каждый вдвое медленнее ──────────────
+	# ── МАССОВОЕ ЛЕЧЕНИЕ — «ОПЕКА» (3d), А НЕ УЗЕЛ 2d (ТЗ 26.10.2026) ────
+	# С ТЗ 18-19.09 узел 2d — «Первое Чудо» (воскрешение); проверка «2d —
+	# Благодать» осталась от спринта 19 и стерегла ту самую дыру, через
+	# которую изученное воскрешение лечило весь отряд за такт (жалоба
+	# владельца, qa_tz1026 E2). Отряд разом теперь лечит 3d, и не быстрее
+	# MONK_MASS_FULL_SEC с нуля до полного
 	GameManager.finish_research(pf, _Forge.node_id("monk", "2d"))
-	verdict("F6 «Благодать» — узел 2d, переключатель", m.aoe_active())
+	verdict("F6 узел 2d (воскрешение) не включает лечение всего отряда",
+		not m.aoe_active() and int(m.max_heal_targets()) <= 3)
+	GameManager.finish_research(pf, _Forge.node_id("monk", "3d"))
 	var grp: Array = _squad("warrior", pf, base + Vector3(0.0, 0.0, 3.0), 4)
 	for u in grp:
 		(u as Unit).current_health = (u as Unit).max_health * 0.5

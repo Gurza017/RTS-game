@@ -350,16 +350,19 @@ func _d_banners() -> void:
 		if int((UC.VET_BANNER_TIERS[i] as Dictionary).get("shape", -1)) != UC.BANNER_PENNANT:
 			shapes_ok = false
 	verdict("D1 все ступени ниже легенды — треугольные вымпелы", shapes_ok)
+	# Шкала ТЗ 30.10.2026: жёлтого нет ниже золотых лычек (7-я ступень)
 	var gold := 0
-	for lvl in range(1, top):
+	for lvl in range(1, top - 3):
 		gold += maxi(_gold_px(BA.texture_for(lvl)), 0)
 		# vexillum_texture рисует ЗНАМЯ ЛЕГЕНДЫ (ступень top) при любом
 		# аргументе — с 25.10 оно золотое, проверяется в D3
-	verdict("D2 ни на одном знамени ниже легенды нет жёлтого", gold == 0,
+	verdict("D2 ни на одном знамени ниже золотых лычек нет жёлтого", gold == 0,
 		"жёлтых пикселей %d" % gold)
 	var leg: Dictionary = UC.veteran_banner_tier(top)
 	var c: Color = leg.get("cloth", Color.BLACK)
-	verdict("D3 знамя легендарных — золотое (разворот ТЗ 25.10)", c.r > 0.8 and c.g > 0.6 and c.b < 0.35, str(c))
+	# РАЗВОРОТ ТЗ 31.10.2026: легенда синяя в фиолетовой рамке, жёлтого нет
+	verdict("D3 знамя легендарных — синее поле в фиолетовой рамке (ТЗ 31.10)",
+		c == UC.BANNER_BLUE and (leg.get("edge", Color.BLACK) as Color) == UC.BANNER_PURPLE, str(c))
 	verdict("D4 знамя элиты отличается от общего (свой ключ, × ELITE_SCALE)",
 		BA.vexillum_texture(7) != BA.texture_for(7))
 

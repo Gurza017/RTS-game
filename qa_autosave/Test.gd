@@ -255,12 +255,13 @@ func _block_b(auto: Node) -> void:
 	get_tree().paused = false
 	verdict("B8 на паузе отсчёт стоит (осталось %.0f → %.0f с), записи нет" % [left0, auto.seconds_left],
 		absf(auto.seconds_left - left0) < 0.01 and auto.saves_done == 2)
-	# Вне живой партии (победа) — стоит
-	main._phase = main.Phase.VICTORY
+	# Вне живой партии (поражение) — стоит. После ПОБЕДЫ партия живёт
+	# (ТЗ 29.10.2026, п. 1: песочница) и автосейв идёт штатно
+	main._phase = main.Phase.DEFEAT
 	for m in range(10):
 		auto._process(60.0)
 	main._phase = main.Phase.PLAYING
-	verdict("B9 вне живой партии (победа/поражение/расстановка) отсчёт стоит",
+	verdict("B9 вне живой партии (поражение) отсчёт стоит",
 		absf(auto.seconds_left - left0) < 0.01 and auto.saves_done == 2)
 	# Выключено
 	_GS.set_autosave_minutes(0)
@@ -495,6 +496,12 @@ func _block_d() -> void:
 	var dropped0: int = GameManager.banners_dropped
 	for m in GameManager.squads[s_relic]["members"].duplicate():
 		if is_instance_valid(m):
+			(m as Unit).take_damage(1.0e12)
+	await pframes(2)
+	# Отряд на вершине шкалы — легенда: последний боец встаёт «последним
+	# выжившим» (ТЗ 30.10.2026); повторный удар — честная смерть
+	for m in GameManager.squads.get(s_relic, {}).get("members", []).duplicate():
+		if is_instance_valid(m) and not (m as Unit).is_dead():
 			(m as Unit).take_damage(1.0e12)
 	await pframes(4)
 	verdict("D14 выбитый элитный отряд роняет знамя (banners_dropped %d → %d)" % [dropped0, GameManager.banners_dropped],

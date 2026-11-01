@@ -28,6 +28,7 @@ extends Node
 
 const _UCfg   := preload("res://scripts/unit_stats_config.gd")
 const _GobCfg := preload("res://scripts/goblin/goblin_config.gd")
+const _OptS13 := preload("res://scripts/perf_config.gd")
 const _Forge  := preload("res://scripts/forge_config.gd")
 
 var main = null
@@ -539,10 +540,15 @@ func _f_abilities() -> void:
 	# расписанию лент оно отношения не имеет. Гоблин в полутора метрах
 	# успевает получить ответный удар за те четыре физкадра, что идут до
 	# заморозки, и проверка мигала через прогон НЕ на коде
+	# РАЗВОРОТ 31.10.2026 (warrior_shield_dynamic): щит в набеге — только на
+	# последних метрах; «на весь набег» проверяется при снятой ручке
+	var _dyn0: bool = _OptS13.warrior_shield_dynamic
+	_OptS13.warrior_shield_dynamic = false
 	w._anim_lock_until_ms = 0
 	w._update_guard()
 	verdict("F6 щит в набеге поднят (зафиксирован)", w.is_guarding(),
 		"набег идёт=%s, щит=%s" % [str(w.rage_active()), str(w.is_guarding())])
+	_OptS13.warrior_shield_dynamic = _dyn0
 	# ── СЕРИЯ: обычный, мощный, обычный, мощный, обычный ─────────────────
 	var strong: float = _UCfg.stat("warrior", "attack_2", w.attack_damage * 2.4)
 	var seq: Array = []

@@ -110,6 +110,19 @@ uniform float water_mix : hint_range(0.0, 1.0) = 0.72;
 uniform float dead_dim : hint_range(0.0, 1.0) = 0.74;
 uniform float dead_desat : hint_range(0.0, 1.0) = 0.40;
 uniform vec3 dead_tint : source_color = vec3(1.0, 0.94, 0.86);
+// ── ПАЛИТРА КУЧИ (ТЗ 01.11.2026, «оттеночный блицкриг») ───────────────────
+// Каждое тело берёт один из трёх подтонов по хэшу своей точки (dead_tint,
+// dead_tint2, dead_tint3) — масса одного рода войск неоднородна без лишних
+// бакетов и вызовов отрисовки. tint_var 0 — все берут dead_tint (прежний вид).
+// dead_lift — подъём тёмных пикселей к подтону (бледность), 0 — без него
+uniform vec3 dead_tint2 : source_color = vec3(1.0, 0.94, 0.86);
+uniform vec3 dead_tint3 : source_color = vec3(1.0, 0.94, 0.86);
+uniform float tint_var : hint_range(0.0, 1.0) = 0.0;
+uniform float dead_lift : hint_range(0.0, 1.0) = 0.0;
+// Сочность кучи (ручка corpse_vivid, F9): −2…3, 0 — как задано палитрой.
+// Меньше нуля — тусклее и бледнее, больше — насыщеннее, контрастнее, ярче
+uniform float dead_vivid = 0.0;
+varying float v_thash;
 // ── СТОРОНА ВОДЫ — ПО ЭКРАНУ, А НЕ ПО РИСУНКУ (ТЗ 29.09.2026, блок 8) ────
 // Прежде под воду уходила сторона РИСУНКА (u > cut): у тел с yaw+PI или
 // зеркалом она оказывалась ВЕРХНЕЙ по экрану — «вода вверху, тело внизу».
@@ -125,6 +138,8 @@ void vertex() {
 	cf.y = 0.0;
 	float l = length(cf);
 	v_axdot = (l > 1e-4) ? dot(ax, cf / l) : 1.0;
+	vec2 wp = MODEL_MATRIX[3].xz;
+	v_thash = fract(sin(dot(floor(wp * 7.0), vec2(12.9898, 78.233))) * 43758.5453);
 }
 
 void fragment() {
@@ -162,7 +177,20 @@ void fragment() {
 	vec3 rgb = col.rgb * COLOR.a;
 	{
 		float lum0 = dot(rgb, vec3(0.299, 0.587, 0.114));
-		rgb = mix(rgb, vec3(lum0), dead_desat) * dead_tint * dead_dim;
+		vec3 tn = dead_tint;
+		if (tint_var > 0.0) {
+			vec3 alt = (v_thash < 0.667) ? dead_tint2 : dead_tint3;
+			tn = mix(dead_tint, alt, step(0.333, v_thash) * tint_var);
+		}
+		rgb = mix(rgb, vec3(lum0), dead_desat);
+		rgb = mix(rgb, tn * 0.6, dead_lift * (1.0 - lum0));
+		rgb = rgb * tn * dead_dim;
+	}
+	if (dead_vivid != 0.0) {
+		float lv = dot(rgb, vec3(0.299, 0.587, 0.114));
+		rgb = mix(vec3(lv), rgb, 1.0 + 0.15 * dead_vivid);
+		rgb = (rgb - 0.35) * (1.0 + 0.06 * dead_vivid) + 0.35;
+		rgb = clamp(rgb * (1.0 + 0.03 * dead_vivid), 0.0, 1.0);
 	}
 	if (rot > 0.001) {
 		// Обесцвечивание к своей же яркости, затем замещение бурым — и всё это

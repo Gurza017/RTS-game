@@ -25,6 +25,7 @@ const _RCfg := preload("res://scripts/relic_config.gd")
 const _UCfgR := preload("res://scripts/unit_stats_config.gd")
 const _SquadBannerR := preload("res://scripts/SquadBanner.gd")
 const _BannerArtR := preload("res://scripts/BannerArt.gd")
+const _Opt := preload("res://scripts/perf_config.gd")
 
 signal pool_changed(value: float)
 signal armed_changed(on: bool)
@@ -50,6 +51,7 @@ var _pick_t: float = 0.0
 ## Стендам
 var grants: int = 0
 var drops: int = 0
+var passes: int = 0
 var pickups: int = 0
 var aura_ticks: int = 0
 
@@ -92,6 +94,8 @@ func add_ai_xp(n: float) -> void:
 		if t == "worker" or t == "monk":
 			continue
 		if _alive_members(int(key)).is_empty():
+			continue
+		if _Opt.standard_squad and standard_level(int(key)) >= _RCfg.STANDARD_MAX_LEVEL:
 			continue
 		var k: int = int(sq.get("kills", 0))
 		if k > best_k:
@@ -143,6 +147,8 @@ func grant_to_squad(sid: int, force: bool = false) -> int:
 	var alive: Array = _alive_members(sid)
 	if alive.is_empty():
 		return -1
+	if _Opt.standard_squad:
+		return _grant_standard(sid, alive, force)
 	if not force:
 		pool -= _RCfg.POOL_COST
 		pool_changed.emit(pool)
@@ -156,6 +162,49 @@ func grant_to_squad(sid: int, force: bool = false) -> int:
 	grants += 1
 	_aura_t = 0.0          # аура — в ближайшем такте, а не через полсекунды
 	return int((r as Dictionary)["id"])
+
+## ── ШТАНДАРТ ЗА ОБЩИЙ ОПЫТ — СВОЙСТВО ОТРЯДА (ТЗ 29.10.2026) ──────────────
+## Было: выдача поднимала РАНГ ветеранства (grant_squad_level подтягивал
+## убийства до порога), и пять кликов по накопленной копилке делали из
+## новобранцев легенду; штандарт жил предметом носителя и пропадал с его
+## гибелью (аура гасла, на повторной выдаче заводился второй, уровня 1).
+## Теперь: личный опыт — убийства и ранг, общий — только штандарт. Первая
+## выдача — штандарт уровня 1, дальше только улучшение до STANDARD_MAX_LEVEL;
+## ранг и убийства отряда не трогаются. Уровень живёт в записи отряда
+## (elite / elite_lvl), реликвия — носитель ауры, переходит к соседу
+func _grant_standard(sid: int, alive: Array, force: bool) -> int:
+	var cur: int = standard_level(sid)
+	if cur >= _RCfg.STANDARD_MAX_LEVEL:
+		return -1
+	if not force:
+		pool -= _RCfg.POOL_COST
+		pool_changed.emit(pool)
+	var lvl: int = cur + 1
+	var sq: Dictionary = GameManager.squads[sid]
+	sq["elite"] = true
+	sq["elite_lvl"] = lvl
+	var r: Variant = relic_of_squad(sid)
+	if r != null:
+		(r as Dictionary)["level"] = lvl
+		_refresh_visual(r)
+	else:
+		r = _new_relic(lvl, _central_member(alive), Vector3.ZERO)
+	GameManager.refresh_squad_banner(sid)
+	grants += 1
+	_aura_t = 0.0
+	GameManager.tm_event("standard_grant", {"sid": sid, "lvl": lvl,
+		"fac": int(sq.get("faction", 0))})
+	return int((r as Dictionary)["id"])
+
+## Уровень штандарта отряда (0 — нет): реликвия у живого бойца или запись
+func standard_level(sid: int) -> int:
+	var r: Variant = relic_of_squad(sid)
+	if r != null:
+		return int((r as Dictionary)["level"])
+	var sq: Variant = GameManager.squads.get(sid)
+	if sq == null or not bool((sq as Dictionary).get("elite", false)):
+		return 0
+	return maxi(1, int((sq as Dictionary).get("elite_lvl", 1)))
 
 ## Реликвия, которую несёт живой боец отряда (первая найденная)
 func relic_of_squad(sid: int) -> Variant:
@@ -247,7 +296,17 @@ func _tick_carriers() -> void:
 		if typeof(c) == TYPE_OBJECT:
 			# Правило 5: is_instance_valid на сырой ссылке до приведения
 			if not is_instance_valid(c) or (c as Unit).is_dead():
-				_drop(d)
+				# ТЗ 29.10.2026: штандарт — свойство отряда; на землю — только
+				# когда в отряде не осталось ни одного живого бойца
+				var heir: Unit = _heir_of(d) if _Opt.standard_squad else null
+				if heir != null:
+					d["carrier"] = heir
+					passes += 1
+					GameManager.probes.note_standard("pass", int(d.get("bsid", 0)), int(d["level"]), heir)
+					_refresh_visual(d)
+					_aura_t = 0.0
+				else:
+					_drop(d)
 			elif not (c as Unit).garrisoned:
 				var p: Vector3 = (c as Unit).global_position
 				p.y = 0.0
@@ -257,12 +316,29 @@ func _tick_carriers() -> void:
 		if who != null:
 			d["carrier"] = who
 			pickups += 1
+			GameManager.probes.note_standard("pickup", who.squad_id, int(d["level"]), who)
 			_refresh_visual(d)
 			_aura_t = 0.0
+
+## Наследник штандарта — центральный живой боец отряда прежнего носителя
+## (отряд — из записи bsid: павший носитель мог быть уже освобождён)
+func _heir_of(d: Dictionary) -> Unit:
+	var sid: int = int(d.get("bsid", 0))
+	if sid <= 0 or not GameManager.squads.has(sid):
+		return null
+	var alive: Array = _alive_members(sid)
+	if alive.is_empty():
+		return null
+	return _central_member(alive)
+
+## Есть ли у отряда штандарт (своя реликвия или запись) — второй не подбирает
+func _squad_has_standard(sid: int) -> bool:
+	return sid > 0 and standard_level(sid) > 0
 
 func _drop(d: Dictionary) -> void:
 	d["carrier"] = null
 	drops += 1
+	GameManager.probes.note_standard("drop", int(d.get("bsid", 0)), int(d["level"]), null)
 	_refresh_visual(d)
 
 ## Ближайший живой боец любой фракции в PICK_RADIUS. Рабочие, овцы и
@@ -285,6 +361,9 @@ func _picker_at(pos: Vector3) -> Unit:
 		if u == null or u.is_dead() or u.garrisoned or u.attack_damage <= 0.0:
 			continue
 		if u is Worker or relic_of_unit(u) != null:
+			continue
+		# Один штандарт на отряд (ТЗ 29.10.2026): отряд со своим упавший не берёт
+		if _Opt.standard_squad and _squad_has_standard(u.squad_id):
 			continue
 		var p: Vector3 = u.global_position
 		var dd: float = (p.x - pos.x) * (p.x - pos.x) + (p.z - pos.z) * (p.z - pos.z)
@@ -323,6 +402,9 @@ func _tick_aura() -> void:
 				continue
 			var u := raw as Unit
 			if u == null or u.is_dead() or u.faction != fac or u.attack_damage <= 0.0:
+				continue
+			# Под аурой подавления свинобосса бонуса штандарта нет (ТЗ 28.10.2026)
+			if u._suppressed_until_ms > Unit.now_ms:
 				continue
 			var iid: int = u.get_instance_id()
 			var cur: Variant = desired.get(iid)
@@ -400,6 +482,7 @@ func _host() -> Node:
 	return tree.current_scene if tree != null else null
 
 func _refresh_visual(d: Dictionary) -> void:
+	_touch_banners(d)
 	var node = d["node"]
 	if node == null or not is_instance_valid(node):
 		var host := _host()
@@ -416,8 +499,42 @@ func _refresh_visual(d: Dictionary) -> void:
 		node.build_texture(_BannerArtR.elite_texture(int(d["level"]), 0),
 			_SquadBannerR.ELITE_SCALE, _BannerArtR.elite_pole_offset_px() * _SquadBannerR.PIXEL_SIZE)
 
+## ── ЗНАМЯ ОТРЯДА-НОСИТЕЛЯ ПЕРЕСТРАИВАЕТСЯ ПО СОБЫТИЮ РЕЛИКВИИ ─────────────
+## Реликвия срастается со знаменем отряда (GameManager.refresh_squad_banner):
+## подбор, выпадение и рост уровня меняют картинку И прежнего отряда-носителя
+## (вернуть вымпел), И нового (штандарт). Отряд прошлого носителя помним в
+## записи: на выпадении носитель уже мёртв и мог быть освобождён
+func _touch_banners(d: Dictionary) -> void:
+	var c = d["carrier"]
+	var sid: int = 0
+	if typeof(c) == TYPE_OBJECT and is_instance_valid(c) and not (c as Unit).is_dead():
+		sid = (c as Unit).squad_id
+	var was: int = int(d.get("bsid", 0))
+	d["bsid"] = sid
+	if was > 0 and was != sid:
+		GameManager.refresh_squad_banner(was)
+	if sid > 0:
+		GameManager.refresh_squad_banner(sid)
+
+## Знамя отряда носителя уже несёт реликвию на полотнище — своего узла не
+## ставим (один отряд — один флагшток)
+func _merged_into_banner(u: Unit) -> bool:
+	if not _Opt.relic_merge_banner or u.squad_id <= 0:
+		return false
+	var sq: Variant = GameManager.squads.get(u.squad_id)
+	if sq == null:
+		return false
+	var b = (sq as Dictionary).get("banner")
+	return b != null and is_instance_valid(b)
+
 const _RelicButtonS := preload("res://scripts/RelicButton.gd")
 var _ui: Node = null
+
+## ПОСЛЕ ВИЗУАЛЬНОГО ПРОХОДА АРМИИ (GameManager.process_priority = 1000):
+## значки и круги ауры берут нарисованную точку бойца того же кадра, а не
+## прошлого (ТЗ 27.10.2026, третье письмо, п. 1)
+func _ready() -> void:
+	process_priority = 1001
 
 func _process(_delta: float) -> void:
 	# Кнопка копилки — в сцене партии (в меню и в стендах без Main её нет)
@@ -443,7 +560,7 @@ func _process(_delta: float) -> void:
 			var u := c as Unit
 			# Отряд носителя — элита: его знамя уже бордовый штандарт, второй
 			# флагшток над тем же отрядом не ставится
-			if GameManager.squad_elite(u.squad_id):
+			if GameManager.squad_elite(u.squad_id) or _merged_into_banner(u):
 				node.visible = false
 				continue
 			# Видна ровно тогда, когда виден носитель (та же логика, что у
@@ -534,13 +651,64 @@ var _icons: Array = []
 var aura_view_rings: int = 0      # стендам: сколько кругов показано сейчас
 var aura_view_icons: int = 0      # стендам: сколько значков показано сейчас
 var _ring_mat: StandardMaterial3D = null
+## ── ЗНАЧКИ И КРУГИ ИДУТ ЗА НАРИСОВАННЫМ БОЙЦОМ (ТЗ 27.10.2026, третье
+## письмо, п. 1; ручка perf_config.aura_follow_draw) ─────────────────────────
+## Состав «кто в круге» по-прежнему решается раз в AURA_VIEW_SEC, а ПОЛОЖЕНИЕ
+## значка и круга — каждый кадр: значок привязан к бойцу-якорю (ближайший к
+## центру отряда) со смещением центра от него, круг — к носителю, и оба берут
+## НАРИСОВАННУЮ точку (Unit.draw_position — её сглаживает ядро). Прежде
+## значок стоял на логическом центре и прыгал раз в 0.15 с, а логическая
+## точка бойца обгоняет картинку — «плюсики дёргаются» на марше
+var _icon_anchor: Array = []      # Unit-якорь значка k (сырая ссылка)
+var _icon_off: Array = []         # смещение значка от якоря (Vector3)
+var _ring_anchor: Array = []      # носитель круга i (сырая ссылка)
 
 func _aura_view_tick(delta: float) -> void:
 	_view_t -= delta
-	if _view_t > 0.0:
-		return
-	_view_t = AURA_VIEW_SEC
-	_update_aura_view()
+	if _view_t <= 0.0:
+		_view_t = AURA_VIEW_SEC
+		_update_aura_view()
+	if _Opt.aura_follow_draw:
+		_follow_aura_view()
+
+## Каждый кадр: значки и круги — к нарисованной точке якоря. Узлов единицы,
+## переходов в ядро — по одному на значок
+func _follow_aura_view() -> void:
+	for k in range(mini(aura_view_icons, _icons.size())):
+		if k >= _icon_anchor.size():
+			break
+		var a = _icon_anchor[k]
+		var lab = _icons[k]
+		# Правило 5: живость на сырой ссылке
+		if a == null or not is_instance_valid(a) or lab == null or not is_instance_valid(lab):
+			continue
+		if (a as Unit).is_dead():
+			continue
+		(lab as Label3D).global_position = (a as Unit).draw_position() + (_icon_off[k] as Vector3)
+	for i in range(mini(aura_view_rings, _rings.size())):
+		if i >= _ring_anchor.size():
+			break
+		var c = _ring_anchor[i]
+		var ring = _rings[i]
+		if c == null or not is_instance_valid(c) or ring == null or not is_instance_valid(ring):
+			continue
+		if (c as Unit).is_dead():
+			continue
+		var dp: Vector3 = (c as Unit).draw_position()
+		(ring as MeshInstance3D).global_position = Vector3(dp.x, GameManager.get_terrain_height(dp.x, dp.z) + 0.12, dp.z)
+
+## Боец отряда, ближайший к его центру (якорь значка)
+static func _anchor_of(alive: Array, cen: Vector3) -> Unit:
+	var best: Unit = null
+	var bd := INF
+	for m in alive:
+		var u := m as Unit
+		var p: Vector3 = u.global_position
+		var d: float = (p.x - cen.x) * (p.x - cen.x) + (p.z - cen.z) * (p.z - cen.z)
+		if d < bd:
+			bd = d
+			best = u
+	return best
 
 func _selected_sids() -> Dictionary:
 	var out: Dictionary = {}
@@ -573,9 +741,13 @@ func _update_aura_view() -> void:
 		var rad: float = _RCfg.aura_radius(int(d["level"]))
 		var ring: MeshInstance3D = _ring_node(shown)
 		var p: Vector3 = cu.global_position
-		ring.global_position = Vector3(p.x, GameManager.get_terrain_height(p.x, p.z) + 0.12, p.z)
+		var rp: Vector3 = cu.draw_position() if _Opt.aura_follow_draw else p
+		ring.global_position = Vector3(rp.x, GameManager.get_terrain_height(rp.x, rp.z) + 0.12, rp.z)
 		ring.scale = Vector3(rad, 1.0, rad)
 		ring.visible = true
+		if _ring_anchor.size() <= shown:
+			_ring_anchor.resize(shown + 1)
+		_ring_anchor[shown] = cu
 		shown += 1
 		# Свои отряды, чей центр в круге, — получают бонус
 		for key in GameManager.squads.keys():
@@ -587,14 +759,24 @@ func _update_aura_view() -> void:
 				continue
 			var cen: Vector3 = GameManager._centroid_of(alive)
 			if Vector2(cen.x - p.x, cen.z - p.z).length() <= rad:
-				marked[int(key)] = cen
+				var anc: Unit = _anchor_of(alive, cen)
+				marked[int(key)] = [cen, anc, cen - anc.global_position]
 	for i in range(shown, _rings.size()):
 		(_rings[i] as MeshInstance3D).visible = false
 	var k := 0
 	for sid in marked:
 		var lab: Label3D = _icon_node(k)
-		var cen2: Vector3 = marked[sid]
-		lab.global_position = cen2 + Vector3(0.0, 3.4, 0.0)
+		var rec: Array = marked[sid]
+		var lift := Vector3(0.0, 3.4, 0.0)
+		if _icon_anchor.size() <= k:
+			_icon_anchor.resize(k + 1)
+			_icon_off.resize(k + 1)
+		_icon_anchor[k] = rec[1]
+		_icon_off[k] = (rec[2] as Vector3) + lift
+		if _Opt.aura_follow_draw:
+			lab.global_position = (rec[1] as Unit).draw_position() + (rec[2] as Vector3) + lift
+		else:
+			lab.global_position = (rec[0] as Vector3) + lift
 		lab.visible = true
 		k += 1
 	for j in range(k, _icons.size()):
@@ -609,8 +791,10 @@ func _update_aura_view() -> void:
 # спутать с зелёной аурой. Радиус — Tower.fire_range() (лучники внутри ×
 # бафф высоты); пустая башня — та дальность, которую дал бы штатный отряд
 # лучников, и круг бледнее: «вот сколько она будет бить с гарнизоном»
-const TOWER_RING_COLOR := Color(1.0, 0.72, 0.25, 0.42)
-const TOWER_RING_EMPTY := Color(1.0, 0.72, 0.25, 0.20)
+## ТЗ 29.10.2026, п. 2: башня со стрелками — ЗЕЛЁНОЕ кольцо точной дальности
+## огня гарнизона; пустая — СИНЕЕ кольцо обзора (радиус тумана башни)
+const TOWER_RING_COLOR := Color(0.32, 0.92, 0.38, 0.55)
+const TOWER_RING_EMPTY := Color(0.38, 0.62, 1.00, 0.45)
 var _trings: Array = []
 var _tring_mat: StandardMaterial3D = null
 var _tring_mat_empty: StandardMaterial3D = null
@@ -639,7 +823,8 @@ func _update_tower_range_view() -> void:
 		var rad: float = float(b.call("fire_range"))
 		var empty: bool = rad <= 0.0
 		if empty:
-			rad = float(_UCfgR.STATS["archer"].get("attack_range", 15.0)) * _UCfgR.GARRISON_RANGE_MULT
+			rad = float(b.vision_radius()) if b.has_method("vision_radius") \
+				else float(_UCfgR.STATS["archer"].get("attack_range", 15.0)) * _UCfgR.GARRISON_RANGE_MULT
 		var ring: MeshInstance3D = _tower_ring_node(shown)
 		ring.material_override = _tring_mat_empty if empty else _tring_mat
 		var p: Vector3 = b.global_position
@@ -651,6 +836,18 @@ func _update_tower_range_view() -> void:
 		(_trings[i] as MeshInstance3D).visible = false
 	tower_view_rings = shown
 
+## ── КРУГ НЕ РЕЖЕТСЯ ХОЛМОМ (ТЗ 27.10.2026, третье письмо, п. 2; ручка
+## perf_config.aura_ring_no_depth) ───────────────────────────────────────────
+## Круг — плоский тор на высоте рельефа в центре: на склоне его половина
+## уходила под грунт и пропадала дугами. Без теста глубины он рисуется
+## целиком поверх земли (и поверх бойцов — круг тонкий и прозрачный, а
+## render_priority держит его над прочей прозрачностью)
+func _ring_off_terrain(mat: StandardMaterial3D) -> void:
+	if not _Opt.aura_ring_no_depth:
+		return
+	mat.no_depth_test = true
+	mat.render_priority = 10
+
 func _tower_ring_node(i: int) -> MeshInstance3D:
 	if _tring_mat == null:
 		for pair in [[TOWER_RING_COLOR, "full"], [TOWER_RING_EMPTY, "empty"]]:
@@ -659,6 +856,7 @@ func _tower_ring_node(i: int) -> MeshInstance3D:
 			mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 			mat.albedo_color = pair[0]
 			mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+			_ring_off_terrain(mat)
 			if pair[1] == "full":
 				_tring_mat = mat
 			else:
@@ -692,6 +890,7 @@ func _ring_node(i: int) -> MeshInstance3D:
 			_ring_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 			_ring_mat.albedo_color = AURA_RING_COLOR
 			_ring_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+			_ring_off_terrain(_ring_mat)
 		# Кольцо единичного радиуса, толщина 0.18 м при радиусе 15 — масштаб
 		# по XZ растягивает его до радиуса ауры
 		var tm := TorusMesh.new()

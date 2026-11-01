@@ -24,6 +24,7 @@ extends MeshInstance3D
 const _BannerArt := preload("res://scripts/BannerArt.gd")
 const _BBUtil    := preload("res://scripts/BillboardUtil.gd")
 const _UCfgS     := preload("res://scripts/unit_stats_config.gd")
+const _Opt       := preload("res://scripts/perf_config.gd")
 
 ## ── МИРОВОЙ РАЗМЕР ОДНОГО ПИКСЕЛЯ КАРТИНКИ ─────────────────────────────────
 ## Отсюда и только отсюда берётся масштаб знамени: холст BannerArt задаёт
@@ -107,14 +108,20 @@ var shown_white: bool = false
 ## Знамя орды — рваные «язычки» (BannerArt.goblin_tongue_texture), а не
 ## аккуратный вымпел с лычками (ТЗ 20.10.2026, блок 8)
 var shown_goblin: bool = false
-## Цветных мини-флажков лычек сверх легенды под золотым флагом (ТЗ 25.10.2026)
+## Ступень престижа легенды — хвост под золотым флагом (ТЗ 28.10.2026)
 var shown_flags: int = 0
+## Знамя полководца орды — язычки с цифрой и синим хвостом (ТЗ 28.10.2026)
+var shown_boss: bool = false
+## Цвет стороны людей (ТЗ 31.10.2026): 1 — красный ИИ, красное поле
+var shown_side: int = 0
+## Отряд, чьё это знамя (клик по знамени выбирает отряд — ТЗ 31.10.2026)
+var squad_id: int = 0
 
 ## ── ЗНАМЯ ОРДЫ КРУПНЕЕ (ТЗ 25.10.2026, блок 3) ─────────────────────────────
 ## Гоблин в SIZE_SCALE раз крупнее человека, а лоскуты висели людского
 ## размера и терялись над толпой. Квад × GOBLIN_SCALE — как у штандарта элиты
 const GOBLIN_SCALE := 1.45
-## Золотой квадрат легендарных с мини-флажками на древке (ТЗ 25.10.2026)
+## Золотой квадрат легендарных с хвостом престижа (ТЗ 25.10.2026)
 const LEGEND_SCALE := 1.3
 
 ## ── КАРТИНКА ЗНАМЕНИ — ОДНО РЕШЕНИЕ ДЛЯ ВСЕХ ПОТРЕБИТЕЛЕЙ ──────────────────
@@ -123,48 +130,74 @@ const LEGEND_SCALE := 1.3
 ## сдвига древка — здесь, один раз: [текстура, множитель квада, сдвиг древка
 ## в метрах при k = 1 (−1 — как у вымпела)].
 ##   орда            → зелёные язычки × GOBLIN_SCALE (белые — в панике);
-##   легендарные     → золотой квадрат × LEGEND_SCALE, под ним бордовый
-##                     мини-флажок штандарта игрока (elite, язычков elite_lvl)
-##                     и цветные мини-флажки лычек сверх легенды (flags);
+##   легендарные     → чистый золотой квадрат × LEGEND_SCALE, под ним хвост
+##                     престижа легенды (flags: красный 1-3 → синий 1-3);
 ##   элита не-легенда → бордовый штандарт × ELITE_SCALE (как было);
 ##   прочие          → вымпел шкалы
+## side — цвет стороны людей (BannerArt.side_of: 0 игрок, 1 красный ИИ)
 static func spec(level: int, elite: bool, goblin: bool, elite_lvl: int,
-		flags: int = 0, white: bool = false) -> Array:
+		flags: int = 0, white: bool = false, boss: bool = false, side: int = 0) -> Array:
 	var lvl: int = maxi(level, 1)
+	# Полководец орды: язычки + цифра + синий хвост (ТЗ 28.10.2026); в
+	# панике — тот же белый флаг орды
+	# Рваный штандарт орды висит по оси древка, как бордовый (ТЗ 29.10.2026)
+	var rag_off: float = _BannerArt.elite_pole_offset_px() * PIXEL_SIZE
+	if boss and goblin and not white:
+		return [_BannerArt.boss_texture(level), GOBLIN_SCALE * BOSS_SCALE, -1.0]
 	if goblin:
-		return [_BannerArt.goblin_tongue_texture(lvl, white), GOBLIN_SCALE, -1.0]
+		var legend_g: bool = lvl >= _UCfgS.VET_BANNER_TIERS.size()
+		return [_BannerArt.goblin_tongue_texture(lvl, white, flags), GOBLIN_SCALE,
+			rag_off if legend_g else -1.0]
 	if white:
 		return [_BannerArt.white_flag_texture(), 1.0, -1.0]
-	if lvl >= _UCfgS.VET_BANNER_TIERS.size():
-		return [_BannerArt.legend_texture(elite_lvl if elite else 0, flags), LEGEND_SCALE, -1.0]
-	if elite:
-		return [_BannerArt.elite_texture(elite_lvl, level), ELITE_SCALE,
+	# ── ШТАНДАРТ СТАРШЕ ЗОЛОТА (ТЗ 29.10.2026) ──────────────────────────────
+	# Легендарному отряду выдали штандарт за общий опыт — золотой квадрат
+	# сменяется бордовым штандартом. Лычки на жёлтом пятаке — уровень
+	# ШТАНДАРТА (1-3 красные, 4-6 синие), а не ранг убийств: общий опыт и
+	# личный не смешиваются. Прежде проверка легенды стояла выше, и выдача
+	# легенде на картинке не меняла ничего
+	if elite and _Opt.standard_squad:
+		return [_BannerArt.elite_texture(elite_lvl, level, side), ELITE_SCALE,
 			_BannerArt.elite_pole_offset_px() * PIXEL_SIZE]
-	return [_BannerArt.texture_for(lvl), 1.0, -1.0]
+	if lvl >= _UCfgS.VET_BANNER_TIERS.size():
+		# Чистый золотой квадрат; хвост престижа — по flags; бордового
+		# мини-флажка штандарта под золотом больше нет (ТЗ 28.10.2026)
+		return [_BannerArt.legend_texture(flags, side), LEGEND_SCALE, -1.0]
+	if elite:
+		return [_BannerArt.elite_texture(elite_lvl, level, side), ELITE_SCALE,
+			_BannerArt.elite_pole_offset_px() * PIXEL_SIZE]
+	return [_BannerArt.texture_for(lvl, side), 1.0, -1.0]
+
+## Знамя полководца крупнее язычков орды ещё на столько (ТЗ 28.10.2026)
+const BOSS_SCALE := 1.2
 
 static func create(level: int, elite: bool = false, goblin: bool = false,
-		elite_lvl: int = 1, flags: int = 0) -> MeshInstance3D:
+		elite_lvl: int = 1, flags: int = 0, boss: bool = false, side: int = 0) -> MeshInstance3D:
 	var root := MeshInstance3D.new()
 	root.set_script(load("res://scripts/SquadBanner.gd"))
 	root.name = "SquadBanner"
-	root.build(level, elite, goblin, elite_lvl, flags)
+	root.build(level, elite, goblin, elite_lvl, flags, boss, side)
 	return root
 
 ## elite — индивидуальное звание отряда: красный штандарт × ELITE_SCALE вместо
 ## вымпела общего ветеранства (ТЗ 13.10.2026, письмо 7)
 ## elite_lvl — уровень элиты (римская цифра), level — общее ветеранство:
 ## у штандарта элиты оно рисуется лычками внизу полотнища (ТЗ 22.10.2026)
-## flags — цветные мини-флажки лычек сверх легенды (ТЗ 25.10.2026)
+## flags — ступень престижа легенды, хвост под золотом (ТЗ 28.10.2026)
 func build(level: int, elite: bool = false, goblin: bool = false, elite_lvl: int = 1,
-		flags: int = 0) -> void:
+		flags: int = 0, boss: bool = false, side: int = 0) -> void:
+	shown_side = side
 	shown_level = maxi(level, 1)
 	shown_white = false
 	shown_elite = elite
 	shown_elite_lvl = elite_lvl if elite else 0
 	shown_flags = flags
-	if goblin:
-		shown_goblin = true
-	var sp: Array = spec(shown_level, elite, shown_goblin, elite_lvl, flags)
+	shown_boss = boss
+	# Присваивание, а не «только взвести»: орда, подобравшая реликвию, носит
+	# штандарт вместо язычков (GameManager.refresh_squad_banner), и признак
+	# обязан сниматься
+	shown_goblin = goblin
+	var sp: Array = spec(shown_level, elite, shown_goblin, elite_lvl, flags, false, boss, side)
 	build_texture(sp[0], float(sp[1]), float(sp[2]))
 
 ## ── ПОКАЗАТЬ БЕЛОЕ ПОЛОТНИЩЕ ВМЕСТО БОЕВОГО ────────────────────────────────

@@ -711,10 +711,11 @@ func _test_stars() -> void:
 		# штандарт — только элите по награде игрока (ТЗ 22.10.2026)
 		# РАЗВОРОТ ТЗ 25.10.2026: высшая (легендарная) ступень — золотой
 		# квадратный штандарт, остальные — вымпелы
-		var want_shape: int = _UCfg.BANNER_STANDARD if lvl == _UCfg.VET_BANNER_TIERS.size() else _UCfg.BANNER_PENNANT
+		# РАЗВОРОТ ТЗ 30.10.2026: легенда — вымпел той же формы, что шкала
+		var want_shape: int = _UCfg.BANNER_PENNANT
 		if sh != want_shape:
 			shape_ok = false
-	verdict("E9 формы грейдов: вымпелы, у легенды — штандарт (ТЗ 25.10)",
+	verdict("E9 формы грейдов: у всех ступеней вымпел (ТЗ 30.10)",
 		shape_ok, ", ".join(grades))
 
 	for m in men:

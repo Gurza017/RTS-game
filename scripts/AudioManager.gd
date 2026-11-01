@@ -166,6 +166,8 @@ const HEAL_POTION_ID := "@proc_heal_potion"
 const BELL_ID := "@proc_bell"
 const TARGET_CONFIRM_ID := "@proc_target_confirm"
 const BANNER_READY_ID := "@proc_banner_ready"
+## Варварский клич свинобосса (ТЗ 28.10.2026): процедурный рык, _screech_stream
+const BOSS_SCREECH_ID := "@proc_boss_screech"
 
 ## Имя-метка процедурного щелчка. Не «res://…» и не имя файла: в ui_path оно
 ## превратилось бы в DIR_UI + метка, то есть в заведомо отсутствующий путь —
@@ -236,6 +238,8 @@ const VOICE_BANK := {
 	"horn_attack": VOICE_HORN_ATTACK,  # 5+ отрядов получили приказ атаковать
 	"horde_horn": DIR_GOBLIN_VOICE + "horde_horn.mp3",  # горн орды (см. play_horn)
 	"war_cry":            VOICE_WAR_CRY,                     # 5+ на атаку: клич под хвост рога
+	# Рабочие по золотому руднику (ТЗ 31.10.2026): фраза из пула REPLY_POOL_EVENTS
+	"worker_gold":        VOICE_GO_GO_GO,
 }
 
 ## ВСЕ ФРАЗЫ ПРИКАЗОВ — ОДНОЙ ТАБЛИЦЕЙ (заказ спринта 18: «юниты постоянно
@@ -264,6 +268,7 @@ const ORDER_REPLIES := [
 const REPLY_POOL_EVENTS := {
 	"mass_march": ["forward_march", "go_go_go", "come_on_1", "come_on_2", "come_on_3"],
 	"hold_line":  ["hold_line"],
+	"worker_gold": ["go_go_go", "come_on_1", "come_on_2", "come_on_3"],
 }
 var _reply_last: int = -1
 ## Последняя фраза по событию (индекс в ORDER_REPLIES): без повтора подряд
@@ -294,6 +299,7 @@ const VOICE_LIMITS := {
 	# Клич после рога — РЕДКИЙ: окно 30 с поверх окна рога (5 с), то есть
 	# из шести массовых атак подряд клич звучит на первой и шестой
 	"war_cry":            {"gap": 30.0, "db": -5.0},
+	"worker_gold":        {"gap": 6.0, "db": -4.0},
 }
 ## ── ГОРН ОРДЫ: СВОЯ ШИНА С РЕВЕРБЕРАЦИЕЙ (спринт 18) ─────────────────────
 ## Умеренный эмбиентный эффект: шина «Horn» → SFX с AudioEffectReverb
@@ -629,6 +635,7 @@ const SFX_BANK := {
 	# 48/64 Гц, и сверху лёгкий призвук земли вместо звона. Файлы на диске
 	# остались — их больше никто не читает
 	"big_step":    [BIG_STEP_ID_A, BIG_STEP_ID_B],
+	"boss_screech": [BOSS_SCREECH_ID],
 	"big_sweep":   ["WHSH_Whoosh_HoveAud_SwordCombat_07.wav",
 					"WHSH_Whoosh_HoveAud_SwordCombat_26.wav"],
 	"vox_action":  ["VOXEfrt_ActionGrunt_HoveAud_SwordCombat_01.wav",
@@ -809,6 +816,7 @@ const SFX_LIMITS := {
 	# как расстроенный барабан, а не как разные ноги
 	"big_step":     {"voices": 3, "gap": 0.25, "db": -23.0, "pitch": [0.96, 1.05]},
 	"big_sweep":    {"voices": 3, "gap": 0.20, "db": -3.0, "pitch": [0.55, 0.70]},
+	"boss_screech": {"voices": 1, "gap": 2.0, "db": 2.0, "pitch": [0.95, 1.05]},
 	# Голоса — редкая приправа поверх гула, их лимиты почти не тронуты
 	"vox_action":   {"voices": 3, "gap": 0.90,  "db": -8.0},
 	"vox_death":    {"voices": 4, "gap": 0.20,  "db": -3.0},
@@ -966,8 +974,19 @@ const AMBIENCE_DB := -10.0
 ## RIVER_FADE_IN_SEC / RIVER_FADE_OUT_SEC) — камера дёргается, шум нет.
 ## Зум гасит так же, как марш (march_zoom_gain): отдалённая камера воды не
 ## слышит. Пик громкости RIVER_DB — «едва уловимый фон», не ручей в ухе
-const RIVER_DB := -20.0
-const RIVER_FADE_M := 5.0
+## ── РЕКА ГРОМЧЕ И ШИРЕ (ТЗ 27.10.2026, третье письмо, п. 4) ──────────────
+## «Громкость +15 %, радиус слышимости влево и вправо от русла +20 %».
+## Громкость — множитель амплитуды поверх прежних −20 дБ (≈ −18.8 дБ);
+## радиус — вся зона слышимости от оси русла (полуширина Main.RIVER_HALF_W
+## 9 м + спад 5 м = 14 м) × 1.2 = 16.8 м, то есть спад за кромкой 7.8 м.
+## Прежние числа — RIVER_DB_BASE / RIVER_FADE_BASE
+const RIVER_DB_BASE := -20.0
+const RIVER_VOL_MULT := 1.15
+const RIVER_DB := RIVER_DB_BASE + 1.213957    # 20·log10(1.15)
+const RIVER_FADE_BASE := 5.0
+const RIVER_HALF_W_REF := 9.0                 # = Main.RIVER_HALF_W
+const RIVER_ZONE_MULT := 1.2
+const RIVER_FADE_M := (RIVER_HALF_W_REF + RIVER_FADE_BASE) * RIVER_ZONE_MULT - RIVER_HALF_W_REF
 const RIVER_FADE_IN_SEC := 1.6
 const RIVER_FADE_OUT_SEC := 2.2
 var _river: AudioStreamPlayer = null
@@ -2347,6 +2366,55 @@ func _bell_stream(id: String) -> AudioStream:
 	_proc_clicks[id] = w
 	return w
 
+## ── ВАРВАРСКИЙ КЛИЧ СВИНОБОССА (ТЗ 28.10.2026) ────────────────────────────
+## Процедурный рык без файла: основной тон съезжает 330 → 150 Гц за 1.4 с с
+## вибрато, сверху пять гармоник (хриплость — нечётные громче), снизу шум
+## дыхания; огибающая — атака 40 мс, плато, спад. Сеяный шум: общий поток
+## случайностей партии не трогается
+func _screech_stream() -> AudioStream:
+	var have: Variant = _proc_clicks.get(BOSS_SCREECH_ID)
+	if have != null:
+		return have
+	var hz: int = 22050
+	var sec: float = 1.5
+	var n: int = int(float(hz) * sec)
+	var mono := PackedFloat32Array()
+	mono.resize(n)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 7331
+	var phase := 0.0
+	var peak := 0.0
+	for i in range(n):
+		var t: float = float(i) / float(hz)
+		var k: float = t / sec
+		var f0: float = lerpf(330.0, 150.0, k * k) * (1.0 + 0.035 * sin(TAU * 6.5 * t))
+		phase += TAU * f0 / float(hz)
+		var v := 0.0
+		for h in range(1, 6):
+			var amp: float = (1.0 / float(h)) * (1.0 if h % 2 == 1 else 0.55)
+			v += sin(phase * float(h)) * amp
+		v += (rng.randf() * 2.0 - 1.0) * 0.18 * (1.0 - k * 0.5)
+		var env: float = minf(t / 0.04, 1.0) * (1.0 if k < 0.55 else maxf(1.0 - (k - 0.55) / 0.45, 0.0))
+		v *= env
+		mono[i] = v
+		peak = maxf(peak, absf(v))
+	var g: float = 0.8 / maxf(peak, 1e-4)
+	var lag: int = int(0.006 * float(hz))
+	var data := PackedByteArray()
+	data.resize(n * 4)
+	for i in range(n):
+		var l: float = mono[i] * g
+		var r: float = (mono[i - lag] if i >= lag else 0.0) * g
+		data.encode_s16(i * 4, clampi(int(l * 32767.0), -32767, 32767))
+		data.encode_s16(i * 4 + 2, clampi(int(r * 32767.0), -32767, 32767))
+	var w := AudioStreamWAV.new()
+	w.format = AudioStreamWAV.FORMAT_16_BITS
+	w.mix_rate = hz
+	w.stereo = true
+	w.data = data
+	_proc_clicks[BOSS_SCREECH_ID] = w
+	return w
+
 func _proc_click_stream(id: String) -> AudioStream:
 	var have: Variant = _proc_clicks.get(id)
 	if have != null:
@@ -2415,6 +2483,8 @@ func _stream(path: String) -> AudioStream:
 			return _heal_potion_stream()
 		if path == BELL_ID or path == TARGET_CONFIRM_ID or path == BANNER_READY_ID:
 			return _bell_stream(path)
+		if path == BOSS_SCREECH_ID:
+			return _screech_stream()
 		return null
 	if _streams.has(path):
 		return _streams[path]
@@ -2465,6 +2535,24 @@ func _audible_at(at: Vector3) -> bool:
 ## горячем пути; словарь растёт лишь при включённом флаге)
 var sfx_trace: bool = false
 var sfx_trace_counts: Dictionary = {}
+
+## ── УДАР СТРОЯ — ЗВУК БОЯ БЫСТРЕЕ (ТЗ 31.10.2026, ручка clash_audio_boost) ──
+## Первый удар рывка зовёт clash_boost: CLASH_SEC все 3D-звуки идут с высотой
+## ×CLASH_PITCH; не чаще CLASH_GAP_MS. Случайности не потребляет
+const CLASH_PITCH := 1.12
+const CLASH_SEC := 1.5
+const CLASH_GAP_MS := 4000
+var _clash_until_ms: int = 0
+var _clash_next_ms: int = 0
+var clash_boosts: int = 0
+
+func clash_boost(at: Vector3) -> void:
+	var now: int = Time.get_ticks_msec()
+	if now < _clash_next_ms or not _audible_at(at):
+		return
+	_clash_until_ms = now + int(CLASH_SEC * 1000.0)
+	_clash_next_ms = now + CLASH_GAP_MS
+	clash_boosts += 1
 
 func play_3d(cat: String, at: Vector3) -> bool:
 	sfx_calls += 1
@@ -2585,6 +2673,8 @@ func play_3d(cat: String, at: Vector3) -> bool:
 	# без явной записи следующий звук унаследовал бы чужую расстройку
 	var pr: Array = lim.get("pitch", DEFAULT_PITCH_RANGE)
 	voice.pitch_scale = randf_range(float(pr[0]), float(pr[1]))
+	if _clash_until_ms > 0 and Time.get_ticks_msec() < _clash_until_ms:
+		voice.pitch_scale *= CLASH_PITCH
 	voice.play()
 	sfx_played += 1
 	return true
@@ -2630,6 +2720,46 @@ func play_chorus(cat: String, at: Vector3) -> int:
 			_chorus_voice(cat, s, at, lim)
 		else:
 			get_tree().create_timer(delay).timeout.connect(_chorus_voice.bind(cat, s, at, lim))
+	return n
+
+## ── РЫК ОРДЫ НА ГОРН СВИНОБОССА (ТЗ 29.10.2026) ────────────────────────────
+## Каждая точка — отряд гоблинов в ауре горна: хрюк (goblin_grunt) и возглас
+## (goblin_attack) из существующих нарезок, со сдвигом по отрядам — толпа, а не
+## один сэмпл. Слышимость — по точке, окна категорий не мешают (голоса хора).
+## Задержки детерминированы (номер отряда); высота — из rng хора, как у смеха.
+## Возвращает число назначенных голосов
+var horde_roars: int = 0
+func play_horde_roar(points: Array) -> int:
+	if not enabled or points.is_empty():
+		return 0
+	var lis: Node3D = _listener_node()
+	var n := 0
+	var i := 0
+	for p in points:
+		var at: Vector3 = p
+		i += 1
+		if not _audible_at(at):
+			continue
+		if lis != null and lis.global_position.distance_squared_to(at) \
+				> SFX_CULL_DISTANCE * SFX_CULL_DISTANCE:
+			continue
+		for cat in ["goblin_grunt", "goblin_attack"]:
+			var fv: Variant = SFX_BANK.get(cat)
+			if fv == null:
+				continue
+			var files: Array = fv
+			if files.is_empty():
+				continue
+			var s: AudioStream = _stream(sfx_path(String(files[(i * 3 + n) % files.size()])))
+			if s == null:
+				continue
+			var lv: Variant = SFX_LIMITS.get(cat)
+			var lim: Dictionary = lv if lv != null else _EMPTY_LIMITS
+			var delay: float = 0.35 + 0.12 * float(i) + (0.18 if cat == "goblin_attack" else 0.0)
+			get_tree().create_timer(delay).timeout.connect(_chorus_voice.bind(cat, s, at, lim))
+			n += 1
+	if n > 0:
+		horde_roars += 1
 	return n
 
 func _chorus_voice(cat: String, s: AudioStream, at: Vector3, lim: Dictionary) -> void:

@@ -96,11 +96,14 @@ func _a_model() -> void:
 	_row("средний отряд", _M.mean_squad_cost())
 	_row("80 отрядов", _M.army_cost())
 	_row("постройки " + str(_M.BUILD_PLAN), _M.buildings_cost())
-	_row("кузница 100 %", _M.forge_cost_full())
-	_row("кузница %d %%" % int(_M.FORGE_TARGET_SHARE * 100.0), _M.forge_cost(_M.FORGE_TARGET_SHARE))
+	# ТЗ 28.10.2026, п. 2: ряды 3-5 несут сток эндгейма (forge_config.ROW_SINK_MULT) — он против
+	# излишка богатой партии (qa_forge_endgame), бюджет и бригада считаются по ядру цены
+	_row("кузница 100 % (со стоком)", _M.forge_cost_full())
+	_row("кузница 100 % (ядро)", _M.forge_cost_full(false))
+	_row("кузница %d %% (ядро)" % int(_M.FORGE_TARGET_SHARE * 100.0), _M.forge_cost(_M.FORGE_TARGET_SHARE))
 	_row("наём рабочих + содержание", _M.upkeep_cost(float(tot)))
 	var bud: Dictionary = _M.session_budget(_M.FORGE_TARGET_SHARE, float(tot))
-	_row("ИТОГО (кузница 65 %)", bud)
+	_row("ИТОГО (кузница %d %%)" % int(_M.FORGE_TARGET_SHARE * 100.0), bud)
 	_row("ИТОГО (кузница 100 %)", _M.session_budget(1.0, float(tot)))
 	_row("стартовый банк", _UCfgE.starting_resources(Constants.FACTION_PLAYER))
 	_row("дома (пассивно)", _M.passive_income())
@@ -125,7 +128,12 @@ func _b_rates() -> void:
 	var cap: int = _UCfgE.pop_worker_cap(int(_M.BUILD_PLAN["house"]), 1)
 	print("  рекомендуемая бригада: %d рабочих (+2-4 строителя), лимит при плане домов %d" % [tot, cap])
 	verdict("B1 бригада помещается в лимит рабочих", tot <= cap, "%d из %d" % [tot, cap])
-	verdict("B2 бригада — десятки, а не сотни (20-60)", tot >= 20 and tot <= 60, "%d" % tot)
+	# ТЗ 28.10.2026 (блок 2): фермеров — по местам в загонах (SHEEP_PLAYER_MAX), они
+	# в бригаде всегда; «десятки, а не сотни» — про добытчиков дерева/золота/камня
+	var gatherers: int = tot - int(w[Constants.RESOURCE_FOOD])
+	verdict("B2 добытчики дерева/золота/камня — десятки, а не сотни (20-60), фермеров не больше мест в загонах",
+		gatherers >= 20 and gatherers <= 60 and int(w[Constants.RESOURCE_FOOD]) <= int(_UCfgE.SHEEP_PLAYER_MAX),
+		"добытчиков %d, фермеров %d (мест %d)" % [gatherers, int(w[Constants.RESOURCE_FOOD]), int(_UCfgE.SHEEP_PLAYER_MAX)])
 	# Постоянный найм войск: 80 отрядов с минуты ARMY_START_MIN до конца партии
 	var span: float = _M.SESSION_MIN - _M.ARMY_START_MIN
 	var army: Dictionary = _M.army_cost()
@@ -147,13 +155,20 @@ func _c_forge() -> void:
 	var worst := 0.0
 	var worst_r := ""
 	for r in _M.RES:
-		if float(inc[r]) < float(b65[r]) * 0.999:
+		# ЕДА — УЗКОЕ МЕСТО ПО ЗАМЫСЛУ (ТЗ 27.10: еда в цене узлов ×1.6; ТЗ 28.10,
+		# блок 2: дефицит при 40+ отрядах): фермеров не больше мест в загонах, и
+		# долю древа по еде партия не закрывает — это проверяет C1б, а не C1
+		if r != Constants.RESOURCE_FOOD and float(inc[r]) < float(b65[r]) * 0.999:
 			ok65 = false
 		var over: float = float(b100[r]) / maxf(float(inc[r]), 1.0)
 		if over > worst:
 			worst = over
 			worst_r = _M.res_name(r)
-	verdict("C1 кузница 65 % закрывается рекомендуемой бригадой", ok65)
+	verdict("C1 кузница %d %% закрывается рекомендуемой бригадой по дереву, золоту и камню" % int(_M.FORGE_TARGET_SHARE * 100.0), ok65)
+	var food_gap: float = float(b65[Constants.RESOURCE_FOOD]) - float(inc[Constants.RESOURCE_FOOD])
+	verdict("C1б еда — узкое место: при полных загонах той же доли древа по еде не хватает (глубокое развитие — через ветку мяса)",
+		food_gap > 0.0 and _M.last_food_shortfall > 0.0,
+		"не хватает %.0f еды за партию (недостача модели %.0f)" % [food_gap, _M.last_food_shortfall])
 	verdict("C2 кузница 100 %% НЕ закрывается ею (дороже хотя бы в %.2f раза)" % _M.FORGE_UNREACHABLE_MARGIN,
 		worst >= _M.FORGE_UNREACHABLE_MARGIN, "%s: в %.2f раза" % [worst_r, worst])
 	var w100: Dictionary = _M.workers_for(1.0)

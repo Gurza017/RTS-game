@@ -4,6 +4,7 @@ class_name Worker
 ## Потолок выпаса у замка и прочие числа стада — в конфиге владельца
 const _UCfgW := preload("res://scripts/unit_stats_config.gd")
 const _SpawnW := preload("res://scripts/spawn_config.gd")   # темп добычи красного ИИ
+const _PerfW := preload("res://scripts/perf_config.gd")     # ручка meat_yield_bonus
 
 const _SSParser := preload("res://scripts/SpriteSheetParser.gd")
 ## Только ради константы F_WORKING: сами массивы живут полем GameManager.army
@@ -943,6 +944,9 @@ func _dest_edge(dest: Node3D, _dir: Vector3) -> float:
 ## Куда идти к складу — ворота (Building.deposit_point), а не центр здания:
 ## центр лежит внутри фундамента, и к нему с боков не подойти (ТЗ 19.09.2026)
 func _dest_point(dest: Node3D) -> Vector3:
+	# Открытый склад (Storehouse) принимает груз с любой стороны (ТЗ 27.10.2026)
+	if dest.has_method("deposit_point_from"):
+		return dest.call("deposit_point_from", global_position)
 	if dest is Building:
 		return (dest as Building).deposit_point()
 	return dest.global_position
@@ -1256,7 +1260,7 @@ func _process_sheep(delta: float) -> void:
 				_finish_sheep_job(_sheep_spot)
 				return
 			carrying_type = Constants.RESOURCE_FOOD
-			carrying_amount = MEAT_PER_TRIP
+			carrying_amount = MEAT_PER_TRIP * meat_yield_mult(faction)
 			_sheep_phase = SheepPhase.HAUL
 			state = State.RETURNING
 			_wake_process()
@@ -1842,7 +1846,17 @@ func nominal_income_per_sec() -> float:
 ## как 1 / (1 − доля). Читают панель загона и приток еды на плашке
 static func farmer_meat_per_sec(f: int) -> float:
 	var pct: float = GameManager.unit_bonus(f, "worker", "bonus_gather_food")
-	return _UCfgW.MEAT_PER_SEC_TARGET / maxf(1.0 - clampf(pct, 0.0, _UCfgW.GATHER_PCT_CAP), 0.1)
+	return _UCfgW.MEAT_PER_SEC_TARGET / maxf(1.0 - clampf(pct, 0.0, _UCfgW.GATHER_PCT_CAP), 0.1) \
+		* meat_yield_mult(f)
+
+## ВЫХОД МЯСА С ТУШИ (ТЗ 28.10.2026, блок 2; ручка perf_config.meat_yield_bonus):
+## ветка «Разделка туши / Коптильня / Солонина» (bonus_meat_pct) растит КУСОК за
+## ходку, а не темп ножа — с той же овцы (Sheep.MEAT_TRIPS кусков) уносят больше.
+## Читают разделка (SheepPhase.BUTCHER), расчётный темп фермера и модель партии
+static func meat_yield_mult(f: int) -> float:
+	if not _PerfW.meat_yield_bonus:
+		return 1.0
+	return 1.0 + maxf(GameManager.unit_bonus(f, "worker", "bonus_meat_pct"), 0.0)
 
 ## Сколько ресурса рабочий уносит за одну ходку. База из конфига плюс ветка
 ## вместимости в кузнице (bonus_carry)

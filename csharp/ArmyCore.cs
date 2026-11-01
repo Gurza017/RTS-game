@@ -646,6 +646,34 @@ public partial class ArmyCore : RefCounted
     private byte[] _gateMode = Array.Empty<byte>();
     public const byte GatePull = 1;
     public const byte GateGoal = 2;
+    // АРЕНДА МАРША (ТЗ 01.11.2026, ручка march_core): тот же ход к точке, что
+    // GateGoal, но идущего в MOVING — строка вне списка тика и в MOVING, а шаг
+    // проходит ПОЛНУЮ геометрию (биты коридора «нет стволов/чужих» и «стволы
+    // не держат» сняты: они стареют, пока GDScript не тикает)
+    public const byte GateMarch = 3;
+    // АРЕНДА ПОДТЯГИВАНИЯ (ТЗ 01.11.2026, FPS ≥ 45; ручка pullup_core): строка
+    // взведена из ветки _should_pull_up и ведётся ядром ТОЛЬКО пока цель в окне
+    // подтягивания; вышла из окна — будит. Страж «чужой рядом» ей не нужен
+    // (GDScript-ветка подтягивания заслон не сканирует, решает срок), поводок
+    // отряда — точка якоря и радиус: боец дальше него — будит (_leash_check)
+    private byte[] _apPull = Array.Empty<byte>();
+    private float[] _apLX = Array.Empty<float>(), _apLZ = Array.Empty<float>();
+    private float[] _apLR2 = Array.Empty<float>();
+    // ПРОБЕГ РАЗГОНА КОННИЦЫ (ТЗ 01.11.2026, ручка charge_core): путь, который
+    // GDScript копил по тикам (Unit._charge_path/_charge_last), на время аренды
+    // копит ядро — в такт шага строки (i % shards == phase), то есть с той же
+    // частотой выборки, что личный тик бойца. Забирает GDScript одним вызовом
+    // (ChargeTrackTake) на первом тике после пробуждения
+    private byte[] _chTrk = Array.Empty<byte>();
+    private float[] _chLX = Array.Empty<float>(), _chLZ = Array.Empty<float>();
+    private float[] _chPath = Array.Empty<float>();
+    // Аренда марша (GateMarch): радиус стражи перехвата, детектор застревания
+    // (опорная дистанция, накопленное время, порог) и признак «будил застрявший»
+    private float[] _mScR = Array.Empty<float>();
+    private float[] _mRef = Array.Empty<float>();
+    private float[] _mChk = Array.Empty<float>();
+    private byte[] _mStall = Array.Empty<byte>();
+    private float _mStuckSec = 0.5f, _mStuckProg = 0.35f;
     private float[] _aggroT = Array.Empty<float>();
     private float[] _atkDmg = Array.Empty<float>();
     private float[] _atkRange = Array.Empty<float>();
@@ -949,6 +977,137 @@ public partial class ArmyCore : RefCounted
     // становятся частью инспектора, чего тут не нужно)
     private int DeadState = 5;
     public void SetDeadState(int s) { DeadState = s; }
+
+    // ── ПОЛ СБЛИЖЕНИЯ СВОИХ В БОЮ (ТЗ 26.10.2026, «монолитная масса») ────────
+    // Разведение своих (BatchSeparation) у ИДУЩЕГО и АТАКУЮЩЕГО снимает
+    // составляющую «назад по ходу» — и это верно для приказа, но в свалке
+    // задний ряд, давящий к врагу полным шагом (3-4 м/с), проходил сквозь
+    // спины передних: разведение отдаёт наружу не больше 0.75 м/с и только
+    // вбок. Итог на скриншотах владельца — отряды сминаются в одно пятно, где
+    // не видно ни рядов, ни границ отрядов.
+    // Здесь — правило ШАГА, а не сила (правило 7 цело): атакующему запрещено
+    // СБЛИЖЕНИЕ с союзником ближе пола; пребывание и шаг прочь/вдоль —
+    // разрешены, касательная остаётся, поэтому задние обтекают передних, а не
+    // встают намертво. Пол своего отряда — 4r/3 (круги заходят друг в друга
+    // не больше чем на треть диаметра, заказ «не более 1/3 объёма»), чужого —
+    // полная личная норма. 0 — выключено (ручка perf_config.ally_floor)
+    private float _allyFloorOwn = 0.0f;
+    private float _allyFloorCross = 0.0f;
+    private int _allyFloorState = -1;
+    public int BmAllyBlocked = 0;
+    public void SetAllyFloor(float own, float cross, int attackingState)
+    {
+        _allyFloorOwn = own; _allyFloorCross = cross; _allyFloorState = attackingState;
+    }
+
+    // ── ОЧЕРЕДЬ ЗАДНИХ РЯДОВ (ТЗ 31.10.2026, «как в Rome: Total War») ──────
+    // Пол выше пускал задних к спинам передних до 4r/3 = 0.33 м и вдоль них —
+    // в рубке сжималась вся армия: 98-100 % бойцов у мёртвой зоны разведения,
+    // глубина отрядов ×0.64-0.72 (зонд qa_tz1031c/Crush). Правило ШАГА, а не
+    // сила: атакующий БЕЗ врага в длине оружия (+ запас), у которого свой
+    // ВПЕРЕДИ по ходу (конус cos) ближе _queueGap, — стоит на месте, а не
+    // обтекает. Передний ряд в контакте живёт по прежнему полу и сминается.
+    // Пробка рассасывается сама: пал передний — путь открыт. 0 — выключено
+    private float _queueGap = 0.0f;
+    private float _queueCos = 0.7f;
+    private float _queueReachPad = 0.6f;
+    public int BmQueueHold = 0;
+    public void SetAllyQueue(float gap, float cosAhead, float reachPad)
+    {
+        _queueGap = gap; _queueCos = cosAhead; _queueReachPad = reachPad;
+    }
+
+    /// Есть ли живой свой (любого отряда, не гигант) впереди по (dx, dz) из
+    /// точки x,z ближе gap, внутри конуса cosMin
+    private bool AllyAhead(int row, float x, float z, float dx, float dz, float gap, float cosMin, int mySlot, int dead)
+    {
+        if (_gw == 0) return false;
+        int cx0 = (int)((x - gap - _gx0) * _ginv);
+        int cz0 = (int)((z - gap - _gz0) * _ginv);
+        int cx1 = (int)((x + gap - _gx0) * _ginv);
+        int cz1 = (int)((z + gap - _gz0) * _ginv);
+        if (cx1 < 0 || cz1 < 0 || cx0 >= _gw || cz0 >= _gh) return false;
+        if (cx0 < 0) cx0 = 0;
+        if (cz0 < 0) cz0 = 0;
+        if (cx1 >= _gw) cx1 = _gw - 1;
+        if (cz1 >= _gh) cz1 = _gh - 1;
+        float g2 = gap * gap;
+        for (int cz = cz0; cz <= cz1; cz++)
+        {
+            int b = cz * _gw;
+            for (int cx = cx0; cx <= cx1; cx++)
+            {
+                int j = _head[(b + cx) * Factions + mySlot];
+                while (j != -1)
+                {
+                    if (j != row && _st[j] != dead && _bodyR[j] <= 0.0f)
+                    {
+                        float ox = _px[j] - x, oz = _pz[j] - z;
+                        float d2 = ox * ox + oz * oz;
+                        if (d2 < g2 && d2 > 1e-8f)
+                        {
+                            float dot = ox * dx + oz * dz;
+                            if (dot > 0.0f && dot * dot >= cosMin * cosMin * d2) return true;
+                        }
+                    }
+                    j = _next[j];
+                }
+            }
+        }
+        return false;
+    }
+
+    /// ОПОРА РЯДОВ В ТОЛЧКЕ (ТЗ 31.10.2026): сколько своих стоит ЗА бойцом
+    /// (против направления (dx, dz)) в range, внутри конуса cosMin, но не
+    /// больше cap. Зовётся раз на событие толчка, не покадрово
+    public int SupportBehind(int row, float dx, float dz, float range, float cosMin, int cap)
+    {
+        if (row < 0 || row >= _capacity || _gw == 0) return 0;
+        float l = Mathf.Sqrt(dx * dx + dz * dz);
+        if (l < 1e-6f) return 0;
+        dx /= l; dz /= l;
+        float x = _px[row], z = _pz[row];
+        int mySlot = FacSlot(_fac[row]);
+        int dead = DeadState;
+        int cx0 = (int)((x - range - _gx0) * _ginv);
+        int cz0 = (int)((z - range - _gz0) * _ginv);
+        int cx1 = (int)((x + range - _gx0) * _ginv);
+        int cz1 = (int)((z + range - _gz0) * _ginv);
+        if (cx1 < 0 || cz1 < 0 || cx0 >= _gw || cz0 >= _gh) return 0;
+        if (cx0 < 0) cx0 = 0;
+        if (cz0 < 0) cz0 = 0;
+        if (cx1 >= _gw) cx1 = _gw - 1;
+        if (cz1 >= _gh) cz1 = _gh - 1;
+        float r2 = range * range;
+        int n = 0;
+        for (int cz = cz0; cz <= cz1; cz++)
+        {
+            int b = cz * _gw;
+            for (int cx = cx0; cx <= cx1; cx++)
+            {
+                int j = _head[(b + cx) * Factions + mySlot];
+                while (j != -1)
+                {
+                    if (j != row && _st[j] != dead && _bodyR[j] <= 0.0f && (_flags[j] & FPosValid) != 0)
+                    {
+                        float ox = x - _px[j], oz = z - _pz[j];
+                        float d2 = ox * ox + oz * oz;
+                        if (d2 < r2 && d2 > 1e-8f)
+                        {
+                            float dot = ox * dx + oz * dz;
+                            if (dot > 0.0f && dot * dot >= cosMin * cosMin * d2)
+                            {
+                                n++;
+                                if (n >= cap) return n;
+                            }
+                        }
+                    }
+                    j = _next[j];
+                }
+            }
+        }
+        return n;
+    }
 
     // ── СЕТКА ──────────────────────────────────────────────────────────────
     private const float CellBase = 1.0f;
@@ -1284,6 +1443,12 @@ public partial class ArmyCore : RefCounted
         Array.Resize(ref _gateT, cap); Array.Resize(ref _gateEl, cap);
         Array.Resize(ref _sideS, cap); Array.Resize(ref _flankB, cap);
         Array.Resize(ref _gateMode, cap);
+        Array.Resize(ref _apPull, cap); Array.Resize(ref _apLX, cap);
+        Array.Resize(ref _apLZ, cap); Array.Resize(ref _apLR2, cap);
+        Array.Resize(ref _chTrk, cap); Array.Resize(ref _chLX, cap);
+        Array.Resize(ref _chLZ, cap); Array.Resize(ref _chPath, cap);
+        Array.Resize(ref _mScR, cap); Array.Resize(ref _mRef, cap);
+        Array.Resize(ref _mChk, cap); Array.Resize(ref _mStall, cap);
         Array.Resize(ref _rbB, cap); Array.Resize(ref _rbI, cap);
         Array.Resize(ref _rbBaseY, cap);
         Array.Resize(ref _drawX, cap); Array.Resize(ref _drawY, cap);
@@ -1943,7 +2108,7 @@ public partial class ArmyCore : RefCounted
                     int j = _head[(b + cx) * Factions + fs];
                     while (j != -1)
                     {
-                        if (j == row || _st[j] == dead) { j = _next[j]; continue; }
+                        if (j == row || _st[j] == dead || (_flags[j] & FGhost) != 0) { j = _next[j]; continue; }
                         float dx = tx - _px[j];
                         float dz = tz - _pz[j];
                         float d2 = dx * dx + dz * dz;
@@ -2114,7 +2279,7 @@ public partial class ArmyCore : RefCounted
                     int j = _head[(b + cx) * Factions + fs];
                     while (j != -1)
                     {
-                        if (j == row || _st[j] == dead) { j = _next[j]; continue; }
+                        if (j == row || _st[j] == dead || (_flags[j] & FGhost) != 0) { j = _next[j]; continue; }
                         float dx = _px[j] - x;
                         float dz = _pz[j] - z;
                         float d2 = dx * dx + dz * dz;
@@ -2172,7 +2337,7 @@ public partial class ArmyCore : RefCounted
                     int j = _head[(b + cx) * Factions + fs];
                     while (j != -1)
                     {
-                        if (j == row || _st[j] == dead) { j = _next[j]; continue; }
+                        if (j == row || _st[j] == dead || (_flags[j] & FGhost) != 0) { j = _next[j]; continue; }
                         float dx = x - _px[j];
                         float dz = z - _pz[j];
                         float d2 = dx * dx + dz * dz;
@@ -2266,7 +2431,7 @@ public partial class ArmyCore : RefCounted
                 int j = _head[(b + cx) * Factions + side];
                 while (j != -1)
                 {
-                    if (_st[j] != dead)
+                    if (_st[j] != dead && (_flags[j] & FGhost) == 0)
                     {
                         float dx = x - _px[j];
                         float dz = z - _pz[j];
@@ -2352,7 +2517,7 @@ public partial class ArmyCore : RefCounted
                     int j = _head[slot + side];
                     while (j != -1)
                     {
-                        if (_st[j] == dead) { j = _next[j]; continue; }
+                        if (_st[j] == dead || (_flags[j] & FGhost) != 0) { j = _next[j]; continue; }
                         float k = _sepR[j] > 0.0f ? Mathf.Clamp(_sepR[j] * inv, 1.0f, HitBodyMax) : 1.0f;
                         float r = radius * k;
                         float dx = x - _px[j];
@@ -2403,7 +2568,7 @@ public partial class ArmyCore : RefCounted
                     int j = _head[slot + side];
                     while (j != -1)
                     {
-                        if (_st[j] == dead) { j = _next[j]; continue; }
+                        if (_st[j] == dead || (_flags[j] & FGhost) != 0) { j = _next[j]; continue; }
                         float dx = x - _px[j];
                         float dz = z - _pz[j];
                         if (dx * dx + dz * dz <= rSq)
@@ -2521,7 +2686,7 @@ public partial class ArmyCore : RefCounted
                     int j = _head[slot + side];
                     while (j != -1)
                     {
-                        if (_st[j] != dead)
+                        if (_st[j] != dead && (_flags[j] & FGhost) == 0)
                         {
                             float dx = x - _px[j];
                             float dz = z - _pz[j];
@@ -2936,6 +3101,65 @@ public partial class ArmyCore : RefCounted
                     }
                 }
             }
+            // ── ПОЛ СБЛИЖЕНИЯ СВОИХ (см. SetAllyFloor) ──────────────────────
+            // Только атакующий, без билета прохода и бега, не гигант: приказ
+            // игрока, отход и проход сквозь союзный строй — по-прежнему
+            // мягкие (SEP_PASS_RELIEF)
+            // Цель — туша/тролль (тело в ядре): там бойцов разводят места на
+            // кольце (Unit._ring_note), а пол не пускал бы их уплотниться в
+            // полосе досягаемости (qa_tz1026 C: 11 из 30 против 27)
+            // Цель-ЗДАНИЕ (строки нет, -1) — тоже без пола: у стены бойцы
+            // встают дугой (RING_ARC), и пол не пускал задних к фундаменту
+            // (qa_reform C1: лагерь из трёх хат не сносился)
+            int tgI = _tgt[i];
+            bool floorTgt = tgI >= 0 && tgI < _capacity && _bodyR[tgI] <= 0.0f;
+            // ── ОЧЕРЕДЬ (см. SetAllyQueue): свой впереди ближе интервала, врага
+            // в длине оружия нет — стоим, не обтекаем. Скан чужих — только при
+            // найденном своём впереди
+            if (_queueGap > 0.0f && _st[i] == _allyFloorState && floorTgt
+                && (fl & (FOrderPass | FSprinting | FRetreating)) == 0 && _bodyR[i] <= 0.0f)
+            {
+                float sl2 = sx * sx + sz * sz;
+                if (sl2 > 1e-10f)
+                {
+                    float sl = Mathf.Sqrt(sl2);
+                    float qg = _sepR[i] > 0.0f ? _sepR[i] * (_queueGap / _allyFloorBase) : _queueGap;
+                    if (AllyAhead(i, x, z, sx / sl, sz / sl, qg, _queueCos, FacSlot(_fac[i]), dead)
+                        && !EnemyNear(x, z, _fac[i], _atkRange[i] + _queueReachPad))
+                    {
+                        BmQueueHold++;
+                        continue;
+                    }
+                }
+            }
+            if (_allyFloorOwn > 0.0f && _st[i] == _allyFloorState && floorTgt
+                && (fl & (FOrderPass | FSprinting | FRetreating)) == 0 && _bodyR[i] <= 0.0f)
+            {
+                float own = _sepR[i] > 0.0f ? _sepR[i] * (_allyFloorOwn / _allyFloorBase) : _allyFloorOwn;
+                float cross = own * (_allyFloorCross / _allyFloorOwn);
+                float ax = 0.0f, az = 0.0f;
+                ScanAllyFloor(i, x, z, nx, nz, own, cross, FacSlot(_fac[i]), dead, ref ax, ref az);
+                if (ax != 0.0f || az != 0.0f)
+                {
+                    float al = Mathf.Sqrt(ax * ax + az * az);
+                    float anx = ax / al, anz = az / al;
+                    float into3 = sx * anx + sz * anz;
+                    if (into3 < 0.0f)
+                    {
+                        BmAllyBlocked++;
+                        sx -= anx * into3; sz -= anz * into3;
+                        if (sx * sx + sz * sz < 1e-8f) continue;
+                        nx = x + sx; nz = z + sz;
+                        if (boundsOn && _cliffOn && IsCliffAt(nx, nz)) continue;
+                        // Второй проход: нормали двух союзников по бокам
+                        // гасят друг друга в сумме, и боковой шаг всё ещё
+                        // сближает с кем-то — тогда стоим
+                        float ax2 = 0.0f, az2 = 0.0f;
+                        ScanAllyFloor(i, x, z, nx, nz, own, cross, FacSlot(_fac[i]), dead, ref ax2, ref az2);
+                        if (ax2 != 0.0f || az2 != 0.0f) continue;
+                    }
+                }
+            }
             // ── КРАЙ МИРА ──────────────────────────────────────────────────
             if (boundsOn)
             {
@@ -2980,6 +3204,60 @@ public partial class ArmyCore : RefCounted
     /// нужна только чтобы узнать ПОТОЛОК выигрыша любой замены этой проверки
     public bool SkipBodyScan = false;
 
+    // Норма, от которой считан пол своего отряда: личный радиус (_sepR) у
+    // крупных переводится в пол той же долей. Ставится вместе с полом
+    private float _allyFloorBase = 0.4167f;
+    public void SetAllyFloorBase(float minDist) { if (minDist > 0.0f) _allyFloorBase = minDist; }
+
+    /// Суммарная нормаль ОТ союзников, к которым шаг x,z → nx,nz СБЛИЖАЕТ
+    /// ближе пола (own — свой отряд, cross — чужой; отряд 0 — как свой).
+    /// Гиганты и стоящие внутри пола, от которых шаг уводит, не считаются
+    private void ScanAllyFloor(int row, float x, float z, float nx, float nz,
+        float own, float cross, int mySlot, int dead, ref float bx, ref float bz)
+    {
+        if (_gw == 0) return;
+        float r = cross > own ? cross : own;
+        int cx0 = (int)((nx - r - _gx0) * _ginv);
+        int cz0 = (int)((nz - r - _gz0) * _ginv);
+        int cx1 = (int)((nx + r - _gx0) * _ginv);
+        int cz1 = (int)((nz + r - _gz0) * _ginv);
+        if (cx1 < 0 || cz1 < 0 || cx0 >= _gw || cz0 >= _gh) return;
+        if (cx0 < 0) cx0 = 0;
+        if (cz0 < 0) cz0 = 0;
+        if (cx1 >= _gw) cx1 = _gw - 1;
+        if (cz1 >= _gh) cz1 = _gh - 1;
+        int mySq = _sq[row];
+        float ownSq = own * own, crossSq = cross * cross;
+        for (int cz = cz0; cz <= cz1; cz++)
+        {
+            int b = cz * _gw;
+            for (int cx = cx0; cx <= cx1; cx++)
+            {
+                int j = _head[(b + cx) * Factions + mySlot];
+                while (j != -1)
+                {
+                    if (j == row || _st[j] == dead || _bodyR[j] > 0.0f) { j = _next[j]; continue; }
+                    int oSq = _sq[j];
+                    float lim = (oSq != mySq && oSq != 0 && mySq != 0) ? crossSq : ownSq;
+                    float dx = nx - _px[j];
+                    float dz = nz - _pz[j];
+                    float d2 = dx * dx + dz * dz;
+                    if (d2 >= lim) { j = _next[j]; continue; }
+                    float cdx = x - _px[j];
+                    float cdz = z - _pz[j];
+                    // Сближения нет — шаг вдоль или прочь, пребывание разрешено
+                    if (d2 >= cdx * cdx + cdz * cdz) { j = _next[j]; continue; }
+                    if (d2 < 1e-8f) { dx = cdx; dz = cdz; d2 = dx * dx + dz * dz; }
+                    if (d2 < 1e-8f) { j = _next[j]; continue; }
+                    float inv = 1.0f / Mathf.Sqrt(d2);
+                    bx += dx * inv;
+                    bz += dz * inv;
+                    j = _next[j];
+                }
+            }
+        }
+    }
+
     private void ScanBlock(int row, float nx, float nz, float blockR, float blockSq,
         int mySlot, int dead, ref float bx, ref float bz, bool awayOk = false)
     {
@@ -3005,7 +3283,7 @@ public partial class ArmyCore : RefCounted
                     int j = _head[(b + cx) * Factions + fs];
                     while (j != -1)
                     {
-                        if (j == row || _st[j] == dead) { j = _next[j]; continue; }
+                        if (j == row || _st[j] == dead || (_flags[j] & FGhost) != 0) { j = _next[j]; continue; }
                         float dx = nx - _px[j];
                         float dz = nz - _pz[j];
                         float d2 = dx * dx + dz * dz;
@@ -3269,6 +3547,10 @@ public partial class ArmyCore : RefCounted
             if (t > 0.0f) { _sepT[i] = t; continue; }
             _sepT[i] = interval;
             float x = _px[i], z = _pz[i];
+            // Глубже пола (см. SetAllyFloor) — признак для правила «идущего
+            // назад не отбрасывает» ниже
+            bool deep = false;
+            float deepSq = _allyFloorOwn * _allyFloorOwn;
             // Скан по БОЛЬШЕЙ из норм: сосед из чужого отряда обязан попасть в
             // просмотр, даже если по своей норме он уже достаточно далеко
             float scanR = crossMin;
@@ -3366,6 +3648,7 @@ public partial class ArmyCore : RefCounted
                             dz = Mathf.Sin(ang) * 0.01f;
                             dd = dx * dx + dz * dz;
                         }
+                        if (dd < deepSq) deep = true;
                         float d = Mathf.Sqrt(dd);
                         float need = (lim - d) / d * share;
                         pxa += dx * need;
@@ -3406,8 +3689,13 @@ public partial class ArmyCore : RefCounted
                 float k = maxStep / Mathf.Sqrt(plen);
                 pxa *= k; pza *= k;
             }
-            // ИДУЩЕГО ПО ПРИКАЗУ ПОПРАВКА НЕ ОТБРАСЫВАЕТ НАЗАД
-            if (s == movingState || s == attackingState)
+            // ИДУЩЕГО ПО ПРИКАЗУ ПОПРАВКА НЕ ОТБРАСЫВАЕТ НАЗАД. Кроме
+            // атакующего, зашедшего в союзника глубже пола (ТЗ 26.10.2026):
+            // передний упёрся во врага и вперёд не уйдёт, и без отката
+            // заднего такое наложение не рассасывалось бы никогда
+            int dT = _tgt[i];
+            bool deepTgt = dT >= 0 && dT < _capacity && _bodyR[dT] <= 0.0f;
+            if ((s == movingState || s == attackingState) && !(deep && deepTgt && s == attackingState && _allyFloorOwn > 0.0f))
             {
                 float vxx = _vx[i], vzz = _vz[i];
                 float vlen = Mathf.Sqrt(vxx * vxx + vzz * vzz);
@@ -3631,9 +3919,9 @@ public partial class ArmyCore : RefCounted
             // Не «простой» бой - полный автомат без разговоров
             if ((fl & FAtkSimple) == 0) { AddNeed(need, i); continue; }
             int t = _tgt[i];
-            // Цели нет, она не боец или уже мертва - это событие, а не счёт
+            // Цели нет, она не боец, мертва или призрак - это событие, а не счёт
             if (t < 0 || t >= _capacity || (_flags[t] & FPosValid) == 0
-                || _st[t] == dead)
+                || _st[t] == dead || (_flags[t] & FGhost) != 0)
             { AddNeed(need, i); continue; }
             float dx = _px[t] - _px[i];
             float dz = _pz[t] - _pz[i];
@@ -3706,7 +3994,7 @@ public partial class ArmyCore : RefCounted
             {
                 int t = _tgt[i];
                 if (t < 0 || t >= _capacity || (_flags[t] & FPosValid) == 0
-                    || _st[t] == dead)
+                    || _st[t] == dead || (_flags[t] & FGhost) != 0)
                 {
                     wake = true;
                 }
@@ -4233,7 +4521,41 @@ public partial class ArmyCore : RefCounted
         _pressV[i] = speed; _pressV2[i] = pullSpeed; _pressStop[i] = stop;
         _pressLim[i] = pullLim; _gateT[i] = cadence; _gateEl[i] = 0.0f;
         _sideS[i] = sideSign; _flankB[i] = 0; _gateMode[i] = 0;
+        _apPull[i] = 0; _chTrk[i] = 0;
         _flags[i] |= FAutopilot;
+    }
+
+    /// Аренда подтягивания (см. _apPull): тот же автопилот, но только в окне
+    /// pullLim; leashR <= 0 — поводка нет
+    public void AutopilotArmPull(int i, float speed, float pullSpeed, float stop,
+        float pullLim, float cadence, float sideSign, float lx, float lz, float leashR)
+    {
+        if (i < 0 || i >= _capacity) return;
+        AutopilotArm(i, speed, pullSpeed, stop, pullLim, cadence, sideSign);
+        _apPull[i] = 1;
+        _apLX[i] = lx; _apLZ[i] = lz;
+        _apLR2[i] = leashR > 0.0f ? leashR * leashR : -1.0f;
+    }
+
+    /// Аренда подтягивания разгоняющегося всадника: то же, что AutopilotArmPull,
+    /// плюс пробег разгона (последняя точка и накопленный путь) — см. _chTrk
+    public void AutopilotArmCharge(int i, float speed, float pullSpeed, float stop,
+        float pullLim, float cadence, float sideSign, float lx, float lz, float leashR,
+        float cLX, float cLZ, float cPath)
+    {
+        if (i < 0 || i >= _capacity) return;
+        AutopilotArmPull(i, speed, pullSpeed, stop, pullLim, cadence, sideSign, lx, lz, leashR);
+        _chTrk[i] = 1; _chLX[i] = cLX; _chLZ[i] = cLZ; _chPath[i] = cPath;
+    }
+
+    /// Пробег разгона назад в GDScript: (x последней точки, путь, z); добавляет
+    /// отрезок до текущей точки и снимает учёт. Не вёлся — Vector3.Inf
+    public Vector3 ChargeTrackTake(int i)
+    {
+        if (i < 0 || i >= _capacity || _chTrk[i] == 0) return Vector3.Inf;
+        _chTrk[i] = 0;
+        float dx = _px[i] - _chLX[i], dz = _pz[i] - _chLZ[i];
+        return new Vector3(_px[i], _chPath[i] + Mathf.Sqrt(dx * dx + dz * dz), _pz[i]);
     }
 
     // Марш стены к ТОЧКЕ (Unit._phalanx_march): цель — не строка, а место;
@@ -4245,8 +4567,41 @@ public partial class ArmyCore : RefCounted
         _pressX[i] = gx; _pressZ[i] = gz;
         _pressLim[i] = -1.0f; _gateT[i] = cadence; _gateEl[i] = 0.0f;
         _flankB[i] = 0; _gateMode[i] = GateGoal;
+        _apPull[i] = 0; _chTrk[i] = 0;
         _flags[i] |= FAutopilot;
     }
+
+    /// Аренда марша (Unit._arm_march): к точке gx,gz со скоростью speed, стоп —
+    /// за stop до неё (угол маршрута или зона прибытия), срок cadence — ближайший
+    /// таймер марша в GDScript
+    public void AutopilotArmMarch(int i, float speed, float gx, float gz, float stop, float cadence,
+        float scanR, bool stuck)
+    {
+        if (i < 0 || i >= _capacity) return;
+        AutopilotArmGoal(i, speed, gx, gz, stop, cadence);
+        _gateMode[i] = GateMarch;
+        _mScR[i] = scanR;
+        float dx = gx - _px[i], dz = gz - _pz[i];
+        _mRef[i] = Mathf.Sqrt(dx * dx + dz * dz);
+        // Без своего детектора (обход по нити: GDScript меряет прогресс до
+        // точки приказа, а не до угла) — срок застревания стоит в cadence
+        _mChk[i] = stuck ? 0.0f : float.NegativeInfinity; _mStall[i] = 0;
+    }
+
+    /// Пороги детектора застревания марша (Unit.STUCK_CHECK_SEC / STUCK_PROGRESS)
+    public void SetMarchStuck(float sec, float prog) { _mStuckSec = sec; _mStuckProg = prog; }
+
+    /// Будил ли строку детектор застревания марша (признак снимается)
+    public bool MarchStallTake(int i)
+    {
+        if (i < 0 || i >= _capacity || _mStall[i] == 0) return false;
+        _mStall[i] = 0;
+        return true;
+    }
+
+    // Причины пробуждения автопилота (замер): цель, срок, дистанция, чужой рядом
+    public int[] ApWhy = new int[6];
+    public int[] ApWhyTake() { var r = (int[])ApWhy.Clone(); Array.Clear(ApWhy); return r; }
 
     public void AutopilotClear(int i)
     {
@@ -4274,11 +4629,18 @@ public partial class ArmyCore : RefCounted
             if ((fl & (FPosValid | FDormant)) != FPosValid || _st[i] == dead)
             { _flags[i] = fl & ~FAutopilot; continue; }
             int t = _tgt[i];
-            bool goal = _gateMode[i] == GateGoal;
+            bool goal = _gateMode[i] >= GateGoal;
             if (!goal && (t < 0 || t >= _capacity || (_flags[t] & FPosValid) == 0
-                || _st[t] == dead))
-            { PressWake(i); continue; }
+                || _st[t] == dead || (_flags[t] & FGhost) != 0))
+            { ApWhy[0]++; PressWake(i); continue; }
             armed++;
+            // Пробег разгона — в такт шага строки (см. _chTrk)
+            if (_chTrk[i] != 0 && (i % shards) == phase)
+            {
+                float cx = _px[i] - _chLX[i], cz = _pz[i] - _chLZ[i];
+                _chPath[i] += Mathf.Sqrt(cx * cx + cz * cz);
+                _chLX[i] = _px[i]; _chLZ[i] = _pz[i];
+            }
             // ── ПЛАНОВЫЙ ВОЗВРАТ В GDScript (BigStand, этап 4) ────────────────
             // Автомат боя в GDScript входит раз в cadence (AGGRO_INTERVAL_HOT):
             // сканы заслона и застревания идут в прежнем ритме, а между ними
@@ -4287,7 +4649,7 @@ public partial class ArmyCore : RefCounted
             // на прошедшее время (Unit._rear_wake(elapsed))
             _gateEl[i] += delta;
             _gateT[i] -= delta;
-            if (_gateT[i] <= 0.0f) { PressWake(i); continue; }
+            if (_gateT[i] <= 0.0f) { ApWhy[1]++; PressWake(i); continue; }
             float x = _px[i], z = _pz[i];
             // ── ОЖИДАНИЕ НА МЕСТЕ ПО ТОЧКЕ (ТЗ 25.10.2026, п. 5) ─────────────
             // Вторая линия осады взводит «стоять» на собственной точке со
@@ -4309,21 +4671,48 @@ public partial class ArmyCore : RefCounted
             if (d2 <= stop * stop)
             {
                 // Дистанция удара/выстрела достигнута — решает полный автомат
+                ApWhy[2]++;
                 PressWake(i);
                 _vx[i] = 0; _vz[i] = 0;
                 continue;
             }
-            // Стража перехвата: чужое тело в длине руки — будит немедленно
-            if (scanMod > 1 && ((i + tick) % scanMod) == 0
-                && EnemyNear(x, z, _fac[i], scanR))
-            { PressWake(i); continue; }
-            float d = Mathf.Sqrt(d2);
-            float nx = dx / d, nz = dz / d;
             // Подтягивание рядов: в окне reach + PULL_UP_MAX идём на долю
             // скорости (Unit.PULL_UP_SPEED, без обхода своих — как в
             // GDScript-ветке _should_pull_up), дальше — полным шагом
             float lim = _pressLim[i];
             bool pull = lim > 0.0f && d2 <= lim * lim;
+            if (_apPull[i] != 0)
+            {
+                // Аренда подтягивания: вне окна — решает полный автомат
+                if (!pull) { ApWhy[4]++; PressWake(i); continue; }
+                float lr2 = _apLR2[i];
+                if (lr2 > 0.0f)
+                {
+                    float lx = x - _apLX[i], lz = z - _apLZ[i];
+                    if (lx * lx + lz * lz > lr2) { ApWhy[5]++; PressWake(i); continue; }
+                }
+            }
+            // Стража перехвата: чужое тело в длине руки — будит немедленно.
+            // Идущему маршем — в радиусе перехвата марша (Unit._arm_march)
+            else if (scanMod > 1 && ((i + tick) % scanMod) == 0
+                && EnemyNear(x, z, _fac[i], _gateMode[i] == GateMarch ? _mScR[i] : scanR))
+            { ApWhy[3]++; PressWake(i); continue; }
+            float d = Mathf.Sqrt(d2);
+            // Детектор застревания марша — копия Unit._tick_stuck: за
+            // STUCK_CHECK_SEC не стал ближе на STUCK_PROGRESS — будим, решает
+            // GDScript (стволы, вызволение, «упёрся = прибыл»)
+            if (_gateMode[i] == GateMarch)
+            {
+                _mChk[i] += delta;
+                if (_mChk[i] >= _mStuckSec)
+                {
+                    _mChk[i] = 0.0f;
+                    if (d > _mRef[i] - _mStuckProg)
+                    { _mStall[i] = 1; ApWhy[5]++; PressWake(i); _vx[i] = 0; _vz[i] = 0; continue; }
+                    _mRef[i] = d;
+                }
+            }
+            float nx = dx / d, nz = dz / d;
             float sp = pull ? _pressV2[i] : _pressV[i];
             if (!goal) _gateMode[i] = pull ? GatePull : (byte)0;
             // Режим «стоять» (скорость 0): стойка «оборона» ждёт цели на
@@ -4365,7 +4754,9 @@ public partial class ArmyCore : RefCounted
             // просочившихся. Скан чужих в шаге стоит доли микросекунды на
             // строку, целостность стены — жалоба владельца номер один.
             // Билет прохода гасится по той же причине
-            _flags[i] = (fl & ~(FOrderPass | FClearEnemy)) | FStepPending;
+            int clr = FOrderPass | FClearEnemy;
+            if (_gateMode[i] == GateMarch) clr |= FClearTrunk | FTrunkIgnore;
+            _flags[i] = (fl & ~clr) | FStepPending;
         }
         return armed;
     }
@@ -5210,6 +5601,21 @@ public partial class ArmyCore : RefCounted
     public const int FVisMoving = 1 << 28;   // объявлено: лента ходьбы идёт
     public const int FVisSeen = 1 << 29;     // объявлено: в поле LOD
     public const int FVisLit = 1 << 30;      // объявлено: освещён (чужой)
+    // ── ПРИЗРАК «ПОСЛЕДНЕГО ВЫЖИВШЕГО» (ТЗ 28.10.2026, блок 3) ─────────────
+    // Последний боец выбитого отряда, уцелевший по жребию (Unit._try_last_stand):
+    // идёт в крепость лечиться, и на время похода ЧУЖИЕ ЕГО НЕ ВИДЯТ — ни выбор
+    // цели (BestEnemy/NearestOfSide/EnemyRowAt — он же стрелы), ни счёт чужих,
+    // ни чужое тело на шаге (ScanBlock/EnemyBlock: сквозь него проходят).
+    // Свои видят как прежде (разведение, монах, строй). Биты 0..30 заняты —
+    // это ЗНАКОВЫЙ бит int; наружу он не выдаётся числом: GDScript ставит и
+    // читает его через SetGhost/IsGhost, а не через SetFlag(1 << 31)
+    public const int FGhost = unchecked((int)0x80000000);
+    public void SetGhost(int i, bool on)
+    {
+        if (i < 0 || i >= _capacity) return;
+        if (on) _flags[i] |= FGhost; else _flags[i] &= ~FGhost;
+    }
+    public bool IsGhost(int i) => i >= 0 && i < _capacity && (_flags[i] & FGhost) != 0;
     private int[] _tickOut = new int[1024];
     public int TickListed;   // сколько строк ушло в список последним вызовом (стендам)
     public int TickSkipped;  // сколько живых тикающих строк ядро оставило себе
@@ -5271,7 +5677,8 @@ public partial class ArmyCore : RefCounted
             if ((fl & FTickAlways) == 0)
             {
                 if ((fl & FMatrixLed) != 0) { skipped++; continue; }
-                if ((fl & led) != 0 && st == attackingState) { skipped++; continue; }
+                if ((fl & led) != 0 && (st == attackingState
+                    || ((fl & FAutopilot) != 0 && _gateMode[i] == GateMarch))) { skipped++; continue; }
                 if (_atkHalf[i] != 0 && st == attackingState && ((i / sh) & 1) != halfPh) { halved++; continue; }
                 if ((fl & FIdleWait) != 0 && st == idleState)
                 {

@@ -170,11 +170,21 @@ func research_progress() -> float:
 func _needs_tick() -> bool:
 	return not research_id.is_empty()
 
+## ТЕМП ИССЛЕДОВАНИЙ (ТЗ 28.10.2026, блок 2; ручка perf_config.forge_research_speed):
+## узлы «Чертёжная» / «Королевская академия» ветки рабочего (bonus_research_pct)
+## ускоряют САМУ кузницу — секунда стены идёт за (1 + доля) секунд исследования
+## любой вкладки. Множитель к ходу таймера, а не к сроку заказа: уже стоящие в
+## очереди исследования тоже ускоряются, а срок в элементе очереди не трогается
+func research_speed_mult() -> float:
+	if not _OptB.forge_research_speed:
+		return 1.0
+	return 1.0 + maxf(GameManager.unit_bonus(faction, "worker", "bonus_research_pct"), 0.0)
+
 func _process(delta: float) -> void:
 	super._process(delta)
 	if research_id.is_empty():
 		return
-	research_timer += delta
+	research_timer += delta * research_speed_mult()
 	if research_timer < research_time:
 		return
 	var done_id := research_id

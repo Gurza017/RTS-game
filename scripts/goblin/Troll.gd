@@ -40,6 +40,17 @@ const SHEETS := {
 var lair: Node3D = null
 ## Домашняя точка стража (ставит логово при рождении; INF — без дома)
 var home_pos: Vector3 = Vector3.INF
+## Пятак у брода, который держит тролль похода (LairDirector, ТЗ 31.10.2026):
+## патруль и возврат с погони — от него, чужой пень не усыновляется. INF — нет
+var ford_hold: Vector3 = Vector3.INF
+
+## Центр патруля: пятак похода, иначе пень
+func _patrol_centre() -> Vector3:
+	if ford_hold.is_finite():
+		return ford_hold
+	if lair != null and is_instance_valid(lair):
+		return lair.global_position
+	return Vector3.INF
 ## Откуда началась погоня за текущей целью — от неё меряется поводок
 ## TROLL_CHASE_RADIUS (ТЗ 14.09.2026, п. 5)
 var _chase_from: Vector3 = Vector3.INF
@@ -345,13 +356,16 @@ func _leave_corpse() -> void:
 	var q := QuadMesh.new()
 	q.size = Vector2(float(fw) * px, float(ch) * px)
 	# Туша краснеет (заказ спринта 15: «усилить красный оттенок при смерти»)
-	var mat: ShaderMaterial = _BBUtil.make_material(texs[0], _GobCfgT.TROLL_DEATH_TINT, 0.5, 0.0)
+	# Тон туши — по палитре кучи тел (CorpseRenderer.troll_modulate; прежняя
+	# палитра — TROLL_DEATH_TINT); группа — чтобы F7 перекрашивал и лежащих
+	var mat: ShaderMaterial = _BBUtil.make_material(texs[0], GameManager.corpses.troll_modulate(), 0.5, 0.0)
 	mat.set_shader_parameter("frame_count", 1.0)
 	mat.set_shader_parameter("frame_fps", 0.0)
 	q.material = mat
 	var mi := MeshInstance3D.new()
 	mi.name = CORPSE_NAME
 	mi.mesh = q
+	mi.add_to_group("troll_corpse")
 	_corpse_node = mi
 	# ── ПАДАЕТ ПОД РАЗНЫМИ УГЛАМИ (заказ владельца 10.09.2026) ────────────
 	# Туша валилась строго вертикально, и лежащий тролль читался как стоящий.
@@ -669,7 +683,7 @@ func tick_physics(delta: float, prof: bool = false, bm: bool = true,
 	_tick_chase(delta)
 	# Тролль из сохранённой партии рождается без логова — подхватываем
 	# логово партии, чтобы патруль, подмога и месть работали и после загрузки
-	if lair == null and GameManager.troll_lair != null \
+	if lair == null and not ford_hold.is_finite() and GameManager.troll_lair != null \
 			and is_instance_valid(GameManager.troll_lair):
 		var nl: Node = GameManager.nearest_lair(global_position)   # логов два (спринт 18)
 		lair = (nl if nl != null else GameManager.troll_lair) as Node3D
@@ -709,14 +723,14 @@ func tick_physics(delta: float, prof: bool = false, bm: bool = true,
 	if _tick_hunger(delta):
 		return
 	# Патруль кольца логова: только в покое и без цели
-	if state == State.IDLE and attack_target == null and lair != null \
-			and is_instance_valid(lair):
+	var pc: Vector3 = _patrol_centre()
+	if state == State.IDLE and attack_target == null and pc.is_finite():
 		_patrol_t -= delta
 		if _patrol_t <= 0.0:
 			_patrol_t = _GobCfgT.TROLL_PATROL_SEC
 			var a: float = randf() * TAU
 			var r: float = _GobCfgT.TROLL_PATROL_RADIUS * randf_range(0.4, 1.0)
-			var p: Vector3 = lair.global_position + Vector3(cos(a) * r, 0.0, sin(a) * r)
+			var p: Vector3 = pc + Vector3(cos(a) * r, 0.0, sin(a) * r)
 			if _Opt.cmd_meter: _Opt.cmd_src = "troll_patrol"
 			command_move(GameManager.land_target(p))
 			if _Opt.cmd_meter: _Opt.cmd_src = ""
@@ -997,10 +1011,11 @@ func _tick_chase(delta: float) -> bool:
 	_atk_pending = false
 	velocity = Vector3.ZERO
 	state = State.IDLE
-	if lair != null and is_instance_valid(lair):
+	var pc: Vector3 = _patrol_centre()
+	if pc.is_finite():
 		var a: float = randf() * TAU
 		var r: float = _GobCfgT.TROLL_PATROL_RADIUS * 0.5
-		var p: Vector3 = lair.global_position + Vector3(cos(a) * r, 0.0, sin(a) * r)
+		var p: Vector3 = pc + Vector3(cos(a) * r, 0.0, sin(a) * r)
 		command_move(GameManager.land_target(p))
 		_patrol_t = _GobCfgT.TROLL_PATROL_SEC
 	return true

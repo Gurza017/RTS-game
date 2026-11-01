@@ -1,5 +1,7 @@
 extends Node
 
+const _OptKP := preload("res://scripts/perf_config.gd")
+
 ## ═══════════════════════════════════════════════════════════════════════════
 ## СТЕНД qa_knights_push — ДВОЙНОЙ ПКМ, НАБЕГ И ТОЛЧОК ЩИТАМИ (спринт 14)
 ## ═══════════════════════════════════════════════════════════════════════════
@@ -182,8 +184,11 @@ func _a_trigger() -> void:
 	# блок пустым — приказ ушёл бы в землю, а приём всё равно раздался бы
 	# (двойной ПКМ по ЗЕМЛЕ его тоже включает, заказ спринта 13)
 	var under = sm._pick_at(scr, sm.order_pick_mask()).get("target")
-	print("  под курсором: %s" % ("враг" if under == foes[0] else str(under)))
-	verdict("A0б курсор наведён на врага, а не на траву", under == foes[0])
+	print("  под курсором: %s" % ("враг" if under in foes else str(under)))
+	# Свойство — враг ОТРЯДА-цели (приказ атаки отрядный): какой именно боец
+	# ближе к точке клика, решает укладка свалки, и она гуляет от того, кто
+	# ведёт шаг задних рядов (ядро или GDScript, ручка pullup_core)
+	verdict("A0б курсор наведён на врага, а не на траву", under != null and under in foes)
 	sm._handle_right_click(scr, false)
 	await pframes(3)
 	var raged_single := 0
@@ -252,11 +257,17 @@ func _b_dash() -> void:
 			Warrior.RAGE_SPEED_MULT])
 	# Щит поднимается БЕЗУСЛОВНО: режим включил сам игрок, и настройка
 	# «закрываться самому» тут ни при чём
+	# Разворот ТЗ 31.10.2026 (щит мечника по делу, warrior_shield_dynamic):
+	# в набеге щит поднят только на последних метрах — B3 стережёт прежний
+	# заказ «щит на всё время набега» при выключенной ручке
+	var _dyn0: bool = _OptKP.warrior_shield_dynamic
+	_OptKP.warrior_shield_dynamic = false
 	w.call("_update_guard")
 	await pframes(2)
 	verdict("B3 щит поднят на всё время набега",
 		bool(w.get("_guard_active")),
 		"щит был %s, стал %s" % [str(guard0), str(w.get("_guard_active"))])
+	_OptKP.warrior_shield_dynamic = _dyn0
 	verdict("B4 поза помечена грязной — картинка пересчитается в тот же кадр",
 		bool(w.call("rage_active")))
 	_kill(w)

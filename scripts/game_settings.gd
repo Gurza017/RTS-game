@@ -53,6 +53,9 @@ const BUILDING_SPRITES := {
 	"house3":     "House3",
 	"towncenter": "House3",
 	"tower":      "Tower",
+	# ТЗ 27.10.2026: свои рисунки — tools/make_market_art.py
+	"market":     "Market",
+	"storehouse": "Storehouse",
 }
 
 const _UNITS_ROOT     := "res://assets/factions/%s/units/%s Units/%s"

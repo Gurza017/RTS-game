@@ -213,6 +213,9 @@ func _watch_spawn(wave: int, n: int, max_s: float) -> Dictionary:
 
 # ─────────────────────────────────────────────────────────────────────────────
 func _run() -> void:
+	# Площадку сбора/спавн у пня стенд проверяет на точке: вход орды из-за
+	# кромки (ТЗ 31.10.2026, стережёт qa_tz1031c) увёл бы отряды к краю карты
+	preload("res://scripts/perf_config.gd").horde_edge_entry = false
 	for a in OS.get_cmdline_user_args():
 		var s := String(a)
 		if s.begins_with("only="):

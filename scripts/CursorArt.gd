@@ -25,10 +25,30 @@ extends RefCounted
 ##           лечить); меч и топор — шире и жирнее штрихом, под габарит
 ##           основной стрелки и перчатки (22-27 px по ширине)
 ## ── ТЗ 24.10.2026, второе письмо, блок 1 ───────────────────────────────────
-##   ARROW — стрела наконечником вниз-влево (как меч): выделены ТОЛЬКО стрелки
+##   ARROW — стрела по той же диагонали, что меч: выделены ТОЛЬКО стрелки
 ##           (лучники, башня/укрепление с гарнизоном) и под курсором враг
+## ── ТЗ 27.10.2026, UI/UX (курсоры) ─────────────────────────────────────────
+##   МЕЧ И СТРЕЛА СМОТРЯТ НА «10 ЧАСОВ»: остриё/наконечник в ВЕРХНЕМ ЛЕВОМ
+##   углу, рукоять/оперение уходят вниз-вправо (прежде — остриё внизу слева,
+##   рукоять вверху справа). Горячая точка — на острие (TIP).
+##   ARROW     — оперение ЗЕЛЁНОЕ: выделенные стрелки/башни достают до цели;
+##   ARROW_FAR — оперение КРАСНОЕ: цель под курсором дальше их дальности
+##               (SelectionManager.selection_reaches, опрос Main.CURSOR_POLL)
+## ── ТЗ 29.10.2026, п. 2 ───────────────────────────────────────────────────
+##   ARROW_FAR — ещё и маленький КРАСНЫЙ КРЕСТИК на острие («не достанут»).
+##   ARROWS_X / ARROWS_X_FAR — две скрещённые стрелы: курсор режима [A] у
+##   одних стрелков (у пехоты и смешанного выделения — скрещённые мечи);
+##   оперение по той же досягаемости, крестик — в перекрестии
 enum { NONE = 0, HAND = 1, DOOR = 2, FORBID = 3, SWORD = 4, HAMMER = 5,
-	AXE = 6, PICKAXE = 7, KNIFE = 8, FINGER = 9, MEDIC = 10, ARROW = 11 }
+	AXE = 6, PICKAXE = 7, KNIFE = 8, FINGER = 9, MEDIC = 10, ARROW = 11,
+	ARROW_FAR = 12, ARROWS_X = 13, ARROWS_X_FAR = 14 }
+
+## Остриё меча и наконечник стрелы (пиксели); горячая точка обоих курсоров
+const TIP := Vector2(3.0, 3.5)
+## Ось «от острия к рукояти»: вниз-вправо, то есть рисунок смотрит на 10 часов
+const TIP_AX := Vector2(0.70710678, 0.70710678)
+## Поперечная ось
+const TIP_PX := Vector2(0.70710678, -0.70710678)
 
 const SZ := 32
 const OUTLINE := Color(0.07, 0.07, 0.09, 1.0)
@@ -51,7 +71,10 @@ static func texture(kind: int) -> ImageTexture:
 		DOOR: img = _door()
 		FORBID: img = _forbid()
 		SWORD: img = _sword()
-		ARROW: img = _arrow()
+		ARROW: img = _arrow(true)
+		ARROW_FAR: img = _arrow_far()
+		ARROWS_X: img = _arrows_x(true)
+		ARROWS_X_FAR: img = _arrows_x(false)
 		HAMMER: img = _hammer()
 		AXE: img = _axe()
 		PICKAXE: img = _pickaxe()
@@ -70,8 +93,11 @@ static func hotspot(kind: int) -> Vector2:
 		DOOR: return Vector2(16, 28)
 		MEDIC: return Vector2(16, 16)
 		FORBID: return Vector2(16, 16)
-		SWORD: return Vector2(3, 28)
-		ARROW: return Vector2(3, 28)
+		SWORD: return Vector2(3, 3)
+		ARROW: return Vector2(3, 3)
+		ARROW_FAR: return Vector2(3, 3)
+		ARROWS_X: return Vector2(16, 16)
+		ARROWS_X_FAR: return Vector2(16, 16)
 		HAMMER: return Vector2(9, 8)
 		AXE: return Vector2(AXE_EDGE)
 		PICKAXE: return Vector2(4, 9)
@@ -185,9 +211,10 @@ static func _sword() -> Image:
 	var blade_dk := Color(0.60, 0.64, 0.72)
 	var gold := Color(0.93, 0.76, 0.24)
 	var grip := Color(0.45, 0.28, 0.14)
-	var tip := Vector2(3.0, 28.5)
-	var ax := Vector2(1, -1).normalized()    # от острия к рукояти
-	var px := Vector2(1, 1).normalized()     # поперёк
+	# ТЗ 27.10.2026: остриё в верхнем левом углу, рукоять — вниз-вправо
+	var tip := TIP
+	var ax := TIP_AX    # от острия к рукояти
+	var px := TIP_PX    # поперёк
 	for y in range(SZ):
 		for x in range(SZ):
 			var d := Vector2(float(x) + 0.5, float(y) + 0.5) - tip
@@ -211,19 +238,25 @@ static func _sword() -> Image:
 				_put(img, x, y, gold)                  # навершие
 	return img
 
-## Стрела по той же диагонали, что меч: наконечник-ромб у горячей точки,
-## древко, оперение двумя «ёлочками» у верхнего правого угла
-static func _arrow() -> Image:
+## Стрела по той же диагонали, что меч: наконечник-ромб у горячей точки
+## (верхний левый угол), древко вниз-вправо, оперение двумя «ёлочками» у
+## нижнего правого угла. Цвет оперения — ответ «достанут ли» (ТЗ 27.10.2026):
+## in_range — зелёное, иначе красное
+const FLETCH_NEAR := Color(0.30, 0.86, 0.34)
+const FLETCH_NEAR_DK := Color(0.14, 0.56, 0.20)
+const FLETCH_FAR := Color(0.94, 0.26, 0.20)
+const FLETCH_FAR_DK := Color(0.64, 0.14, 0.11)
+static func _arrow(in_range: bool = true) -> Image:
 	var img := _blank()
 	var iron := Color(0.86, 0.88, 0.94)
 	var iron_dk := Color(0.55, 0.58, 0.66)
 	var shaft := Color(0.74, 0.52, 0.28)
 	var shaft_dk := Color(0.52, 0.34, 0.16)
-	var fl := Color(0.92, 0.30, 0.22)
-	var fl_dk := Color(0.66, 0.18, 0.14)
-	var tip := Vector2(3.0, 28.5)
-	var ax := Vector2(1, -1).normalized()
-	var px := Vector2(1, 1).normalized()
+	var fl := FLETCH_NEAR if in_range else FLETCH_FAR
+	var fl_dk := FLETCH_NEAR_DK if in_range else FLETCH_FAR_DK
+	var tip := TIP
+	var ax := TIP_AX
+	var px := TIP_PX
 	for y in range(SZ):
 		for x in range(SZ):
 			var d := Vector2(float(x) + 0.5, float(y) + 0.5) - tip
@@ -247,6 +280,46 @@ static func _arrow() -> Image:
 				elif absf(v) <= 1.1:
 					_put(img, x, y, shaft_dk)
 	return img
+
+## Красный крестик «не достанут»: косой крест с тёмной обводкой
+## (обводка своя: общая _outline обводит только прозрачное вокруг рисунка)
+const CROSS_RED := Color(0.98, 0.16, 0.12)
+static func _red_cross(img: Image, c: Vector2i, arm: int = 2) -> void:
+	# Штрих в два пикселя толщиной (диагональ + сосед справа), затем
+	# обводка в один пиксель ровно вокруг красного
+	var red: Dictionary = {}
+	for k in range(-arm, arm + 1):
+		for p in [Vector2i(c.x + k, c.y + k), Vector2i(c.x + k + 1, c.y + k),
+				Vector2i(c.x + k, c.y - k), Vector2i(c.x + k + 1, c.y - k)]:
+			red[p] = true
+	for p in red.keys():
+		for d in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+			var q: Vector2i = p + d
+			if not red.has(q):
+				_put(img, q.x, q.y, OUTLINE)
+	for p in red.keys():
+		_put(img, p.x, p.y, CROSS_RED)
+
+## Стрела «не достанут»: красное оперение и крестик на острие
+static func _arrow_far() -> Image:
+	var img := _arrow(false)
+	_red_cross(img, Vector2i(int(TIP.x) + 2, int(TIP.y) + 2))
+	return img
+
+## Две скрещённые стрелы (курсор [A] у стрелков): стрела «на 10 часов» и
+## её зеркало «на 2 часа», перекрестие в центре (горячая точка 16,16)
+static func _arrows_x(in_range: bool) -> Image:
+	var a := _arrow(in_range)
+	var b := _arrow(in_range)
+	b.flip_x()
+	for y in range(SZ):
+		for x in range(SZ):
+			var cb: Color = b.get_pixel(x, y)
+			if cb.a > 0.5 and a.get_pixel(x, y).a <= 0.5:
+				a.set_pixel(x, y, cb)
+	if not in_range:
+		_red_cross(a, Vector2i(15, 16), 2)
+	return a
 
 ## Топор: рукоять из правого нижнего угла, головка вверху слева, ЛЕЗВИЕ
 ## СМОТРИТ ВНИЗ-ВЛЕВО — в дерево под курсором (ТЗ 21.10.2026, письмо 4:

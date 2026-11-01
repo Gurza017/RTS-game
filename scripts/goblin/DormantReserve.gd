@@ -75,7 +75,7 @@ func spawn(p_main, p_village: Vector3, p_ai) -> int:
 		p.x = clampf(p.x, -main.GEN_HALF_X, main.GEN_HALF_X)
 		p.z = clampf(p.z, -main.GEN_HALF_Z, main.GEN_HALF_Z)
 		p = GameManager.land_target(Vector3(p.x, 0.0, p.z))
-		var sid: int = int(main.spawn_goblin_squad(uid, n, p))
+		var sid: int = int(main.spawn_goblin_squad(uid, n, p, false, 0, false))
 		if sid <= 0:
 			continue
 		var vet: int = int(row["vet"])

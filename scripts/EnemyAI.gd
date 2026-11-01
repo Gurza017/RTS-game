@@ -53,6 +53,15 @@ const ROLE_HUNT    := "hunt"      # вылазка на троллей ради 
 ## на брод, глубокий строй у брода, вылазки на троллей, разведка 2:1
 const _RedAI := preload("res://scripts/ai/RedAI.gd")
 var red = _RedAI.new()
+## Экономика v2 (ТЗ 30.10.2026, ручка ai_eco_v2): рынок, загоны, склады, кузница
+const _RedEco := preload("res://scripts/ai/RedEconomy.gd")
+var eco = _RedEco.new()
+## Тактика (ТЗ 30.10.2026): перегруппировка после боя, корпус, клещи, опорные точки
+const _RedTac := preload("res://scripts/ai/RedTactics.gd")
+var tac = _RedTac.new()
+## Марш волны штурма привалами (ТЗ 31.10.2026, ai_wave_stages)
+const _RedMarch := preload("res://scripts/ai/RedMarch.gd")
+var march = _RedMarch.new()
 
 # Строй отряда при выдаче приказа
 const SQUAD_COLS    := 6
@@ -106,6 +115,11 @@ func _mustered(field: Array, rally: Vector3) -> bool:
 ## Была ли у ИИ настоящая армия. Нужно для аварийного барака: на старте армия
 ## тоже равна нулю, и без этого флага ПЕРВЫЙ барак доставался бы бесплатно
 var _had_army: bool      = false
+## Счётчики ТЗ 27.10.2026 (разд. 4): слияний огрызков, походов на
+## докомплектацию, удержаний волны — читают стенды
+var regroup_merges: int = 0
+var refill_trips: int = 0
+var wave_holds: int = 0
 ## ── ПАМЯТЬ О ПИКЕ БАЗЫ (ТЗ 14.10.2026, п. 2) ───────────────────────────────
 ## Сколько рабочих и каких построек у ИИ БЫЛО — после потерь он нанимает и
 ## отстраивает до пика в приоритете, а не ждёт очереди обычного развития
@@ -121,10 +135,16 @@ var last_action: String  = ""
 func setup(p_main: Node3D) -> void:
 	main = p_main
 	red.ai = self
+	eco.ai = self
+	tac.ai = self
+	march.ai = self
 	reset()
 
 func reset() -> void:
 	squads.clear()
+	eco.reset()
+	tac.reset()
+	march.reset()
 	_think_timer = 0.0
 	_peace_timer = 0.0
 	_peace_over  = _Diff.ai_peace_seconds() <= 0.0
@@ -225,12 +245,15 @@ func tick() -> void:
 		return
 	_home_pos = castle.global_position
 	_construction(castle)         # барак, кузница, улучшения
+	if eco.on():
+		eco.tick(castle)          # фермеры, рынок, кузница (RedEconomy)
 	if not _peace_over:
 		_hold_everyone_home(castle)
 		return
 	_train_army(castle)
 	# ── ПОДКРЕПЛЕНИЕ И ОТВЕТНЫЙ УДАР (ТЗ 19.09.2026-3, п. 2) ────────────────
 	_tick_reinforcement()
+	tac.tick()                    # отметки боя, сбор после боя, сигнал корпусу (RedTactics)
 	_update_retaliation()
 	if retaliation_active():
 		_command_retaliation(castle)
@@ -512,7 +535,20 @@ func _regroup() -> void:
 		for m in sq["members"]:
 			assigned[(m as Node).get_instance_id()] = true
 
-	# 3) новобранцев — в неполные отряды своего типа
+	# 3) новобранцев — в отряды.
+	# ОТРЯД РЕЕСТРА НЕ РВЁТСЯ (ТЗ 27.10.2026, разд. 4, ручка ai_regroup_whole).
+	# Партия из бараков и отряд, выпущенный замком после лечения, — ОДИН отряд
+	# реестра (одно знамя, одна разметка, одна медиана сплочённости). Прежняя
+	# поштучная раздача «в первую неполную группу своего типа» разносила одно
+	# знамя по двум группам ИИ с разными постами: обе половины стояли «на
+	# своих местах» в 20 м друг от друга (телеметрия 27.10: 142 разрыва
+	# IDLE/IDLE у красного из 541), а подзыв сплочённости и пост группы
+	# перетягивали меньшую половину туда-сюда. Теперь бойцы собираются по
+	# squad_id реестра: целиком в группу, где их отряд уже есть; огрызок
+	# меньше половины штата — в неполную группу своего рода РЯДОМ
+	# (REGROUP_JOIN_R) с переводом в её отряд реестра; иначе — своя группа
+	var by_sid: Dictionary = {}
+	var loose: Array = []
 	for n in main.get_tree().get_nodes_in_group("enemy_units"):
 		if not is_instance_valid(n):
 			continue
@@ -525,6 +561,63 @@ func _regroup() -> void:
 		# роль от этого цикла (пост, заслон, рейд) сорвала бы её с места
 		if GameManager.squad_is_home_guard(u.squad_id):
 			continue
+		if _OptEA.ai_regroup_whole and u.squad_id > 0:
+			var lst: Variant = by_sid.get(u.squad_id)
+			if lst == null:
+				lst = []
+				by_sid[u.squad_id] = lst
+			(lst as Array).append(u)
+		else:
+			loose.append(u)
+	for sid_v in by_sid:
+		var grp: Array = by_sid[sid_v]
+		var uid0: String = (grp[0] as Unit).stat_id
+		var want0: int = _UCfg.squad_size(uid0)
+		var host: Dictionary = {}
+		for s in squads:
+			var sq: Dictionary = s
+			if String(sq["type"]) != uid0:
+				continue
+			for m in sq["members"]:
+				if is_instance_valid(m) and (m as Unit).squad_id == int(sid_v):
+					host = sq
+					break
+			if not host.is_empty():
+				break
+		if host.is_empty() and grp.size() * 2 < want0:
+			var gc: Vector3 = _squad_centroid(grp)
+			var jr2: float = _AICfg.REGROUP_JOIN_R * _AICfg.REGROUP_JOIN_R
+			for s in squads:
+				var sq: Dictionary = s
+				if String(sq["type"]) != uid0:
+					continue
+				var mem: Array = sq["members"]
+				if mem.size() + grp.size() > want0 or mem.is_empty():
+					continue
+				var hc: Vector3 = _squad_centroid(mem)
+				if (hc.x - gc.x) * (hc.x - gc.x) + (hc.z - gc.z) * (hc.z - gc.z) > jr2:
+					continue
+				host = sq
+				break
+			if not host.is_empty():
+				# Огрызок вливается в отряд реестра группы: одно знамя
+				var host_sid: int = _sid_of(host)
+				if host_sid > 0:
+					for u2 in grp:
+						GameManager.add_to_squad(host_sid, u2)
+					regroup_merges += 1
+		if host.is_empty():
+			squads.append({
+				"type": uid0, "members": grp.duplicate(), "role": ROLE_GUARD,
+				"target": (grp[0] as Unit).global_position, "issued": false,
+				"flank_side": squad_count(uid0) % 2,
+				"flank_close": false,
+				"peak": 0,
+			})
+		else:
+			(host["members"] as Array).append_array(grp)
+			host["issued"] = false
+	for u in loose:
 		var uid: String = u.stat_id
 		var want: int = _UCfg.squad_size(uid)
 		var placed := false
@@ -580,11 +673,21 @@ func army_size() -> int:
 
 ## Лимит набран по ВСЕМ типам — можно идти в общую атаку
 func army_ready() -> bool:
+	if squads.is_empty():
+		return false
+	# ШТУРМ ПО ДОЛЕ АРМИИ (ТЗ 27.10.2026, разд. 2, ручка ai_assault_fraction):
+	# ждать последнего отряда последнего рода при лимите 29 значило бы ждать
+	# до часа игры — волна идёт с ASSAULT_READY_FRACTION суммарного лимита
+	if _OptEA.ai_assault_fraction:
+		var total: int = 0
+		for t in _AICfg.combat_types():
+			total += _Diff.ai_squad_limit(String(t))
+		return squads.size() >= int(ceil(float(total) * _AICfg.ASSAULT_READY_FRACTION))
 	for t in _AICfg.combat_types():
 		var uid: String = String(t)
 		if squad_count(uid) < _Diff.ai_squad_limit(uid):
 			return false
-	return not squads.is_empty()
+	return true
 
 # ═════════════════════════════════════════════════════════════════════════════
 # ЗАМОК ПАЛ: ОТСТРАИВАЕМСЯ И ДЕРЁМСЯ НА РУИНАХ
@@ -760,7 +863,7 @@ func _economy(castle: Castle) -> void:
 	# простаивающий рабочий сразу идёт на ресурс
 	for w in workers:
 		var wk := w as Worker
-		if wk.state == Unit.State.IDLE:
+		if wk.state == Unit.State.IDLE and not (eco.on() and _RedEco.is_farmer(wk)):
 			_assign_worker(wk)
 	# Пик бригады — цель восстановления после потерь
 	_peak_workers = maxi(_peak_workers, workers.size())
@@ -768,7 +871,8 @@ func _economy(castle: Castle) -> void:
 		workers_short = false
 		return
 	var queued := _queued_count(castle, "worker")
-	if workers.size() + queued >= _Diff.ai_worker_limit():
+	var wlimit: int = eco.worker_limit() if eco.on() else _Diff.ai_worker_limit()
+	if workers.size() + queued >= wlimit:
 		workers_short = false
 		return
 	# ── РАБОЧИЕ ПОСЛЕ ПОТЕРЬ — В ПРИОРИТЕТЕ (ТЗ 14.10.2026, п. 2) ───────────
@@ -776,6 +880,8 @@ func _economy(castle: Castle) -> void:
 	# заказывается В ГОЛОВУ очереди замка, мимо занятости армией и мимо резерва
 	# еды — без рабочих еда не придёт никогда
 	var target: int = clampi(maxi(_peak_workers, _AICfg.AI_WORKER_REBUILD_MIN), 0, _Diff.ai_worker_limit())
+	if eco.on():
+		target = clampi(maxi(target, eco.worker_target()), 0, wlimit)
 	workers_short = workers.size() + queued < target
 	if workers_short:
 		if castle.train_from_config("worker", true):
@@ -788,7 +894,7 @@ func _economy(castle: Castle) -> void:
 	# ── ЕДА — ПОД АРМИЮ (ТЗ 29.09.2026, п. 1) ───────────────────────────────
 	# Рабочий стоит еду, отряд тоже; без резерва рабочие съедали всё к 140-й
 	# секунде, и армия не нанималась до конца партии
-	if workers.size() + queued >= _AICfg.AI_WORKER_FLOOR:
+	if workers.size() + queued >= _AICfg.AI_WORKER_FLOOR and not (eco.on() and eco.feeds_workers()):
 		var wcost: float = float(_UCfg.TRAINING.get("castle", {}).get("worker", {}).get("cost_food", 50.0))
 		if ResourceManager.get_amount(Constants.FACTION_ENEMY, Constants.RESOURCE_FOOD) - wcost < _AICfg.AI_FOOD_RESERVE:
 			return
@@ -1061,7 +1167,10 @@ func _tower_spot(castle: Castle, _idx: int) -> Vector3:
 				break
 		if free:
 			return p
-	return GameManager.land_target(slots[slots.size() - 1])
+	# Все слоты заняты — башни НЕ ставим (прежде — последний слот, то есть
+	# вплотную к стоящей: «две вышки в одной точке», если владелец поднимет
+	# AI_TOWERS выше числа слотов у проходов)
+	return Vector3.INF
 
 func _tower_axis_spot(castle: Castle, idx: int) -> Vector3:
 	var base: Vector3 = _player_base_pos()
@@ -1164,6 +1273,12 @@ func _construction(castle: Castle) -> void:
 		return
 	if archery == null:
 		return
+	# ── ЭКОНОМИКА v2: загоны, рынок, склады (RedEconomy, ручка ai_eco_v2) ──
+	if eco.on() and eco.build_step(castle, crew):
+		return
+	# ── ВЫШКИ НА ОПОРНЫХ ТОЧКАХ: брод и рудник (RedTactics, ai_strongpoint) ──
+	if tac.build_step(castle, crew):
+		return
 
 	# ── ДОМА — ЕДИНСТВЕННЫЙ ИСТОЧНИК ЕДЫ ИИ (ТЗ 29.09.2026, п. 1) ───────────
 	# Первые четыре — сразу за стрелковой, остальные — вперемешку с башнями
@@ -1183,7 +1298,7 @@ func _construction(castle: Castle) -> void:
 	# одной, а между ними — исследования кузницы по обычному кругу
 	if _AICfg.AI_BUILD_TOWERS and towers + _sites_count("tower") < _AICfg.AI_TOWERS:
 		var spot4: Vector3 = _tower_spot(castle, towers + _sites_count("tower"))
-		if _start_site("tower", spot4, false, crew):
+		if spot4.x != INF and _start_site("tower", spot4, false, crew):
 			if "tower" in lost:
 				rebuild_sites += 1
 			last_action += "|заложена башня на границе"
@@ -1438,6 +1553,7 @@ func _command_squads(castle: Castle) -> void:
 			last_action += "|волна собрана, общий выход"
 	if field.is_empty():
 		_wave_out = false          # волны нет — сбор начинается заново
+		march.reset()
 	var attacking: bool = (ready or _lake_taken) 		and (_wave_out or not _AICfg.AI_MUSTER_BEFORE_ATTACK)
 
 	# Куда идут излишки/волна
@@ -1493,6 +1609,7 @@ func _command_squads(castle: Castle) -> void:
 		per_type_total[uid] = int(per_type_total.get(uid, 0)) + 1
 
 	var per_type_idx: Dictionary = {}
+	var plan: Array = []          # [sq, tgt, uid] — цели волны до разноса
 	for s in field:
 		var sq: Dictionary = s
 		var uid: String = String(sq["type"])
@@ -1507,8 +1624,83 @@ func _command_squads(castle: Castle) -> void:
 		# кучу ещё на марше (та же арифметика, что и у заслона)
 		var centered: float = float(i) - float(n - 1) * 0.5
 		off += right * (centered * maxf(SQUAD_LATERAL_STEP, _screen_step_for(uid)))
-		_set_role(sq, role, target_pos + off)
+		plan.append([sq, target_pos + off, uid])
+	# ── ОТРЯДЫ ОДНОГО РОДА НЕ ВСТАЮТ НА ОДНУ ТОЧКУ (аудит 27.10.2026) ──────
+	# Фланговый сдвиг тактики (±flank) и центрированный ряд складываются, и
+	# при 6-8 отрядах рода на полном лимите 29 соседние места ряда ложились
+	# друг на друга (qa_ai 6 «deep_column»: зазор 0.2 м). Внутри рода места
+	# разводятся по фронту не теснее шага ряда, середина ряда не сдвигается
+	if _OptEA.ai_wave_despread:
+		_despread_plan(plan, target_pos, right)
+	# ── МАРШ ПРИВАЛАМИ (RedMarch, ai_wave_stages): пока волна на привале,
+	# весь план стоит на точке привала, клещей нет
+	var halting: bool = false
+	if _OptEA.ai_wave_stages:
+		if attacking:
+			if not march.launched:
+				march.launch(wave_c if wave_c != Vector3.ZERO else castle.global_position, target_pos)
+			march.stage(plan, target_pos, wave_c)
+			halting = march.active
+			if halting:
+				last_action += "|волна на привале %d" % (march.leg + 1)
+		elif march.launched:
+			march.reset()
+	# ── КЛЕЩИ (RedTactics, ai_pincer): крылья за край чужого фронта и в тыл
+	if attacking and not halting:
+		tac.pincer(plan, target_pos, course, wave_c)
+	for p in plan:
+		var sq: Dictionary = p[0]
+		var tgt: Vector3 = p[1]
+		# ── ВОЛНА ДЕРЖИТСЯ ВМЕСТЕ (ТЗ 27.10.2026, разд. 4, ручка ai_wave_hold) ─
+		# Отряд, ушедший вперёд центра волны дальше WAVE_LEAD_MAX и не в
+		# бою, ждёт остальных: цель — где стоит. Иначе волна приходила к
+		# противнику по одному отряду (разные точки старта, стычки по пути)
+		if attacking and not halting and _OptEA.ai_wave_hold and wave_c != Vector3.ZERO:
+			var c0: Vector3 = _squad_centroid(sq["members"])
+			var lead: float = (c0.x - wave_c.x) * course.x + (c0.z - wave_c.z) * course.z
+			if lead > _AICfg.WAVE_LEAD_MAX and not _in_melee(sq) and not sq.has("wing"):
+				tgt = c0
+				wave_holds += 1
+		_set_role(sq, tac.wing_role(sq, role) if attacking else role, tgt)
 	_apply_orders()
+
+## Развести места одного рода по фронту: сортировка по боковой координате,
+## соседи не теснее шага рода, середина ряда остаётся на месте
+func _despread_plan(plan: Array, origin: Vector3, right: Vector3) -> void:
+	var by_type: Dictionary = {}
+	for k in range(plan.size()):
+		var uid: String = plan[k][2]
+		var lst: Variant = by_type.get(uid)
+		if lst == null:
+			lst = []
+			by_type[uid] = lst
+		(lst as Array).append(k)
+	for uid in by_type:
+		var idx: Array = by_type[uid]
+		if idx.size() < 2:
+			continue
+		var step: float = maxf(SQUAD_LATERAL_STEP, _screen_step_for(String(uid)))
+		var lat: Array = []
+		for k in idx:
+			var t: Vector3 = plan[k][1]
+			lat.append([(t.x - origin.x) * right.x + (t.z - origin.z) * right.z, k])
+		lat.sort_custom(func(a, b): return float(a[0]) < float(b[0]))
+		var mean0 := 0.0
+		for e in lat:
+			mean0 += float(e[0])
+		mean0 /= float(lat.size())
+		var fixed: Array = [float(lat[0][0])]
+		for j in range(1, lat.size()):
+			fixed.append(maxf(float(lat[j][0]), float(fixed[j - 1]) + step))
+		var mean1 := 0.0
+		for v in fixed:
+			mean1 += float(v)
+		mean1 /= float(fixed.size())
+		for j in range(lat.size()):
+			var k: int = int(lat[j][1])
+			var shift: float = float(fixed[j]) - mean1 + mean0 - float(lat[j][0])
+			if absf(shift) > 0.01:
+				plan[k][1] = (plan[k][1] as Vector3) + right * shift
 
 # ═════════════════════════════════════════════════════════════════════════════
 # ОБОРОНИТЕЛЬНЫЙ РЕЖИМ (DEFENSIVE_MODE)
@@ -1857,9 +2049,11 @@ func _command_squads_defensive(castle: Castle) -> void:
 	# факт: побеждает факт, рубеж просто растягивается
 	var line_step: float = maxf(
 		_AICfg.DEFENSE_LINE_WIDTH / float(maxi(line_count, 1)), _widest_step())
+	var line_sqs: Array = []
 	for i in range(rest.size()):
 		var sq: Dictionary = rest[i]
 		if i < line_count:
+			line_sqs.append(sq)
 			# ЗАСЛОН: отряды растянуты поперёк курса, с шагом по ширине рубежа
 			var centered: float = float(i) - float(maxi(line_count - 1, 1)) * 0.5
 			var off := right * (centered * line_step)
@@ -1870,6 +2064,9 @@ func _command_squads_defensive(castle: Castle) -> void:
 			# ПАТРУЛЬ: точка на дуге ПЕРЕД рубежом, смена по таймеру
 			var pi: int = i - line_count
 			_set_role(sq, ROLE_PATROL, _patrol_point(center, pi, patrols, course))
+	# ── КОРПУС ПО СИГНАЛУ (RedTactics, ai_corps): стычка патруля/рейда —
+	# заслон встаёт кирпичами перед ней и держит место
+	tac.assign_corps(line_sqs, center)
 	_apply_orders()
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -2465,8 +2662,10 @@ func _squad_strength(sq: Dictionary) -> float:
 	var sample: Unit = null
 	var hp := 0.0
 	for m in members:
+		if m == null or not is_instance_valid(m):
+			continue
 		var u := m as Unit
-		if u == null or not is_instance_valid(u) or u.is_dead():
+		if u == null or u.is_dead():
 			continue
 		if sample == null:
 			sample = u
@@ -2485,8 +2684,10 @@ func _squad_vet_level(sq: Dictionary) -> int:
 	var best := 0
 	var seen: Dictionary = {}
 	for m in sq["members"]:
+		if m == null or not is_instance_valid(m):
+			continue
 		var u := m as Unit
-		if u == null or not is_instance_valid(u):
+		if u == null:
 			continue
 		var sid: int = u.squad_id
 		if sid <= 0 or seen.has(sid):
@@ -2542,8 +2743,17 @@ func _try_retreat(sq: Dictionary, castle: Castle) -> bool:
 	var limit: float = _AICfg.RETREAT_STRENGTH
 	if _squad_vet_level(sq) >= _AICfg.RETREAT_VETERAN_LEVEL:
 		limit = maxf(limit, _AICfg.RETREAT_STRENGTH_VETERAN)
-	if _squad_strength(sq) > limit:
-		return false
+	var strength: float = _squad_strength(sq)
+	# ── ДОКОМПЛЕКТАЦИЯ В ТИШИНЕ (ТЗ 27.10.2026, разд. 4, ручка ai_refill_home) ─
+	# Отряд ниже RETREAT_REFILL_STRENGTH, рядом с которым нет противника,
+	# идёт в замок лечиться и пополняться (замок это умеет: лечит, набирает до
+	# штата, выпускает целым). Прежде такой отряд стоял огрызком на рубеже до
+	# следующего боя — и на экране армия красного выглядела рассыпанной
+	var refill: bool = false
+	if strength > limit:
+		if not (_OptEA.ai_refill_home and strength <= _AICfg.RETREAT_REFILL_STRENGTH):
+			return false
+		refill = true
 	# ── ЗАВЯЗАЛСЯ В РУКОПАШНОЙ — ДЕРЁТСЯ ДО КОНЦА ───────────────────────────
 	# Отряд, развернувшийся спиной посреди схватки, не отступает, а гибнет: он
 	# идёт к воротам сквозь тех, кто до него достаёт, не отвечает (режим отхода
@@ -2564,7 +2774,11 @@ func _try_retreat(sq: Dictionary, castle: Castle) -> bool:
 	# Отступают ОТ КОГО-ТО. Уводить отряд с поста из-за старых ран, когда вокруг
 	# тихо, значит оголить рубеж без всякой причины
 	var anchor := _squad_centroid(sq["members"])
-	if _nearest_player_target(anchor, _AICfg.RETREAT_THREAT_RADIUS) == null:
+	if refill:
+		# На докомплектацию — только когда вокруг тихо
+		if _nearest_player_target(anchor, _AICfg.DEFENSE_ENGAGE_RADIUS) != null:
+			return false
+	elif _nearest_player_target(anchor, _AICfg.RETREAT_THREAT_RADIUS) == null:
 		return false
 	# ── У САМОГО ПРОТИВНИКА РЕШЕНИЕ ОБ АТАКЕ НЕ ОТМЕНЯЕТСЯ ─────────────────
 	# Разбор — в AICfg.AI_NO_RETREAT_RANGE. Коротко: запрет по КОНТАКТУ выше
@@ -2578,8 +2792,10 @@ func _try_retreat(sq: Dictionary, castle: Castle) -> bool:
 	var sent := false
 	var seen: Dictionary = {}
 	for m in sq["members"]:
+		if m == null or not is_instance_valid(m):
+			continue
 		var u := m as Unit
-		if u == null or not is_instance_valid(u):
+		if u == null:
 			continue
 		var sid: int = u.squad_id
 		if sid <= 0 or seen.has(sid):
@@ -2589,6 +2805,8 @@ func _try_retreat(sq: Dictionary, castle: Castle) -> bool:
 			sent = true
 	if not sent:
 		return false          # гарнизон полон — деремся там, где стоим
+	if refill:
+		refill_trips += 1
 	_set_role(sq, ROLE_RETREAT, castle.global_position)
 	# ── РЕШЕНИЕ ЗАФИКСИРОВАНО (см. AICfg.RETREAT_MIN_SEC) ──────────────────
 	# До этой отметки отряду не выдадут никакой другой роли, сколько бы раз
@@ -2817,9 +3035,18 @@ func _apply_orders() -> void:
 		var threat: Node3D = null
 		if _AICfg.AI_COUNTER_ATTACK and _may_counter_attack(sq):
 			var anchor: Vector3 = _squad_centroid(members)
-			threat = _nearest_player_target(anchor, _AICfg.DEFENSE_ENGAGE_RADIUS)
+			threat = _nearest_player_target(anchor, tac.engage_radius(sq))
 		if threat != null:
 			holds = false
+		# ── СБОР ПОСЛЕ БОЯ (RedTactics, ai_regroup) ──────────────────────────
+		# Враг в зоне — сбор снят, отряд дерётся; тихо — стоит кирпичом на месте
+		# сбора в Защите, какую бы цель ни назначил план этого такта
+		var regroup: bool = false
+		if threat != null:
+			tac.break_regroup(sq)
+		elif tac.regrouping(sq):
+			regroup = true
+			holds = true
 		var uid: String = String(sq["type"])
 		var stance: String = _UCfg.STANCE_DEFENSE if holds else _UCfg.STANCE_ATTACK
 		# ── ФАЛАНГА НА МАРШЕ ────────────────────────────────────────────────
@@ -2850,6 +3077,9 @@ func _apply_orders() -> void:
 		# бойцов игрока это сорок тысяч проверок расстояния в один кадр, и
 		# они же гуляющим углом переставляли весь неподвижный строй
 		var course: Vector3 = sq.get("face", Vector3.ZERO)
+		if regroup:
+			center = sq["rg_post"]
+			course = sq["rg_face"]
 		var course_frozen: bool = course.length_squared() > 1e-6
 		# ГЛУБИНА СТРОЯ (13.09.2026): на марше широко, у брода глубоко —
 		# смена глубины сама переиздаёт приказ (ranks_for снимает issued)
@@ -2867,7 +3097,7 @@ func _apply_orders() -> void:
 		var rows_est: int = maxi(1, int(ceil(float(members.size()) / float(cols))))
 		center = GameManager.squad_inside(center,
 			float(cols) * SQUAD_SPACING * 0.5, float(rows_est) * SQUAD_SPACING * 0.5)
-		var recon_run: bool = role == ROLE_RAID and bool(sq.get("recon", false))
+		var recon_run: bool = role == ROLE_RAID and bool(sq.get("recon", false)) and not regroup
 		if recon_run:
 			threat = null            # разведчик не ввязывается в бой
 			holds = false
@@ -3166,8 +3396,10 @@ func _field_centroid(field: Array) -> Vector3:
 func _squad_centroid(members: Array) -> Vector3:
 	var live: Array = []
 	for m in members:
+		if m == null or not is_instance_valid(m):
+			continue
 		var u := m as Unit
-		if u == null or not is_instance_valid(u) or u.is_dead():
+		if u == null or u.is_dead():
 			continue
 		live.append(u)
 	if live.is_empty():

@@ -201,7 +201,7 @@ func _block_auto_vet() -> void:
 			full / maxf(base_hp, 1.0) * 100.0])
 	# ── У КАЖДОГО РОДА СВОЯ ЛЕСТНИЦА (дословно из заказа) ────────────────
 	var w: Dictionary = _UCfgT.vet_auto_step("warrior")
-	var a: Dictionary = _UCfgT.vet_auto_step("archer")
+	var a: Dictionary = _UCfgT.vet_auto_step("archer", _UCfgT.LEGEND_TIER - 1)
 	verdict("B6 мечнику растёт откат яростной атаки, лучнику — темп стрельбы",
 		float(w.get("bonus_rage_cd", 0.0)) > 0.0
 		and float(a.get("bonus_cooldown", 0.0)) > 0.0

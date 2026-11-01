@@ -118,8 +118,143 @@ func _pad(s: String, n: int) -> String:
 # ─────────────────────────────────────────────────────────────────────────────
 # ЗАМЕР КАДРА
 # ─────────────────────────────────────────────────────────────────────────────
+## Перепись дерева (census=1): цена «прочего» вне армии — кто крутит колбэки
+var _census := false
+var _keep_paused := false
+
+func _census_print() -> void:
+	var total := 0
+	var by: Dictionary = {}
+	var stack: Array = [get_tree().root]
+	while not stack.is_empty():
+		var n: Node = stack.pop_back()
+		total += 1
+		var sc: Variant = n.get_script()
+		var key: String = (sc as Script).resource_path.get_file() if sc != null else n.get_class()
+		var rec: Array = by.get(key, [0, 0, 0, 0])
+		rec[0] += 1
+		if n.is_processing(): rec[1] += 1
+		if n.is_physics_processing(): rec[2] += 1
+		if n.is_processing_internal() or n.is_physics_processing_internal(): rec[3] += 1
+		by[key] = rec
+		for c in n.get_children(true):
+			stack.append(c)
+	var keys: Array = by.keys()
+	keys.sort_custom(func(a, b): return int(by[a][1]) + int(by[a][2]) + int(by[a][3]) > int(by[b][1]) + int(by[b][2]) + int(by[b][3]))
+	print("  ПЕРЕПИСЬ: узлов %d, объектов %d" % [total, int(Performance.get_monitor(Performance.OBJECT_COUNT))])
+	print("    %-34s %7s %7s %7s %7s" % ["скрипт/класс", "узлов", "_proc", "_phys", "внутр."])
+	for i in range(mini(keys.size(), 30)):
+		var k: String = keys[i]
+		var rc: Array = by[k]
+		print("    %-34s %7d %7d %7d %7d" % [k, int(rc[0]), int(rc[1]), int(rc[2]), int(rc[3])])
+	keys.sort_custom(func(a, b): return int(by[a][0]) > int(by[b][0]))
+	print("    — больше всего узлов:")
+	for i2 in range(mini(keys.size(), 12)):
+		print("    %-34s %7d" % [String(keys[i2]), int(by[keys[i2]][0])])
+
+func _nodes_of(pred: Callable) -> Array:
+	var out: Array = []
+	var stack: Array = [get_tree().root]
+	while not stack.is_empty():
+		var n: Node = stack.pop_back()
+		if pred.call(n):
+			out.append(n)
+		for c in n.get_children(true):
+			stack.append(c)
+	return out
+
+func _pmon() -> String:
+	var vp: RID = get_viewport().get_viewport_rid()
+	return "рендер CPU %.2f / GPU %.2f мс, TIME_PROC %.2f, TIME_PHYS %.2f мс, объектов в кадре %d, примитивов %d" % [
+		RenderingServer.viewport_get_measured_render_time_cpu(vp),
+		RenderingServer.viewport_get_measured_render_time_gpu(vp),
+		Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0,
+		Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0,
+		int(Performance.get_monitor(Performance.RENDER_TOTAL_OBJECTS_IN_FRAME)),
+		int(Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME))]
+
+## Стенные часы кадра (TIME_FPS обновляется раз в секунду — для коротких окон врёт)
+func _wall(n: int = 90) -> Dictionary:
+	await frames(20)
+	var t0: int = Time.get_ticks_usec()
+	for _i in range(n):
+		await get_tree().process_frame
+	var ms: float = float(Time.get_ticks_usec() - t0) * 0.001 / float(n)
+	return {"ms": ms, "fps": 1000.0 / maxf(ms, 0.001)}
+
+func _ticks_itself(n: Node) -> bool:
+	if n is Unit or n == self or n.get_script() == null:
+		return false
+	return (n.is_processing() and n.has_method("_process")) 		or (n.is_physics_processing() and n.has_method("_physics_process"))
+
+## По одному гасим колбэки узлов вне армии (у кого есть свой _process или
+## _physics_process): кадр стенными часами до и после
+func _census_nodes() -> void:
+	var cand: Array = _nodes_of(_ticks_itself)
+	var rows: Array = []
+	var base: Dictionary = await _wall(120)
+	for n in cand:
+		if not is_instance_valid(n):
+			continue
+		var pp: bool = n.is_processing()
+		var ph: bool = n.is_physics_processing()
+		n.set_process(false)
+		n.set_physics_process(false)
+		var w: Dictionary = await _wall(120)
+		n.set_process(pp)
+		n.set_physics_process(ph)
+		var after: Dictionary = await _wall(120)
+		var b2: float = (float(base["ms"]) + float(after["ms"])) * 0.5
+		rows.append([String(n.name) + " (" + (n.get_script() as Script).resource_path.get_file() + ")",
+			b2 - float(w["ms"]), b2])
+		base = after
+	rows.sort_custom(func(x, y): return float(x[1]) > float(y[1]))
+	print("  ЦЕНА КОЛБЭКОВ УЗЛОВ (кадр %.2f мс; гасим по одному):" % float(base["ms"]))
+	for r in rows:
+		print("    %-52s %+7.2f мс" % [String(r[0]), float(r[1])])
+
+func _census_paused() -> void:
+	RenderingServer.viewport_set_measure_render_time(get_viewport().get_viewport_rid(), true)
+	var b: Dictionary = await _wall()
+	print("  ПАУЗА: %.2f мс/кадр (%.1f FPS); %s" % [float(b["ms"]), float(b["fps"]), _pmon()])
+	var groups: Array = [
+		["спрайт-узлы бойцов (AnimatedSprite3D/Sprite3D под Unit)", func(n): return (n is AnimatedSprite3D or n is Sprite3D) and n.get_parent() is Unit],
+		["деревья и ресурсы (ResourceNode)", func(n): return n is ResourceNode],
+		["MeshInstance3D", func(n): return n is MeshInstance3D],
+		["узлы бойцов целиком (Unit)", func(n): return n is Unit],
+		["весь World", func(n): return n == main.get("_world")],
+	]
+	for g in groups:
+		var ns: Array = _nodes_of(g[1])
+		var was: Array = []
+		for n in ns:
+			if n is Node3D:
+				was.append((n as Node3D).visible)
+				(n as Node3D).visible = false
+		var w: Dictionary = await _wall()
+		print("  ПАУЗА без «%s» (%d узлов): %.2f мс/кадр (%+.2f); %s" % [String(g[0]), ns.size(), float(w["ms"]),
+			float(w["ms"]) - float(b["ms"]), _pmon()])
+		var i := 0
+		for n2 in ns:
+			if n2 is Node3D:
+				(n2 as Node3D).visible = bool(was[i])
+				i += 1
+	# Физсервер: формы столкновений деревьев
+	var shapes: Array = _nodes_of(func(n): return n is CollisionShape3D)
+	for sh in shapes:
+		(sh as CollisionShape3D).disabled = true
+	var w2: Dictionary = await _wall()
+	print("  ПАУЗА без форм столкновений (%d): %.2f мс/кадр (%+.2f)" % [shapes.size(), float(w2["ms"]), float(w2["ms"]) - float(b["ms"])])
+	for sh2 in shapes:
+		(sh2 as CollisionShape3D).disabled = false
+	var space: RID = get_viewport().world_3d.space
+	PhysicsServer3D.set_active(false)
+	var w3: Dictionary = await _wall()
+	print("  ПАУЗА без физсервера: %.2f мс/кадр (%+.2f)" % [float(w3["ms"]), float(w3["ms"]) - float(b["ms"])])
+	PhysicsServer3D.set_active(true)
+
 func _sample(warm: int = 30, n: int = 45) -> Dictionary:
-	if get_tree().paused:
+	if get_tree().paused and not _keep_paused:
 		get_tree().paused = false
 	await frames(warm)
 	_Opt.tick_reset()
@@ -539,6 +674,7 @@ func _run() -> void:
 		elif s.begins_with("builders="): N_BUILDERS = int(s.substr(9))
 		elif s.begins_with("clash="):   CLASH_SEC = int(s.substr(6))
 		elif s.begins_with("fps="):     FPS_TARGET = float(s.substr(4))
+		elif s == "census=1":           _census = true
 		elif s.begins_with("res="):
 			var p := s.substr(4).split("x")
 			if p.size() == 2:
@@ -682,6 +818,14 @@ func _run() -> void:
 	var base: Dictionary = await _sample()
 	_print_frame(base)
 	var melee: Dictionary = base
+	if _census:
+		_census_print()
+		process_mode = Node.PROCESS_MODE_ALWAYS
+		_keep_paused = true
+		base = await _cost("ВСЁ ДЕРЕВО НА ПАУЗЕ (остаток = движок + рендер)",
+			func(): get_tree().paused = true, func(): get_tree().paused = false, base)
+		_keep_paused = false
+		await _census_nodes()
 	base = await _cost("туман войны",
 		func():
 			if GameManager.fog != null:

@@ -499,12 +499,18 @@ func _run() -> void:
 	var half: float = float(main.RIVER_HALF_W)
 	var g_in: float = AudioManager.river_gain_at(Vector3(rx, 0.0, rz))
 	var g_edge: float = AudioManager.river_gain_at(Vector3(rx + half, 0.0, rz))
-	var g_mid: float = AudioManager.river_gain_at(Vector3(rx + half + 2.5, 0.0, rz))
-	var g_out: float = AudioManager.river_gain_at(Vector3(rx + half + 6.0, 0.0, rz))
-	verdict("G4 в русле и на кромке — полная доля, в 2.5 м — половина, дальше 5 м — ноль",
+	# Спад — свойство: половина в середине полосы спада, ноль за ней (ТЗ
+	# 27.10.2026, третье письмо, п. 4: зона слышимости ×1.2, было «+5 м»)
+	var fade: float = AudioManager.RIVER_FADE_M
+	var g_mid: float = AudioManager.river_gain_at(Vector3(rx + half + fade * 0.5, 0.0, rz))
+	var g_out: float = AudioManager.river_gain_at(Vector3(rx + half + fade + 1.0, 0.0, rz))
+	verdict("G4 в русле и на кромке — полная доля, в середине спада — половина, за спадом — ноль",
 		is_equal_approx(g_in, 1.0) and g_edge > 0.99 and absf(g_mid - 0.5) < 0.05 and is_zero_approx(g_out),
 		"%.2f / %.2f / %.2f / %.2f" % [g_in, g_edge, g_mid, g_out])
-	verdict("G5 зона реки + 5 м", is_equal_approx(AudioManager.RIVER_FADE_M, 5.0))
+	verdict("G5 зона слышимости реки ×%.1f от прежней (%.1f м от оси, было %.1f)" % [
+			AudioManager.RIVER_ZONE_MULT, half + fade, half + AudioManager.RIVER_FADE_BASE],
+		is_equal_approx(half + fade, (half + AudioManager.RIVER_FADE_BASE) * AudioManager.RIVER_ZONE_MULT)
+		and is_equal_approx(db_to_linear(AudioManager.RIVER_DB - AudioManager.RIVER_DB_BASE), AudioManager.RIVER_VOL_MULT))
 	# Плавный вход: камера у реки
 	AudioManager._river_gain = 0.0
 	GameManager.update_view_point(Vector3(rx, 0.0, rz), 60.0, 0.0)

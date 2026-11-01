@@ -470,6 +470,12 @@ func _leg_verdicts(id: String, r: Dictionary, need_arrive: bool = true) -> void:
 
 # ─────────────────────────────────────────────────────────────────────────────
 func _run() -> void:
+	# Зеркальный пень (ТЗ 31.10.2026) стоит на пути армии к лагерю орды — окружение,
+	# а не марш: стенд меряет марш на прежней расстановке
+	preload("res://scripts/perf_config.gd").lair_layout_v2 = false
+	# Площадку сбора/спавн у пня стенд проверяет на точке: вход орды из-за
+	# кромки (ТЗ 31.10.2026, стережёт qa_tz1031c) увёл бы отряды к краю карты
+	preload("res://scripts/perf_config.gd").horde_edge_entry = false
 	for a in OS.get_cmdline_user_args():
 		var s := String(a)
 		if s.begins_with("only="):

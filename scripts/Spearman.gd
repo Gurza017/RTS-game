@@ -930,7 +930,8 @@ func _strike_damage() -> float:
 	# Урон по крупной цели (конница, туша, тролль — Unit.giant_class) ×(1 +
 	# bonus_giant_melee). Признак крупной цели — метод цели, без приведений
 	var tgt = attack_target
-	if tgt != null and is_instance_valid(tgt) and tgt is Unit and (tgt as Unit).giant_class():
+	if tgt != null and is_instance_valid(tgt) and tgt is Unit and (tgt as Unit).giant_class() \
+			and not (tgt as Unit).immune_to_spears():
 		var gm: float = GameManager.unit_bonus(faction, "spearman", "bonus_giant_melee")
 		if gm > 0.0:
 			dmg *= 1.0 + gm

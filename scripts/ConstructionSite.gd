@@ -353,6 +353,7 @@ func _complete() -> void:
 		parent.add_child(made)
 		made.global_position = pos
 		built.emit(made)
+		GameManager.note_building_done(f)
 	# Рабочих отпускаем: стройка кончилась, пусть возвращаются к делам.
 	# Кто стоял ЗА рисунком готового здания — выходит на линию перед ним
 	# (ТЗ 14.10.2026, п. 1: «после постройки замка рабочих не видно»)
@@ -435,6 +436,8 @@ func _make_target() -> Building:
 		"mine":     return Mine.new()
 		"sheep_pen": return _SheepPen.new()
 		"castle":   return Castle.new()
+		"market":   return load("res://scripts/Market.gd").new()
+		"storehouse": return load("res://scripts/Storehouse.gd").new()
 	# Три дома — один скрипт с разной картинкой (House.variant_id)
 	if _UCfg.is_house(target_id):
 		var h: Building = _House.new()

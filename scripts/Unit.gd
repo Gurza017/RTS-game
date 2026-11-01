@@ -188,6 +188,36 @@ const SEP_MIN_DIST := PERSONAL_RADIUS * (2.0 - OVERLAP_ALLOWED)
 ## Считает разведение в солвере (ArmyCore.BatchSeparation), не GDScript
 const SEP_CROSS_SQUAD := 1.6
 
+## ── ПОЛ СБЛИЖЕНИЯ СВОИХ В БОЮ (ТЗ 26.10.2026) ──────────────────────────────
+## Жалоба владельца: в столкновении отряды сминаются в монолитную тёмную
+## массу. Корень — разведение не отбрасывает атакующего назад по ходу, и
+## задний ряд на полном шаге проходил сквозь спины передних. Пол — правило
+## ШАГА в ядре (ArmyCore.SetAllyFloor), не сила: атакующий не вправе
+## СБЛИЗИТЬСЯ с союзником теснее пола, вдоль и прочь — вправе.
+## Свой отряд: 4r/3 = 0.333 м — личные круги заходят друг в друга не больше
+## чем на треть диаметра («сжиматься не более чем на 1/3 объёма»).
+## Чужой отряд: полная личная норма SEP_MIN_DIST — граница отрядов видна
+const ALLY_FLOOR_OWN_TIGHT := PERSONAL_RADIUS * 4.0 / 3.0
+## ТЗ 31.10.2026 («как в Rome: Total War», ручка ally_floor_wide): атакующий
+## держит от своего почти строевой шаг (0.55) — 0.48 м; зонд qa_tz1031c/Crush:
+## мечники держат 0.49 м и глубину ×0.95 вместо 0.34 м и ×0.64-0.73. Сжимает
+## теперь только чужой напор (_apply_push), а не собственный подход
+const ALLY_FLOOR_OWN := 0.48
+const ALLY_FLOOR_CROSS := SEP_MIN_DIST
+## ── ОЧЕРЕДЬ ЗАДНИХ РЯДОВ (ТЗ 31.10.2026, ArmyCore.SetAllyQueue) ─────────────
+## Атакующий без врага в длине оружия + ALLY_QUEUE_REACH_PAD, у которого свой
+## впереди по ходу (конус ALLY_QUEUE_COS) ближе ALLY_QUEUE_GAP (≈0.9 строевого
+## интервала 0.55), — стоит и ждёт, а не обтекает передних
+const ALLY_QUEUE_GAP := 0.50
+const ALLY_QUEUE_COS := 0.7
+const ALLY_QUEUE_REACH_PAD := 0.6
+## ── ОПОРА РЯДОВ В ТОЛЧКЕ (ТЗ 31.10.2026) ───────────────────────────────────
+## Свои за спиной в PUSH_RANK_RANGE, в конусе PUSH_RANK_COS, не больше
+## PUSH_RANK_CAP — каждый даёт unit_stats_config.PUSH_RANK_SUPPORT напора
+const PUSH_RANK_RANGE := 1.8
+const PUSH_RANK_COS := 0.6
+const PUSH_RANK_CAP := 4
+
 ## ── ПРОХОД СКВОЗЬ СОЮЗНЫЙ СТРОЙ ────────────────────────────────────────────
 ## Во сколько раз ОСЛАБЛЯЕТСЯ разбор наложения между ИДУЩИМ и СТОЯЩИМ бойцами
 ## из РАЗНЫХ отрядов. Единица — прежнее поведение, оно же прежнее заклинивание:
@@ -497,6 +527,9 @@ var charge_row_depth: float = 1.1
 ## CHARGE_STRAIGHT_FRAC) и последняя точка, от которой он считается
 var _charge_path: float = 0.0
 var _charge_last: Vector3 = Vector3.ZERO
+## Пробег разгона сейчас копит ядро (аренда _arm_pullup, ручка charge_core):
+## первый тик после пробуждения забирает его (_charge_sync)
+var _charge_core: bool = false
 ## До этого момента боец ОСТАНОВЛЕН стеной копий (спринт 18): его толчок
 ## равен нулю (см. spear_wall_strike)
 var _counter_hit_until_ms: int = 0
@@ -524,6 +557,35 @@ var spear_wall_hits: int = 0        # на копейщике: скольких 
 var _wall_struck: bool = false      # на бегущем: за этот забег о стену уже бился
 ## Замедление (стена копий): множитель скорости до срока
 var _slow_until_ms: int = 0
+## ── РЫВОК ПЕРЕД СТОЛКНОВЕНИЕМ (ТЗ 31.10.2026, ручка ease_rush) ─────────────
+## Отряд «вольно», взявший чужой отряд целью (GameManager.squad_ease_engage),
+## последние EASE_RUSH_DIST до цели идёт ×EASE_RUSH_MULT; первый удар окно гасит
+const EASE_RUSH_DIST := 5.0
+const EASE_RUSH_MULT := 1.4
+const EASE_RUSH_SEC := 6.0
+var _rush_until_ms: int = 0
+var ease_rush_hits: int = 0
+
+func start_ease_rush() -> void:
+	_rush_until_ms = Unit.game_ms() + int(EASE_RUSH_SEC * 1000.0)
+
+## Рывок идёт прямо сейчас (последние метры, цель жива)
+func ease_rushing() -> bool:
+	if _rush_until_ms <= now_ms or state != State.ATTACKING:
+		return false
+	var t = attack_target
+	if t == null or not is_instance_valid(t):
+		return false
+	var tp: Vector3 = (t as Node3D).global_position
+	var me: Vector3 = position if _local_xform else global_position
+	var d: float = Vector2(tp.x - me.x, tp.z - me.z).length()
+	return d <= EASE_RUSH_DIST and d > attack_range
+
+func _rush_consume() -> void:
+	_rush_until_ms = 0
+	ease_rush_hits += 1
+	if _Opt.clash_audio_boost:
+		AudioManager.clash_boost(position if _local_xform else global_position)
 var _slow_mult: float = 1.0
 
 func spear_wall_active() -> bool:
@@ -550,6 +612,8 @@ func is_slowed() -> bool:
 func spear_wall_strike(victim: Unit) -> void:
 	GameManager.tm_ability("spear_wall_strike", faction)
 	if victim == null or not is_instance_valid(victim) or victim.is_dead():
+		return
+	if victim.immune_to_spears():
 		return
 	spear_wall_hits += 1
 	var dmg: float = (_strike_damage() + _upgrade_damage_bonus()) * SPEAR_WALL_DMG_MULT
@@ -587,6 +651,12 @@ const CHARGE_FRONT_COS := 0.34
 ## Это свойство РОДА ВОЙСК, а не стойки: копья опущены навстречу коннице и в
 ## «атаке», иначе фаланга была бы уязвима ровно в тот момент, когда идёт вперёд
 func repels_charge() -> bool:
+	return false
+
+## ИММУНИТЕТ К ЗАЩИТЕ КОПЕЙЩИКОВ (ТЗ 29.10.2026, «Удар Свинобосса»): копья в
+## лоб и «Стена копий» его не останавливают и не ранят сверх обычного удара,
+## «Приём копья» (bonus_giant_melee) по нему не действует. База — нет
+func immune_to_spears() -> bool:
 	return false
 
 ## Смотрю ли я НАВСТРЕЧУ навалу, пришедшему по направлению dirn (от всадника
@@ -638,6 +708,7 @@ func _atk_wake(cd: float) -> void:
 ## приход к точке боя). Полный автомат подхватит с той же целью
 func _rear_wake(elapsed: float = 0.0) -> void:
 	wake_physics()
+	var was_march: bool = _auto_pilot and state == State.MOVING
 	_rear_press = false
 	_auto_pilot = false
 	# Ядро вело бойца elapsed секунд без входа в автомат (BigStand, этап 4):
@@ -653,6 +724,26 @@ func _rear_wake(elapsed: float = 0.0) -> void:
 		if _reform_permit > 0.0:
 			_reform_permit = maxf(_reform_permit - elapsed, 0.0)
 		_rank_timer -= elapsed
+		# Аренда марша: таймеры _process_move тоже доводятся, и созревающие в
+		# ближайшие MARCH_CORE_BUNDLE с срабатывают в этот же вход — иначе
+		# четыре несведённых таймера будили бы бойца вчетверо чаще
+		if state == State.MOVING:
+			if _move_lock > 0.0:
+				_move_lock -= elapsed
+			_route_los_t -= elapsed
+			if _aggro_timer < MARCH_CORE_BUNDLE: _aggro_timer = minf(_aggro_timer, 0.0)
+			if _route_los_t < MARCH_CORE_BUNDLE: _route_los_t = minf(_route_los_t, 0.0)
+			if _nav_t < MARCH_CORE_BUNDLE: _nav_t = minf(_nav_t, 0.0)
+			if _stuck_timer > STUCK_CHECK_SEC - MARCH_CORE_BUNDLE:
+				_stuck_timer = maxf(_stuck_timer, STUCK_CHECK_SEC)
+			# Под арендой марша перехват и застревание стерегло ядро: на входе
+			# перехват опрашивается сразу, детектор берёт свежую опору — или,
+			# если будил он сам, признаёт застревание в этот же такт
+			if was_march:
+				_aggro_timer = minf(_aggro_timer, 0.0)
+				if _march_stuck_core:
+					_stuck_timer = maxf(_stuck_timer, STUCK_CHECK_SEC)
+					_stuck_ref_dist = 0.0 if (_soa >= 0 and GameManager.army.march_stall_take(_soa)) else INF
 
 ## ── ВЕРНУТЬ БОЙЦА В GDSCRIPT-ТИК (BigStand-5, этап 1) ──────────────────────
 ## Ведомый ядром (автопилот, напор, дрёма в ATTACKING) в tick_physics не
@@ -685,6 +776,8 @@ func _core_led() -> bool:
 		return true
 	if state == State.ATTACKING:
 		return _auto_pilot or _rear_press or _atk_snooze
+	if state == State.MOVING:
+		return _auto_pilot
 	return _idle_wait and state == State.IDLE
 
 ## Стоящий в бою ждёт такт авто-агро в ядре (BigStand-5, этап 1б): таймер
@@ -766,14 +859,18 @@ func _arm_autopilot(tu: Unit, rng: float, dist: float) -> void:
 	var cav: bool = charge_range > 0.0
 	var stop: float = (charge_range + RIDER_AUTOPILOT_MARGIN) if cav else rng
 	if dist <= stop + AUTOPILOT_ARM_SLACK:
+		if _Opt.profile_physics: _Opt.prof_add("ap- у дистанции %s тег %d" % [String(get_script().resource_path.get_file()), _pa_tag], 0)
 		return
 	if _stance_holds_ground() or retreating or sprinting or _disengaging or _rear_press:
+		if _Opt.profile_physics: _Opt.prof_add("ap- стойка/отход", 0)
 		return
 	if cav and (not _Opt.rider_autopilot or is_charging):
 		return
 	# Цель за поводком отряда — шаг ведёт GDScript (там проверка поводка)
 	if not leash_allows_drive(tu.position if tu._local_xform else tu.global_position):
+		if _Opt.profile_physics: _Opt.prof_add("ap- поводок", 0)
 		return
+	if _Opt.profile_physics: _Opt.prof_add("ap+ взвод", 0)
 	_auto_pilot = true
 	var eff: float = _effective_speed()
 	# Подтягивание — только у отряда и не под замком цели: ровно те условия,
@@ -783,6 +880,158 @@ func _arm_autopilot(tu: Unit, rng: float, dist: float) -> void:
 		pull_lim = rng + PULL_UP_MAX
 	GameManager.army.autopilot_arm(_soa, eff, eff * PULL_UP_SPEED, stop,
 		pull_lim, AGGRO_INTERVAL_HOT, _side_sign)
+
+## ── АРЕНДА ПОДТЯГИВАНИЯ (ТЗ 01.11.2026, FPS ≥ 45; ручка pullup_core) ──────
+## qa_melee_bench mult=5: ветка подтягивания — 165 тыс. входов автомата из 222
+## тыс. за замес. Обычный взвод (_arm_autopilot) почти не держал её в ядре:
+## треть отказов — «последние 5 см» (боец упёрся в своих у самой дистанции и
+## шагает на месте каждый такт), треть — поводок отряда игрока (цель за
+## поводком), а взведённых тут же будил страж «чужой рядом» (52 тыс. из 58) —
+## задние ряды в свалке всегда в 1.5 м от чужого. Аренда ведёт строку, пока цель
+## в окне подтягивания: GDScript-ветка и так шагает к ней, не глядя ни на
+## заслон, ни на поводок цели. Поводок — по САМОМУ бойцу (якорь и
+## CHASE_LEASH: ядро будит, _leash_check решает), страж снят, остальное —
+## как у автопилота (срок AGGRO_INTERVAL_HOT, дистанция, гибель цели)
+func _arm_pullup(tu: Unit, rng: float) -> void:
+	if not _Opt.approach_autopilot or _soa < 0 or tu == null or tu._soa < 0:
+		if _Opt.profile_physics: _Opt.prof_add("apP- нет строки", 0)
+		return
+	# Бег коннице не помеха (charge_core): CavalryCommander шлёт заход и отход
+	# бегом, и флаг доживает до рубки (command_attack его не снимает) — шаг
+	# подтягивания у бегущего тот же, скорость с бегом даёт _effective_speed
+	var run_block: bool = sprinting and not (charge_range > 0.0 and _Opt.charge_core)
+	if _stance_holds_ground() or retreating or run_block or _disengaging or _rear_press:
+		if _Opt.profile_physics: _Opt.prof_add("apP- стойка/отход", 0)
+		return
+	if _Opt.profile_physics: _Opt.prof_add("apP+ взвод", 0)
+	var lr: float = -1.0
+	if _leash_from.x != INF and faction == Constants.FACTION_PLAYER and squad_id > 0 \
+			and _Opt.squad_leash:
+		lr = CHASE_LEASH
+	# Окно у конницы — не дальше рубежа разгона: вышла цель за него — автомат
+	# взводит _charge_ready
+	var lim: float = rng + PULL_UP_MAX
+	var cad: float = AGGRO_INTERVAL_HOT
+	if charge_range > 0.0:
+		if _charge_ready and not is_charging:
+			# Задняя линия под запретом разгона: рубеж charge_range ей ничего
+			# не меняет (взвод уже стоит), будить — к сроку запрета: автомат
+			# взводит разгон в тот же такт, что и без аренды
+			cad = clampf(float(no_charge_until_ms - game_ms()) / 1000.0, 0.02, cad)
+		else:
+			lim = minf(lim, charge_range)
+	_auto_pilot = true
+	# Скорость берётся с множителем разгона (_effective_speed: is_charging)
+	var eff: float = _effective_speed()
+	var lx: float = _leash_from.x if lr > 0.0 else 0.0
+	var lz: float = _leash_from.z if lr > 0.0 else 0.0
+	if is_charging and _Opt.charge_core:
+		if _Opt.profile_physics: _Opt.prof_add("apC+ разгон", 0)
+		_charge_core = true
+		GameManager.army.autopilot_arm_charge(_soa, eff, eff * PULL_UP_SPEED, rng,
+			lim, cad, _side_sign, lx, lz, lr,
+			_charge_last.x, _charge_last.z, _charge_path)
+	else:
+		GameManager.army.autopilot_arm_pull(_soa, eff, eff * PULL_UP_SPEED, rng,
+			lim, cad, _side_sign, lx, lz, lr)
+
+## Забрать пробег разгона у ядра (см. _charge_core): один вызов на пробуждение
+func _charge_sync() -> void:
+	_charge_core = false
+	if _soa < 0:
+		return
+	var v: Vector3 = GameManager.army.charge_track_take(_soa)
+	if v.x != INF:
+		_charge_path = v.y
+		_charge_last = Vector3(v.x, _charge_last.y, v.z)
+
+## ── АРЕНДА МАРША (ТЗ 01.11.2026, ручка march_core) ────────────────────────
+## Аудит марша (qa_melee_bench mult=5 mvprof=1): марш стоил столько же, сколько
+## рубка (физтик 5.99 против 5.91 мс), и личных сканов в нём нет — дорог сам
+## вход каждого идущего в _process_move ~10 раз в секунду ради «направление,
+## скорость, шаг». Ядро ведёт идущего к ТЕКУЩЕЙ точке (угол маршрута или точка
+## приказа) режимом GateMarch и будит: у угла (до ROUTE_WP_RADIUS), за
+## SQUAD_ARRIVE_TOL + MARCH_CORE_LAST до конца (зона прибытия, зажим шага и
+## стоп — в GDScript), упор в чужое тело, чужой в длине руки (страж), срок —
+## ближайший таймер марша (агро-перехват, замок приказа, взгляд за угол,
+## обход, детектор застревания; не реже AGGRO_INTERVAL_HOT). Брод, обход по
+## навигации, билеты прохода, отход, паника, охота, разлёт — в GDScript.
+## Смена приказа/скорости снимает аренду (command_move, бег, стойка, хвост)
+const MARCH_CORE_LAST := 0.5
+const MARCH_CORE_PAD := 0.1
+const MARCH_CORE_MIN_CAD := 0.06
+const MARCH_CORE_BUNDLE := 0.12
+## Потолок срока аренды марша: перехват и застревание стережёт ядро, срок —
+## только страховка и редкие таймеры (взгляд за угол, обход)
+const MARCH_CORE_MAX_CAD := 1.0
+## Застревание этой аренды стережёт ядро (см. _rear_wake)
+var _march_stuck_core: bool = false
+
+func _arm_march(dist: float) -> void:
+	if not _Opt.approach_autopilot or not _Opt.core_tick_list or _soa < 0 or not _bm_on:
+		return
+	if state != State.MOVING or retreating or _panicked or _sprint_after_pass \
+			or _hunt_sheep != null or breaks_bodies or _trunk_ignore > 0.0 \
+			or _fling_vel.x != 0.0 or _fling_vel.z != 0.0 or _down_until_ms > 0 \
+			or _matrix_driven:
+		return
+	if _forced_move_pass() or _retreat_pass():
+		return
+	var route: bool = _route_i < _route.size()
+	var stop: float
+	var cad: float = MARCH_CORE_MAX_CAD
+	var gx: float = move_target.x
+	var gz: float = move_target.z
+	var core_stuck: bool = true
+	if route:
+		if _route_i == _route_ford_i:
+			return
+		stop = ROUTE_WP_RADIUS - MARCH_CORE_PAD
+		cad = minf(cad, _route_los_t)
+	else:
+		stop = SQUAD_ARRIVE_TOL + MARCH_CORE_LAST
+		if nav_active and _Opt.nav_detour_move and dist > NAV_DIR_MIN:
+			cad = minf(cad, _nav_t)
+		# Обход по нити (_atk_route): ядро ведёт к текущему углу, угол берёт
+		# GDScript на входе; прогресс застревания он меряет до точки приказа,
+		# поэтому его срок остаётся в cadence
+		if _atk_route_i < _atk_route.size():
+			var w: Vector3 = _atk_route[_atk_route_i]
+			gx = w.x
+			gz = w.z
+			var wx: float = gx - position.x
+			var wz: float = gz - position.z
+			if wx * wx + wz * wz <= ROUTE_WP_RADIUS * ROUTE_WP_RADIUS:
+				return
+			if dist <= stop + MARCH_CORE_PAD:
+				return
+			stop = ROUTE_WP_RADIUS - MARCH_CORE_PAD
+			core_stuck = false
+			cad = minf(cad, STUCK_CHECK_SEC - _stuck_timer)
+	if core_stuck and dist <= stop + MARCH_CORE_PAD:
+		return
+	if cad < MARCH_CORE_MIN_CAD:
+		if _Opt.profile_physics: _Opt.prof_add("mv_r срок мал", 0)
+		return
+	var sp: float = sqrt(velocity.x * velocity.x + velocity.z * velocity.z)
+	if sp <= 0.01:
+		return
+	if _Opt.profile_physics: _Opt.prof_add("mv_C взвод" if core_stuck else "mv_C взвод обход", 0)
+	_auto_pilot = true
+	_march_stuck_core = core_stuck
+	# Радиус стражи — тот же, что у перехвата марша в _process_move
+	var scan_r: float = attack_range + INTERCEPT_MARGIN
+	if MARCH_INTERCEPT_MELEE and pursues_target() and attack_range <= MARCH_INTERCEPT_MELEE_MAX:
+		scan_r = maxf(scan_r, AGGRO_RADIUS)
+	GameManager.army.autopilot_arm_march(_soa, sp, gx, gz, stop, cad, scan_r, core_stuck)
+
+## Снять аренду марша (смена приказа, скорости или режима хода)
+func _march_release() -> void:
+	if _auto_pilot and state == State.MOVING:
+		if _Opt.profile_physics: _Opt.prof_add("mv_r снятие", 0)
+		_auto_pilot = false
+		if _soa >= 0:
+			GameManager.army.autopilot_clear(_soa)
 
 ## ── ПОДХОД К ЗДАНИЮ — ТОЖЕ В ЯДРЕ (ТЗ 25.10.2026, третье письмо, п. 5) ────
 ## Жалоба «армия добивает вышки — минус 20-30 FPS». Зонд qa_tower_assault:
@@ -1113,6 +1362,11 @@ var squad_id: int = 0
 ## Место, куда бойца поставили последним приказом. Якорь поводка авто-агро
 var post_pos: Vector3 = Vector3.ZERO
 var _post_valid: bool = false
+## Пост поставлен концом боя «где стою», а не разметкой (см. _hold_loose)
+var _post_loose: bool = false
+## Вход орды из-за кромки (ТЗ 31.10.2026): идёт к horde_goal (Main._tick_entering)
+var horde_entering: bool = false
+var horde_goal: Vector3 = Vector3.INF
 
 ## В ГАРНИЗОНЕ (внутри Замка). Боец жив и числится в отряде, но снят с карты:
 ## невидим, без физики, вне пространственной сетки и вне групп фракции —
@@ -1140,6 +1394,7 @@ func set_off_map(on: bool) -> void:
 		return
 	_phys_asleep = false         # тик снятого с карты ведёт здание, не сон
 	if on:
+		_march_release()
 		GameManager.army.set_off_map(_soa, true)
 	else:
 		sync_row()
@@ -1156,9 +1411,45 @@ var dormant: bool = false
 ## ядре: визуальный тик остаётся — боец прячется от чужих глаз сам, веткой
 ## внутри tick_visual (см. разбор у GoblinAI._set_dormant)
 func set_dormant(on: bool) -> void:
+	if on:
+		_march_release()
 	if dormant != on:
 		dormant = on
 		GameManager.note_dormant(on)
+	# ── ЗАСЫПАЕТ НА ХОДУ — СНАЧАЛА ВСТАЁТ (разбор партии 27.10.2026) ────────
+	# Вожак орды усыпляет отряд по ЦЕНТРУ у площадки сбора или по сроку
+	# (GoblinAI._guards_tick: GUARD_HOME_R / 60 с), а не по прибытию каждого.
+	# Недошедший застывал в MOVING: тик погашен, лента ходьбы листается —
+	# «бег на месте» по 8 минут (зонд stuck_running: отряды орды 30-88 из 100,
+	# точка хода в 4-8 м; после загрузки автосейва — сразу все). Встаёт там,
+	# где стоит: пост — сюда же, смыкание после пробуждения соберёт толпу
+	if on and _Opt.dormant_halt and state == State.MOVING:
+		velocity = Vector3.ZERO
+		state = State.IDLE
+		_march_pending = false
+		_march_run = false
+		_move_lock = 0.0
+		if sprinting:
+			_set_sprinting(false)
+		_hold_where_i_stand()
+		_settled = true
+		if _soa >= 0:
+			GameManager.army.set_state(_soa, state)
+			GameManager.army.set_vel(_soa, 0.0, 0.0)
+	# Поза — по событию: спящему некому сменить ленту ходьбы на покой (зонд
+	# после правки выше: 4-5 всадников в IDLE с лентой ходьбы)
+	if on and _Opt.dormant_halt:
+		_wake_process(11)
+	# ── СОСТОЯНИЕ В ЯДРО — ПРИ ЛЮБОМ ЗАСЫПАНИИ (разбор партии .exe 28.10.2026)
+	# Строка узнаёт state только из queue_pose в физтике. Охрана крепости
+	# усыпляется из _process между шардированными тиками: боец в GDScript уже
+	# IDLE, а в ядре ещё MOVING — и тик, который это исправил бы, погашен.
+	# Четыре спящих отряда красного 42 минуты числились «бегущими на месте»
+	# (724 строки зонда, четверть лога), а cure_run_in_place «лечил» их
+	# каждые 2 с вхолостую. Та же явная подача, что у sleep_physics
+	if on and _Opt.dormant_state_sync and _soa >= 0 and _sent_st >= 0:
+		GameManager.army.set_state(_soa, state)
+		GameManager.army.set_vel(_soa, 0.0, 0.0)
 	set_tick(not on)
 	if not on:
 		set_draw(true)
@@ -1191,7 +1482,8 @@ func may_sleep_physics() -> bool:
 	return true
 
 func sleep_physics() -> void:
-	if _phys_asleep or dormant or garrisoned or not tick_on:
+	# Призрак не спит: срок и мигание ведёт его же тик (_ghost_tick)
+	if _phys_asleep or dormant or garrisoned or not tick_on or _ghost:
 		return
 	# ── СТРОКА ОБЯЗАНА БЫТЬ ПОДАНА ДО СНА ──────────────────────────────────
 	# Позу в ядро (FPosValid) строка получает первым физтиком через
@@ -1228,6 +1520,122 @@ func wake_physics() -> void:
 #
 # Снимается в Castle.absorb_unit() (дошёл) и в любом новом приказе игрока.
 var retreating: bool = false
+
+# ── ПОСЛЕДНИЙ ВЫЖИВШИЙ (ТЗ 28.10.2026, блок 3; узел 3c пехоты в кузнице) ─────
+# Отряд выбит, и последний его боец вместо гибели по жребию
+# (unit_stats_config.LAST_STAND_CHANCE) остаётся с LAST_STAND_HP_FRAC запаса
+# ПРИЗРАКОМ: чужие его не видят (ArmyCore.FGhost — выбор цели, стрелы, счёт
+# чужих и чужое тело на шаге его пропускают; GDScript-дороги — set_attack_target,
+# command_attack, squad_pick_member, снайпер — тоже), он мигает красным и
+# идёт в ближайшую крепость ШТАТНЫМ путём отхода (GameManager.squad_to_castle →
+# Castle.request_garrison: лазарет, подъём до штата, выход отрядом). Боевого
+# автомата у призрака нет — отход и так снимает агро, ответ на удар и
+# перехват. Срок LAST_STAND_GHOST_SEC; истёк или вошёл в гарнизон — снова как
+# все. Второго жребия нет: урон, прилетевший всё же (свип туши, рассечение,
+# таран, падение с крыши), убивает честно; паникующему жребий не положен.
+# Ручка perf_config.last_stand. Стенд qa_last_survivor
+var _ghost: bool = false
+var _ghost_until_ms: int = 0
+var _ghost_blink_ms: int = 0
+var last_stands: int = 0            # стендам: сколько раз уцелел
+## Радиус, в котором у чужих снимается цель «я» в момент жребия, м: шире
+## любой дальности стрелка (потолок 25 м × гарнизон 1.3, снайпер — своё)
+const LAST_STAND_DROP_R := 60.0
+
+func is_ghost() -> bool:
+	return _ghost
+
+## Жребий последнего выжившего. Зовётся из take_damage, когда запас ушёл в
+## ноль; true — боец уцелел и уже уходит, смерть не наступает
+func _try_last_stand(attacker: Node3D) -> bool:
+	if not _Opt.last_stand or _ghost or _panicked or garrisoned \
+			or squad_id <= 0 or _soa < 0:
+		return false
+	# Последний ли: состав читается напрямую (squad_members — не читатель)
+	var raw: Variant = GameManager.squads.get(squad_id)
+	if raw == null:
+		return false
+	# Легенда (не орда) уцелевает всегда, без узла кузницы (ТЗ 30.10.2026)
+	var legend: bool = _Opt.legend_retreat and faction != Constants.FACTION_GOBLIN \
+		and int((raw as Dictionary).get("level", 0)) >= _UStats.LEGEND_TIER
+	if not legend and not GameManager.is_researched(faction, stat_id + "_" + _UStats.LAST_STAND_CELL):
+		return false
+	for m in ((raw as Dictionary)["members"] as Array):
+		if m == self or m == null or not is_instance_valid(m):
+			continue
+		if not (m as Unit).is_dead():
+			return false
+	if not legend and AudioManager.rng.randf() >= _UStats.LAST_STAND_CHANCE:
+		return false
+	_enter_last_stand(attacker)
+	return true
+
+func _enter_last_stand(attacker: Node3D) -> void:
+	last_stands += 1
+	_ghost = true
+	var now: int = Unit.game_ms()
+	_ghost_until_ms = now + int(_UStats.LAST_STAND_GHOST_SEC * 1000.0)
+	_ghost_blink_ms = now
+	current_health = maxf(1.0, max_health * _UStats.LAST_STAND_HP_FRAC)
+	_soa_push_stats()
+	_update_hp_bar()
+	GameManager.army.set_ghost(_soa, true)
+	# Кто целился в меня — отпускает сейчас, а не по своему такту: иначе удар
+	# по уже уходящему приходит тем же кадром. Разовое событие, не покадровый путь
+	var gp: Vector3 = global_position
+	for n in GameManager.unit_grid.query_radius(gp, LAST_STAND_DROP_R):
+		if n == null or not is_instance_valid(n) or not (n is Unit):
+			continue
+		var e := n as Unit
+		if e.faction == faction or e.is_dead():
+			continue
+		if e.attack_target == self:
+			e.set_attack_target(null)
+	set_attack_target(null)
+	_atk_pending = false
+	release_target_lock("last_stand")
+	GameManager.tm_event("last_stand", {"fac": int(faction), "sid": squad_id,
+		"type": stat_id, "by": (String((attacker as Unit).stat_id) if (attacker != null
+		and is_instance_valid(attacker) and attacker is Unit) else "")})
+	# В крепость — тем же путём, что кнопка «в замок» (отход, бег, ворота,
+	# лазарет, пополнение). Крепостей нет — отход прочь от ближайшего чужого
+	if not GameManager.squad_to_castle(squad_id):
+		begin_retreat()
+		var off: Vector3 = GameManager.army.nearest_enemy_offset(_soa, LAST_STAND_DROP_R * 0.5)
+		if off.length_squared() > 1e-4:
+			command_move(gp - off.normalized() * _UStats.PANIC_FLEE_DIST, false,
+				Vector3.ZERO, true, false, true)
+	wake_physics()
+	_ghost_blink()
+
+## Такт призрака (из tick_physics, одно сравнение bool у всех прочих)
+func _ghost_tick(now: int) -> void:
+	if now >= _ghost_until_ms:
+		end_last_stand()
+		return
+	if now >= _ghost_blink_ms:
+		_ghost_blink_ms = now + int(_UStats.LAST_STAND_BLINK_SEC * 1000.0)
+		_ghost_blink()
+
+## Снять призрака: срок вышел, вошёл в гарнизон или погиб
+func end_last_stand() -> void:
+	if not _ghost:
+		return
+	_ghost = false
+	_ghost_until_ms = 0
+	if _soa >= 0:
+		GameManager.army.set_ghost(_soa, false)
+
+## Красное мигание: вспышка в instance-цвете поверх окровавленного (10 % HP)
+## спрайта — тот же канал, что у удара и подмигивания (wink); гасит ядро
+func _ghost_blink() -> void:
+	if _rb_bound and _Opt.vis_core_path and _Opt.vis_quiet_rows and _soa >= 0:
+		_hit_flash = 0.0
+		GameManager.army.vis_hit(_soa, WINK_PEAK, _UStats.LAST_STAND_BLINK_SEC * 0.5)
+	else:
+		_hit_flash = HIT_FLASH_SEC
+		_dmg_dirty = true
+		_push_damage_shade()
 
 # ── БЕГ (SPRINT) ─────────────────────────────────────────────────────────────
 # Включается ДВОЙНЫМ ПКМ в точку земли (SelectionManager). Пока флаг стоит:
@@ -1584,18 +1992,38 @@ func _arm_target_lock(target: Node3D) -> void:
 	# спросить его точку будет не у кого
 	_lock_pos = target.global_position if target != null else Vector3.ZERO
 	_lock_is_building = target is Building
+	# Точка приказа — от неё меряется погоня под замком (_lock_chase_ok)
+	_lock_from = global_position
+
+## ── ПОГОНЯ ПО ПРИКАЗУ ИГРОКА ДОЖИМАЕТ ЦЕЛЬ (ТЗ 31.10.2026) ────────────────
+## Под ручным замком игрока поводок отряда (PURSUIT_LIMIT 7 м от первого
+## касания) и порог «цель ушла из виду» (_lock_sight_range) снимали приказ,
+## как только враг отходил на 7-10 м (pursuit_leash 414 и lock_lost_sight 188
+## за партию 30.10). Теперь прямой приказ гонит цель, пока та в
+## LOCK_CHASE_MAX от точки, где приказ отдан; дальше — приказ исчерпан
+const LOCK_CHASE_MAX := 45.0
+var _lock_from: Vector3 = Vector3.INF
+
+func _lock_chase_live() -> bool:
+	return target_lock and _Opt.lock_chase and faction == Constants.FACTION_PLAYER and _lock_from.x != INF
+
+func _lock_chase_ok(at: Vector3) -> bool:
+	if not _lock_chase_live():
+		return false
+	return Vector2(at.x - _lock_from.x, at.z - _lock_from.z).length() <= LOCK_CHASE_MAX
 
 ## Снять замок: приказ отменён или назначенный отряд выбит целиком.
 ## reason — кто снимает (зонд order_override_bug, ТЗ 25.10.2026): «move» и
 ## «target_destroyed» — штатное завершение приказа, прочие — внутренняя
 ## механика, перебившая приказ игрока, и попадают в лог зонда
 func release_target_lock(reason: String = "") -> void:
-	if target_lock and reason != "" and reason != "move" and reason != "target_destroyed":
+	if target_lock and reason != "" and reason != "move" and reason != "target_destroyed" and reason != "lock_chase_end":
 		_probe_override(reason)
 	target_lock  = false
 	_lock_squad  = 0
 	_lock_target = null
 	_lock_is_building = false
+	_lock_from = Vector3.INF
 
 ## ЗОНД order_override_bug (ТЗ 25.10.2026, блок 5): приказ игрока у этого
 ## бойца перебит внутренней механикой. Только событие — покадрового пути нет.
@@ -1608,7 +2036,15 @@ const _PROBE_SKIP := ["release_target_lock", "command_move", "command_attack",
 func _probe_override(reason: String) -> void:
 	if not _Opt.squad_probes or faction != Constants.FACTION_PLAYER or squad_id <= 0:
 		return
-	var caller: String = ""
+	# ── МЕТКА ИСТОЧНИКА, А НЕ СТЕК (разбор партии .exe 28.10.2026) ──────────
+	# В экспортной сборке get_stack() пуст: все 1110 строк зонда партии шли с
+	# «вызов ?», а фильтр [A] по имени файла не срабатывал вовсе — марш с
+	# перехватом по дороге считался дефектом. Командир [A], вызволение и
+	# сплочённость ставят метку GameManager.probes.ctx на время своего приказа
+	var ctx: String = GameManager.probes.ctx
+	if ctx == "attack_move":
+		return
+	var caller: String = ctx
 	var st: Array = get_stack()
 	# [0] — эта функция, дальше — точка снятия и её вызывающие. Берём первую
 	# функцию ВЫШЕ служебных обёрток: она и есть инициатор
@@ -1706,15 +2142,38 @@ func _end_squad_pursuit(fled_sid: int) -> void:
 		m._pursuit_anchored = false
 		m._engaged_once = false
 		m.velocity = Vector3.ZERO
-		if m._post_valid:
-			m.command_move(m.post_pos)
-		else:
-			m.state = State.IDLE
+		# Встаёт где стоит — см. разбор у поводка в _process_attack (29.10.2026)
+		m._atk_pending = false
+		m._attack_is_forced = false
+		m._hold_loose()
+		m.state = State.IDLE
+
+## Свинобосс (PigBoss переопределяет): паника его не берёт, отход мозга не
+## перебивают приказы волны (GameManager._start_panic, GoblinAI._issue)
+## Сдвиг знамени отряда от нарисованной точки знаменосца, м (Y — вверх от
+## земли). У всех ноль; Свинобосс несёт знамя за спиной (PigBoss)
+func banner_offset() -> Vector3:
+	return Vector3.ZERO
+
+func is_pig_boss() -> bool:
+	return false
+
+func is_withdrawing() -> bool:
+	return false
 
 func _hold_where_i_stand() -> void:
 	post_pos = global_position
 	_post_valid = true
 	_settled = false
+
+## КОНЕЦ БОЯ — ВСТАТЬ ЗДЕСЬ, НО НЕ В СТРОЙ (ТЗ 31.10.2026, вечер): пост «где
+## стою» не ячейка разметки, и обход смыкания мерил бы от него нулевой дрейф —
+## разбросанные стояли бы «партизанами». Признак снимает пост из разметки
+## (command_move, hold_post, _formation_settle)
+func _hold_loose() -> void:
+	_hold_where_i_stand()
+	if _Opt.idle_form_up:
+		_post_loose = true
 
 ## СЛЕДУЮЩАЯ ЖЕРТВА ИЗ ЗАПЕРТОГО ОТРЯДА. null — там больше никого нет, замок
 ## пора снимать. Раздачей по бойцам занимается squad_pick_member: она берёт
@@ -1742,10 +2201,31 @@ func _lock_next_victim() -> Node3D:
 	if _lock_squad != 0:
 		# Та же поправка, что и при выдаче приказа: стрелок добивает того, до
 		# кого достаёт, а не идёт через полстроя к «наименее обстрелянному»
-		return _prefer_in_range(
+		var nv: Node3D = _prefer_in_range(
 			GameManager.squad_pick_member(_lock_squad, global_position, null))
+		# ── ОТРЯД-ЦЕЛЬ ВЫБИТ — ЗАМОК ПЕРЕХОДИТ НА СОСЕДНИЙ (ТЗ 29.10.2026) ──
+		# «Отряд после уничтожения текущего врага не должен никуда отступать,
+		# он обязан бесшовно переключаться на следующую ближайшую цель». Было:
+		# замок снимался, пост переезжал «где стою», и отряд стоял в 10-15 м
+		# от следующего вражеского отряда (за радиусом авто-агро 5 м) —
+		# qa_no_retreat D1. Как у построек (_next_enemy_building): соседний
+		# отряд в LOCK_CHAIN_RANGE, один на весь свой отряд
+		# (GameManager.squad_lock_chain), бегущих в панике не берём
+		if nv == null and _Opt.lock_chain_squad and faction == Constants.FACTION_PLAYER:
+			var ns: int = GameManager.squad_lock_chain(squad_id, _lock_squad, self)
+			if ns != 0:
+				_lock_squad = ns
+				_pursuit_anchored = false
+				_leash_from = Vector3.INF
+				GameManager.squad_pursuit_release(squad_id)
+				nv = _prefer_in_range(GameManager.squad_pick_member(ns, global_position, null))
+				if nv != null:
+					_lock_target = nv
+					_lock_pos = nv.global_position
+		return nv
 	if _lock_target != null and is_instance_valid(_lock_target) \
-			and not (_lock_target.has_method("is_dead") and _lock_target.is_dead()):
+			and not (_lock_target.has_method("is_dead") and _lock_target.is_dead()) \
+			and not (_lock_target is Unit and (_lock_target as Unit)._ghost):
 		return _lock_target
 	return null
 
@@ -1758,6 +2238,8 @@ const RETREAT_LOCK_SEC := 12.0
 
 func begin_retreat() -> void:
 	wake_physics()
+	if not retreating and squad_id > 0 and _Opt.probes_ext:
+		GameManager.probes.note_retreat(self)
 	retreating     = true
 	# ОТКУДА ВЫБИРАЕТСЯ. По этой точке гаснет билет отхода: он даётся на
 	# РАЗРЫВ КОНТАКТА, а не на переход чужой линии (см. _retreat_pass)
@@ -1842,6 +2324,7 @@ var _sprint_after_pass: bool = false
 func _set_sprinting(on: bool) -> void:
 	if sprinting == on:
 		return
+	_march_release()   # бег меняет скорость и биты шага
 	sprinting = on
 	if not on:
 		_player_run = false
@@ -2211,9 +2694,23 @@ func _resume_march() -> bool:
 	if d.length() < MARCH_DONE_DIST:
 		_march_pending = false
 		return false
+	# ── [A]: ТОЧКА МАРША ПОЗАДИ — НЕ ВОЗВРАЩАЕМСЯ (ТЗ 31.10.2026) ────────────
+	# Подход к угрозе и стоянка линии ставят точку марша посреди поля; бой
+	# уносит бойца за неё, и возобновлённый марш вёл его НАЗАД. Отряд [A]
+	# ведёт командир (марш к местам у точки приказа) — здесь только стоим
+	if _Opt.am_no_reform and squad_id > 0:
+		var amd: Variant = GameManager.am_marching.get(squad_id)
+		if amd != null:
+			var to_d: Vector3 = (amd as Vector3) - global_position
+			# Точка марша дальше 75° от хода к точке приказа — позади или вбок
+			if to_d.x * d.x + to_d.z * d.z < 0.25 * to_d.length() * d.length():
+				_march_pending = false
+				return false
 	# Через command_move: он же переставит пост, стойку взгляда и разбудит _process.
 	# Флаг _march_pending при этом выставится заново — приказ всё ещё в силе
+	if _Opt.cmd_meter: _Opt.cmd_src = "resume_march"
 	command_move(_march_target, _march_slow, _march_face, false, false, _march_run)
+	if _Opt.cmd_meter: _Opt.cmd_src = ""
 	return true
 
 ## ── НЕЗАКОНЧЕННЫЙ ПРИКАЗ АТАКИ ───────────────────────────────────────────────
@@ -2255,7 +2752,11 @@ func _resume_attack() -> bool:
 		if target_lock:
 			release_target_lock("target_destroyed")
 		return false
+	var from0: Vector3 = _lock_from
 	command_attack(tgt, true, _atk_pending_charge, _atk_pending_lock)
+	# Возобновлённый приказ — тот же приказ: точка погони прежняя (_lock_chase_ok)
+	if _atk_pending_lock and from0.x != INF:
+		_lock_from = from0
 	return true
 
 ## player_order — приказ отдал ИГРОК, а не внутренняя механика (_resume_march,
@@ -2462,18 +2963,39 @@ func _ford_lane() -> float:
 	# п. 7): см. GameManager.squad_ford_lane
 	return GameManager.squad_ford_lane(squad_id, here.z - c.y)
 
+## ОТЛАДКА СТЕНДОВ: кто отдал последний приказ (цепочка функций из стека).
+## Включает только стенд (qa_army_front); в партии false — ни строки работы
+static var dbg_order_src: bool = false
+var dbg_src: String = ""
+var dbg_goal: Vector3 = Vector3.INF
+
+func _dbg_note_src(kind: String, goal: Vector3) -> void:
+	var st: Array = get_stack()
+	var chain: PackedStringArray = PackedStringArray()
+	for k in range(2, mini(st.size(), 9)):
+		chain.append(String((st[k] as Dictionary).get("function", "?")))
+	dbg_src = kind + ":" + "<".join(chain)
+	dbg_goal = goal
+
 func command_move(target_pos: Vector3, slow_march: bool = false, face_dir: Vector3 = Vector3.ZERO,
 		keep_retreat: bool = false, player_order: bool = false, run: bool = false) -> void:
 	# Зонд BigStand: кто, кому и из какого состояния шлёт приказ (одно
 	# сравнение bool на приказ, покадрового пути здесь нет)
 	if _Opt.cmd_meter:
 		_Opt.cmd_hit(stat_id, state, squad_id)
+	if dbg_order_src:
+		_dbg_note_src("move", target_pos)
 	var _cm_t: int = Time.get_ticks_usec() if _Opt.sys_meter else 0
 	# ЗОНД order_override_bug: приказ на движение НЕ от игрока поверх живого
 	# приказа игрока (замок движения или замок цели) — перебивает его
 	if not player_order and faction == Constants.FACTION_PLAYER \
 			and (_move_lock > 0.0 or target_lock):
 		_probe_override("internal_move_over_lock" if target_lock else "internal_move_over_move")
+	# Новый приказ — аренда марша прежней точки снимается (ручка march_core)
+	if _auto_pilot:
+		_auto_pilot = false
+		if _soa >= 0:
+			GameManager.army.autopilot_clear(_soa)
 	# Любой приказ на движение — новая отправная точка (см. CHASE_LEASH)
 	_leash_from = Vector3.INF
 	# ── НЕДОСТИЖИМАЯ ТОЧКА — НЕ ПЕРЕСПРАШИВАТЬ (аудит лога 20.10.2026) ──────
@@ -2571,6 +3093,7 @@ func command_move(target_pos: Vector3, slow_march: bool = false, face_dir: Vecto
 	is_charging = false
 	# Новый приказ снимает признак «стою»: боец снова в пути
 	_settled = false
+	_zone_told = false
 	# И запрет погони тоже: игрок переставил отряд — новый подход разрешён
 	_engaged_once = false
 	_pursuit_anchored = false
@@ -2584,10 +3107,8 @@ func command_move(target_pos: Vector3, slow_march: bool = false, face_dir: Vecto
 	# И ЗАМОК ЦЕЛИ ТОЖЕ: приказ «идти туда» отменяет приказ «бить их».
 	# Это единственный штатный способ снять замок вручную (см. target_lock)
 	release_target_lock("move")
-	# ПРИКАЗ ИГРОКА ПЕРЕНАЗНАЧАЕТ ПОСТ, а значит и «исходную позицию», куда
-	# отряд возвращается после боя: метка «ушёл помогать» снимается
+	# ПРИКАЗ ИГРОКА ПЕРЕНАЗНАЧАЕТ ПОСТ
 	if player_order and squad_id > 0:
-		GameManager.squad_clear_helped(squad_id)
 		# ── И ВСЮ ОТРЯДНУЮ ПАМЯТЬ О БОЕ ТОЖЕ ───────────────────────────
 		# Личную боец чистит строками выше, а отрядная (сектор у стены,
 		# «держать позицию», общий ответ о ближайшем враге) переживала
@@ -2629,6 +3150,7 @@ func command_move(target_pos: Vector3, slow_march: bool = false, face_dir: Vecto
 	# поэтому отправить отряд через всю карту по-прежнему можно
 	post_pos    = move_target
 	_post_valid = true
+	_post_loose = false
 	# ── РЕКА И СКАЛЫ НА ПУТИ: МАРШРУТ, ПОТОМ ЦЕЛЬ (спринт 19) ──────────────
 	# ПОСТ ОСТАЁТСЯ КОНЕЧНОЙ ТОЧКОЙ, а не бродом и не углом обхода: пост
 	# означает «куда меня поставили», от него считается поводок авто-агро.
@@ -2734,6 +3256,7 @@ func command_move(target_pos: Vector3, slow_march: bool = false, face_dir: Vecto
 
 func set_stance(new_stance: String) -> void:
 	wake_physics()
+	_march_release()   # скорость стойки другая — шаг пересчитает GDScript
 	stance = new_stance
 	# ПЕРЕКЛЮЧЕНИЕ В ОБОРОНУ = «СТОЙ ГДЕ СТОИШЬ». Незаконченный приказ атаки
 	# гаснет вместе с точкой, куда шла стена: игрок нажал щит — значит хочет,
@@ -2809,6 +3332,7 @@ var _reform_permit: float = 0.0
 func hold_post(p: Vector3, face_dir: Vector3 = Vector3.ZERO) -> void:
 	post_pos = p
 	_post_valid = true
+	_post_loose = false
 	if face_dir.length_squared() > 1e-6:
 		var fd: Vector3 = face_dir.normalized()
 		var dd: float = _facing.dot(fd)
@@ -2836,7 +3360,8 @@ func _effective_cooldown() -> float:
 	if pct > 0.0:
 		cd *= (1.0 - minf(pct, 0.8))
 	# «Аура скорострельности» монаха — стрелкам (письмо 12)
-	if attack_range > 3.0 and now_ms < _aura_until_ms and _aura_rate > 0.0:
+	if attack_range > 3.0 and now_ms < _aura_until_ms and _aura_rate > 0.0 \
+			and now_ms >= _suppressed_until_ms:
 		cd *= (1.0 - minf(_aura_rate, 0.6))
 	return maxf(cd, _UStats.MIN_COOLDOWN)
 
@@ -2858,6 +3383,8 @@ func _effective_cooldown() -> float:
 ## перехват заслона, ни контратака отряда замка не взводят
 func command_attack(target: Node3D, forced: bool = true, charge: bool = false,
 		lock: bool = false) -> void:
+	if dbg_order_src:
+		_dbg_note_src("atk", target.global_position if target != null and is_instance_valid(target) else Vector3.INF)
 	wake_physics()
 	_player_march = false
 	# ПАНИКУЮЩИЙ НЕ ДЕРЁТСЯ ВОВСЕ (см. _panicked): ни по приказу игрока, ни по
@@ -2869,6 +3396,10 @@ func command_attack(target: Node3D, forced: bool = true, charge: bool = false,
 	# крепость — троллю): приказ не принимается, цель не берётся
 	if target != null and is_instance_valid(target) and target is Building \
 			and not may_attack_building(target as Building):
+		return
+	# Призрак «последнего выжившего» — не цель ни для кого (см. _ghost)
+	if target != null and is_instance_valid(target) and target is Unit \
+			and (target as Unit)._ghost:
 		return
 	# Приказ атаки снимает ожидание такта агро в ядре (этап 1б) — см. command_move
 	if _idle_wait:
@@ -3157,6 +3688,64 @@ func _should_pull_up(dist: float) -> bool:
 ## смена цели событие редкое (см. set_attack_target).
 var _target_pad: float = 0.0
 
+## ── ОПОЯСЫВАНИЕ КРУПНОЙ ЦЕЛИ (ТЗ 26.10.2026, блок 3) ───────────────────────
+## Жалоба владельца: отряд рыцарей, посланный на тролля, бьёт его втроём,
+## остальные стоят. Замер qa_tz1026 C (живой тролль): половина отряда стоит
+## в 3.07-3.2 м при досягаемости 3.02 — все шли к цели по прямой с ОДНОЙ
+## стороны и упирались в спины тех, кто уже дотянулся; дальняя сторона
+## кольца пустовала. Теперь рукопашнику (не коннице) при выборе крупной цели
+## (fine_ring_radius > 0) раздаётся МЕСТО НА КОЛЬЦЕ: угол — от направления
+## «цель → центр отряда», места чередуются влево-вправо по номеру в отряде
+## с шагом GIANT_RING_GAP, радиус — внутри досягаемости на GIANT_RING_INSET.
+## Не дотянувшийся идёт к своему месту (в обход туши — её тело блокирует
+## шаг), дотянувшийся бьёт там, где стоит. Одно вычисление на смену цели;
+## ручка perf_config.giant_ring
+const GIANT_RING_GAP := 0.6
+const GIANT_RING_INSET := 0.6
+## Ближе этого к своему месту — дошёл, дальше подход по прямой
+const GIANT_RING_ARRIVE := 0.35
+## Слой глубже, когда на кольце не хватает мест, метры
+const GIANT_RING_LAYER := 0.5
+var _ring_on: bool = false
+var _ring_ang: float = 0.0
+var _ring_inset: float = 0.0
+
+func _ring_note(target: Node3D) -> void:
+	_ring_on = false
+	if not _Opt.giant_ring or charge_range > 0.0 or squad_id <= 0 or not pursues_target():
+		return
+	var tu := target as Unit
+	if tu == null or tu.fine_ring_radius() <= 0.0:
+		return
+	var tp: Vector3 = tu.global_position
+	var c: Vector2 = GameManager.squad_centre_xz(squad_id)
+	var mp: Vector3 = global_position
+	if not c.is_finite():
+		c = Vector2(mp.x, mp.z)
+	var a0: float = atan2(c.y - tp.z, c.x - tp.x)
+	# Номер в отряде — состав напрямую (squad_members распускает пустой отряд)
+	var k: int = 0
+	var sq: Variant = GameManager.squads.get(squad_id)
+	if sq != null:
+		k = maxi(((sq as Dictionary)["members"] as Array).find(self), 0)
+	var r0: float = maxf(attack_range + _target_pad - GIANT_RING_INSET, tu.sep_radius() + 0.3)
+	var cap: int = maxi(int(TAU * r0 / GIANT_RING_GAP), 1)
+	var layer: int = k / cap
+	var kk: int = k % cap
+	var r: float = maxf(r0 - float(layer) * GIANT_RING_LAYER, tu.sep_radius() + 0.3)
+	var step: float = GIANT_RING_GAP / r
+	var off: float = float((kk + 1) / 2) * step * (1.0 if kk % 2 == 0 else -1.0)
+	_ring_ang = a0 + off
+	_ring_inset = attack_range + _target_pad - r
+	_ring_on = true
+
+## Точка своего места на кольце у ТЕКУЩЕЙ точки цели (Vector3.INF — места нет)
+func _ring_goal(tp: Vector3) -> Vector3:
+	if not _ring_on:
+		return Vector3.INF
+	var r: float = attack_range + _target_pad - _ring_inset
+	return Vector3(tp.x + cos(_ring_ang) * r, 0.0, tp.z + sin(_ring_ang) * r)
+
 ## Дальность оружия с поправкой на габарит цели (см. _target_pad)
 func reach() -> float:
 	return attack_range + _target_pad
@@ -3223,6 +3812,11 @@ func target_in_range() -> bool:
 # Здесь же ведётся счётчик атакующих на цели — по нему бой распределяется
 # «стенка на стенку», а не 10 бойцов на одного беднягу (см. _find_nearest_enemy_in_range)
 func set_attack_target(target: Node3D) -> void:
+	# Призрак «последнего выжившего» целью не берётся — ни замком, ни отрядной
+	# подсказкой, ни добором (см. _ghost); событие, не покадровый путь
+	if target != null and is_instance_valid(target) and target is Unit \
+			and (target as Unit)._ghost:
+		target = null
 	if attack_target == target:
 		return
 	if target != null:
@@ -3270,6 +3864,7 @@ func set_attack_target(target: Node3D) -> void:
 	# Габарит цели — сюда же, по тому же поводу: смена цели редка, а читают
 	# поправку каждый кадр (см. _target_pad)
 	_target_pad = _pad_of(target)
+	_ring_note(target)
 	# Якорь поводка отряда — откуда боец пошёл за этой погоней (см. CHASE_LEASH)
 	if target != null:
 		_leash_note(target)
@@ -5110,6 +5705,9 @@ func tick_physics(delta: float, prof: bool = false, bm: bool = true,
 				delta = base
 	_last_pf = phys_frame
 	var _mv_now: int = _mv_tick()
+	# ── ПРИЗРАК «ПОСЛЕДНЕГО ВЫЖИВШЕГО»: срок и мигание (см. _ghost) ────────
+	if _ghost:
+		_ghost_tick(_mv_now)
 	# ── ОТЛОЖЕННОЕ КАСАНИЕ (см. _release_hit) ──────────────────────────────
 	if _hit_pend_ms > 0 and _mv_now >= _hit_pend_ms:
 		_release_hit()
@@ -5271,6 +5869,17 @@ func tick_physics(delta: float, prof: bool = false, bm: bool = true,
 	if (_rear_press or _auto_pilot) and state == State.ATTACKING:
 		if _prof: _Opt.prof_add("rear_press_skip", Time.get_ticks_usec() - _t0)
 		return
+	# Идущий под арендой марша в список тика не попадает (ArmyCore.TickRows) —
+	# кроме родов со своими часами (F_TICK_ALWAYS: лучник, монах, гнолл,
+	# тролль, туша): их тик рода отработал, шаг ведёт ядро, как у аренды
+	# атаки выше. Пробуждение снимает _auto_pilot до следующего тика
+	# (_rear_wake), сон и снятие с карты — _march_release
+	if _auto_pilot and state == State.MOVING:
+		if not may_sleep_physics():
+			if _prof: _Opt.prof_add("mv_ skip свои часы", Time.get_ticks_usec() - _t0)
+			return
+		if _prof: _Opt.prof_add("mv_r молча снята", 0)
+		_auto_pilot = false
 	# ── Я В ТЫЛУ СВАЛКИ: ПОДПИРАЮ ФРОНТ, А НЕ ПРОБИВАЮСЬ САМ ────────────────
 	# Признак раздаёт отряд (GameManager._sweep_battle_lines). Состояние и цель
 	# при этом сохраняются: как только передо мной освободится место, разметка
@@ -5299,8 +5908,11 @@ func tick_physics(delta: float, prof: bool = false, bm: bool = true,
 				var A2 = GameManager.army
 				_facing = Vector3(A2.facing_x(_soa), 0.0, A2.facing_z(_soa))
 			else:
+				_pa_tag = 0
 				_process_attack(delta)
-			if _prof: _Opt.prof_add("process_attack", Time.get_ticks_usec() - _t0)
+			if _prof:
+				_Opt.prof_add("process_attack", Time.get_ticks_usec() - _t0)
+				_Opt.prof_add(PA_TAGS[_pa_tag], Time.get_ticks_usec() - _t0)
 		State.IDLE:
 			velocity = Vector3.ZERO
 			# Ядро вернуло строку в список: таймер агро истёк там (этап 1б).
@@ -5560,6 +6172,57 @@ func _base_speed() -> float:
 ## каждым идущим — межобъектный вызов со словарным поиском на ровном месте
 var _catch_up: bool = false
 
+## ── ВАЛИДАТОР ПРИБЫТИЯ ОТРЯДА (ТЗ 28.10.2026, вечер: «бег на месте» без
+## таймеров) ───────────────────────────────────────────────────────────────
+## Порог прибытия ARRIVE_RADIUS 0.48 выведен из разведения СВОИХ по шеренге
+## (0.42), а бойцов РАЗНЫХ отрядов ядро держит на SEP_CROSS_SQUAD × 0.42 =
+## 0.67 м: место строя, занятое или прижатое чужим отрядом, недостижимо —
+## боец упирается в тела в 0.6-0.9 м от ячейки и бежит на месте, пока его
+## не снимет лестница застревания (секунды). Решение — на уровне ОТРЯДА:
+## вошёл в зону прибытия (SQUAD_ARRIVE_TOL от своей ячейки, конечный
+## отрезок маршрута) — докладывает отряду ОДИН раз (squad_note_zone); когда в
+## зоне доля ARRIVE_ZONE_SHARE отряда, отряд объявляет прибытие и одним
+## проходом ставит в покой всех, кто в допуске и упёрся (settle_in_zone);
+## опоздавший к проходу применяет то же правило сам в своём тике по флагу
+## _squad_arrived — без таймеров и без опроса: две проверки у бойца, который
+## и так считает dist до цели в каждом тике. «Упёрся» — реальная скорость за
+## окно замера хода (_sample_movement, 200 мс) ниже ARRIVE_STILL_FRAC штатной,
+## и замер взят ПОСЛЕ входа в зону (иначе смыкание рядов на 0.8 м замирало бы
+## на месте). Никаких ежесекундных проверок в процессе бега
+const SQUAD_ARRIVE_TOL := 1.0
+const ARRIVE_STILL_FRAC := 0.5
+## Отряд объявил прибытие (раздаёт GameManager._squad_arrive_validate,
+## снимает squad_set_formation — новый приказ)
+var _squad_arrived: bool = false
+## Доложил ли отряду о входе в зону по текущему приказу (сброс в command_move)
+var _zone_told: bool = false
+var _zone_ms: int = 0
+static var zone_arrivals: int = 0
+
+## Упёрся: есть замер хода после входа в зону и он ниже половины штатной
+func _arrive_jammed() -> bool:
+	if _mv_sample_ms <= _zone_ms:
+		return false
+	return _mv_speed < ARRIVE_STILL_FRAC * _effective_speed()
+
+## Проход отряда извне тика: в допуске и упёрся — прибыл здесь. Состояние и
+## скорость подаются в ядро сразу (тик бойца может быть через кадр-два)
+func settle_in_zone() -> bool:
+	if state != State.MOVING or retreating or garrisoned or _hunt_sheep != null \
+			or _route_i < _route.size() or not _zone_told:
+		return false
+	var p: Vector3 = position if _local_xform else global_position
+	var d: float = Vector2(move_target.x - p.x, move_target.z - p.z).length()
+	if d >= SQUAD_ARRIVE_TOL or not _arrive_jammed():
+		return false
+	zone_arrivals += 1
+	_arrive_now()
+	if _soa >= 0:
+		GameManager.army.set_state(_soa, state)
+		GameManager.army.set_vel(_soa, 0.0, 0.0)
+	_wake_process(9)
+	return true
+
 ## ЗДЕСЬ БЫЛ КЭШ ГОТОВОЙ СКОРОСТИ (множители свёрнуты в целочисленный ключ).
 ## Замер на 5000 бойцов: ветка mv_speed 0.73 → 0.70 мкс, то есть в пределах
 ## разброса. Множителей всего три, и сложить их дешевле, чем собрать и сверить
@@ -5589,6 +6252,8 @@ func _effective_speed() -> float:
 	# ЗАМЕДЛЕНИЕ ОТ СТЕНЫ КОПИЙ (спринт 18): −30 % на SPEAR_WALL_SLOW_SEC
 	if _slow_until_ms > now_ms:
 		s *= _slow_mult
+	if _rush_until_ms > now_ms and ease_rushing():
+		s *= EASE_RUSH_MULT
 	# ── ШТРАФ СТОЙКИ. ПРИМЕНЯЕТСЯ ВСЕГДА, В ТОМ ЧИСЛЕ НА БЕГУ ───────────────
 	# Множитель берётся из конфига (STANCES.move_speed_mult), а не из константы:
 	# это балансное число, и место ему в балансной таблице.
@@ -5633,7 +6298,9 @@ func _commit_step(step: Vector3) -> void:
 		if retreating:          sfl |= 1 << 1     # F_RETREATING
 		if sprinting:           sfl |= 1 << 2     # F_SPRINTING
 		if _clear_trunk:        sfl |= 1 << 7     # F_CLEAR_TRUNK
-		if _clear_enemy:        sfl |= 1 << 8     # F_CLEAR_ENEMY
+		# ПАНИКУЮЩИЙ ПРОСАЧИВАЕТСЯ СКВОЗЬ ТЕЛА (ТЗ 29.10.2026, п. 3): тем же
+		# битом, что коридор отряда, — чужие тела шаг не блокируют
+		if _clear_enemy or (_panicked and _Opt.panic_pass): sfl |= 1 << 8     # F_CLEAR_ENEMY
 		if _trunk_ignore > 0.0: sfl |= 1 << 12    # F_TRUNK_IGNORE
 		# ПОСЛАБЛЕНИЕ ПРИКАЗА ИГРОКА ЕДЕТ ЗДЕСЬ, А НЕ ТОЛЬКО В _move_blocked.
 		# Горячий путь шага — ПАКЕТНЫЙ (очередь → ArmyCore.BatchStep), и
@@ -5814,7 +6481,7 @@ func _move_blocked(step: Vector3) -> void:
 	var pass_on: bool = _forced_move_pass() or _retreat_pass()
 	if pass_on:
 		brad = BLOCK_RADIUS * PASS_CORE_FRAC
-	if not _clear_enemy:
+	if not _clear_enemy and not (_panicked and _Opt.panic_pass):
 		block = GameManager.unit_grid.enemy_block(self, np, brad, pass_on)
 	if _prof: _Opt.prof_add("mb_enemyblock", Time.get_ticks_usec() - _t)
 	if block.length_squared() > 1e-8:
@@ -6027,7 +6694,7 @@ func _rear_step(delta: float) -> void:
 	# и там скан идёт — ровно тот же, что делает обычный шаг. Экономия дешёвого
 	# шага от этого никуда не девается: он по-прежнему пропускает и воду, и
 	# стволы, и весь боевой автомат
-	if not _clear_enemy and not retreating:
+	if not _clear_enemy and not retreating and not (_panicked and _Opt.panic_pass):
 		if GameManager.unit_grid.enemy_block(self, np, BLOCK_RADIUS).length_squared() > 1e-8:
 			velocity = Vector3.ZERO
 			return
@@ -6174,6 +6841,13 @@ func _tick_stuck(delta: float, dist: float) -> bool:
 		return false
 	_trunk_ignore = TRUNK_IGNORE_SEC
 	_stuck_streak += 1
+	# ── ПАНИКА У ГЛУХОГО ПРЕПЯТСТВИЯ МЕНЯЕТ ВЕКТОР (ТЗ 29.10.2026, п. 3) ───
+	# Тела паникующего не держат (F_CLEAR_ENEMY), значит, не продвигается он
+	# только у леса, скалы, воды или кромки. Вызволение ему запрещено
+	# (_may_unstick), приказы — тоже: поворачиваем бег сами
+	if _panicked:
+		_panic_turn(dist)
+		return false
 	# ── ВЫЗВОЛЕНИЕ (ТЗ 29.09.2026, второе письмо, п. 1) ─────────────────────
 	# Застрял у леса-стены, скалы или кромки карты и не продвигается
 	# UNSTICK_STREAK проверок подряд — путь и цель сбрасываются, боец
@@ -6186,6 +6860,40 @@ func _tick_stuck(delta: float, dist: float) -> bool:
 		_unstick()
 		return false
 	return true
+
+## Новый вектор бегства: поворот прежнего на ±50/95/140° (сторона чередуется
+## по счёту упоров) к проходимой точке, до которой прямая свободна. Приказ —
+## той же дверью, что panic_flee: признак снимается на время command_move
+static var panic_turns: int = 0
+const PANIC_TURN_ANGLES := [50.0, 95.0, 140.0]
+const PANIC_TURN_MIN := 6.0
+
+func _panic_turn(dist: float) -> void:
+	var p0: Vector3 = position if _local_xform else global_position
+	var d := Vector3(move_target.x - p0.x, 0.0, move_target.z - p0.z)
+	if d.length_squared() < 1e-4:
+		d = Vector3(_facing.x, 0.0, _facing.z)
+	if d.length_squared() < 1e-4:
+		d = Vector3.BACK
+	d = d.normalized()
+	var reach: float = maxf(dist, PANIC_TURN_MIN)
+	var side: float = 1.0 if (_stuck_streak % 2) == 1 else -1.0
+	var clear: float = nav_clearance() * 0.5
+	for a in PANIC_TURN_ANGLES:
+		for s in [side, -side]:
+			var dv: Vector3 = d.rotated(Vector3.UP, deg_to_rad(float(a)) * float(s))
+			var p: Vector3 = GameManager._panic_inside(p0 + dv * reach)
+			if not GameManager.is_passable(p.x, p.z):
+				continue
+			if GameManager.nav_blocked(p0, p, clear):
+				continue
+			panic_turns += 1
+			_panicked = false
+			command_move(p, false, Vector3.ZERO, false, false, true)
+			if not sprinting:
+				_set_sprinting(true)
+			_panicked = true
+			return
 
 ## ── «ДОШЁЛ, УПЁРСЯ В СОСЕДА» (ТЗ 21.10.2026, аудит лога партии 21.10) ──────
 ## Допуск прибытия ARRIVE_RADIUS 0.48 выведен из SEP_MIN_DIST людей ОДНОГО
@@ -6249,7 +6957,10 @@ const GIVEUP_MEMORY_MS := 30000
 const GIVEUP_GOAL_R := 3.0
 var _giveup_goal: Vector3 = Vector3.ZERO
 var _giveup_until_ms: int = 0
+## До какого срока авто-агро не берёт цель за пределами оружия (см. _unstick)
+var _giveup_hold_until_ms: int = 0
 static var giveup_orders_skipped: int = 0
+static var giveup_aggro_held: int = 0
 var _unstick_last_ms: int = -1000000
 var _unstick_repeat: int = 0
 
@@ -6338,12 +7049,22 @@ func _unstick() -> void:
 		if attack_target != null and is_instance_valid(attack_target) and not target_lock:
 			set_attack_target(null)
 		var here: Vector3 = global_position
+		GameManager.probes.ctx = "unstick_giveup"
 		command_move(here, false, Vector3.ZERO, retreating)
+		GameManager.probes.ctx = ""
 		hold_post(here)
 		# Память ставится ПОСЛЕ своего «встать здесь» — иначе он сам попал бы
 		# под фильтр, когда место в строю в паре метров
 		_giveup_goal = gave_up_on
 		_giveup_until_ms = Unit.game_ms() + GIVEUP_MEMORY_MS
+		# ── СДАЛСЯ — НЕ БЕРЁТ НОВУЮ ЦЕЛЬ, К КОТОРОЙ НАДО ИДТИ (28.10.2026) ──
+		# Партия .exe: отряд орды 22 у кромки леса базы игрока — 126 сдач, 80 за
+		# одну минуту. Цикл: упёрся в лес (cliff) → сдача, цель брошена →
+		# авто-агро через долю секунды выдаёт нового врага за тем же лесом →
+		# снова в стену → снова сдача (повтор в окне 20 с — сдача мгновенно).
+		# Память точки не помогала: цель каждый раз новая. Пока держится
+		# память сдачи, инициатива — только по тому, до кого достаёт с места
+		_giveup_hold_until_ms = _giveup_until_ms
 		return
 	# Куда: к своему месту в строю, без отряда — к центру отряда, без
 	# того — туда, куда шёл
@@ -6354,6 +7075,7 @@ func _unstick() -> void:
 			goal = Vector3(c.x, 0.0, c.y)
 		if post_pos != Vector3.ZERO and Vector2(post_pos.x - goal.x, post_pos.z - goal.z).length() < 12.0:
 			goal = post_pos
+	GameManager.probes.note_unstuck()
 	GameManager.tm_event("unstuck", {"sid": squad_id, "type": String(stat_id), "fac": faction,
 		"at": [snappedf(p.x, 0.1), snappedf(p.z, 0.1)], "st": int(state),
 		"tgt": attack_target != null and is_instance_valid(attack_target),
@@ -6396,6 +7118,71 @@ func _stuck_dist(dist: float, route: PackedVector3Array, route_i: int, mypos: Ve
 	var dz: float = w.z - mypos.z
 	return sqrt(dx * dx + dz * dz)
 
+## ── ЛЕЧЕНИЕ «БЕГА НА МЕСТЕ» (ТЗ 27.10.2026, четвёртое письмо, п. 1;
+## ручка perf_config.run_in_place_cure) ──────────────────────────────────────
+## «Если скорость около нуля, а лента бега идёт дольше N секунд — сбросить
+## вектор, перестроить путь или вернуть в покой/строй». Кого лечить, решает
+## зонд ядра (ArmyCore.ProbeStuckRows: лента ходьбы без продвижения) — его
+## сводку SquadProbes._tick_stuck держит по бойцу и после RIP_CURE_MS зовёт
+## сюда. Универсально для всех сторон и всех причин:
+##   не MOVING и не подход к цели — поза устарела: срочный пересчёт (0);
+##   MOVING у цели (ближе RIP_HALT_DIST) или второй раз за RIP_REPEAT_MS
+##     (кроме приказа игрока) — встать здесь, пост — под ногами (1);
+##   MOVING далеко — новый путь к той же цели тем же приказом (2);
+##   подход к цели без продвижения — свежий приказ атаки (новый маршрут),
+##     повтор без замка игрока — бросить цель и встать (1).
+## Ответ — что сделано (стендам и счётчикам)
+const RIP_HALT_DIST := 4.0
+const RIP_REPEAT_MS := 20000
+var _rip_last_ms: int = -1000000
+static var rip_repaths: int = 0
+static var rip_halts: int = 0
+static var rip_poses: int = 0
+
+func cure_run_in_place() -> int:
+	var now: int = Unit.game_ms()
+	var repeat: bool = now - _rip_last_ms < RIP_REPEAT_MS
+	_rip_last_ms = now
+	var p: Vector3 = position if _local_xform else global_position
+	if state == State.MOVING:
+		var g: Vector3 = march_goal()
+		var d: float = Vector2(g.x - p.x, g.z - p.z).length()
+		var po: bool = player_order_active()
+		# Приказ игрока вдали от цели молча не снимается: повтор — снова
+		# новый путь (приоритет приказа игрока выше любой автоматики)
+		if d < RIP_HALT_DIST or (repeat and not po):
+			rip_halts += 1
+			command_move(p, false, face_on_arrive, retreating, po)
+			hold_post(p, face_on_arrive)
+			_wake_process()
+			return 1
+		rip_repaths += 1
+		_reset_stuck()
+		command_move(g, march_slow, face_on_arrive, retreating, po, sprinting)
+		return 2
+	var tgt_raw = attack_target
+	# Правило 5: живость цели на сырой ссылке
+	if state == State.ATTACKING and tgt_raw != null and is_instance_valid(tgt_raw):
+		if repeat and not target_lock:
+			rip_halts += 1
+			set_attack_target(null)
+			command_move(p, false, Vector3.ZERO, retreating)
+			hold_post(p)
+			return 1
+		rip_repaths += 1
+		_reset_stuck()
+		var tgt: Node3D = tgt_raw
+		command_attack(tgt, true, false, target_lock)
+		return 2
+	rip_poses += 1
+	_wake_process()
+	# Стоящий без тика (спящая охрана, резерв): строка ядра могла застыть в
+	# MOVING — зонд читает её, а не узел. Подать состояние явно (28.10.2026)
+	if _Opt.dormant_state_sync and _soa >= 0 and _sent_st >= 0 and not tick_on:
+		GameManager.army.set_state(_soa, state)
+		GameManager.army.set_vel(_soa, 0.0, 0.0)
+	return 0
+
 ## Новый приказ — новый отсчёт: иначе «не продвигаюсь» считалось бы от
 ## расстояния до ПРЕЖНЕЙ цели, и свежий приказ объявлялся бы застрявшим сразу
 func _reset_stuck() -> void:
@@ -6412,6 +7199,50 @@ func _reset_stuck() -> void:
 ## каждого бойца дороже поиска по клеткам 4 м, который почти всегда смотрит
 ## одну-две клетки. Понижать потолок списка бессмысленно — тогда он просто
 ## никогда не применяется. Механика удалена целиком.
+
+
+## Прибытие в точку приказа: стоп, покой, якорь, доклад отряду, доворот.
+## Зовут порог ARRIVE_RADIUS, остановка у соседа (stall_arrive) и зона
+## прибытия отряда (settle_in_zone / zone_in)
+func _arrive_now() -> void:
+	velocity = Vector3.ZERO
+	state    = State.IDLE
+	_march_pending = false      # дошли — возобновлять больше нечего
+	_march_run     = false
+	_disengaging   = false      # дошли — снова можно ввязываться в бой
+	_move_lock     = 0.0        # приказ выполнен, держать замок больше незачем
+	# ПРИБЕЖАЛИ — БЕГ ВЫКЛЮЧАЕТСЯ САМ. Отряд возвращается в обычный режим:
+	# копейщики снова опускают копья и строят фалангу, авто-агро оживает
+	if sprinting:
+		_set_sprinting(false)
+	# ЯКОРЬ. С этого мгновения расталкивание бойца не двигает: подошедшие
+	# соседи встают впритык, перекрываясь, и тоже замирают
+	_settled = true
+	# ДОЛОЖИТЬ ОТРЯДУ. Когда доложит достаточная доля, отставшие получат
+	# прибавку к скорости и быстро запечатают квадрат (см. squad_note_arrival)
+	if squad_id > 0:
+		GameManager.squad_note_arrival(squad_id)
+	# ПРИШЛИ В СВОЙ СЛОТ — доворачиваемся в направление строя.
+	# Ракурс спрайта у стоящего юнита заморожен (см. _update_sprite_flip),
+	# поэтому явно просим один пересчёт зеркала
+	# ── ВСЕ В СТРОЮ СМОТРЯТ В ОДНУ СТОРОНУ ────────────────────────
+	# Жалоба владельца со скриншотом: «лучники после построения
+	# смотрят в разные стороны». Курс прихода есть НЕ У КАЖДОГО
+	# ПРИКАЗА: смыкание рядов, подзыв сплочённости, возврат на пост и
+	# возврат из гарнизона зовут command_move БЕЗ курса. Такой боец
+	# оставался с тем взглядом, что был у него до того, — а был он, как
+	# правило, на чужого или на точку, откуда он шёл. Оттого строй и
+	# смотрел вразнобой: кто пришёл по приказу игрока — по курсу, кто
+	# дошёл смыканием — куда придётся.
+	# Запасной ответ — КУРС ОТРЯДА (направление последнего приказа,
+	# по нему же считаются шеренги фаланги), а не свой скан и не
+	# второе хранилище направлений: он уже есть и он отрядный
+	var face_now: Vector3 = face_on_arrive
+	if face_now.length_squared() <= 1e-6 and squad_id > 0:
+		face_now = GameManager.squad_course(squad_id)
+	if face_now.length_squared() > 1e-6:
+		_facing = face_now
+		mark_flip_dirty()
 
 
 func _process_move(delta: float) -> void:
@@ -6495,8 +7326,9 @@ func _process_move(delta: float) -> void:
 	# Бег по-прежнему не ищет заслон сам (мимо — так мимо), но упор телом в
 	# чужой строй кончает бег боем: копейщики бегут и вступают в бой, а не
 	# перебирают ногами у чужой шеренги до конца замка приказа
+	# Паникующему перехват запрещён (ТЗ 29.10.2026, п. 3): ветка снимала бег и	# звала command_attack, который он отклоняет, — «бег на месте» до конца ступора
 	if attack_damage > 0.0 and not retreating and (wall or not sprinting) \
-			and (wall or free_to_intercept):
+			and (wall or free_to_intercept) and not (_panicked and _Opt.panic_pass):
 		# КАСАНИЕ ЧУЖОГО СТРОЯ ПЕРЕБИВАЕТ ТАЙМЕР. Обычный опрос идёт раз в
 		# полсекунды, и за это время боец успевал соскользнуть вдоль вражеской
 		# шеренги и уйти дальше по маршруту, так и не вступив в бой
@@ -6524,7 +7356,9 @@ func _process_move(delta: float) -> void:
 				if MARCH_INTERCEPT_MELEE and not wall and pursues_target() \
 						and attack_range <= MARCH_INTERCEPT_MELEE_MAX:
 					reach_i = maxf(reach_i, AGGRO_RADIUS)
+				var _tb: int = Time.get_ticks_usec() if _prof else 0
 				var blocker := _find_nearest_enemy_in_range(reach_i, "blocker_reach")
+				if _prof: _Opt.prof_add("mv_blocker_scan", Time.get_ticks_usec() - _tb)
 				# ── РАЗДЕЛИТЕЛЯ «ИДУ ПРОЧЬ» ЗДЕСЬ НЕТ, И ЭТО ЗАМЕР ──────────
 				# Снимать перехват тому, кто идёт прочь от помехи, пробовал в
 				# трёх видах: по продвижению к точке приказа, по росту дистанции
@@ -6545,7 +7379,9 @@ func _process_move(delta: float) -> void:
 						_melee_grip = true
 					if _prof: _Opt.prof_add("mv_intercept", Time.get_ticks_usec() - _t)
 					return
-	if _prof: _Opt.prof_add("mv_intercept", Time.get_ticks_usec() - _t)
+	if _prof:
+		_Opt.prof_add("mv_intercept", Time.get_ticks_usec() - _t)
+		_t = Time.get_ticks_usec()
 	# ── СВОЯ ТОЧКА ЧИТАЕТСЯ ПО ДЕШЁВОМУ ПУТИ (правило 2) ───────────────────
 	# Здесь стояло `move_target - global_position`. global_position у Node3D —
 	# не поле, а свойство: каждое чтение проверяет актуальность мировой матрицы
@@ -6603,11 +7439,22 @@ func _process_move(delta: float) -> void:
 			# раньше внутреннего, срезал и уходил вперёд — блок вытягивался в
 			# две нитки (qa_cliff_bypass D: 4.1 × 2.7 → 5.5 × 1.2). Пропуск
 			# по одной видимости остался для вытолкнутого назад
+			if _prof: _Opt.prof_add("mv_route_los", 0)
 			if _route_beside_wp(mypos) and not GameManager.nav_blocked(mypos, nxt, _nav_clear):
 				_route_advance()
 				return
 	var stall_in: bool = dist >= ARRIVE_RADIUS and _stall_arrived(dist)
-	if dist < ARRIVE_RADIUS or stall_in:
+	# ── ЗОНА ПРИБЫТИЯ ОТРЯДА (см. SQUAD_ARRIVE_TOL) ──────────────────────
+	var zone_in: bool = false
+	if squad_id > 0 and dist < SQUAD_ARRIVE_TOL and _route_i >= _route.size() \
+			and not retreating and _hunt_sheep == null:
+		if not _zone_told:
+			_zone_told = true
+			_zone_ms = now_ms
+			GameManager.squad_note_zone(squad_id)
+		elif _squad_arrived and dist >= ARRIVE_RADIUS and _arrive_jammed():
+			zone_in = true
+	if dist < ARRIVE_RADIUS or stall_in or zone_in:
 		# ── ОХОТА НА ОВЦУ: дошли — бьём, ушла — идём за ней ─────────────
 		if _hunt_sheep != null and _hunt_arrival():
 			return
@@ -6616,44 +7463,9 @@ func _process_move(delta: float) -> void:
 			var sk: int = get_instance_id()
 			stall_by_unit[sk] = int(stall_by_unit.get(sk, 0)) + 1
 			_reset_stuck()
-		velocity = Vector3.ZERO
-		state    = State.IDLE
-		_march_pending = false      # дошли — возобновлять больше нечего
-		_march_run     = false
-		_disengaging   = false      # дошли — снова можно ввязываться в бой
-		_move_lock     = 0.0        # приказ выполнен, держать замок больше незачем
-		# ПРИБЕЖАЛИ — БЕГ ВЫКЛЮЧАЕТСЯ САМ. Отряд возвращается в обычный режим:
-		# копейщики снова опускают копья и строят фалангу, авто-агро оживает
-		if sprinting:
-			_set_sprinting(false)
-		# ЯКОРЬ. С этого мгновения расталкивание бойца не двигает: подошедшие
-		# соседи встают впритык, перекрываясь, и тоже замирают
-		_settled = true
-		# ДОЛОЖИТЬ ОТРЯДУ. Когда доложит достаточная доля, отставшие получат
-		# прибавку к скорости и быстро запечатают квадрат (см. squad_note_arrival)
-		if squad_id > 0:
-			GameManager.squad_note_arrival(squad_id)
-		# ПРИШЛИ В СВОЙ СЛОТ — доворачиваемся в направление строя.
-		# Ракурс спрайта у стоящего юнита заморожен (см. _update_sprite_flip),
-		# поэтому явно просим один пересчёт зеркала
-		# ── ВСЕ В СТРОЮ СМОТРЯТ В ОДНУ СТОРОНУ ────────────────────────
-		# Жалоба владельца со скриншотом: «лучники после построения
-		# смотрят в разные стороны». Курс прихода есть НЕ У КАЖДОГО
-		# ПРИКАЗА: смыкание рядов, подзыв сплочённости, возврат на пост и
-		# возврат из гарнизона зовут command_move БЕЗ курса. Такой боец
-		# оставался с тем взглядом, что был у него до того, — а был он, как
-		# правило, на чужого или на точку, откуда он шёл. Оттого строй и
-		# смотрел вразнобой: кто пришёл по приказу игрока — по курсу, кто
-		# дошёл смыканием — куда придётся.
-		# Запасной ответ — КУРС ОТРЯДА (направление последнего приказа,
-		# по нему же считаются шеренги фаланги), а не свой скан и не
-		# второе хранилище направлений: он уже есть и он отрядный
-		var face_now: Vector3 = face_on_arrive
-		if face_now.length_squared() <= 1e-6 and squad_id > 0:
-			face_now = GameManager.squad_course(squad_id)
-		if face_now.length_squared() > 1e-6:
-			_facing = face_now
-			mark_flip_dirty()
+		if zone_in:
+			zone_arrivals += 1
+		_arrive_now()
 	else:
 		dir /= dist
 		# ── ХОД БЕЗ МАРШРУТА: ОБХОД СКАЛ РАЗ В NAV_RECHECK_SEC (п. 8) ──────
@@ -6670,6 +7482,7 @@ func _process_move(delta: float) -> void:
 				if not _atk_route.is_empty():
 					_atk_route = PackedVector3Array()
 			elif _nav_t <= 0.0:
+				if _prof: _Opt.prof_add("mv_nav_check", 0)
 				if GameManager.nav_blocked(mypos, move_target, _nav_clear):
 					_nav_t = NAV_RECHECK_SEC + float(get_instance_id() % 7) * 0.03
 					GameManager.nav_who = stat_id
@@ -6692,7 +7505,9 @@ func _process_move(delta: float) -> void:
 				dir = Vector3(wdx / wl, 0.0, wdz / wl)
 				break
 		_facing  = dir
-		if _prof: _t = Time.get_ticks_usec()
+		if _prof:
+			_Opt.prof_add("mv_mid", Time.get_ticks_usec() - _t)
+			_t = Time.get_ticks_usec()
 		velocity = dir * _effective_speed()
 		if _prof: _Opt.prof_add("mv_speed", Time.get_ticks_usec() - _t)
 		# ── ШАГ НЕ ПРОВОДИТСЯ ЗДЕСЬ, А ЗАЯВЛЯЕТСЯ (см. ArmySoA.batch_move) ───
@@ -6709,7 +7524,24 @@ func _process_move(delta: float) -> void:
 		# по-старому, поштучно
 		# collision_mask = 0 — физических коллизий нет, интегрируем напрямую
 		# (дешевле move_and_slide), но сквозь чужой строй не пускаем
-		_commit_step(velocity * delta)
+		# ── ШАГ НЕ ДЛИННЕЕ ОСТАТКА ПУТИ ДО ТОЧКИ ПРИКАЗА (29.10.2026) ───────
+		# Редкий такт (чужой в тумане тикает раз в shards × fog_slow_div
+		# кадров с накопленной дельтой) давал шаг длиннее расстояния до точки:
+		# боец ПЕРЕЛЕТАЛ её, разворачивался и перелетал обратно — вечные
+		# качели в MOVING без единого метра пути (зонд qa_squad_arrival/Probe:
+		# гноллы орды, тик раз в 18 кадров, прыжки по 1.9 м через точку в
+		# 0.77 м). На последнем отрезке (ни угла дороги, ни обхода) шаг
+		# зажимается остатком: боец садится В точку и прибывает следующим
+		# тиком. Три умножения, без вызовов
+		var mv_step: Vector3 = velocity * delta
+		if _Opt.step_clamp and _route_i >= _route.size() and _atk_route_i >= _atk_route.size():
+			if mv_step.x * mv_step.x + mv_step.z * mv_step.z > dist * dist:
+				mv_step = dir * dist
+		if _prof: _t = Time.get_ticks_usec()
+		_commit_step(mv_step)
+		if _prof: _Opt.prof_add("mv_commit", Time.get_ticks_usec() - _t)
+		if _Opt.march_core:
+			_arm_march(dist)
 
 ## Пауза между повторными попытками найти замену погибшей цели (см. ниже).
 ## БЫЛО: полный скан сетки (до FORCED_RETARGET_RANGE/attack_range, у лучника
@@ -6725,7 +7557,18 @@ const RETARGET_RETRY_SEC := 0.2
 var _retarget_timer: float = 0.0
 
 func _process_attack(delta: float) -> void:
+	# Раскладка автомата боя по участкам (только profile_physics, ранжирование)
+	var _pa: bool = _Opt.profile_physics
+	var _pa_t: int = Time.get_ticks_usec() if _pa else 0
+	# Погоня под замком игрока кончается в LOCK_CHASE_MAX от точки приказа и в
+	# контакте тоже (ветка поводка ниже живёт только в подходе); дальше —
+	# обычные правила без замка (ТЗ 31.10.2026, qa_tz1031 A2)
+	if target_lock and _lock_from.x != INF and _Opt.lock_chase:
+		var lp0: Vector3 = position if _local_xform else global_position
+		if Vector2(lp0.x - _lock_from.x, lp0.z - _lock_from.z).length() > LOCK_CHASE_MAX:
+			release_target_lock("lock_chase_end")
 	# is_dead()/is_instance_valid не нужны: цель обнуляется сигналом died (см. set_attack_target)
+	if _pa: _pa_tag = 0
 	if attack_target == null:
 		_melee_grip = false      # сцепка живёт ровно один контакт (см. поле)
 		# ── СТЕНА ДОХОДИТ ДО ТОЧКИ ПРИКАЗА, ДАЖЕ ЕСЛИ ЦЕЛЬ УЖЕ ПАЛА ─────────
@@ -6740,6 +7583,7 @@ func _process_attack(delta: float) -> void:
 		# вражеском отряде» 0 из 6 против 6 из 6, E2 «замок снят сам» 0 из 4
 		# против 4 из 4. В обороне это безвредно — там точка И ЕСТЬ приказ, и
 		# дойти до неё важнее, чем сменить цель
+		if _pa: _pa_tag = 6
 		if _attack_is_forced and _hold_goal_set and _stance_holds_ground():
 			if _phalanx_march(delta):
 				return
@@ -6764,7 +7608,7 @@ func _process_attack(delta: float) -> void:
 			# ПОСТ ПЕРЕНОСИТСЯ СЮДА: иначе и авто-агро, и возврат на пост
 			# потянут бойца туда, откуда отряд вышел (см. _hold_where_i_stand)
 			release_target_lock("target_destroyed")
-			_hold_where_i_stand()
+			_hold_loose()
 			_atk_pending = false
 		# После смерти цели добираем СЛЕДУЮЩУЮ в своём радиусе атаки
 		# (раньше — 20 м, из-за чего юниты убегали через полкарты за новой целью).
@@ -6782,6 +7626,22 @@ func _process_attack(delta: float) -> void:
 		# вражеского строя (жалоба игрока, см. qa_archer_retarget)
 		var was_forced := _attack_is_forced
 		var seek: float = maxf(attack_range, FORCED_RETARGET_RANGE) if was_forced else attack_range
+		# ── ПРЕЖНЯЯ ЦЕЛЬ ПАЛА — ПОВОДОК ОТРЯДА ОТСЧИТЫВАЕТСЯ ЗАНОВО (29.10.2026) ──
+		# Якорь ставился раз на всю цепочку целей (_leash_note: «уже стоит —
+		# не трогать»): отряд, прорубающийся сквозь глубокую колонну, за 8 м
+		# рубки рвал поводок посреди боя, бросал цель и шёл «домой»
+		# (qa_no_retreat C/E: обрывы при живом враге в упор). Поводок —
+		# против погони за ОДНОЙ убегающей целью; победа над ней открывает
+		# новый отсчёт от места, где боец стоит
+		_leash_from = Vector3.INF
+		# ── СЛЕДУЮЩАЯ ЦЕЛЬ — БЛИЖАЙШАЯ В РАДИУСЕ АВТО-АГРО, А НЕ В ДЛИНЕ ОРУЖИЯ ──
+		# В длине копья после гибели цели чаще всего никого нет: боец уходил
+		# в IDLE, отряд «выходил из боя», смыкал ряды по СТАРОЙ разметке, и
+		# только следующий такт авто-агро возвращал его к врагу в 3-5 м — это
+		# и был откат после победы. Стойка, держащая место (оборона), радиус
+		# не расширяет: фаланга к цели сама не идёт. Радиус — общий
+		# AGGRO_RADIUS, а не aggro_radius(): у орды тот равен обзору
+		var seek_wide: float = seek if _stance_holds_ground() else maxf(seek, AGGRO_RADIUS)
 		# ── СНАЧАЛА СПРАШИВАЕМ ОТРЯД, ПОТОМ ИЩЕМ САМИ (слой B) ───────────────
 		# Отряд знает, с кем он дерётся (GameManager._sweep_melee), и выдаёт
 		# наименее атакованного из ТОГО ЖЕ вражеского отряда. Это ровно то, что
@@ -6793,7 +7653,7 @@ func _process_attack(delta: float) -> void:
 		# так что уйти из своего боя за дальней целью по нему нельзя
 		var pick: Node3D = GameManager.squad_duel_target(squad_id, self, seek)
 		if pick == null:
-			pick = _find_nearest_enemy_in_range(seek, "retarget_lost")
+			pick = _find_nearest_enemy_in_range(seek_wide, "retarget_lost")
 		set_attack_target(pick)
 		# Приказ остаётся в силе, только пока замена нашлась поблизости
 		_attack_is_forced = was_forced and attack_target != null
@@ -6849,6 +7709,7 @@ func _process_attack(delta: float) -> void:
 	# считается. _attack_timer на время дрёмы заморожен и синхронизируется
 	# при пробуждении/снятии; читатели снаружи (_sweep_volleys) видят
 	# арм-значение больше нуля, то есть честное «ещё не готов»
+	if _pa: _pa_tag = 1
 	if _atk_snooze:
 		return
 	# ── ОБЕ ТОЧКИ ЧИТАЮТСЯ ПО ДЕШЁВОМУ ПУТИ ─────────────────────────────────
@@ -6872,8 +7733,24 @@ func _process_attack(delta: float) -> void:
 	# считаем до СТЕНЫ, иначе пехота лезет внутрь коробки, а стрелок жмётся
 	# к ней вплотную
 	var rng: float = attack_range + _target_pad
+	if _pa: _pa_t = _pa_lap("pa_pre", _pa_t)
 	# ── ПОВОДОК ОТРЯДА (ТЗ 22.10.2026): за агро дальше CHASE_LEASH не уходим ─
+	if _pa: _pa_tag = 2
 	if _leash_from.x != INF and _leash_check(mp):
+		return
+	# ── ЗА БЕГУЩИМ В ПАНИКЕ НЕ ГОНЯТСЯ (ТЗ 29.10.2026, п. 4) ─────────────────
+	# Остаток волны в панике пробегал мимо отряда и уходил за спину, а
+	# копейщики гнали его поштучно до поводка — отряд в [A] «откатывался» на
+	# 6-8 м назад. Без замка игрока бегущего отпускают, как только он ушёл
+	# дальше длины оружия и радиуса агро; дальше — ближайшая цель или покой
+	if _Opt.am_cone_memory and tu != null and tu._panicked and not target_lock \
+			and dist > maxf(rng + 1.0, AGGRO_RADIUS):
+		panic_chase_drops += 1
+		set_attack_target(null)
+		_attack_is_forced = false
+		_atk_pending = false
+		if _pa: _pa_tag = 18
+		velocity = Vector3.ZERO
 		return
 	# ── ПОЛУТАКТ В КОНТАКТЕ (этап 4, perf_config.atk_half_contact) ──────────
 	# Боец в зоне контакта (цель за досягаемостью, но не дальше ATK_HALF_ZONE;
@@ -6884,6 +7761,7 @@ func _process_attack(delta: float) -> void:
 	# 40-95 строк из 160-210 в зоне (VisAb 28.09). Стоящий в упор — не здесь:
 	# его ведёт дрёма, а удар после пробуждения ждать не вправе. Переход
 	# границы — только на смене признака
+	if _pa: _pa_tag = 3
 	if _Opt.atk_half_contact:
 		_atk_half_set(charge_range <= 0.0 and dist > rng and dist <= rng + ATK_HALF_ZONE)
 	elif _atk_half:
@@ -6893,6 +7771,9 @@ func _process_attack(delta: float) -> void:
 	# этой строки ветка не идёт. Флаг взводится ровно на подходе к БОЙЦУ:
 	# разгоняться на здание незачем (сминать там некого, а стена не отлетит),
 	# и стойка «Защита» разгона не знает — «единый забор» не бросается вперёд
+	if _pa: _pa_tag = 4
+	if _charge_core:
+		_charge_sync()
 	if charge_range > 0.0 and tu != null:
 		if dist > charge_range:
 			# Оторвался от цели — натиск снова доступен. Это и есть
@@ -6923,6 +7804,8 @@ func _process_attack(delta: float) -> void:
 	if box_hold and dist <= rng and _box_row >= BOX_STRIKE_ROWS and _box_frontal(dir, dist):
 		_box_hold(delta, mp, dir, dist, tu, rng)
 		return
+	if _pa: _pa_t = _pa_lap("pa_mid", _pa_t)
+	if _pa: _pa_tag = 5
 	if dist > rng:
 		# ── УДАР С РАЗГОНА — В КАДР КОНТАКТА, А НЕ В КАДР ТИКА ──────────────
 		# Жалоба владельца: «сначала залетают, а потом спустя время юниты
@@ -6962,6 +7845,7 @@ func _process_attack(delta: float) -> void:
 		# Цель при этом НЕ бросаем: она вернётся в дальность сама, если
 		# противник подойдёт, а бросок означал бы, что фаланга «забывает», с
 		# кем дралась, каждый раз, когда враг отступил на шаг
+		if _pa: _pa_tag = 7
 		if _stance_holds_ground():
 			velocity = Vector3.ZERO
 			_facing = dir / dist
@@ -7015,6 +7899,7 @@ func _process_attack(delta: float) -> void:
 		# Всё, что ниже, — способы сблизиться ПООДИНОЧКЕ (подтягивание рядов,
 		# сцепка, обход свалки, автопилот с обходом своих). В коробке сближается
 		# только отряд целиком (SquadBox подаёт место вперёд), боец идёт к месту
+		if _pa: _pa_tag = 8
 		if box_hold:
 			_box_hold(delta, mp, dir, dist, tu, rng)
 			return
@@ -7044,6 +7929,7 @@ func _process_attack(delta: float) -> void:
 		# сам, а смыкание рядов тянуло его обратно (qa_archer_fix A4: 9 бойцов
 		# на 1-2.8 м, 36 приказов смыкания за 60 с). Стрелок бьёт с места то,
 		# что достаёт; к дальнему его ведёт только приказ игрока
+		if _pa: _pa_tag = 9
 		if not target_lock and not _stance_holds_ground() and not holds_ground_on_aggro() \
 				and _should_pull_up(dist):
 			# ── ЗАСЛОН ВПЛОТНУЮ ВАЖНЕЕ ПОДТЯГИВАНИЯ (ТЗ 29.09.2026, блок 7) ──
@@ -7055,6 +7941,7 @@ func _process_attack(delta: float) -> void:
 				_enemy_contact = false
 				var blk_pull := _find_nearest_enemy_in_range(attack_range + INTERCEPT_MARGIN, "blocker_pull")
 				if blk_pull != null and blk_pull != attack_target:
+					if _pa: _pa_tag = 21
 					velocity = Vector3.ZERO
 					command_attack(blk_pull, false)
 					_melee_grip = true
@@ -7066,18 +7953,32 @@ func _process_attack(delta: float) -> void:
 			# под стрелами (qa_red_ai_aggro E: 18 из 18 у стены 40 с). Прямая
 			# упирается — шаг по углу обхода и полным ходом (это уже не
 			# подшагивание рядов, а дорога к цели); автопилот не взводится
+			if _pa: _pa_tag = 22
 			var nd: Vector3 = _nav_dir(mp, tp, delta, dir)
 			if nd != dir:
+				if _pa: _pa_tag = 23
 				_facing = nd
 				velocity = nd * _effective_speed()
 				_commit_step(velocity * delta)
 				return
+			if _pa: _pa_tag = 24
 			_facing  = dir
 			velocity = dir * (_effective_speed() * PULL_UP_SPEED)
 			_commit_step(velocity * delta)
 			# Подтягивание рядов — самая массовая ветка замеса, и она
 			# однородна: дальше её ведёт ядро (BigStand, этап 4)
-			_arm_autopilot(tu, rng, dist)
+			# Конница — только с потраченным разгоном: взвод и пробег разгона
+			# меряет GDScript по тикам
+			# Конница — в разгоне (пробег копит ядро, ручка charge_core), с
+			# потраченным натиском или задняя линия волны под запретом разгона
+			# CavalryCommander (no_charge_until_ms: аренда до его срока)
+			if _Opt.pullup_core and (charge_range <= 0.0
+					or (_Opt.charge_core and (is_charging or not _charge_ready
+						or now_ms < no_charge_until_ms))
+					or (_Opt.rider_autopilot and not is_charging and not _charge_ready)):
+				_arm_pullup(tu, rng)
+			else:
+				_arm_autopilot(tu, rng, dist)
 			return
 		# Hold Position: без прямого приказа за целью НЕ гонимся — лучник
 		# стреляет с места, пехота стоит на посту; ушла из радиуса — отбой.
@@ -7101,6 +8002,7 @@ func _process_attack(delta: float) -> void:
 		# «приказа не было» и «уже подошёл, а гнаться не полагается»
 		# СЦЕПКА ПЕРЕБИВАЕТ «HOLD POSITION» В УЗКОЙ ПОЛОСЕ. В обороне не
 		# действует: «единый забор» не подшагивает даже на полметра
+		if _pa: _pa_tag = 10
 		if _melee_grip and not _stance_holds_ground() 				and dist <= rng + INTERCEPT_MARGIN:
 			dir /= dist
 			_facing  = dir
@@ -7139,13 +8041,20 @@ func _process_attack(delta: float) -> void:
 		#
 		# Отряд при этом не растягивается: цель НЕПОДВИЖНА, и все идут в одну
 		# точку, а не за разбегающимися поодиночке
+		if _pa: _pa_tag = 11
 		if _pursuit_anchored and _attack_is_forced and not (attack_target is Building):
 			var anch: Vector3 = _pursuit_from
 			if squad_id > 0:
 				var sa: Vector3 = GameManager.squad_pursuit_anchor(squad_id)
 				if sa != Vector3.INF:
 					anch = sa
-			if Vector2(mp.x - anch.x, mp.z - anch.z).length() > pursuit_limit():
+			# Под ручным замком игрока граница — LOCK_CHASE_MAX от точки приказа:
+			# якорь отряда переставляется на каждом новом касании и сам погоню
+			# не кончит никогда (qa_tz1031 A2)
+			var leash_hit: bool = Vector2(mp.x - anch.x, mp.z - anch.z).length() > pursuit_limit()
+			if _lock_chase_live():
+				leash_hit = Vector2(mp.x - _lock_from.x, mp.z - _lock_from.z).length() > LOCK_CHASE_MAX
+			if leash_hit:
 				var fled := attack_target as Unit
 				var fled_sid: int = fled.squad_id if fled != null else 0
 				set_attack_target(null)
@@ -7158,12 +8067,17 @@ func _process_attack(delta: float) -> void:
 				# Поводок сорван — снимаем якорь ВСЕМУ отряду: погоня кончилась
 				# для всех сразу, иначе соседи продолжали бы мерить от неё
 				GameManager.squad_pursuit_release(squad_id)
-				# ВОЗВРАТ НА ПОСТ — приказом, а не силой: то же решение, что и
-				# у сплочённости (GameManager._cohesion_guard)
-				if _post_valid:
-					command_move(post_pos)
-				else:
-					state = State.IDLE
+				# ── ВСТАТЬ ЗДЕСЬ, А НЕ ИДТИ НА СТАРЫЙ ПОСТ (29.10.2026) ────────
+				# Пост остаётся там, откуда игрок послал отряд в атаку
+				# (command_attack поста не переносит), и сорванная погоня гнала
+				# бойца назад через всё поле. Враг бежит — бой выигран; строй
+				# собирается смыканием ПО МЕСТУ (squad_close_ranks перецентрует
+				# разметку). Незаконченный приказ атаки снимается тут же —
+				# иначе _resume_attack вернул бы погоню следующим тиком
+				_atk_pending = false
+				_attack_is_forced = false
+				_hold_loose()
+				state = State.IDLE
 				# ── И ВЕСЬ ОТРЯД ВМЕСТЕ С НИМ (лог партии 26.10.2026) ────────
 				# Снятый якорь отряда не останавливал соседей: каждый мерил
 				# дальше от СВОЕЙ точки касания и срывался поодиночке, через
@@ -7182,6 +8096,7 @@ func _process_attack(delta: float) -> void:
 		# половина не стреляет и не идёт. Отметка держит только тех, кому до
 		# цели дальше SQUAD_SHOT_SLACK сверх своей дальности (это и есть
 		# «нитка за отступающим»); задние ряды доходят и встают в зоне огня
+		if _pa: _pa_tag = 12
 		var squad_shot: bool = not pursues_target() and squad_id > 0 \
 			and GameManager.squad_ranged_engaged(squad_id) \
 			and dist > rng + SQUAD_SHOT_SLACK
@@ -7215,6 +8130,7 @@ func _process_attack(delta: float) -> void:
 		# ещё надо дойти, а неприказанную цель вне досягаемости боец бросает
 		# (ветка «гнаться не буду» ниже). Замок приказа при этом цел: выбьют
 		# соседа — _lock_next_victim вернёт бойца к назначенному отряду
+		if _pa: _pa_tag = 13
 		if not _stance_holds_ground() and not retreating and not sprinting:
 			if _tick_stuck(delta, _stuck_dist(dist, _atk_route, _atk_route_i, mp)) 					and _stuck_streak >= STUCK_RETARGET_STREAK:
 				var alt := _find_nearest_enemy_in_range(STUCK_RETARGET_RANGE, "stuck_retarget")
@@ -7246,6 +8162,7 @@ func _process_attack(delta: float) -> void:
 					command_attack(blocker, false)
 					_melee_grip = true      # см. разбор у поля: лечит «челнок»
 					return
+		if _pa: _pa_tag = 14
 		dir /= dist
 		_facing  = dir
 		# Шаг может идти В ОБХОД (см. _flank_step), поэтому velocity считается
@@ -7271,6 +8188,7 @@ func _process_attack(delta: float) -> void:
 		# им за каждого бойца в свалке нельзя
 		# Куда ведёт обход скал и построек у цели-здания: сектор кольца, пока
 		# он ведёт, иначе точка остановки перед стеной (см. ниже)
+		if _pa: _pa_tag = 15
 		var nav_goal: Vector3 = Vector3.INF
 		if squad_id > 0 and attack_target is Building and dist > rng:
 			var anc: Vector3 = GameManager.squad_attack_anchor(squad_id)
@@ -7333,11 +8251,24 @@ func _process_attack(delta: float) -> void:
 						GameManager.army.autopilot_arm_goal(_soa, 0.0, mp.x, mp.z, 0.0,
 							AGGRO_INTERVAL_HOT)
 					return
+		# ── КРУПНАЯ ЦЕЛЬ: К СВОЕМУ МЕСТУ НА КОЛЬЦЕ (см. _ring_note) ─────────
+		var ring_goal: bool = false
+		if _ring_on and nav_goal.x == INF:
+			var rg: Vector3 = _ring_goal(tp)
+			var rdx: float = rg.x - mp.x
+			var rdz: float = rg.z - mp.z
+			var rd: float = sqrt(rdx * rdx + rdz * rdz)
+			if rd > GIANT_RING_ARRIVE:
+				dir = Vector3(rdx / rd, 0.0, rdz / rd)
+				_facing = dir
+				nav_goal = rg
+				ring_goal = true
 		# ── ПОДХОД В ОБХОД СКАЛ И ВОДЫ (спринт 19, письмо 11) ──────────────
 		# Цель за обрывом: прямая упирается в стену, и раньше боец шёл в неё
 		# лбом и дёргался у подножия. Теперь раз в NAV_RECHECK_SEC прямая
 		# проверяется по сетке ядра, и упёршийся получает угол обхода — до
 		# спуска, а оттуда к цели. Вплотную к цели обход не нужен
+		if _pa: _pa_tag = 16
 		var nav_detour := false
 		if dist > rng + 1.0 and GameManager.nav_cells_blocked > 0 and GameManager.world_bounds_enabled:
 			# ── К ПОСТРОЙКЕ — ДО ТОЧКИ ОСТАНОВКИ, А НЕ ДО ЕЁ ЦЕНТРА ────────
@@ -7348,7 +8279,7 @@ func _process_attack(delta: float) -> void:
 			# отставание от сектора 8-26 м). Цель обхода — сектор, пока он
 			# ведёт, иначе точка перед стеной по лучу от бойца
 			var ntp: Vector3 = tp
-			if attack_target is Building and nav_goal.x != INF:
+			if (attack_target is Building or ring_goal) and nav_goal.x != INF:
 				ntp = nav_goal
 			elif dist > 0.01:
 				# ── И К БОЙЦУ — ДО ТОЧКИ ОСТАНОВКИ (ТЗ 13.10.2026,
@@ -7377,7 +8308,7 @@ func _process_attack(delta: float) -> void:
 				if not _attack_is_forced:
 					_nav_dead_end = false
 					set_attack_target(null)
-					_hold_where_i_stand()
+					_hold_loose()
 				return
 			if wp.x != INF:
 				var wdx: float = wp.x - mp.x
@@ -7387,6 +8318,7 @@ func _process_attack(delta: float) -> void:
 					dir = Vector3(wdx / wl, 0.0, wdz / wl)
 					_facing = dir
 					nav_detour = true
+		if _pa: _pa_tag = 17
 		var step_dir := dir if _stance_holds_ground() else _flank_step(dir, dist)
 		velocity = step_dir * _effective_speed()
 		# ── ВЗВОД АВТОПИЛОТА ПОДХОДА (этап D1) ──────────────────────────────
@@ -7405,7 +8337,9 @@ func _process_attack(delta: float) -> void:
 		# сняты — стражу перехвата, упор и обход своих ведёт само ядро, а
 		# автомат входит по расписанию (см. _arm_autopilot)
 		if not nav_detour:
-			if tu == null and attack_target is Building:
+			if (tu == null and attack_target is Building) or ring_goal:
+				# К месту на кольце — тот же режим «к точке», что у здания:
+				# у точки, по такту и от чужого в длине руки — назад сюда
 				_arm_autopilot_building(mp, tp, nav_goal, rng, dist)
 			else:
 				_arm_autopilot(tu, rng, dist)
@@ -7416,6 +8350,7 @@ func _process_attack(delta: float) -> void:
 		# вынесен в пакет. Держать две разные дороги для одного и того же
 		# перемещения незачем
 		_commit_step(velocity * delta)
+		if _pa: _pa_lap("pa_far_full", _pa_t)
 	else:
 		velocity = Vector3.ZERO
 		# ── СТОЛКНОВЕНИЕ С РАЗГОНА ──────────────────────────────────────────
@@ -7447,6 +8382,7 @@ func _process_attack(delta: float) -> void:
 				# иначе отряд вставал за 25 м, а луки достают на 20
 				if not pursues_target() and _announces_squad_shot():
 					GameManager.squad_ranged_engaged_set(squad_id)
+		if _pa: _pa_tag = 19
 		_engaged_once = true
 		_attack_timer -= delta
 		# ── ГОТОВ, НО ЖДЁТ КОМАНДЫ ──────────────────────────────────────────
@@ -7456,7 +8392,9 @@ func _process_attack(delta: float) -> void:
 		# Таймер при этом ЗАЖИМАЕТСЯ В НОЛЬ, а не уходит в минус: «готов» —
 		# состояние, и по нему отряд считает, сколько его бойцов уже ждут
 		# (GameManager._sweep_volleys)
-		if _attack_timer <= 0.0 and not _may_strike_now():
+		# Замешательство от клича свинобосса (now_ms < _hesitate_until_ms) —
+		# те же ворота «готов, но ждёт», один срок на клич (ТЗ 28.10.2026)
+		if _attack_timer <= 0.0 and (now_ms < _hesitate_until_ms or not _may_strike_now()):
 			_attack_timer = 0.0
 			if _Opt.tick_meter: _Opt.atk_why[4] += 1
 		elif _attack_timer <= 0.0 and _hit_pend_ms == 0:
@@ -7504,6 +8442,8 @@ func _process_attack(delta: float) -> void:
 			# отбрасывает противника рывком с каждого тычка
 			if hd <= 0 and push_now and tgt is Unit and not (tgt as Unit).is_dead():
 				_apply_push(tgt as Unit, pdir)
+			if _rush_until_ms > 0:
+				_rush_consume()
 			_on_attack_fired(tgt, dmg)
 			if _prof_s: _Opt.prof_add("atk_strike", Time.get_ticks_usec() - _t_s)
 		# ── ВЗВОД ДРЁМЫ (см. ворота в начале функции) ───────────────────────
@@ -7517,6 +8457,7 @@ func _process_attack(delta: float) -> void:
 		# КОРОТКИМ таймером — до кадра касания плюс запас; проснувшись, боец
 		# отпускает удар в преамбуле тика и восстанавливает настоящий кулдаун
 		# (_restore_attack_timer), после чего дремлет уже до готовности
+		if _pa: _pa_tag = 20
 		if _Opt.atk_snooze and _attack_timer > ATK_SNOOZE_SPARE \
 				and not is_charging and _soa >= 0:
 			_atk_snooze = true
@@ -7534,6 +8475,18 @@ func _process_attack(delta: float) -> void:
 				attack_range + _target_pad + ATK_SNOOZE_REACH_SLACK)
 		elif _Opt.tick_meter and _attack_timer > 0.0:
 			_Opt.atk_why[1 if _attack_timer <= ATK_SNOOZE_SPARE else (2 if is_charging else 3)] += 1
+		if _pa: _pa_lap("pa_near_full", _pa_t)
+
+## Участок автомата боя, на котором вышел вызов (profile_physics): время вызова
+## пишет вызывающий в PA_TAGS[_pa_tag]
+var _pa_tag: int = 0
+const PA_TAGS := ["pa0 нет цели", "pa1 дрёма", "pa2 поводок", "pa3 полутакт", "pa4 разгон", "pa5 подход: начало", "pa6 подход: марш фаланги", "pa7 подход: оборона", "pa8 подход: коробка", "pa9 подход: инициатива", "pa10 подход: сцепка", "pa11 подход: поводок погони", "pa12 подход: стрелки", "pa13 подход: перехват", "pa14 подход: шаг", "pa15 подход: здание", "pa16 подход: обход", "pa17 подход: фланг/коммит", "pa18 упор: начало", "pa19 упор: таймер", "pa20 упор: дрёма-взвод", "pa21 подтяг: заслон", "pa22 подтяг: до обхода", "pa23 подтяг: обход", "pa24 подтяг: шаг+взвод"]
+
+## Круг часов автомата боя (profile_physics)
+static func _pa_lap(bucket: String, t0: int) -> int:
+	var t1: int = Time.get_ticks_usec()
+	_Opt.prof_add(bucket, t1 - t0)
+	return t1
 
 ## ── ПОГОНЯ ЗА ЦЕЛЬЮ, ВЫШЕДШЕЙ ИЗ ЗОНЫ ПОРАЖЕНИЯ ─────────────────────────────
 ## Ближний бой — да: без погони мечник вообще не может драться, его дистанция
@@ -7790,6 +8743,9 @@ func leash_allows_drive(tp: Vector3) -> bool:
 	var lim: float = CHASE_LEASH + attack_range
 	return Vector2(tp.x - _leash_from.x, tp.z - _leash_from.z).length_squared() <= lim * lim
 
+## Стендам: сколько раз боец отпустил бегущего в панике (ТЗ 29.10.2026, п. 4)
+static var panic_chase_drops: int = 0
+
 ## Ушёл дальше поводка — бросить цель и вернуться. true — погоня оборвана
 func _leash_check(mp: Vector3) -> bool:
 	if _leash_from.x == INF or target_lock or retreating or _disengaging \
@@ -7810,11 +8766,29 @@ func _leash_check(mp: Vector3) -> bool:
 	_engaged_once = false
 	velocity = Vector3.ZERO
 	GameManager.squad_chase_broken(squad_id)
+	# ── К СВОЕМУ ОТРЯДУ, А НЕ К ЯКОРЮ (ТЗ 31.10.2026) ─────────────────────
+	# Возврат к якорю — ход назад через поле (зонд qa_army_front: второй
+	# источник «пошли назад» в «вольно»). Пост рядом с центром отряда —
+	# отряд стоит, убежал один: назад на пост. Пост далеко — гнался весь
+	# отряд: встать здесь, строй соберёт смыкание по месту
+	# (передняя шеренга у передних, GameManager._slots_recentered)
+	if _Opt.leash_hold_here:
+		var sc: Vector2 = GameManager.squad_centre_xz(squad_id)
+		if not _post_valid or not sc.is_finite() \
+				or Vector2(post_pos.x - sc.x, post_pos.z - sc.y).length() > CHASE_LEASH:
+			_hold_loose()
+			return true
+		if _Opt.cmd_meter: _Opt.cmd_src = "chase_leash"
+		command_move(GameManager.land_target(post_pos))
+		if _Opt.cmd_meter: _Opt.cmd_src = ""
+		return true
 	# Домой — на пост строя, если он рядом с якорем; иначе к якорю
 	var home: Vector3 = post_pos if _post_valid \
 		and Vector2(post_pos.x - back.x, post_pos.z - back.z).length() <= CHASE_LEASH * 2.0 \
 		else back
+	if _Opt.cmd_meter: _Opt.cmd_src = "chase_leash"
 	command_move(GameManager.land_target(home))
+	if _Opt.cmd_meter: _Opt.cmd_src = ""
 	return true
 
 ## Номер прохода пакетного боя, на котором этот боец попал в список «нужен
@@ -8062,6 +9036,24 @@ var _aura_armor: float = 0.0
 var _aura_attack: float = 0.0
 var _aura_rate: float = 0.0
 var _aura_until_ms: int = 0
+## ── ПОДАВЛЕНИЕ И КЛИЧ СВИНОБОССА (ТЗ 28.10.2026, PigBoss._tick_aura) ──────
+## До _suppressed_until_ms читатели аур (бонус атаки, перезарядка, броня) и
+## раздатчики (RelicManager, Monk) бонусов не дают; ветеранство vet_* — не
+## аура, не трогается. Клич: до _screech_until_ms урон ЭТОГО бойца ×
+## _screech_mult (читает take_damage жертвы по полю атакующего), замешательство
+## _hesitate_until_ms — ворота удара, один раз на клич (_screech_seen)
+var _suppressed_until_ms: int = 0
+var _screech_until_ms: int = 0
+var _screech_mult: float = 1.0
+var _hesitate_until_ms: int = 0
+var _screech_seen: int = 0
+## «Гоблинский горн» (ТЗ 29.10.2026): до _frail_until_ms входящий урон ЭТОГО
+## бойца × _frail_mult (цена ярости: −20 % стойкости своим в ауре)
+var _frail_until_ms: int = 0
+var _frail_mult: float = 1.0
+
+func suppressed() -> bool:
+	return now_ms < _suppressed_until_ms
 
 func aura_apply(armor_add: float, attack_add: float, rate_add: float, until_ms: int) -> void:
 	if now_ms >= _aura_until_ms:
@@ -8165,6 +9157,18 @@ func _effective_morale() -> float:
 # PUSH_EVERY ударов — движение строя медленное и слитное, а не рывками.
 func _apply_push(target: Unit, dirn: Vector3) -> void:
 	var diff := _push_power() - target._stand_power()
+	# ТОЛЧОК МАССОЙ (ТЗ 31.10.2026): соотношение отрядов вокруг толкаемого
+	var mass_k: float = 1.0
+	if _Opt.mass_push and target.squad_id > 0:
+		mass_k = GameManager.mass_push_mult(target.squad_id, faction, squad_id)
+		if mass_k > 1.0:
+			diff += GameManager.MASS_DIFF * (mass_k - 1.0)
+	# ОПОРА РЯДОВ (ТЗ 31.10.2026): задние поджимают переднего, задние
+	# толкаемого — держат его; толкает строй, а не одиночка
+	if _Opt.rank_push and _soa >= 0 and target._soa >= 0:
+		diff += _UStats.PUSH_RANK_SUPPORT * float(
+			GameManager.army.support_behind(_soa, dirn.x, dirn.z, PUSH_RANK_RANGE, PUSH_RANK_COS, PUSH_RANK_CAP)
+			- GameManager.army.support_behind(target._soa, -dirn.x, -dirn.z, PUSH_RANK_RANGE, PUSH_RANK_COS, PUSH_RANK_CAP))
 	if diff <= 0.0:
 		return
 	# ОБЩЕЕ ОСЛАБЛЕНИЕ ТОЛЧКА: 35% от прежнего (см. PUSH_GLOBAL_SCALE).
@@ -8174,6 +9178,7 @@ func _apply_push(target: Unit, dirn: Vector3) -> void:
 	var step: float = clampf(diff * 0.15, 0.04, 0.4) \
 		* _UStats.PUSH_GLOBAL_SCALE \
 		* _UStats.stance_stat(target.stance, "push_resist", 1.0)
+	step *= mass_k
 	# ── УДАРНАЯ КОННИЦА: МНОЖИТЕЛЬ ПРИМЕНЯЕТСЯ ПОСЛЕ ПОТОЛКА ───────────────
 	# Именно после, и в этом весь смысл. Потолок 0.4 м срабатывает уже при
 	# разнице напора в три единицы, поэтому кабан с push_force 15 продавливал
@@ -8382,20 +9387,21 @@ func _charge_impact(target: Unit, dirn: Vector3) -> void:
 	# он получает их укол и идёт дальше — это босс, а не кабан. СТЕНА КОПИЙ
 	# (spearman_1d, спринт 18) останавливает и его
 	var trample: int = _trample_count()
+	var spear_proof: bool = immune_to_spears()
 	# ── КОННИЦА НА КОПЬЯ В ЛОБ: ВОЛНЫ (ТЗ 24.09.2026, п. 2) ────────────────
 	# Без «Стены копий» первая волна теряет 50 % СВОЕГО максимального запаса,
 	# вторая и следующие — 25 % (волну считает CavalryImpactHandler по отряду
 	# копейщиков). Со «Стеной копий» та же доля ×3 («300 % входящего урона»):
 	# первая волна гибнет на копьях, вторая теряет 75 %. Топчущего (тролль)
 	# это не касается — копья его только царапают (charge_counter_frac)
-	if trample <= 0 and target.repels_charge() and target._faces_charge(dirn):
+	if trample <= 0 and not spear_proof and target.repels_charge() and target._faces_charge(dirn):
 		var wave_frac: float = _CavImpact.front_wave_frac(target)
 		var wall: bool = target.spear_wall_active()
 		take_frac_damage(wave_frac * (_CavImpact.WALL_COUNTER_MULT if wall else 1.0), target)
 		if wall and not is_dead():
 			target.spear_wall_strike(self)
 		return
-	if target.repels_charge() and target._faces_charge(dirn):
+	if not spear_proof and target.repels_charge() and target._faces_charge(dirn):
 		var back: float = max_health * charge_counter_frac
 		if back > 0.0:
 			# Через take_damage, а не вычитанием: там живут и защита, и вспышка
@@ -8509,7 +9515,7 @@ func _charge_impact(target: Unit, dirn: Vector3) -> void:
 		if v == null or not is_instance_valid(v) or v.is_dead():
 			continue
 		# Копья держат навал и в брызгах (см. шапку) — но не против топчущего
-		if trample <= 0 and v.repels_charge() and v._faces_charge(dirn):
+		if trample <= 0 and not spear_proof and v.repels_charge() and v._faces_charge(dirn):
 			continue
 		v.take_damage(v.max_health * charge_impact_frac * cav_dmg, self)
 		if is_instance_valid(v) and not v.is_dead():
@@ -8543,7 +9549,7 @@ func _charge_rows(victims: Array, mp: Vector3, dirn: Vector3, at: Vector3,
 		var v := n as Unit
 		if v == null or not is_instance_valid(v) or v.is_dead():
 			continue
-		if v.repels_charge() and v._faces_charge(dirn):
+		if v.repels_charge() and v._faces_charge(dirn) and not immune_to_spears():
 			continue
 		var off: Vector3 = v.global_position - mp
 		var along: float = off.x * dirn.x + off.z * dirn.z
@@ -9082,11 +10088,19 @@ func _check_auto_aggro() -> void:
 					_aggro_timer = AGGRO_INTERVAL_HOT
 					command_attack(locked, false)
 				return
+			# Под приказом игрока — догоняем, пока цель в радиусе от точки приказа
+			if not _is_ranged() and _lock_chase_ok(lkp):
+				_aggro_timer = AGGRO_INTERVAL_HOT
+				# Тот же приказ: точка приказа не переносится (иначе погоня без конца)
+				var from0: Vector3 = _lock_from
+				command_attack(locked, true, false, true)
+				_lock_from = from0
+				return
 		# Отряд истреблён или ушёл из виду — приказ исчерпан, живём как обычно.
 		# Пост при этом переносится СЮДА (см. _hold_where_i_stand): без этого
 		# боец разворачивался и уходил на старое место — за полкарты
 		release_target_lock("lock_lost_sight")
-		_hold_where_i_stand()
+		_hold_loose()
 		_atk_pending = false
 	# В стойке ЗАЩИТА боец не сходит с места ради врага: замечает только то,
 	# до чего дотягивается копьём. Направление на строй противника и смыкание
@@ -9224,6 +10238,16 @@ func _check_auto_aggro() -> void:
 		_aggro_timer = AGGRO_INTERVAL_HOT     # рядом бой — следим внимательно
 		var mypos: Vector3 = position if _local_xform else global_position
 		var far: bool = mypos.distance_to(nb_pos) > attack_range
+		# ── ПОСЛЕ СДАЧИ ВЫЗВОЛЕНИЯ — ТОЛЬКО ТО, ДО ЧЕГО ДОСТАЁШЬ (28.10.2026)
+		# Боец только что признал дорогу непроходимой и встал здесь; новая
+		# далёкая цель за той же стеной вернула бы его в цикл сдач (см. _unstick)
+		if far and _Opt.giveup_aggro_hold and _giveup_hold_until_ms > 0 \
+				and Unit.game_ms() < _giveup_hold_until_ms:
+			giveup_aggro_held += 1
+			var at_hand6 := _find_nearest_enemy_in_range(attack_range, "giveup_at_hand")
+			if at_hand6 != null:
+				command_attack(at_hand6, false)
+			return
 		# ── ЦЕЛЬ ЗА ОБРЫВОМ — ИНИЦИАТИВЫ НЕТ (спринт 19, письмо 11) ────────
 		# Замеченный наверху плато враг раньше вёл отряд лбом в стену
 		# (скриншот владельца: орки сгрудились у обрыва и дёргаются). Идти к
@@ -9256,13 +10280,12 @@ func _check_auto_aggro() -> void:
 				if at_hand3 != null:
 					command_attack(at_hand3, false)
 				return
-		# ── ОТРЯД УШЁЛ С ПОСТА ПО СВОЕЙ ИНИЦИАТИВЕ ──────────────────────────
-		# far = true означает «врага бью не с места, а иду к нему»: сосед идёт
-		# ПОМОГАТЬ. Помечаем это на отряде — по окончании боя он вернётся на
-		# СВОЙ пост, а не встанет там, где закончилась рубка (заказ владельца:
-		# «соседний отряд помогает, а после победы полностью восстанавливает
-		# исходную позицию и шеренгу»). Отряд, которого игрок сам послал в бой,
-		# метку не получает и строится по месту — см. GameManager.squad_close_ranks
+		# ── ПОСЛЕ ПОБЕДЫ ОТРЯД НЕ ВОЗВРАЩАЕТСЯ НА СТАРЫЙ ПОСТ (29.10.2026) ──
+		# Здесь стояла метка «ушёл помогать» (squad_mark_helped): по ней
+		# squad_close_ranks после боя вёл отряд на ИСХОДНЫЕ посты — это и был
+		# «откат после победы» у стоящего отряда (разворот заказа «после
+		# победы полностью восстанавливает исходную позицию»). Строй теперь
+		# собирается там, где бой закончился, разметка едет за ним
 		# ── СТРЕЛОК ПО СВОЕЙ ИНИЦИАТИВЕ С МЕСТА НЕ СХОДИТ (ТЗ 17.09.2026) ──
 		# far = «до цели не достаю, надо идти». Радар отряда отдаёт цель всем
 		# тридцати, а достают до неё только передние ряды — задние делали по
@@ -9276,8 +10299,12 @@ func _check_auto_aggro() -> void:
 			if at_hand4 != null:
 				command_attack(at_hand4, false)
 			return
-		if far and squad_id > 0:
-			GameManager.squad_mark_helped(squad_id)
+		# ── «ВОЛЬНО»: В БОЙ ОТРЯДОМ (ТЗ 31.10.2026, ease_squad_engage) ──────
+		# Замеченный чужой отряд берёт целью ВЕСЬ отряд (каждому — ближайший из
+		# чужого отряда), а не один боец за одним солдатиком
+		if far and _Opt.ease_squad_engage and squad_id > 0 and nearby is Unit \
+				and GameManager.squad_ease_engage(squad_id, nearby as Unit):
+			return
 		command_attack(nearby, far)
 
 ## НА СКОЛЬКО МЕТРОВ ОТРЯД ПОДТЯГИВАЕТСЯ К СВОЕЙ ЖЕ СВАЛКЕ.
@@ -9626,7 +10653,8 @@ func _upgrade_damage_bonus() -> float:
 	# на каждом ударе, как и бонусы кузницы: иначе выбранная игроком награда
 	# оставалась бы только числом в панели и на урон не влияла вовсе
 	# «Боевой клич» монаха — рукопашным (письмо 12)
-	var aura: float = _aura_attack if (now_ms < _aura_until_ms and attack_range <= 3.0) else 0.0
+	var aura: float = _aura_attack if (now_ms < _aura_until_ms and attack_range <= 3.0 \
+		and now_ms >= _suppressed_until_ms) else 0.0
 	return GameManager.get_upgrade(faction, "damage") \
 		+ GameManager.unit_bonus(faction, stat_id, "bonus_attack") \
 		+ vet_attack + aura
@@ -9852,6 +10880,16 @@ func take_damage(amount: float, attacker: Node3D = null) -> void:
 	if dormant and attacker != null and is_instance_valid(attacker) \
 			and attacker is Unit and (attacker as Unit).faction != faction:
 		GameManager.wake_dormant_squad(squad_id, self)
+	# ── КЛИЧ СВИНОБОССА: УРОН АТАКУЮЩЕГО × _screech_mult, ПОКА ДЕЙСТВУЕТ ────
+	# Множитель лежит на АТАКУЮЩЕМ (раздаёт PigBoss._tick_aura), читается у
+	# жертвы одним сравнением; у бойца вне клича срок ноль — ветка не стоит
+	# ничего (ТЗ 28.10.2026)
+	if attacker != null and is_instance_valid(attacker) and attacker is Unit:
+		var _au := attacker as Unit
+		if now_ms < _au._screech_until_ms:
+			amount *= _au._screech_mult
+	if now_ms < _frail_until_ms:
+		amount *= _frail_mult
 	# ── УКРЫТЫЙ В ЗДАНИИ УРОНА НЕ ПОЛУЧАЕТ — ЕГО ПОЛУЧАЕТ ЗДАНИЕ ────────────
 	# Заказ владельца (09.09.2026): лучники в башне неуязвимы, пока башня
 	# стоит; всё, что прилетело по ним, списывается с её запаса. Из сетки
@@ -9904,7 +10942,7 @@ func take_damage(amount: float, attacker: Node3D = null) -> void:
 		+ GameManager.unit_bonus(faction, stat_id, "bonus_armor") \
 		+ GameManager.unit_bonus(faction, stat_id, "bonus_defense") \
 		+ vet_armor + vet_defense \
-		+ (_aura_armor if now_ms < _aura_until_ms else 0.0) \
+		+ (_aura_armor if (now_ms < _aura_until_ms and now_ms >= _suppressed_until_ms) else 0.0) \
 		+ _UStats.stance_stat(stance, "defense_bonus", 0.0)   # +5 в обороне
 	# ── ПАНИКА СРЕЗАЕТ ЗАЩИТУ ──────────────────────────────────────────────
 	# Отряд под белым флагом бежит врассыпную и не прикрывается: его добивают
@@ -9979,7 +11017,12 @@ func take_damage(amount: float, attacker: Node3D = null) -> void:
 			_hit_flash = HIT_FLASH_SEC
 			_dmg_dirty = true
 			_push_damage_shade()
-	if current_health <= 0.0:
+	# ── ПОСЛЕДНИЙ ВЫЖИВШИЙ (ТЗ 28.10.2026, блок 3, см. _ghost) ─────────────
+	# Запас ушёл в ноль у последнего бойца отряда с узлом 3c — жребий: уцелел
+	# призраком — ни фрага, ни смерти, он уже уходит в крепость
+	if current_health <= 0.0 and _try_last_stand(attacker):
+		pass
+	elif current_health <= 0.0:
 		# Фраг записывается на ОТРЯД убийцы (см. GameManager.credit_kill):
 		# опыт копится отрядом целиком, а не отдельным бойцом
 		var _dt: int = Time.get_ticks_usec() if _prof_d else 0
@@ -10096,7 +11139,7 @@ func take_damage(amount: float, attacker: Node3D = null) -> void:
 	# Ранний выход здесь ровно один (уже мёртв) и он ДО начала отсчёта, поэтому
 	# счётчик закрывается в единственной точке
 	# ── ОБСТРЕЛ ИЗДАЛЕКА (спринт 17): орда не стоит под стрелами ───────────
-	if current_health > 0.0 and attacker != null and answers_far_fire():
+	if current_health > 0.0 and attacker != null and answers_far_fire() and not _ghost:
 		_answer_far_fire(attacker)
 	if _prof_d: _Opt.prof_add("atk_damage", Time.get_ticks_usec() - _t_d)
 

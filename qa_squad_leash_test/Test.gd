@@ -281,6 +281,12 @@ func _case(tag: String, title: String, kind: String, dist: float, mode: String,
 		var u := m as Unit
 		if u.global_position.distance_to(u.post_pos) < HOME_R or march:
 			home += 1
+		elif _diag:
+			print("    NOTHOME d=%.1f st=%d pos=%s post=%s mt=%s rip=%d tgt=%s" % [u.global_position.distance_to(u.post_pos), u.state,
+				u.global_position, u.post_pos, u.move_target, Unit.game_ms() - u._rip_last_ms,
+				("y" if u.attack_target != null and is_instance_valid(u.attack_target) else "-")])
+	if _diag:
+		print("    RIP halts=%d repaths=%d poses=%d" % [Unit.rip_halts, Unit.rip_repaths, Unit.rip_poses])
 	print("  %s: худший отрыв от поста %.1f м, оторвавшихся (> %.1f) в пике %d из %d; на постах после ухода врага %d из %d" % [
 		tag, worst, leash + SLACK, worst_cnt, men.size(), home, alive.size()])
 	verdict("%s %s: никто не отрывается" % [tag, title], worst_cnt == 0,

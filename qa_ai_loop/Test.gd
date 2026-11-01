@@ -134,11 +134,16 @@ func _run() -> void:
 	ai._peace_over = false
 	ai._peace_timer = 0.0
 	await think(2)
+	# По БОЙЦАМ, а не по номерам отрядов: с 27.10.2026 огрызок (12 при штате 60)
+	# вливается в соседний отряд реестра (ai_regroup_whole), прежний sid
+	# пустеет, и squad_centroid отвечал INF — «ушёл»
 	var far := 0
-	for sid in sids:
-		if _xz(GameManager.squad_centroid(int(sid)), cp) > 40.0:
+	for n in main.get_tree().get_nodes_in_group("enemy_units"):
+		if not is_instance_valid(n) or n is Worker or (n as Unit).is_dead():
+			continue
+		if _xz((n as Node3D).global_position, cp) > 40.0:
 			far += 1
-	verdict("A3 в мире войска остаются у своего замка", far == 0 and not ai._peace_over, "ушло %d" % far)
+	verdict("A3 в мире войска остаются у своего замка", far == 0 and not ai._peace_over, "ушло бойцов %d" % far)
 
 	print("\n═════ B. ЭКСПАНСИЯ: РУДНИК ═════")
 	ai._peace_over = true
@@ -179,6 +184,21 @@ func _run() -> void:
 		hs.faction = Constants.FACTION_ENEMY
 		main.world_add(hs)
 		hs.global_position = cp - Vector3(14.0, 0.0, -8.0 + float(k) * 6.0)
+	# Экономика v2 (ТЗ 30.10.2026, ai_eco_v2): загоны, рынок и склады идут
+	# ДО башен — ставим их сами, блок мерит закладку башни (порядок
+	# экономики стережёт qa_red_tactics A)
+	var eco_ids: Array = []
+	if preload("res://scripts/perf_config.gd").ai_eco_v2:
+		for _p in range(_AICfg.ECO_PENS):
+			eco_ids.append("sheep_pen")
+		eco_ids.append("market")
+		for _s in range(_AICfg.ECO_STOREHOUSES):
+			eco_ids.append("storehouse")
+	for k in range(eco_ids.size()):
+		var eb: Building = load("res://scripts/ConstructionSite.gd").make_building(String(eco_ids[k]))
+		eb.faction = Constants.FACTION_ENEMY
+		main.world_add(eb)
+		eb.global_position = cp + Vector3(-10.0 - float(k) * 9.0, 0.0, -18.0)
 	ResourceManager.add_resource(Constants.FACTION_ENEMY, Constants.RESOURCE_FOOD, 2000.0)
 	await pframes(4)
 	var towers0: int = ai._towers_count()
@@ -347,6 +367,7 @@ func _run() -> void:
 	verdict("F4б снесены и постройки орды — победа", main._phase == main.Phase.VICTORY)
 	# И обратный случай: ИИ БЕЗ крепости (старт партии) с вырезанными рабочими
 	main._phase = main.Phase.PLAYING
+	main._victory_won = false
 	main._ai_castle_placed = false
 	main._red_had_buildings = false
 	main._ai_wiped_since = -1.0

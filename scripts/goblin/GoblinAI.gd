@@ -194,6 +194,9 @@ func assault_gate() -> Dictionary:
 ## таймеры этого узла идут от Unit.game_ms(), а не от delta отрисовки —
 ## при просадке FPS мир замедляется, и сроки этого узла вместе с ним
 var _gclk = preload("res://scripts/GameClockStep.gd").new()
+## Кузница гоблинов (ТЗ 28.10.2026): дерево/золото лагеря, закладка, исследования —
+## scripts/economy/goblin_forge/GoblinForgeAI.gd; ручка perf_config.goblin_forge
+var _gforge = preload("res://scripts/economy/goblin_forge/GoblinForgeAI.gd").new()
 
 func _process(delta: float) -> void:
 	delta = _gclk.step()   # игровое время вместо delta отрисовки (GameClockStep)
@@ -210,6 +213,7 @@ func _process(delta: float) -> void:
 	if not _reserve_done:
 		_spawn_start_reserve()
 	_economy_tick(dt)
+	_gforge.tick(self, dt)
 	_production_tick()
 	_guards_tick(dt)
 	_camp_tick(dt)
@@ -241,7 +245,7 @@ func _spawn_start_reserve() -> void:
 		var base: Vector3 = _slot_pos(slot)
 		if main.has_method("_clear_trees"):
 			main.call("_clear_trees", base, 9.0)
-		var sid: int = int(main.call("spawn_goblin_squad", want, n, base, false))
+		var sid: int = int(main.call("spawn_goblin_squad", want, n, base, false, 0, false))
 		if sid <= 0:
 			continue
 		field_units += n
@@ -411,7 +415,7 @@ func adopt_after_load() -> void:
 		if int(sq.get("faction", -1)) != Constants.FACTION_GOBLIN:
 			continue
 		var t: String = String(sq.get("type", ""))
-		if t != "goblin_spearman" and t != "goblin_rider" and t != "big_goblin":
+		if t != "goblin_spearman" and t != "goblin_rider" and t != "big_goblin" and t != "pig_boss":
 			continue
 		if _alive_n(int(sid)) == 0:
 			continue
@@ -461,8 +465,9 @@ func _defeat() -> void:
 	_ready_q.clear()
 	last_action = "лагерь уничтожен — производство остановлено"
 	var hud = main.get("hud") if main != null else null
-	if hud != null and is_instance_valid(hud) and hud.has_method("show_placement_hint"):
-		hud.show_placement_hint("Лагерь орды уничтожен — новых волн не будет")
+	# ТЗ 31.10.2026: плашки нет — конец партии говорит окно победы
+	if _OptGA.horde_defeat_notice and hud != null and is_instance_valid(hud) and hud.has_method("show_notice"):
+		hud.show_notice("Лагерь орды уничтожен — новых волн не будет")
 
 # ═════════════════════════════════════════════════════════════════════════════
 # ПРОИЗВОДСТВО: ПЛАН ВОЛНЫ → ПОКУПКА ПО ОТРЯДУ → СЛОТ ПЛОЩАДКИ СБОРА
@@ -476,7 +481,24 @@ func _new_plan() -> void:
 	var pat: Array = _Spawn.WAVE_PATTERN
 	var tpl: String = String(pat[_pattern_i % pat.size()])
 	_pattern_i += 1
-	_plan = {"tpl": tpl, "comp": (_Spawn.WAVE_TEMPLATES[tpl] as Array).duplicate(), "have": [], "t0": clock}
+	var comp: Array = (_Spawn.WAVE_TEMPLATES[tpl] as Array).duplicate()
+	# После часа планы крупнее (ТЗ 27.10.2026, второе письмо, п. 1): шаблон
+	# дополняется своими же родами по кругу до HOUR_PLAN_MULT размера
+	if _Spawn.hour_surge(clock) and tpl != "scout":
+		var want: int = int(ceil(float(comp.size()) * _Spawn.HOUR_PLAN_MULT))
+		var k0: int = comp.size()
+		var i0 := 0
+		while comp.size() < want:
+			comp.append(comp[i0 % k0])
+			i0 += 1
+	# ── СВИНОБОСС (ТЗ 28.10.2026): один живой на карту, после BOSS_FROM_SEC ──
+	# План становится «волной полководца» (spawn_config.WAVE_TEMPLATES["boss"]):
+	# босс последним в составе, чтобы не держать покупку остальных отрядов
+	if _OptGA.pig_boss and tpl != "scout" and clock >= _GobCfg.BOSS_FROM_SEC \
+			and GameManager.pig_boss_may_spawn():
+		tpl = "boss"
+		comp = (_Spawn.WAVE_TEMPLATES["boss"] as Array).duplicate()
+	_plan = {"tpl": tpl, "comp": comp, "have": [], "t0": clock}
 
 ## Какого рода не хватает плану (первый неукомплектованный)
 func _plan_missing() -> String:
@@ -534,7 +556,9 @@ func _production_tick() -> void:
 	if slot < 0:
 		return
 	var base: Vector3 = _slot_pos(slot)
-	var sid: int = int(main.call("spawn_goblin_squad", want, n, base, true))
+	# Отряд свинобосса рождает своя точка спавна (босс + свита-ветераны)
+	var sid: int = int(main.call("spawn_boss_squad", base)) if want == "pig_boss" \
+		else int(main.call("spawn_goblin_squad", want, n, base, true))
 	if sid <= 0:
 		return
 	ResourceManager.set_amount(Constants.FACTION_GOBLIN, Constants.RESOURCE_FOOD,
@@ -580,7 +604,8 @@ func _maybe_launch() -> void:
 	# уходит тем, что набрано (ветка «не набрал состав» ниже)
 	var since: float = clock - _last_launch_clock if _last_launch_clock >= 0.0 else 1.0e9
 	# После 30-й минуты паузы × LATE_GAP_MULT (ТЗ 23.10.2026, второе письмо)
-	var gap_k: float = _Spawn.LATE_GAP_MULT if _Spawn.late_surge(clock) else 1.0
+	# После часа — ещё короче (spawn_config.late_gap_k, ТЗ 27.10.2026)
+	var gap_k: float = _Spawn.late_gap_k(clock)
 	if since < _Spawn.WAVE_GAP_MIN_SEC * gap_k:
 		return
 	var overdue: bool = since >= _Spawn.WAVE_GAP_MAX_SEC * gap_k and _last_launch_clock >= 0.0
@@ -622,6 +647,19 @@ func _launch(tpl: String, sids: Array) -> void:
 	for s in sids:
 		if _alive_n(int(s)) > 0:
 			live.append(int(s))
+	# Свободный полководец уходит с каждой волной (ТЗ 30.10.2026): прежде он
+	# выходил только с волной своей покупки, а после возврата домой — никогда
+	if _OptGA.boss_sortie and tpl != "scout" and not live.is_empty():
+		var bsid: int = boss_free_sid()
+		# Свой план покупки он ждёт (его снятие оставило бы план без рода
+		# pig_boss, а второго босса не купить — производство встало бы)
+		var in_plan: bool = not _plan.is_empty() and (_plan["have"] as Array).has(bsid)
+		if bsid > 0 and not live.has(bsid) and not in_plan:
+			for w0 in waves:
+				((w0 as Dictionary)["sids"] as Array).erase(bsid)
+			for rp0 in _ready_q:
+				((rp0 as Dictionary)["have"] as Array).erase(bsid)
+			live.append(bsid)
 	if live.is_empty():
 		return
 	for sid in live:
@@ -639,7 +677,7 @@ func _launch(tpl: String, sids: Array) -> void:
 	_wave_seq += 1
 	var has_cav := false
 	for sid3 in live:
-		if _type(sid3) == "goblin_rider":
+		if _type(sid3) == "goblin_rider" or _type(sid3) == "pig_boss":
 			has_cav = true
 	var tactic: String = "raid" if String(sc["name"]) == "scout" else _pick_tactic(has_cav)
 	var w := {"id": _wave_seq, "tpl": tpl, "sids": live, "name": sc["name"],
@@ -660,9 +698,16 @@ func _launch(tpl: String, sids: Array) -> void:
 	tactic_counts[tactic] = int(tactic_counts.get(tactic, 0)) + 1
 	last_action = "волна %d (%s): %s, тактика %s, отрядов %d" % [_wave_seq, tpl, sc["name"], tactic, live.size()]
 	_assign_points(w)
+	# Марш привалами (WaveMarch): первый приказ — к привалу «выход с базы»
+	if _OptGA.wave_stages and tactic != "raid":
+		_WaveMarch.build_legs(self, w)
+	var staged: bool = w.has("legs") and not (w["legs"] as Array).is_empty()
 	for sid5 in live:
-		_order_move(sid5, (w["pts"] as Dictionary)[sid5]["stage"], false)
+		if not staged:
+			_order_move(sid5, (w["pts"] as Dictionary)[sid5]["stage"], false)
 		(w["track"] as Dictionary)[sid5] = {"c": _centre(sid5), "t": clock, "n": 0}
+	if staged:
+		_WaveMarch.tick(self, w)
 	_blow_horn("волна %d вышла" % _wave_seq)
 
 ## Сценарий волны: {name, pos, node}. Разведка — к базе игрока (ловить
@@ -675,6 +720,10 @@ func _pick_scenario(tpl: String, sids: Array) -> Dictionary:
 		if tgt == null:
 			return {}
 		return {"name": "scout", "pos": tgt.global_position, "node": null}
+	if _OptGA.boss_sortie:
+		var bsc: Dictionary = _boss_scenario(sids)
+		if not bsc.is_empty():
+			return bsc
 	var cand: Array = []
 	if main != null and main.has_method("ford_point"):
 		var fp: Vector3 = main.call("ford_point")
@@ -705,6 +754,45 @@ func _pick_scenario(tpl: String, sids: Array) -> Dictionary:
 		if r <= 0.0:
 			return c2
 	return cand[cand.size() - 1]
+
+## ВОЛНА ПОЛКОВОДЦА БЬЁТ КЛЮЧЕВЫЕ НАПРАВЛЕНИЯ (ТЗ 30.10.2026): брод и золотой
+## рудник по очереди; первым — то, где стоит больше чужих (вскрыть оборону),
+## при равенстве — не то, куда ходили в прошлый раз. Пусто — волна без босса
+## или ни брода, ни рудника на карте (жребий как прежде)
+var _boss_goal_last: String = ""
+var boss_goals: Dictionary = {}      ## стендам: имя сценария → сколько раз
+
+func _boss_scenario(sids: Array) -> Dictionary:
+	var has_boss := false
+	for s in sids:
+		if _type(int(s)) == "pig_boss":
+			has_boss = true
+	if not has_boss:
+		return {}
+	var opts: Array = []
+	if main != null and main.has_method("ford_point"):
+		var fp: Vector3 = main.call("ford_point")
+		if fp.is_finite():
+			opts.append({"name": "ford_assault", "pos": fp, "node": null, "foes": _foes_count(fp, 35.0)})
+	var mine: Node3D = _mine_of(Constants.FACTION_PLAYER)
+	if mine == null:
+		mine = _mine_of(Constants.FACTION_ENEMY)
+	if mine != null:
+		var mp: Vector3 = mine.global_position
+		opts.append({"name": "player_mine" if (mine as Building).faction == Constants.FACTION_PLAYER else "red_mine",
+			"pos": mp, "node": mine, "foes": _foes_count(mp, 35.0)})
+	if opts.is_empty():
+		return {}
+	var best: Dictionary = opts[0]
+	for o in opts:
+		var od: Dictionary = o
+		var better: bool = int(od["foes"]) > int(best["foes"]) \
+			or (int(od["foes"]) == int(best["foes"]) and String(best["name"]) == _boss_goal_last)
+		if better:
+			best = od
+	_boss_goal_last = String(best["name"])
+	boss_goals[_boss_goal_last] = int(boss_goals.get(_boss_goal_last, 0)) + 1
+	return {"name": best["name"], "pos": best["pos"], "node": best["node"]}
 
 func _pick_tactic(has_cav: bool) -> String:
 	var opts: Array = [["front", 0.3], ["flank", 0.3], ["rear", 0.2], ["feint", 0.2]] if has_cav \
@@ -783,9 +871,18 @@ func _waves_tick(dt: float) -> void:
 		if live.is_empty():
 			done.append(w)
 			continue
-		if clock - float(w["t0"]) > _Spawn.WAVE_MAX_SEC and String(w["stage"]) != "home":
+		var on_halts: bool = w.has("legs") and not (w["legs"] as Array).is_empty() and not bool(w.get("legs_done", false))
+		if not on_halts and clock - float(w["t0"]) > _Spawn.WAVE_MAX_SEC and String(w["stage"]) != "home" \
+				and not _razing(w):
 			_wave_home(w)
 			continue
+		# У БАЗЫ ИГРОКА НЕ СТОЯТЬ (ТЗ 27.10.2026, второе письмо, п. 1): отряд
+		# волны, оставшийся без дела рядом с постройками игрока, сносит
+		# ближайшую — на любом этапе, кроме дороги домой
+		if _OptGA.goblin_base_raze and String(w["stage"]) != "home" and String(w["stage"]) != "feint":
+			for sid_r in live:
+				if _squad_idle(sid_r):
+					_raze_near_base(sid_r, w)
 		match String(w["stage"]):
 			"march":
 				_wave_march(w)
@@ -813,6 +910,26 @@ func _set_stage(w: Dictionary, st: String) -> void:
 ## развёртывание. Застрявшему (центр не сдвинулся) — тот же приказ ещё раз,
 ## не чаще STUCK_SEC и не больше STUCK_REISSUE_MAX раз
 func _wave_march(w: Dictionary) -> void:
+	# ── ПРИВАЛЫ (ТЗ 31.10.2026, WaveMarch) ──────────────────────────────────
+	if w.has("legs") and not (w["legs"] as Array).is_empty() and not bool(w.get("legs_done", false)):
+		var r: String = _WaveMarch.tick(self, w)
+		if r == "contact":
+			w["legs_done"] = true
+			_deploy(w)
+			return
+		if r == "march":
+			return
+		# Привалы пройдены: прежний марш к точкам развёртывания; срок волны —
+		# от этой минуты (поход привалами дольше прежнего прямого)
+		w["legs_done"] = true
+		w["t0"] = clock
+		_set_stage(w, "march")
+		for sid0 in (w["sids"] as Array):
+			var pp: Dictionary = w["pts"]
+			if pp.has(sid0):
+				_order_move(int(sid0), pp[sid0]["stage"], false)
+				(w["track"] as Dictionary)[sid0] = {"c": _centre(int(sid0)), "t": clock, "n": 0}
+		return
 	var live: Array = w["sids"]
 	var pts: Dictionary = w["pts"]
 	var arrived := 0
@@ -860,6 +977,13 @@ func _wave_centre(w: Dictionary) -> Vector3:
 
 ## Развёртывание: фронт бьёт сразу, фланг/тыл сначала заходит на свою точку
 func _deploy(w: Dictionary) -> void:
+	# Чужие отряды у волны — подача дозами (WaveFeed), а не все разом
+	if _OptGA.wave_feed and _WaveFeed.tick(self, w):
+		if String(w["name"]) == "ford_patrol" or String(w["name"]) == "ford_assault":
+			w["hold_t"] = clock
+		_set_stage(w, "engage")
+		w["engage_t"] = clock
+		return
 	var roles: Dictionary = w["roles"]
 	var pts: Dictionary = w["pts"]
 	var any_flank := false
@@ -920,8 +1044,9 @@ func _wave_engage(w: Dictionary, dt: float) -> void:
 			_set_stage(w, "feint")
 			return
 	var idle := 0
+	var fed: bool = _OptGA.wave_feed and _WaveFeed.tick(self, w)
 	for sid3 in live:
-		if _squad_idle(sid3):
+		if not fed and _squad_idle(sid3):
 			idle += 1
 			_engage_squad(sid3, w)
 	# Цель и окрестности чисты?
@@ -940,10 +1065,14 @@ func _wave_engage(w: Dictionary, dt: float) -> void:
 		return
 	if float(w["calm"]) < 12.0:
 		return
-	# Штурм базы: следующая постройка той же стороны рядом — продолжаем
-	if nm == "player_base" or nm == "red_base":
-		var fac: int = Constants.FACTION_PLAYER if nm == "player_base" else Constants.FACTION_ENEMY
-		var nb: Node3D = _nearest_building_of(fac, w["pos"], 60.0)
+	# Штурм базы: следующая постройка той же стороны рядом — продолжаем.
+	# Любая волна, стоящая у построек игрока, — тоже (ТЗ 27.10.2026): прежде
+	# разведка и набег на рудник у базы через 12 с тишины уходили домой
+	var at_player: bool = _OptGA.goblin_base_raze and _raze_target(_wave_centre(w)) != null
+	if nm == "player_base" or nm == "red_base" or at_player:
+		var fac: int = Constants.FACTION_ENEMY if nm == "red_base" else Constants.FACTION_PLAYER
+		var nb: Node3D = _raze_target(_wave_centre(w)) if fac == Constants.FACTION_PLAYER and _OptGA.goblin_base_raze \
+			else _nearest_building_of(fac, w["pos"], 60.0)
 		if nb != null:
 			w["node"] = nb
 			w["pos"] = nb.global_position
@@ -952,6 +1081,87 @@ func _wave_engage(w: Dictionary, dt: float) -> void:
 				_engage_squad(sid4, w)
 			return
 	_wave_home(w)
+
+## ── СНОС У БАЗЫ (ТЗ 27.10.2026, второе письмо, п. 1) ─────────────────────
+## Цель сноса для отряда в точке from: постройка игрока в GOBLIN_BASE_RAZE_R
+## (после часа — GOBLIN_BASE_RAZE_R_HOUR). До часа — ближайшая лёгкая
+## (башня, дом, бараки…), крепость — только если лёгких рядом нет; после
+## часа — ключевые здания вперёд (крепость, бараки, стрелковая, кузница,
+## башня), затем остальное. Рудник не сносится (goblin_may_raze)
+const BASE_RAZE_R := 45.0
+const BASE_RAZE_R_HOUR := 70.0
+const _KEY_BLD := ["castle", "barracks", "archery", "smithy", "tower", "market", "storehouse"]
+
+func _raze_target(from: Vector3) -> Node3D:
+	if from.x == INF:
+		return null
+	var hour: bool = _Spawn.hour_surge(clock)
+	var r: float = BASE_RAZE_R_HOUR if hour else BASE_RAZE_R
+	var best: Node3D = null
+	var best_d := INF
+	for b in get_tree().get_nodes_in_group(Constants.building_group(Constants.FACTION_PLAYER)):
+		if b == null or not is_instance_valid(b) or not (b is Building) or (b as Building).is_dead():
+			continue
+		var bb := b as Building
+		if bb is Mine or String(bb.building_id).is_empty() or not GameManager.goblin_may_raze(bb):
+			continue
+		var d: float = Vector2(bb.global_position.x - from.x, bb.global_position.z - from.z).length()
+		if d > r:
+			continue
+		var sh: bool = bb.has_method("is_stronghold") and bool(bb.call("is_stronghold")) and not (bb is Barracks) \
+			and String(bb.building_id) != "tower"
+		# Штраф дистанции вместо жёсткого порядка: ближняя лёгкая важнее
+		# дальней, но крепость в упор не пропускается вечно
+		var k: float = d
+		if hour:
+			if String(bb.building_id) in _KEY_BLD or sh:
+				k -= 40.0
+		elif sh:
+			k += 35.0
+		if k < best_d:
+			best_d = k
+			best = bb
+	return best
+
+func _raze_near_base(sid: int, w: Dictionary) -> void:
+	var c: Vector3 = _centre(sid)
+	var t: Node3D = _raze_target(c)
+	if t == null:
+		return
+	w["node"] = t
+	w["pos"] = t.global_position
+	w["calm"] = 0.0
+	if String(w["stage"]) == "march" or String(w["stage"]) == "flank":
+		_set_stage(w, "engage")
+		w["engage_t"] = clock
+	base_razes += 1
+	_order_attack_node(sid, t)
+
+## Волна сейчас сносит постройку игрока у базы (срок волны её не уводит)
+func _razing(w: Dictionary) -> bool:
+	if not _OptGA.goblin_base_raze:
+		return false
+	var node = w.get("node")
+	return node != null and is_instance_valid(node) and node is Building and not (node as Building).is_dead() \
+		and int((node as Building).faction) == Constants.FACTION_PLAYER and _raze_target(_wave_centre(w)) != null
+
+var base_razes: int = 0
+
+## Марш привалами (ТЗ 31.10.2026): счётчики стендам и телеметрии
+const _WaveMarch := preload("res://scripts/goblin/WaveMarch.gd")
+var halts_ordered: int = 0
+var halts_done: int = 0
+var halt_stuck: int = 0
+var halt_late: int = 0
+var scans_done: int = 0
+## Подача дозами (ТЗ 31.10.2026): счётчики стендам
+const _WaveFeed := preload("res://scripts/goblin/WaveFeed.gd")
+var feed_starts: int = 0
+var feed_doses: int = 0
+var feed_replaced: int = 0
+var feed_flanks: int = 0
+var feed_breaches: int = 0
+var feed_boss_opens: int = 0
 
 func _squad_idle(sid: int) -> bool:
 	for m in _alive(sid):
@@ -976,6 +1186,11 @@ func _engage_squad(sid: int, w: Dictionary) -> void:
 	if node != null and is_instance_valid(node) and not (node as Building).is_dead() and _hostile_building(node):
 		_order_attack_node(sid, node)
 		return
+	if _OptGA.goblin_base_raze:
+		var rz: Node3D = _raze_target(c)
+		if rz != null:
+			_order_attack_node(sid, rz)
+			return
 	var pts: Dictionary = w["pts"]
 	var goal: Vector3 = pts[sid].get("strike", t) if pts.has(sid) else t
 	if c.distance_to(goal) > ARRIVE_M:
@@ -1212,13 +1427,66 @@ func _nearest_building_of(fac: int, from: Vector3, r: float) -> Node3D:
 # СОН И ПРИКАЗЫ
 # ═════════════════════════════════════════════════════════════════════════════
 func _sleep_squad(sid: int) -> void:
+	# ОТРЯД ПОЛКОВОДЦА НЕ СПИТ (ТЗ 30.10.2026, разбор партии 30.10): возврат
+	# домой (_guards_tick: «дошёл или 60 с») усыплял босса где застал — 8.5 мин
+	# посреди поля на бегстве и 11 мин у лагеря до конца партии; разбудить его
+	# могла только тревога лагеря, а в план волны род pig_boss не входит
+	if _OptGA.boss_sortie and _is_boss_sid(sid):
+		return
 	for m in _alive(sid):
 		var u := m as Unit
+		# Входящий из-за кромки (ТЗ 31.10.2026) засыпает, когда дойдёт
+		if u.horde_entering:
+			GameManager.squads[sid]["entry_sleep"] = true
+			continue
 		if u.retreating:
 			u.end_retreat(true)
 		u.set_attack_target(null)
 		if not u.dormant:
 			u.set_dormant(true)
+
+func _is_boss_sid(sid: int) -> bool:
+	var b = GameManager.pig_boss
+	return b != null and is_instance_valid(b) and not (b as Unit).is_dead() and (b as Unit).squad_id == sid
+
+## Отряд босса, свободный для волны: жив, ни в одной волне, не бежит и не
+## лечится на базе (ими ведает мозг); 0 — нет такого
+func boss_free_sid() -> int:
+	var b = GameManager.pig_boss
+	if b == null or not is_instance_valid(b) or (b as Unit).is_dead():
+		return 0
+	var u := b as Unit
+	if u.call("is_withdrawing") or u.call("is_fleeing"):
+		return 0
+	var sid: int = u.squad_id
+	if sid <= 0:
+		return 0
+	for w in waves:
+		if ((w as Dictionary)["sids"] as Array).has(sid) and String((w as Dictionary)["stage"]) != "home":
+			return 0
+	return sid
+
+## ВЫЛАЗКА ПОЛКОВОДЦА (ТЗ 30.10.2026): босс без волны дольше
+## BOSS_IDLE_SORTIE_SEC выводит отряд сам; готовые планы площадки — с ним
+func boss_sortie(sid: int) -> bool:
+	if sid <= 0 or phase == PHASE_DEFEATED or waves.size() >= _Spawn.WAVES_MAX_ACTIVE:
+		return false
+	var sids: Array = [sid]
+	while not _ready_q.is_empty():
+		var rp: Dictionary = _ready_q.pop_front()
+		sids.append_array(rp["have"])
+	# План покупки полководца уходит с ним тем, что набрано
+	if not _plan.is_empty() and (_plan["have"] as Array).has(sid):
+		sids.append_array(_plan["have"])
+		_plan = {}
+	var uniq: Array = []
+	for s in sids:
+		if not uniq.has(int(s)):
+			uniq.append(int(s))
+	sids = uniq
+	var n0: int = waves.size()
+	_launch("boss", sids)
+	return waves.size() > n0
 
 func _wake_squad(sid: int) -> void:
 	for m in _alive(sid):
@@ -1236,6 +1504,8 @@ func _set_horde_formation(sid: int, goal: Vector3, n: int, course: Vector3) -> A
 	var sq: Variant = GameManager.squads.get(sid)
 	if sq != null:
 		hk = maxf(1.0, GameManager._block_slot_step((sq as Dictionary)["members"]) / _GobCfg.HORDE_SPOT)
+		if hk > 1.0:
+			hk *= _GobCfg.big_wide()
 	for k in range(n):
 		var ho: Vector2 = _GobCfg.horde_offset(k, n, sid) * hk
 		slots.append(Vector3(goal.x + ho.x, 0.0, goal.z + ho.y))
@@ -1294,6 +1564,8 @@ func _issue(o: Dictionary, budget: int) -> int:
 				continue
 			if u.dormant:
 				u.set_dormant(false)
+			if u.is_pig_boss() and u.is_withdrawing():
+				continue           # отход полководца решает его мозг
 			if u.retreating:
 				u.end_retreat(true)
 			u.command_attack(t_raw as Node3D, true, true)
@@ -1325,6 +1597,9 @@ func _issue(o: Dictionary, budget: int) -> int:
 		var u2 := m as Unit
 		if u2.dormant:
 			u2.set_dormant(false)
+		if u2.is_pig_boss() and u2.is_withdrawing():
+			used += 1
+			continue               # отход полководца решает его мозг
 		if k == "move":
 			var slots: Array = o["_slots"]
 			var p: Vector3 = GameManager.land_target(slots[mini(j - 1, slots.size() - 1)])

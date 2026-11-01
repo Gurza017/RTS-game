@@ -277,8 +277,9 @@ func _d_scans() -> void:
 # ═════════════════════════════════════════════════════════════════════════════
 func _e_spawn() -> void:
 	print("\n═════ E. СПАВН ═════")
-	verdict("E1 отряд туш — пятёрка",
-		int(_GobCfg.SQUAD_SIZE.get("big_goblin", 0)) == 5,
+	# РАЗВОРОТ 31.10.2026: туш в отряде 7 (spawn_config.GOBLIN_SQUAD_SIZE)
+	verdict("E1 отряд туш — по конфигу (7)",
+		int(_GobCfg.SQUAD_SIZE.get("big_goblin", 0)) == 7,
 		"%d" % int(_GobCfg.SQUAD_SIZE.get("big_goblin", 0)))
 	var base_rows := 0
 	for row in _GobCfg.START_SQUADS:
@@ -306,5 +307,5 @@ func _e_spawn() -> void:
 	var n := 0
 	for sid in lair.get("big_squads"):
 		n += GameManager.squad_members(int(sid)).size()
-	verdict("E4 в защитных отрядах ровно по пять туш",
-		n == _GobCfg.BIG_DEFENSE_SQUADS * 5, "бойцов %d" % n)
+	verdict("E4 в защитных отрядах ровно по штату туш",
+		n == _GobCfg.BIG_DEFENSE_SQUADS * int(_GobCfg.SQUAD_SIZE.get("big_goblin", 0)), "бойцов %d" % n)

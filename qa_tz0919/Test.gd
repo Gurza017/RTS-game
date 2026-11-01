@@ -119,6 +119,8 @@ func _flat_spot(base: Vector3) -> Vector3:
 	return best
 
 func _run() -> void:
+	# Разворот ТЗ 31.10.2026 (охрана пня ×3): стенд стережёт прежнюю механику
+	preload("res://scripts/perf_config.gd").lair_guard_x3 = false
 	main = load("res://scenes/Main.tscn").instantiate()
 	get_tree().root.add_child(main)
 	await frames(6)

@@ -22,6 +22,8 @@ UNITS = {
     "spearman": "Lancer/Lancer_Idle.png",
     "archer": "Archer/Archer_Idle.png",
     "monk": "Monk/Idle.png",
+    # Рабочий — главная иконка группы рабочих в мульти-выборе (ТЗ 30.10.2026)
+    "worker": "Pawn/Pawn_Idle Hammer.png",
 }
 PAD = 4
 SHADOW_ALPHA = 120
@@ -36,6 +38,13 @@ def frame_of(sheet: Image.Image) -> Image.Image:
 ## которая вырезается: копьё в 2 роста задаёт высоту, и в квадратной ячейке
 ## тело выходило вдвое мельче соседей. Наконечник и флажок остаются
 SHAFT_CUT = {"spearman": (101, 122)}
+## Сжатие оставшегося копья над вырезом по вертикали (ТЗ 27.10.2026, третье
+## письмо, п. 3: «копейщик с копьём, по размеру сопоставимый с монахом»):
+## наконечник с флажком ужимается вдвое, и фигура в высокой ячейке полосы
+## вписывается телом почти в рост монаха, а не задаётся длиной копья
+## ТЗ 30.10.2026, п. 4: при 0.5 фигура была 109 px высотой против 74 у монаха,
+## и в ячейке тело копейщика выходило заметно мельче — ужато до 0.22
+TOP_SQUEEZE = {"spearman": 0.22}
 
 
 def figure(src: str, uid: str = "") -> Image.Image:
@@ -48,6 +57,16 @@ def figure(src: str, uid: str = "") -> Image.Image:
         joined.paste(top, (0, 0))
         joined.paste(bot, (0, cut[0]))
         fr = joined
+        k = TOP_SQUEEZE.get(uid, 1.0)
+        if k < 1.0:
+            nh = max(1, int(round(cut[0] * k)))
+            top2 = fr.crop((0, 0, fr.size[0], cut[0])).resize((fr.size[0], nh), Image.NEAREST)
+            rest = fr.crop((0, cut[0], fr.size[0], fr.size[1]))
+            sq = Image.new("RGBA", (fr.size[0], nh + rest.size[1]), (0, 0, 0, 0))
+            sq.paste(top2, (0, 0))
+            sq.paste(rest, (0, nh))
+            fr = sq
+            cut = (nh, cut[1])
         # Древко в 2-3 пикселя кадра при вписывании в ячейку 36 px тает в
         # подложку: над шлемом (выше cut[0]) каждый непрозрачный пиксель
         # копируется на соседние по горизонтали — копьё вдвое толще

@@ -382,6 +382,10 @@ func _release_bone() -> void:
 	# Отойти некуда (кайт это уже выяснил — _kite_block_t): не бежать на месте
 	if _kite_block_t > 0.0 or hunting:
 		return
+	# БЕЗ ОТСТУПЛЕНИЯ (ТЗ 31.10.2026, ручка gnoll_no_retreat): метатель стоит
+	# и бросает, как лучник
+	if _OptG.gnoll_no_retreat:
+		return
 	var back: Vector3 = global_position - _throw_aim
 	back.y = 0.0
 	if lair != null and is_instance_valid(lair):
@@ -440,7 +444,8 @@ func tick_physics(delta: float, prof: bool = false, bm: bool = true,
 	if lair == null or not is_instance_valid(lair):
 		lair = null
 		if home_pos.x == INF:
-			home_pos = global_position
+			# Вошедший из-за кромки (ТЗ 31.10.2026) — дом там, куда шёл
+			home_pos = horde_goal if horde_goal.is_finite() else global_position
 		var nl: Node = GameManager.nearest_lair(home_pos)
 		if nl != null and is_instance_valid(nl) and Vector2(
 				(nl as Node3D).global_position.x - home_pos.x,
@@ -477,6 +482,8 @@ func tick_physics(delta: float, prof: bool = false, bm: bool = true,
 
 ## Отбежать от подошедшей вплотную пехоты. true — шаг выдан, дальше не идём
 func _tick_kite(delta: float) -> bool:
+	if _OptG.gnoll_no_retreat:
+		return false
 	# ── ПРОВЕРКА ПРЕДЫДУЩЕГО ОТХОДА ────────────────────────────────────────
 	# Отход выдан — смотрим, дал ли он смещение. Не дал — бежать некуда
 	if _kite_series_n > 0:
@@ -701,7 +708,7 @@ func take_damage(amount: float, attacker: Node3D = null) -> void:
 	if hidden:
 		return
 	# ── МАЛО ЗАПАСА — В ПЕНЬ ───────────────────────────────────────────────
-	if not hiding_to_lair and lair != null and is_instance_valid(lair) \
+	if not hiding_to_lair and not _OptG.gnoll_no_retreat and lair != null and is_instance_valid(lair) \
 			and not bool(lair.call("is_dead")) \
 			and current_health < max_health * _GobCfgG.GNOLL_HIDE_HP:
 		hiding_to_lair = true

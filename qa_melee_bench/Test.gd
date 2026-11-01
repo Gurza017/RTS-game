@@ -47,6 +47,15 @@ var _g_all: Array = []
 var _trolls: Array = []
 var _lair = null
 var _knobs: Dictionary = {}
+## A/B ЧЕРЕДОВАНИЕМ в замесе (`-- ab=имя_ручки rounds=6 block=90`): ручка
+## переключается блоками физкадров, порядок в раунде переворачивается, первые
+## AB_SETTLE кадров блока не считаются (аренды прежнего положения доживают)
+var _ab_knob: String = ""
+## `-- mvprof=1`: разбор по веткам снимается с фазы МАРША, а не замеса
+var _mv_prof: bool = false
+var _ab_rounds: int = 6
+var _ab_block: int = 90
+const AB_SETTLE := 30
 
 func _ready() -> void:
 	for a in OS.get_cmdline_user_args():
@@ -59,6 +68,10 @@ func _ready() -> void:
 			"move": MOVE_SEC = float(kv[1])
 			"cap": CAP_FPS = int(kv[1])
 			"mult": MULT = maxi(int(kv[1]), 1)
+			"ab": _ab_knob = kv[1]
+			"mvprof": _mv_prof = kv[1] == "1"
+			"rounds": _ab_rounds = maxi(int(kv[1]), 1)
+			"block": _ab_block = maxi(int(kv[1]), AB_SETTLE + 10)
 			"knob":
 				var nv: PackedStringArray = kv[1].split(":")
 				if nv.size() == 2:
@@ -285,7 +298,7 @@ func _run() -> void:
 			var p: Vector3 = (u as Unit).global_position
 			(u as Unit).command_move(Vector3(p.x, 0.0, p.z - FAR_M * 0.35))
 	await pframes(WARM)
-	var r_move: Dictionary = await _measure("MOVE (марш навстречу, без контакта)", MOVE_SEC, headless)
+	var r_move: Dictionary = await _measure("MOVE (марш навстречу, без контакта)", MOVE_SEC, headless, _mv_prof)
 	_stop_all()
 	# ── ФАЗА COMBAT ─────────────────────────────────────────────────────
 	_place(-CONTACT_M * 0.5, CONTACT_M * 0.5)
@@ -300,9 +313,49 @@ func _run() -> void:
 		if foe != null:
 			(t as Unit).command_attack(foe, true, true, false)
 	await pframes(WARM)
-	var r_cmb: Dictionary = await _measure("COMBAT (замес в %.0f м)" % CONTACT_M, COMBAT_SEC, headless, true)
-	_summary([r_idle, r_move, r_cmb], headless)
+	if _ab_knob != "":
+		await _ab_run()
+		get_tree().quit()
+		return
+	var r_cmb: Dictionary = await _measure("COMBAT (замес в %.0f м)" % CONTACT_M, COMBAT_SEC, headless, not _mv_prof)
+	_summary([r_idle, r_cmb, r_move] if _mv_prof else [r_idle, r_move, r_cmb], headless)
 	get_tree().quit()
+
+## A/B чередованием по tick_meter: [вкл, выкл] — сумма мкс и кадров
+func _ab_run() -> void:
+	var oi = _Opt.new()
+	if oi.get(_ab_knob) == null:
+		print("  ручки %s в perf_config нет — A/B не выполнен" % _ab_knob)
+		return
+	var on0: bool = bool(oi.get(_ab_knob))
+	_Opt.tick_meter = true
+	var us := [0, 0]
+	var nf := [0, 0]
+	var per: Array = [[], []]
+	for r in range(_ab_rounds):
+		var order: Array = [true, false] if r % 2 == 0 else [false, true]
+		for on in order:
+			oi.set(_ab_knob, on)
+			var k: int = 0 if on else 1
+			var u0 := 0
+			var f0 := 0
+			for f in range(_ab_block):
+				var t0: int = _Opt._tick_usec
+				await get_tree().physics_frame
+				if f >= AB_SETTLE:
+					u0 += _Opt._tick_usec - t0
+					f0 += 1
+			us[k] += u0
+			nf[k] += f0
+			(per[k] as Array).append(float(u0) / 1000.0 / float(maxi(f0, 1)))
+	oi.set(_ab_knob, on0)
+	var a: float = float(us[0]) / 1000.0 / float(maxi(nf[0], 1))
+	var b: float = float(us[1]) / 1000.0 / float(maxi(nf[1], 1))
+	print("  A/B %s: вкл %.2f мс тика, выкл %.2f мс, разница %+.2f мс (%d раундов по %d кадров)" % [
+		_ab_knob, a, b, a - b, _ab_rounds, _ab_block])
+	print("    по блокам вкл: %s" % str(per[0]))
+	print("    по блокам выкл: %s" % str(per[1]))
+	print("    живых к концу %d" % (_alive(_p_all) + _alive(_g_all)))
 
 ## Один замер фазы: секунды по физкадрам. detail — печатать классы и ветки
 func _measure(label: String, secs: float, headless: bool, detail: bool = false) -> Dictionary:
@@ -484,4 +537,9 @@ func _summary(rs: Array, headless: bool) -> void:
 	for row in ev:
 		print("  %-24s худший %6d мкс, %6.0f мкс/вызов × %5d вызовов = %7.2f мс всего" % [
 			String(row[0]), int(row[4]), float(row[3]), int(row[2]), float(int(row[1])) / 1000.0])
+	# Счётчики автопилота подхода (взвод и причины пробуждения) — только число
+	print("\n🔁 **ЗАМЕС — АВТОПИЛОТ ПОДХОДА** (счётчики за фазу)")
+	for row in cmb.get("prof", []):
+		if String(row[0]).begins_with("ap") or String(row[0]).begins_with("mv_"):
+			print("  %-24s %8d" % [String(row[0]), int(row[2])])
 	print("═════ ИТОГ qa_melee_bench: провалов: 0 (измеритель, вердиктов нет) ═════")

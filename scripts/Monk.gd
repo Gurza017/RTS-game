@@ -608,6 +608,16 @@ func _care_squad(sid: int, may_walk: bool = true) -> bool:
 		var cur := heal_target as Unit
 		if _may_heal(cur) and cur.squad_id == sid:
 			worst = cur
+	# ── ОТРЯД МОНАХОВ ЛЕЧИТ ПО ОДНОМУ (ТЗ 28.10.2026, пятое письмо) ─────────
+	# Каждый монах вёл СВОЕГО пациента, и отряд из шести без единого узла
+	# кузницы поднимал весь отряд из 24 разом (зонд qa_am_map E2: 24 из 24).
+	# Без узлов массового лечения монахи одного отряда сходятся на одном
+	# пациенте — самом раненом из тех, кого уже ведёт кто-то из них
+	if _Opt.monk_squad_focus and squad_id > 0 and max_heal_targets() == 1:
+		var shared: Unit = _squad_patient(sid)
+		if shared != null and shared != worst:
+			worst = shared
+			squad_focus_switches += 1
 	# Подход — только когда пациент ЗА границей ауры; встаём на stand_dist
 	# от центра его отряда, снаружи строя (ТЗ 17.09.2026)
 	var gap: float = global_position.distance_to(worst.global_position)
@@ -630,6 +640,26 @@ func _care_squad(sid: int, may_walk: bool = true) -> bool:
 	# заметное время, а не «мгновенно из коробки»
 	if cap > 1 and not full:
 		per /= MASS_HEAL_SLOW
+	# ── МАССОВОЕ ЛЕЧЕНИЕ ЗРИМО, А НЕ ПО ЩЕЛЧКУ (ТЗ 26.10.2026, блок 5) ──────
+	# С ветками темпа и объёма (1b-2b-3b-4b) массовый такт поднимал отряд из
+	# 50 за секунду, с «Абсолютным целительством» (5b) — за один такт. Потолок
+	# — доля запаса за такт: с нуля до полного не быстрее MONK_MASS_FULL_SEC
+	# непрерывной работы. Одиночный каст (cap = 1) прежний, 5b там в силе
+	# Доля — от ПРОШЕДШЕГО игрового времени, а не от номинального такта: фаза
+	# скана укорачивает такт, приказ и удар будят монаха внеочередным тактом,
+	# и от такта потолок протекал (14.5 с вместо 17 на том же отряде)
+	if cap > 1 and _Opt.monk_mass_gate:
+		full = false
+		var now_ms: int = Unit.game_ms()
+		var el: float = tick if _mass_last_ms < 0 else clampf(float(now_ms - _mass_last_ms) * 0.001, 0.0, tick)
+		_mass_last_ms = now_ms
+		# Потолок — на ОТРЯД, а не на бойца: при cap меньше числа раненых
+		# монах и так обходит их по кругу, и доля каждому вправе быть больше
+		# (иначе три цели «Троичного потока» лечились бы вдвое медленнее
+		# точечного вместо ×1.4 — qa_tz1023 J3)
+		var n_hurt: int = hurt.size()
+		var rot: float = float(n_hurt) / float(maxi(mini(cap, n_hurt), 1))
+		per = minf(per, el / _MCfg.MONK_MASS_FULL_SEC * rot)
 	var given := 0.0
 	var touched := 0
 	heal_targets.clear()
@@ -840,6 +870,9 @@ func _tick_spacing(delta: float) -> void:
 		var m := n as Monk
 		if m == null or m.is_dead() or m.faction != faction:
 			continue
+		# Свой отряд держит строй — от соседа по отряду не расходимся (ТЗ 31.10)
+		if _Opt.monk_spacing_own_squad and squad_id > 0 and m.squad_id == squad_id:
+			continue
 		if m.state != State.IDLE or m.moved_recently():
 			continue
 		var d: float = mp.distance_to(m.global_position)
@@ -888,6 +921,9 @@ func _tick_aura(delta: float, force: bool = false) -> void:
 			continue
 		var u := n as Unit
 		if u == null or u.is_dead() or u.faction != faction or u == self:
+			continue
+		# Под аурой подавления свинобосса ауры монаха не раздаются (ТЗ 28.10.2026)
+		if u._suppressed_until_ms > now_ms:
 			continue
 		u.aura_apply(a, k, r, until)
 		touched += 1
@@ -1293,6 +1329,34 @@ func _res_flash(at: Vector3) -> void:
 	tw.tween_property(mi, "scale", Vector3(0.01, 0.01, 0.01), RES_FLASH_SEC * 0.55)
 	tw.tween_callback(mi.queue_free)
 
+var squad_focus_switches: int = 0
+
+## Пациент, которого уже ведёт монах моего отряда в отряде sid: самый
+## раненый из их целей (ручка monk_squad_focus). null — никто не ведёт
+func _squad_patient(sid: int) -> Unit:
+	var raw: Variant = GameManager.squads.get(squad_id)
+	if raw == null:
+		return null
+	var best: Unit = null
+	var best_f := INF
+	for m in (raw as Dictionary).get("members", []):
+		if m == null or not is_instance_valid(m) or m == self:
+			continue
+		var mk := m as Monk
+		if mk == null or mk.is_dead():
+			continue
+		var ht: Variant = mk.heal_target
+		if ht == null or not is_instance_valid(ht):
+			continue
+		var hu := ht as Unit
+		if hu == null or hu.squad_id != sid or not _may_heal(hu):
+			continue
+		var f: float = hu.current_health / maxf(hu.max_health, 1.0)
+		if f < best_f:
+			best_f = f
+			best = hu
+	return best
+
 ## Годится ли этот боец в пациенты: свой, живой, на карте и с неполным запасом
 func _may_heal(u: Unit) -> bool:
 	if u == null or not is_instance_valid(u):
@@ -1372,7 +1436,15 @@ func heal_radius() -> float:
 
 ## AOE-перк «Благодать» изучен и включён (переключатель, как залп у лучников)
 ## Со спринта 19 «Благодать» — узел 2d (tier 2, письмо 12)
+## ── РАЗВЯЗАНО С УЗЛОМ 2d (ТЗ 26.10.2026, блок 5) ───────────────────────────
+## С ТЗ 18-19.09 узел 2d — «Первое Чудо» (воскрешение), а массовое лечение —
+## «Троичный поток» (1d, трое) и «Опека» (3d, весь отряд). Проверка здесь
+## осталась от спринта 19, и изученное воскрешение молча включало лечение
+## ВСЕГО отряда за такт (переключатель включён по умолчанию): жалоба
+## владельца «монах лечит отряд из 50 без улучшения». false — прежнее
 func aoe_active() -> bool:
+	if _Opt.monk_mass_gate:
+		return false
 	return squad_id > 0 and GameManager.squad_has_ability(squad_id, "monk_2d") \
 		and GameManager.squad_ability_on(squad_id, "monk_2d")
 
@@ -1394,6 +1466,10 @@ func _self_heal(given: float) -> void:
 	current_health = minf(max_health, current_health + given * k)
 	if current_health > was:
 		_soa_push_stats()
+
+## Игровое время прошлого массового такта (−1 — не было): потолок темпа
+## массового лечения считается от прошедшего, см. _care_squad
+var _mass_last_ms: int = -1
 
 ## Стенды: скольких накрыл последний AOE-такт
 var aoe_touched: int = 0

@@ -355,28 +355,31 @@ func _block_c() -> void:
 	# Легенда
 	var top: int = _UCfg.VET_BANNER_TIERS.size()
 	var leg: Dictionary = _UCfg.veteran_banner_tier(top)
-	verdict("C5 легендарный ранг — квадратный штандарт (BANNER_STANDARD)",
-		int(leg.get("shape", -1)) == _UCfg.BANNER_STANDARD)
-	var l0: Texture2D = _BA.legend_texture(0, 0)
-	verdict("C6 легендарный флаг — золотой", _count(l0, is_gold) > 1500, "золотых %d" % _count(l0, is_gold))
-	var is_bord := func(c: Color) -> bool: return absf(c.r - _UCfg.LEGEND_ELITE_MINI.r) < 0.06 \
-		and absf(c.g - _UCfg.LEGEND_ELITE_MINI.g) < 0.05 and absf(c.b - _UCfg.LEGEND_ELITE_MINI.b) < 0.06
-	var le: Texture2D = _BA.legend_texture(2, 0)
-	verdict("C7 штандарт игрока у легенды — бордовый мини-флажок под золотым",
-		_count(l0, is_bord) == 0 and _count(le, is_bord) > 80, "бордовых %d" % _count(le, is_bord))
-	var mc: Array = _UCfg.LEGEND_MINI_COLORS
-	var near := func(c: Color, ref: Color) -> bool: return absf(c.r - ref.r) < 0.05 and absf(c.g - ref.g) < 0.05 and absf(c.b - ref.b) < 0.05
-	var lf: Texture2D = _BA.legend_texture(0, 2)
-	var c1: int = _count(lf, func(c): return near.call(c, mc[0] as Color))
-	var c2: int = _count(lf, func(c): return near.call(c, mc[1] as Color))
-	var c3: int = _count(lf, func(c): return near.call(c, mc[2] as Color))
-	verdict("C8 две лычки сверх легенды — красный и синий мини-флажки, третьего нет",
-		c1 > 60 and c2 > 60 and c3 == 0, "кр %d, син %d, зел %d" % [c1, c2, c3])
-	verdict("C9 у штандарта элиты язычков столько, сколько уровней (разные ленты)",
-		_BA.legend_texture(1, 0) != _BA.legend_texture(3, 0))
-	verdict("C10 флажок ранга в панели у легенды выше вымпела (crop_for)",
-		_BA.crop_for(top).size.y > _BA.crop_for(2).size.y + 20.0,
-		"%s / %s" % [str(_BA.crop_for(top)), str(_BA.crop_for(2))])
+	# РАЗВОРОТ ТЗ 30.10.2026: легенда — золотой вымпел той же формы, что шкала
+	verdict("C5 легендарный ранг — золотой вымпел (признак legend)",
+		bool(leg.get("legend", false)) and int(leg.get("shape", -1)) == _UCfg.BANNER_PENNANT)
+	var l0: Texture2D = _BA.legend_texture(0)
+	# РАЗВОРОТ ТЗ 31.10.2026: легенда — синее поле в фиолетовой рамке, жёлтого нет
+	var is_purple := func(c: Color) -> bool: return c.a > 0.5 and absf(c.r - _UCfg.BANNER_PURPLE.r) < 0.06 		and absf(c.g - _UCfg.BANNER_PURPLE.g) < 0.06 and absf(c.b - _UCfg.BANNER_PURPLE.b) < 0.06
+	verdict("C6 легендарный флаг — фиолетовая рамка, без золота", _count(l0, is_purple) > 30 and _count(l0, is_gold) < 20,
+		"рамка %d, золотых %d" % [_count(l0, is_purple), _count(l0, is_gold)])
+	# Чистая легенда — ни бордового отростка, ни красных лычек
+	var bord := 0
+	var img0: Image = l0.get_image()
+	for y in range(img0.get_height()):
+		for x in range(img0.get_width()):
+			var c: Color = img0.get_pixel(x, y)
+			if c.a > 0.5 and absf(c.r - _BA.ELITE_CLOTH.r) < 0.06 and absf(c.g - _BA.ELITE_CLOTH.g) < 0.06 \
+					and absf(c.b - _BA.ELITE_CLOTH.b) < 0.06:
+				bord += 1
+	verdict("C7 чистая легенда — без бордового отростка", bord == 0, "бордовых пикселей %d" % bord)
+	var top_l: int = _UCfg.VET_BANNER_TIERS.size()
+	# Штандарт за общий опыт у легенды — бордовый; пятак показывает РАНГ (ТЗ 30.10)
+	verdict("C8 штандарт игрока у легенды — бордовый, без штандарта — чистое золото",
+		_SB.spec(top_l, true, false, 3, 0)[0] == _BA.elite_texture(3, top_l) and _SB.spec(top_l, false, false, 0, 0)[0] == l0)
+	verdict("C9 ступени престижа — разные ленты", _BA.legend_texture(1) != _BA.legend_texture(3))
+	verdict("C10 флажок ранга в панели у легенды той же рамки, что у шкалы (crop_for)",
+		_BA.crop_for(top) == _BA.crop_for(2), "%s / %s" % [str(_BA.crop_for(top)), str(_BA.crop_for(2))])
 
 # ═════════════════════════════════════════════════════════════════════════════
 # D. ЛЫЧКИ СВЕРХ ЛЕГЕНДЫ
@@ -404,10 +407,9 @@ func _block_d() -> void:
 	var att0: float = u0.vet_attack
 	GameManager.credit_kills(sid, t2 - last)
 	var bn = sq.get("banner")
-	verdict("D4 две лычки без штандарта — два мини-флажка",
-		int(sq.get("legend_extra", 0)) == 2 and int(sq.get("legend_flags", 0)) == 2
-			and bn != null and int(bn.shown_flags) == 2,
-		"лычек %d, флажков %d, на знамени %s" % [int(sq.get("legend_extra", 0)), int(sq.get("legend_flags", 0)),
+	verdict("D4 две ступени престижа — на знамени хвост второй ступени",
+		int(sq.get("legend_extra", 0)) == 2 and bn != null and int(bn.shown_flags) == 2,
+		"ступеней %d, на знамени %s" % [int(sq.get("legend_extra", 0)),
 			str(bn.shown_flags) if bn != null else "-"])
 	verdict("D5 каждая лычка — ещё ступень прибавок рода", u0.vet_attack > att0,
 		"атака %.2f → %.2f" % [att0, u0.vet_attack])
@@ -417,13 +419,14 @@ func _block_d() -> void:
 	verdict("D6 штандарт игрока выдаётся и легендарному отряду", GameManager.squad_elite(sid) and el0 >= 1,
 		"элита %s, уровень %d" % [str(GameManager.squad_elite(sid)), el0])
 	GameManager.credit_kills(sid, t3 - t2)
-	verdict("D7 лычка при штандарте поднимает его уровень, флажков не прибавляет",
-		GameManager.squad_elite_level(sid) == el0 + 1 and int(sq.get("legend_flags", 0)) == 2
-			and int(sq.get("legend_extra", 0)) == 3,
-		"уровень %d → %d, флажков %d" % [el0, GameManager.squad_elite_level(sid), int(sq.get("legend_flags", 0))])
+	# РАЗВОРОТ ТЗ 29.10.2026: личный опыт (престиж) уровень штандарта не
+	# растит — он только от общего опыта
+	verdict("D7 ступень престижа уровень штандарта не меняет",
+		GameManager.squad_elite_level(sid) == el0 and int(sq.get("legend_extra", 0)) == 3,
+		"уровень %d → %d" % [el0, GameManager.squad_elite_level(sid)])
 	bn = sq.get("banner")
-	verdict("D8 знамя: золотой квадрат с мини-флажками (spec legend)",
-		bn != null and bool(bn.shown_elite) and int(bn.shown_elite_lvl) == el0 + 1)
+	verdict("D8 знамя: ступень престижа 3 записана, висит бордовый штандарт",
+		bn != null and int(bn.shown_flags) == 3 and bool(bn.shown_elite), "на знамени %s" % (str(bn.shown_flags) if bn != null else "-"))
 	GameManager.credit_kills(sid, 5000)
 	verdict("D9 потолок лычек держится", int(sq.get("legend_extra", 0)) == _UCfg.LEGEND_EXTRA_MAX)
 	for m in _members(sid):
@@ -511,7 +514,10 @@ func _block_f() -> void:
 	var hud = main.hud
 	var ib: Control = hud._idle_btn
 	var mb: Control = hud._mine_box
-	verdict("F1 плашка бездельников вдвое меньше прежних 52 px", ib != null and absf(ib.size.x - 26.0) < 0.5,
+	# ×1.5 к 26 px (ТЗ 27.10.2026, второе письмо: иконки HUD крупнее) —
+	# размер берётся из HUD, а не числом
+	verdict("F1 плашка бездельников размера HUD.IDLE_WIDGET_SIZE (26 × 1.5)", ib != null and absf(ib.size.x - float(hud.IDLE_WIDGET_SIZE)) < 0.5
+			and absf(float(hud.IDLE_WIDGET_SIZE) - 39.0) < 0.5,
 		"%s" % str(ib.size if ib != null else Vector2.ZERO))
 	verdict("F2 значок рудников справа от плашки, той же величины",
 		mb != null and mb.get_parent() == hud and absf(mb.size.x - ib.size.x) < 0.5

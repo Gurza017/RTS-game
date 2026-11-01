@@ -43,6 +43,7 @@ extends Node
 const _Spawn := preload("res://scripts/spawn_config.gd")
 const _GobCfg := preload("res://scripts/goblin/goblin_config.gd")
 const _Raid := preload("res://scripts/goblin/RaidManager.gd")
+const _OptE := preload("res://scripts/perf_config.gd")
 
 const THINK_SEC := 0.5
 const CENTRE_NONE := Vector3(INF, 0.0, INF)
@@ -622,6 +623,19 @@ func _engage(sid: int, s: Dictionary, foe: Node3D, ai: Node, assist: bool, w: Di
 		ai.call("_order_move", sid, GameManager.land_target(at), true)
 		s["goal"] = at
 		assists += 1
+	elif foe != null and _OptE.raid_lone_foe:
+		# ЧУЖОЙ БЕЗ ПАРЫ (ТЗ 27.10.2026, второе письмо, п. 1): одиночка без
+		# отряда (монах, рабочий вне артели, отбившийся) пары в front_pairs
+		# не даёт — прежде отряд на этом месте ВСТАВАЛ: угроза держала его в
+		# бою, а приказа не было. Теперь он бьёт этого чужого сам
+		if s.get("tgt") != foe or idle:
+			s["tgt"] = foe
+			s["tgt_sh"] = false
+			ai.call("_order_attack_node", sid, foe)
+			engages += 1
+		s["goal"] = CENTRE_NONE
+		s["mode"] = "fight"
+		return
 	else:
 		return
 	if mode != "fight":

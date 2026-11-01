@@ -395,6 +395,9 @@ func tick_snooze(delta: float, spare: float) -> int:
 func take_woken_f() -> PackedFloat32Array:
 	return _c.TakeWokenF()
 
+func ap_why_take() -> PackedInt32Array:
+	return _c.ApWhyTake()
+
 func press_woken_count() -> int:
 	return _c.PressWokenCount()
 
@@ -488,6 +491,36 @@ const F_AUTOPILOT := 1 << 22
 ## BigStand, этап 4: темп подтягивания и его порог, плановый возврат в
 ## GDScript раз в cadence, сторона обхода своих — всё, чем ядро заменяет
 ## покадровый вход в _process_attack у идущего к цели
+## Аренда подтягивания (ручка pullup_core): только в окне pull_lim, поводок —
+## якорь и радиус (leash_r <= 0 — нет)
+func autopilot_arm_pull(i: int, speed: float, pull_speed: float, stop: float,
+		pull_lim: float, cadence: float, side_sign: float, lx: float, lz: float,
+		leash_r: float) -> void:
+	_c.AutopilotArmPull(i, speed, pull_speed, stop, pull_lim, cadence, side_sign, lx, lz, leash_r)
+
+## Аренда подтягивания с пробегом разгона конницы (ручка charge_core)
+func autopilot_arm_charge(i: int, speed: float, pull_speed: float, stop: float,
+		pull_lim: float, cadence: float, side_sign: float, lx: float, lz: float,
+		leash_r: float, c_lx: float, c_lz: float, c_path: float) -> void:
+	_c.AutopilotArmCharge(i, speed, pull_speed, stop, pull_lim, cadence, side_sign,
+		lx, lz, leash_r, c_lx, c_lz, c_path)
+
+## Пробег разгона из ядра: (x, путь, z); не вёлся — Vector3.INF
+func charge_track_take(i: int) -> Vector3:
+	return _c.ChargeTrackTake(i)
+
+## Аренда марша (ручка march_core): к точке, стоп за stop, срок cadence
+func autopilot_arm_march(i: int, speed: float, gx: float, gz: float, stop: float,
+		cadence: float, scan_r: float, stuck: bool) -> void:
+	_c.AutopilotArmMarch(i, speed, gx, gz, stop, cadence, scan_r, stuck)
+
+func set_march_stuck(sec: float, prog: float) -> void:
+	_c.SetMarchStuck(sec, prog)
+
+## Будил ли строку детектор застревания марша (признак снимается)
+func march_stall_take(i: int) -> bool:
+	return _c.MarchStallTake(i)
+
 func autopilot_arm(i: int, speed: float, pull_speed: float, stop: float,
 		pull_lim: float, cadence: float, side_sign: float) -> void:
 	_c.AutopilotArm(i, speed, pull_speed, stop, pull_lim, cadence, side_sign)
@@ -520,6 +553,18 @@ const F_TICK_ALWAYS := 1 << 24
 const F_MATRIX_LED := 1 << 25
 ## Ожидание такта агро в ядре (этап 1б): таймер тикает в TickRows
 const F_IDLE_WAIT := 1 << 26
+
+## ── ПРИЗРАК «ПОСЛЕДНЕГО ВЫЖИВШЕГО» (ТЗ 28.10.2026, блок 3) ─────────────────
+## Биты 0..30 заняты (27-30 — зеркала тишины картинки в ядре), бит 31 —
+## знаковый: числом наружу не выдаётся, ядро ставит и читает его своими
+## SetGhost/IsGhost (см. ArmyCore.FGhost). Строка под ним для ЧУЖИХ не цель и
+## не тело: выбор цели, стрелы, счёт чужих и проверка чужих тел на шаге её
+## пропускают; свои (разведение, монах, строй) видят как прежде
+func set_ghost(i: int, on: bool) -> void:
+	_c.SetGhost(i, on)
+
+func is_ghost(i: int) -> bool:
+	return _c.IsGhost(i)
 
 ## ── ОТРЯДНЫЕ ПЕРЕСЧЁТЫ ОДНИМ ВЫЗОВОМ (BigStand-5, этап 2) ────────────────
 ## Коридор: [n, cx, cz, far, watch, fac, clear_trunk, clear_enemy] — габариты,
@@ -753,6 +798,28 @@ func fling_left(i: int) -> float:
 ## [срок, туман, LOD, ход↔стоп лента, ход↔стоп факт, разворот, взгляд ведомого]
 func vis_wake_why() -> PackedInt32Array:
 	return _c.VisWakeWhyTake()
+
+## Очередь задних рядов (ArmyCore.SetAllyQueue, ТЗ 31.10.2026); gap = 0 — выключена
+func set_ally_queue(gap: float, cos_ahead: float, reach_pad: float) -> void:
+	_c.SetAllyQueue(gap, cos_ahead, reach_pad)
+
+## Стендам: сколько шагов встало в очередь (накопительно)
+func queue_holds() -> int:
+	return int(_c.BmQueueHold)
+
+## Свои за спиной строки row против (dx, dz) — опора рядов толчка
+func support_behind(row: int, dx: float, dz: float, rng: float, cos_min: float, cap: int) -> int:
+	return int(_c.SupportBehind(row, dx, dz, rng, cos_min, cap))
+
+## Пол сближения своих в бою (см. ArmyCore.SetAllyFloor); own = 0 — выключен.
+## base — норма, от которой выведен пол (личный радиус крупных — той же долей)
+func set_ally_floor(own: float, cross: float, attacking_state: int, base: float) -> void:
+	_c.SetAllyFloorBase(base)
+	_c.SetAllyFloor(own, cross, attacking_state)
+
+## Стендам: сколько шагов срезал пол сближения своих (накопительно)
+func ally_floor_blocked() -> int:
+	return _c.BmAllyBlocked
 
 ## ── ДЕКЛАРАТИВНЫЕ СТРЕЛЫ (хак физтика №1) ─────────────────────────────────
 ## Измерительная ручка: проверка чужих тел на шаге выключена (потолок хака №2)

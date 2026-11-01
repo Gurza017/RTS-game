@@ -356,7 +356,8 @@ func _snipe_pick(default_target: Node3D, lone_only: bool = false) -> Node3D:
 		if n == null or not is_instance_valid(n):
 			continue
 		var u := n as Unit
-		if u == null or u.faction == faction or u.is_dead() or u.garrisoned:
+		# Призрак «последнего выжившего» снайперу не цель (ТЗ 28.10.2026, блок 3)
+		if u == null or u.faction == faction or u.is_dead() or u.garrisoned or u._ghost:
 			continue
 		if u.faction == Constants.FACTION_NEUTRAL:
 			continue

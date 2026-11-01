@@ -42,6 +42,7 @@ class_name SquadCommander
 
 const _UCfgSC := preload("res://scripts/unit_stats_config.gd")
 const _OptSC := preload("res://scripts/perf_config.gd")
+const _SqFormSC := preload("res://scripts/units/SquadFormation.gd")
 
 ## ═══════════════════════════════════════════════════════════════════════════
 ## АДАПТИВНЫЙ СКАН И ДЕСИНХРОНИЗАЦИЯ (ТЗ 10.10.2026, второе письмо)
@@ -105,14 +106,33 @@ func _enqueue(u: Unit, sid: int, kind: int, a, b, c) -> void:
 	# Кадр постановки — для замера ожидания; у заменённого приказа он прежний
 	var f0: int = int((had as Array)[6]) if had != null else Engine.get_physics_frames()
 	_oq[id] = [u, kind, sid, a, b, c, f0]
+	if Unit.dbg_order_src:
+		var stk: Array = get_stack()
+		_dbg_enq[id] = "%s@%d" % [String((stk[1] as Dictionary).get("function", "?")) if stk.size() > 1 else "?",
+			Engine.get_physics_frames()]
 	oq_queued += 1
 	oq_depth_max = maxi(oq_depth_max, _oq.size())
 
+## Отладка стендов (Unit.dbg_order_src): кто поставил приказ в очередь
+var _dbg_enq: Dictionary = {}
+
 func _issue(u: Unit, kind: int, a, b, c) -> void:
+	# Метка источника для зонда order_override_bug: в экспорте get_stack()
+	# пуст, и марш [A] с перехватом по дороге считался снятием приказа игрока
+	GameManager.probes.ctx = "attack_move"
 	if kind == OQ_MOVE:
+		if _OptSC.cmd_meter: _OptSC.cmd_src = "attack_move"
 		u.command_move(a, false, b, false, true, c)
+		if _OptSC.cmd_meter: _OptSC.cmd_src = ""
 	else:
 		u.command_attack(a, bool(b))
+	GameManager.probes.ctx = ""
+	if Unit.dbg_order_src:
+		var src: Variant = _dbg_enq.get(u.get_instance_id())
+		if src != null:
+			var parts: PackedStringArray = String(src).split("@")
+			u.dbg_src = "q:%s ждал %d кадр" % [parts[0], Engine.get_physics_frames() - int(parts[1])]
+			_dbg_enq.erase(u.get_instance_id())
 
 func _drain_orders() -> void:
 	if _oq_ids.is_empty():
@@ -366,17 +386,63 @@ func attack_move(sm: Node, dest: Vector3, run: bool = false, march: bool = true)
 func prepare_attack_move(sm: Node) -> void:
 	_drop_defense(_selected_squads(sm))
 
+## Прежняя стойка отрядов, снятая _drop_defense и ещё не положенная в запись
+## режима (_register_am идёт следом за prepare_attack_move / attack_move)
+var _stance0: Dictionary = {}
+var stance_restores: int = 0
+
 func _drop_defense(sids: Dictionary) -> void:
+	# ── [A] — НАДСТРОЙКА НАД СТОЙКОЙ (ТЗ 31.10.2026) ───────────────────────
+	# «В Защите через атаку он должен идти, как если бы стоял, а я кликнул по
+	# ближнему отряду, — и фаланга пошла». Стойка не меняется; встреченного
+	# фаланга бьёт прямым приказом (_def_forced) — переносом стены
+	if _OptSC.am_keep_defense:
+		return
 	# Отряд, которому велели идти с боем, обязан быть вправе идти: в стойке
-	# ЗАЩИТА ход запрещён на уровне move_speed_mult, и приказ молча пропал бы
+	# ЗАЩИТА нет инициативы (авто-агро только перед фронтом), и марш с боем
+	# вырождался бы в марш. Стойка ВОЗВРАЩАЕТСЯ при снятии режима (ТЗ
+	# 28.10.2026, пятое письмо: «после прибытия — прежнее состояние»)
 	for sid in sids:
 		var sq: Variant = GameManager.squads.get(int(sid))
 		if sq == null:
 			continue
+		var was: String = ""
 		for m in ((sq as Dictionary)["members"] as Array):
 			if m != null and is_instance_valid(m) and m.has_method("set_stance"):
+				if was == "":
+					was = String((m as Unit).stance)
 				if String((m as Unit).stance) == _UCfgSC.STANCE_DEFENSE:
 					(m as Unit).set_stance(_UCfgSC.STANCE_ATTACK)
+		# Повторный [A] поверх действующего: прежняя стойка уже в записи —
+		# нести её дальше, а не «атаку», в которую отряд переведён режимом
+		var old: Variant = _am.get(int(sid))
+		if old != null and String((old as Dictionary).get("stance0", "")) != "":
+			was = String((old as Dictionary)["stance0"])
+		if was != "" and not _stance0.has(int(sid)):
+			_stance0[int(sid)] = was
+
+## Вернуть отряду стойку, в которой он был до [A] (ручка am_stance_restore).
+## Без клича: это не новый приказ игрока, а возврат к его прежнему
+func _restore_stance(sid: int, st: Dictionary) -> void:
+	if not _OptSC.am_stance_restore:
+		return
+	var was: String = String(st.get("stance0", ""))
+	if was == "" or was == _UCfgSC.STANCE_ATTACK:
+		return
+	var sq: Variant = GameManager.squads.get(sid)
+	if sq == null:
+		return
+	var changed := false
+	for m in ((sq as Dictionary)["members"] as Array):
+		if m == null or not is_instance_valid(m) or not m.has_method("set_stance"):
+			continue
+		if (m as Unit).is_dead() or String((m as Unit).stance) == was:
+			continue
+		(m as Unit).set_stance(was)
+		changed = true
+	if changed:
+		GameManager.on_squad_stance(sid, was)
+		stance_restores += 1
 
 ## own_dest — у каждого отряда СВОЯ конечная точка: середина его постов (строй
 ## по линии с боем). Общая середина линии делала крайние отряды «потерянными»
@@ -390,8 +456,15 @@ func _register_am(sids: Dictionary, dest: Vector3, run: bool, own_dest: bool = f
 		var d: Vector3 = dest
 		if own_dest:
 			d = _posts_centre(int(sid2), dest)
+		# Повторный [A]: остаток очереди и темп прежнего режима — долой
+		if _am.has(int(sid2)):
+			_drop_orders(int(sid2))
+			_pace_reset(int(sid2))
+		var st0: String = String(_stance0.get(int(sid2), ""))
+		_stance0.erase(int(sid2))
 		_am[int(sid2)] = {
 			"grp": _group_seq,
+			"stance0": st0,
 			"dest": d, "run": run, "clear": 0,
 			"wait": 0.0, "fighting": false,
 			# Точка, где отряд свернул с марша к врагу. Vector3.INF — не
@@ -401,8 +474,46 @@ func _register_am(sids: Dictionary, dest: Vector3, run: bool, own_dest: bool = f
 			"next_scan": Unit.game_ms() + _rng.randi_range(0, SCAN_MARCH_MS),
 		}
 		GameManager.squad_note_order(int(sid2), GameManager.ORDER_MOVE, d)
+		GameManager.am_group_of[int(sid2)] = _group_seq
+		GameManager.am_marching[int(sid2)] = d
+	_stance0.clear()
 	active_count = _am.size()
+	_update_group_centres()
 	return sids.size()
+
+## Центр каждой группы [A] — медиана центров её отрядов; читает
+## GameManager.squad_leg (одна дорога на группу, ручка am_group_route)
+var _grp_centre_t: float = 0.0
+const GRP_CENTRE_SEC := 0.5
+
+func _update_group_centres() -> void:
+	# Array, а не Packed: Packed-массив из словаря читается КОПИЕЙ, и append
+	# в него терялся (зонд qa_am_map: 411 ошибок «index -1»)
+	var xs: Dictionary = {}
+	var zs: Dictionary = {}
+	for sid in _am.keys():
+		var c: Vector2 = GameManager.squad_centre_xz(int(sid))
+		if c == Vector2.INF:
+			continue
+		var g: int = int((_am[sid] as Dictionary).get("grp", 0))
+		if not xs.has(g):
+			xs[g] = []
+			zs[g] = []
+		(xs[g] as Array).append(c.x)
+		(zs[g] as Array).append(c.y)
+	GameManager.am_group_centre.clear()
+	for g in xs.keys():
+		var ax: Array = xs[g]
+		var az: Array = zs[g]
+		ax.sort()
+		az.sort()
+		var n: int = ax.size()
+		if n == 0:
+			continue
+		var h: int = n / 2
+		var mx: float = float(ax[h]) if n % 2 == 1 else (float(ax[h - 1]) + float(ax[h])) * 0.5
+		var mz: float = float(az[h]) if n % 2 == 1 else (float(az[h - 1]) + float(az[h])) * 0.5
+		GameManager.am_group_centre[g] = Vector3(mx, 0.0, mz)
 
 ## Середина постов отряда (куда его поставил последний приказ)
 func _posts_centre(sid: int, fallback: Vector3) -> Vector3:
@@ -426,9 +537,14 @@ func _posts_centre(sid: int, fallback: Vector3) -> Vector3:
 ## SelectionManager: ПКМ и клавиши стоек зовут cancel_squad)
 func cancel_squad(sid: int) -> void:
 	_drop_orders(sid)
-	if _am.erase(sid):
+	var e: Variant = _am.get(sid)
+	if e != null:
+		_am.erase(sid)
+		GameManager.am_group_of.erase(sid)
+		GameManager.am_marching.erase(sid)
 		active_count = _am.size()
 		_pace_reset(sid)
+		_restore_stance(sid, e as Dictionary)
 
 ## Снять темп колонны со всех бойцов отряда
 func _pace_reset(sid: int) -> void:
@@ -438,6 +554,10 @@ func _pace_reset(sid: int) -> void:
 	for m in ((sq as Dictionary)["members"] as Array):
 		if m != null and is_instance_valid(m):
 			(m as Unit).pace_mult = 1.0
+
+## Отряд держит «Защиту» под [A] (am_keep_defense): приказ атаки ему — прямой
+func _def_forced(lead: Unit) -> bool:
+	return _OptSC.am_keep_defense and lead.stance == _UCfgSC.STANCE_DEFENSE and lead.is_combatant() and lead.pursues_target()
 
 func is_attack_moving(sid: int) -> bool:
 	return _am.has(sid)
@@ -484,7 +604,16 @@ func _physics_process(delta: float) -> void:
 func _physics_body(delta: float) -> void:
 	_drain_orders()
 	if _am.is_empty():
+		if not GameManager.am_group_of.is_empty():
+			GameManager.am_group_of.clear()
+			GameManager.am_group_centre.clear()
+		if not GameManager.am_marching.is_empty():
+			GameManager.am_marching.clear()
 		return
+	_grp_centre_t -= delta
+	if _grp_centre_t <= 0.0:
+		_grp_centre_t = GRP_CENTRE_SEC
+		_update_group_centres()
 	_tick_t -= delta
 	if _tick_t <= 0.0:
 		_tick_t = AM_TICK_SEC
@@ -571,6 +700,15 @@ func _tick_squad(sid: int, _delta: float) -> void:
 					and Vector2((raw_f as Unit).global_position.x - cpos.x,
 						(raw_f as Unit).global_position.z - cpos.z).length() <= _scan_radius(lead) * 1.25:
 				foe = raw_f
+				# ── ЗАПОМНЕННЫЙ ВРАГ ТОЖЕ ПРОХОДИТ СЕКТОР (ТЗ 29.10.2026, п. 4) ──
+				# Между сканами отряд держал последнего врага без проверки
+				# сектора: беглец орды, проскочивший мимо отряда (в 6 м он
+				# «вплотную»), уводил весь отряд за спину на 6-10 м — отряд
+				# в [A], вышедший из [S], «откатывался» за остатком волны
+				if _OptSC.am_cone_memory and not _in_march_cone(st, cpos, foe):
+					foe = null
+					st.erase("foe")
+					do_scan = now_s - int(st.get("last_scan", 0)) >= SCAN_MIN_GAP_MS
 			elif bool(st["fighting"]) and st.has("foe"):
 				# Враг отряда пал или ушёл посреди боя — скан вне очереди
 				st.erase("foe")
@@ -696,21 +834,32 @@ func _tick_squad(sid: int, _delta: float) -> void:
 		# (squad_pick_member — только при forced), и весь отряд шёл в одну
 		# модель — пять отрядов сплющивались в одну молотилку
 		var fsid: int = _front_target(sid, st, cpos, foe)
+		# Фаланга в «Защите» (am_keep_defense) без прямого приказа с места не
+		# сходит: встреченного бьёт прямым — перенос стены (Unit._wall_goal)
+		var dforced: bool = _def_forced(lead)
 		if fsid > 0:
 			if _OptSC.am_order_queue:
 				_atk_sink.clear()
-				GameManager.squad_attack_squad(sid, fsid, false, _atk_sink)
+				GameManager.squad_attack_squad(sid, fsid, dforced, _atk_sink)
 				var k := 0
 				while k + 1 < _atk_sink.size():
-					_enqueue(_atk_sink[k] as Unit, sid, OQ_ATTACK, _atk_sink[k + 1], false, null)
+					_enqueue(_atk_sink[k] as Unit, sid, OQ_ATTACK, _atk_sink[k + 1], dforced, null)
 					k += 2
 			else:
-				GameManager.squad_attack_squad(sid, fsid, false)
+				GameManager.squad_attack_squad(sid, fsid, dforced)
 		else:
 			for u in alive:
-				_enqueue(u as Unit, sid, OQ_ATTACK, foe, false, null)
+				_enqueue(u as Unit, sid, OQ_ATTACK, foe, dforced, null)
 		GameManager.squad_note_order(sid, GameManager.ORDER_ATTACK,
 			foe.global_position, foe)
+		# ── СТРЕЛКИ ВНЕ ДАЛЬНОСТИ ПОДТЯГИВАЮТСЯ ПОШТУЧНО (ТЗ 28.10.2026) ────
+		# Скан берёт врага на 1.15 дальности + 2 м, а нефорсированный приказ
+		# атаки стрелок за дальностью бросает («гнаться не буду») и стоит без
+		# цели до следующего такта: задние ряды и дальний фланг замирали, не
+		# стреляя. Кому до цели дальше дальности — шаг на 0.8 дальности (вместо
+		# приказа атаки в очереди), кто достаёт — стреляет, не сходя с места
+		if _OptSC.am_archer_standoff and not lead.pursues_target() and lead.is_combatant():
+			_archers_close_in(sid, st, alive, fsid, foe)
 		return
 	# ── 2г. ПОСТРОЙКИ ПО ХОДУ (ТЗ 22.10.2026) ────────────────────────────
 	# Чужих бойцов рядом нет, а в секторе марша стоит чужая постройка —
@@ -749,6 +898,17 @@ func _tick_squad(sid: int, _delta: float) -> void:
 	# такт без скана выводил бы отряд из боя, пока бойцы ещё рубятся
 	if not do_scan and bool(st["fighting"]):
 		return
+	# ── КТО-ТО ЕЩЁ РУБИТСЯ — НЕ ЗАЧИЩЕНО (29.10.2026) ─────────────────────
+	# Скан идёт от ЦЕНТРА отряда на 1.15 дальности + 2 м и не видит врага у
+	# передней кромки строя: командир объявлял «зачищено» при живой первой
+	# волне, _resume_march слал command_move всем (цели сброшены, разметка
+	# переехала), бойцы отходили от врага в упор и тут же брали его снова
+	# (qa_no_retreat A-deep: откат 4.5 м, 52 эпизода «от врага»). Отряд
+	# выходит из боя, когда ни у кого нет живой цели
+	if bool(st["fighting"]) and _any_engaged(alive):
+		st["clear"] = 0
+		st["wait"] = AM_RESUME_GAP
+		return
 	# Врага в досягаемости нет — место стычки больше ничего не держит
 	st["hold"] = Vector3.INF
 	st["leash"] = AM_LEASH
@@ -764,17 +924,37 @@ func _tick_squad(sid: int, _delta: float) -> void:
 
 	# ── 4. ДОШЛИ? ──────────────────────────────────────────────────────────
 	var dest: Vector3 = st["dest"]
+	var fought: bool = bool(st["fighting"])
 	# ── ГРУППА ПРИБЫВАЕТ ЦЕЛИКОМ (ТЗ 23.10.2026, к am_own_dest) ──────────────
 	# У каждого отряда своя точка, и первый дошедший снимал режим раньше
 	# соседей: дальше обычные правила (ответ на обстрел) уводили его за
 	# стрелками во фланге (qa_attack_move_vector_test A3: увод 25 м). Дошедший
 	# смыкается и ЖДЁТ в режиме [A] (сектор марша, поводок), пока не дойдут
 	# все отряды клика, — тогда режим снимается со всех разом
-	if _OptSC.am_own_dest and cpos.distance_to(dest) <= AM_ARRIVE:
+	# ── ПРИБЫВШИЙ НЕ ВОЗВРАЩАЕТСЯ В ТОЧКУ ПОСЛЕ БОЯ (29.10.2026) ────────────
+	# Отряд, дошедший и ждущий группу, после стычки оказывался дальше
+	# AM_ARRIVE от точки и шёл в неё маршем назад (_resume_march к старой
+	# разметке). Приказ уже исполнен: строй собирается там, где кончился бой,
+	# разметка едет за ним (squad_close_ranks с перецентровкой)
+	# ── ПРОШЁЛ СВОЮ ТОЧКУ — ТОЖЕ ДОШЁЛ (ТЗ 31.10.2026) ─────────────────────
+	# Стычка уносит отряд вперёд за его место в строю группы (задний эшелон
+	# глубокого строя рубится в первой линии): марш к точке был бы маршем
+	# НАЗАД. Отряд строится там, где кончился бой
+	var passed: bool = false
+	if _OptSC.am_no_reform and fought:
+		var md0: Variant = st.get("mdir")
+		if md0 != null:
+			passed = (dest.x - cpos.x) * (md0 as Vector2).x + (dest.z - cpos.z) * (md0 as Vector2).y <= 0.0
+	if _OptSC.am_own_dest and (bool(st.get("arrived", false)) or cpos.distance_to(dest) <= AM_ARRIVE or passed):
+		st["fighting"] = false
 		if not bool(st.get("arrived", false)):
 			st["arrived"] = true
+			GameManager.am_marching.erase(sid)
 			_pace_reset(sid)
-			GameManager.squad_close_ranks(sid)
+			GameManager.squad_close_ranks(sid, fought)
+		elif fought:
+			_pace_reset(sid)
+			GameManager.squad_close_ranks(sid, true)
 		var grp_a: int = int(st.get("grp", 0))
 		if not _group_arrived(grp_a):
 			return
@@ -783,14 +963,15 @@ func _tick_squad(sid: int, _delta: float) -> void:
 				GameManager.squad_clear_order(int(sid_g))
 				cancel_squad(int(sid_g))
 		return
-	if cpos.distance_to(dest) <= AM_ARRIVE:
+	if cpos.distance_to(dest) <= AM_ARRIVE or passed:
 		# ПРИБЫЛИ — СМЫКАЕМ СТРОЙ И СНИМАЕМ РЕЖИМ. Смыкание, а не новая
 		# разметка: разметка отряда не стиралась на время боя (её только
 		# блокировали), и close_ranks вернёт выживших ровно в ту форму, в
 		# которой отряд выходил, — это и есть заказанное «перестраиваются
-		# точно в ту формацию»
+		# точно в ту формацию». После боя — по месту боя (force), не назад
 		_pace_reset(sid)
-		GameManager.squad_close_ranks(sid)
+		GameManager.am_marching.erase(sid)
+		GameManager.squad_close_ranks(sid, fought)
 		GameManager.squad_clear_order(sid)
 		cancel_squad(sid)
 		return
@@ -819,6 +1000,7 @@ const AM_CONE_COS := 0.5
 const AM_HIT_CONE_COS := 0.7
 const AM_SIDE_CONTACT := 6.0
 var cone_skips: int = 0
+var archer_standoffs: int = 0
 
 ## Угроза отряду, идущему [A], — в секторе его марша? (контратака на обстрел
 ## GameManager.squad_counter_charge спрашивает: иначе стрелки с фланга
@@ -857,7 +1039,10 @@ func _in_march_cone(st: Dictionary, cpos: Vector3, foe: Node3D, cos_min: float =
 	var fz: float = fp.z - cpos.z
 	var fl: float = sqrt(fx * fx + fz * fz)
 	if fl <= AM_SIDE_CONTACT:
-		return true
+		# Бегущий в панике «вплотную» не угроза: за ним отряд не
+		# разворачивается (ТЗ 29.10.2026, п. 4); рубят его бойцы сами
+		if not (_OptSC.am_cone_memory and foe is Unit and (foe as Unit).is_panicked()):
+			return true
 	if (cx * fx + cz * fz) / (cl * fl) >= cos_min:
 		return true
 	cone_skips += 1
@@ -1069,6 +1254,12 @@ func _keep_column(sid: int, alive: Array, cpos: Vector3, dest: Vector3, run: boo
 		var r4: Vector3 = un4.global_position - cpos
 		if Vector2(r4.x, r4.z).length() <= rejoin_r:
 			continue
+		# Ушедший ВПЕРЁД колонны назад не идёт — его догонят (темп колонны);
+		# пост позади бойца тоже не зовёт его назад
+		if _OptSC.am_no_reform and (r4.x * course.x + r4.z * course.z > 0.0
+				or (un4.post_pos.x - un4.global_position.x) * course.x
+				+ (un4.post_pos.z - un4.global_position.z) * course.z < 0.0):
+			continue
 		if now_r - int(un4.get_meta("am_rejoin", -100000)) < REJOIN_GAP_MS:
 			continue
 		un4.set_meta("am_rejoin", now_r)
@@ -1151,8 +1342,54 @@ func _front_target(sid: int, st: Dictionary, cpos: Vector3, foe: Node3D) -> int:
 	var got: Variant = ((cache as Dictionary)["pairs"] as Dictionary).get(sid)
 	if got == null:
 		return fallback
+	if _OptSC.am_front_guard and int(got) != fallback and not _pair_near(st, cpos, foe, int(got)):
+		front_rejects += 1
+		return fallback
 	front_assigns += 1
 	return int(got)
+
+## ── ПАРА ФРОНТА НЕ УВОДИТ В СТОРОНУ (ТЗ 30.10.2026, скриншот 01:29) ──────
+## front_pairs раскладывает по оси фронта ВСЕ чужие отряды в радиусе «габарит
+## группы + досягаемость + 6 м» (у армии из 10-15 отрядов это 60-75 м) и
+## раздаёт их нашим по порядку слева направо: крайний отряд получал крайнего
+## врага — волну, идущую мимо в 50-70 м сбоку, — хотя свой враг стоял в
+## досягаемости и в секторе марша. Подмена не проверялась ничем, а
+## несфорсированная атака на отряд-пару (или подход к угрозе с поводком
+## AM_ASSIST_LEASH 100 м) срывала отряд с линии. Пара годится, если её центр
+## рядом с найденным врагом, либо не дальше него и в секторе марша
+const FRONT_PAIR_NEAR := 12.0
+const FRONT_PAIR_SLACK := 6.0
+var front_rejects: int = 0
+
+func _pair_near(st: Dictionary, cpos: Vector3, foe: Node3D, fsid: int) -> bool:
+	var pc: Vector2 = GameManager.squad_centre_xz(fsid)
+	if pc == Vector2.INF or foe == null:
+		return false
+	var fp: Vector3 = foe.global_position
+	if Vector2(pc.x - fp.x, pc.y - fp.z).length() <= FRONT_PAIR_NEAR:
+		return true
+	var df: float = Vector2(fp.x - cpos.x, fp.z - cpos.z).length()
+	var dp: float = Vector2(pc.x - cpos.x, pc.y - cpos.z).length()
+	if dp > df + FRONT_PAIR_SLACK:
+		return false
+	# Сектор марша — тот же, что у скана (_in_march_cone), по центру пары
+	var dest: Vector3 = st["dest"]
+	var cx: float = dest.x - cpos.x
+	var cz: float = dest.z - cpos.z
+	var cl: float = sqrt(cx * cx + cz * cz)
+	if cl < AM_ARRIVE * 2.0:
+		var md: Variant = st.get("mdir")
+		if md == null:
+			return true
+		cx = (md as Vector2).x
+		cz = (md as Vector2).y
+		cl = 1.0
+	var px: float = pc.x - cpos.x
+	var pz: float = pc.y - cpos.z
+	var pl: float = sqrt(px * px + pz * pz)
+	if pl <= AM_SIDE_CONTACT:
+		return true
+	return (cx * px + cz * pz) / (cl * pl) >= AM_CONE_COS
 
 ## Возобновить марш отряда в точку. Строй переносится ЦЕЛИКОМ — тем же
 ## приёмом, что и приказ игрока (см. GameManager.squad_set_formation через
@@ -1162,6 +1399,22 @@ func _resume_march(sid: int, alive: Array, dest: Vector3, run: bool) -> void:
 	var centroid: Vector3 = GameManager._centroid_of(alive)
 	centroid.y = 0.0
 	var shift: Vector3 = dest - centroid
+	# ── ТОЧКА ПОЗАДИ — СТРОИМСЯ НА МЕСТЕ (ТЗ 31.10.2026) ────────────────────
+	# Бой (или погоня по поводку) унёс отряд за его точку в строю группы:
+	# марш к ней — марш НАЗАД. Отряд считается дошедшим и строится там, где
+	# стоит (смыкание с перецентровкой), режим ждёт группу как у дошедших
+	var e_r: Variant = _am.get(sid)
+	if _OptSC.am_no_reform and e_r != null:
+		var md_r: Variant = (e_r as Dictionary).get("mdir")
+		# «Позади» — и «почти здесь»: точка ближе AM_REGROUP_AHEAD по ходу
+		# раздала бы передним места за спиной (строй глубже этого запаса)
+		if md_r != null and shift.x * (md_r as Vector2).x + shift.z * (md_r as Vector2).y <= AM_REGROUP_AHEAD:
+			(e_r as Dictionary)["arrived"] = true
+			(e_r as Dictionary)["fighting"] = false
+			GameManager.am_marching.erase(sid)
+			passed_dest += 1
+			GameManager.squad_close_ranks(sid, true)
+			return
 	# ── РАЗМЕТКА ЕДЕТ ВМЕСТЕ С МАРШЕМ (ТЗ 25.09.2026, найдено qa_attack_move B3) ─
 	# Бойцы шли к точке, а места строя (squads[sid]["slots"]) оставались там,
 	# где отряд застал бой. Через три секунды окно боя закрывалось, штатное
@@ -1210,6 +1463,10 @@ func _resume_march(sid: int, alive: Array, dest: Vector3, run: bool) -> void:
 ## ближайший ещё не занятый боец. O(n·m) на возобновление марша (60×60 —
 ## микросекунды, раз на стычку), покадрового пути здесь нет
 var regrouped: int = 0
+## Отрядов, построенных на месте: бой унёс их за свою точку (ТЗ 31.10.2026)
+var passed_dest: int = 0
+## Точка ближе этого по ходу, м, — строимся на месте, а не маршем к ней
+const AM_REGROUP_AHEAD := 4.0
 func _march_to_slots(alive: Array, slots: Array, course: Vector3, run: bool) -> void:
 	var n: int = alive.size()
 	var px := PackedFloat32Array()
@@ -1219,6 +1476,21 @@ func _march_to_slots(alive: Array, slots: Array, course: Vector3, run: bool) -> 
 		var p0: Vector3 = (alive[i] as Node3D).global_position
 		px[i] = p0.x
 		pz[i] = p0.z
+	# Раздача по рядам (ручка rank_match, см. SquadFormation.rank_pairs):
+	# передние — в передние шеренги, без хода назад сквозь своих
+	if _OptSC.rank_match:
+		var ui: Array = range(n)
+		var si_l: Array = range(mini(n, slots.size()))
+		var pr: int = maxi(_SqFormSC._per_row(slots, course), 1)
+		for pp in _SqFormSC.rank_pairs(px, pz, ui, slots, si_l, course, pr):
+			var un0 := alive[int(pp[1])] as Unit
+			if un0 == null or not un0.has_method("command_move"):
+				continue
+			var sl0: Vector3 = slots[int(pp[0])]
+			sl0.y = 0.0
+			_enqueue(un0, _sid_of(un0), OQ_MOVE, sl0, course, run)
+		regrouped += 1
+		return
 	var taken := PackedByteArray()
 	taken.resize(n)
 	var left: int = n
@@ -1332,9 +1604,53 @@ func _assist_move(sid: int, alive: Array, cpos: Vector3, fpos: Vector3, stand_of
 		_enqueue(un, sid, OQ_MOVE, p, dir / dist, false)
 	GameManager.squad_note_order(sid, GameManager.ORDER_MOVE, goal)
 
+## Стрелки отряда, не достающие до цели, идут к ней на 0.8 своей дальности
+## (ручка am_archer_standoff). Точка цели — центр чужого отряда-цели (fsid) или
+## сам враг. Не чаще раза в 2 с на отряд: приказ будит бойца и метит позу
+func _archers_close_in(sid: int, st: Dictionary, alive: Array, fsid: int, foe: Node3D) -> void:
+	var now_a: int = Unit.game_ms()
+	if now_a - int(st.get("adv_t", -100000)) < 2000:
+		return
+	var fpos: Vector3 = foe.global_position
+	if fsid > 0:
+		var fc: Vector2 = GameManager.squad_centre_xz(fsid)
+		if fc != Vector2.INF:
+			fpos = Vector3(fc.x, 0.0, fc.y)
+	fpos.y = 0.0
+	var sent := 0
+	for u in alive:
+		var un := u as Unit
+		if un.state == Unit.State.ATTACKING or un.retreating or un._panicked:
+			continue
+		var mp: Vector3 = un.global_position
+		mp.y = 0.0
+		var d: float = mp.distance_to(fpos)
+		var rng: float = un.attack_range
+		if d <= rng * 0.95 or d < 0.1:
+			continue
+		var dir: Vector3 = (fpos - mp) / d
+		var goal: Vector3 = mp + dir * (d - rng * 0.8)
+		_enqueue(un, sid, OQ_MOVE, goal, dir, false)
+		sent += 1
+	if sent > 0:
+		st["adv_t"] = now_a
+		archer_standoffs += 1
+
 ## Радиус ВСТУПЛЕНИЯ В БОЙ по роду войск вожака. Пол — собственный радиус
 ## инициативы бойца (AGGRO_RADIUS): ниже него отряд перестал бы замечать тех,
 ## на кого и без всякого Attack-Move бросился бы сам
+## Есть ли у кого-то из отряда живая цель — отряд ещё в бою, «зачищено»
+## объявлять рано. O(n) раз в такт на отряд (0.3 с), покадрового пути нет
+func _any_engaged(alive: Array) -> bool:
+	for u in alive:
+		var un := u as Unit
+		if un == null or un.state != Unit.State.ATTACKING:
+			continue
+		var t = un.attack_target
+		if t != null and is_instance_valid(t) and not t.is_dead():
+			return true
+	return false
+
 func _scan_radius(lead: Unit) -> float:
 	var r: float = lead.attack_range * AM_SCAN_MULT + AM_ENGAGE_MARGIN
 	return clampf(maxf(r, lead.aggro_radius()), 1.0, AM_SCAN_MAX)

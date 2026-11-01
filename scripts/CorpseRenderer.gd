@@ -42,6 +42,7 @@ extends RefCounted
 
 const _SHADER := preload("res://shaders/mm_corpse.gdshader")
 const _Opt := preload("res://scripts/perf_config.gd")
+const _GobCfgCR := preload("res://scripts/goblin/goblin_config.gd")
 const _ArrowC := preload("res://scripts/Arrow.gd")
 const _Vis := preload("res://scripts/units/UnitVisuals.gd")
 const _UCfgC := preload("res://scripts/unit_stats_config.gd")
@@ -222,6 +223,9 @@ class Bucket:
 	var tint_set: bool = false
 	## Мягкость ступени затемнения кучи (см. _tone_k), считается при создании
 	var tone_k: float = 1.0
+	## Род тела для палитры кучи: goblin / big / blue / red (см. CORPSE_PALETTES)
+	var kind: String = ""
+	var faction: int = -1
 
 	## ВСЕ ЗАПИСИ В БУФЕР — ТОЛЬКО ЗДЕСЬ. Packed-массивы в GDScript копируются
 	## при записи снаружи владельца (та же оговорка и с тем же обоснованием
@@ -517,16 +521,170 @@ const CORPSE_TINTS := {
 	Constants.FACTION_GOBLIN: Color(0.88, 1.0, 0.80),
 }
 
-func _set_faction_tint(b, faction: int) -> void:
+func _set_faction_tint(b, faction: int, kind: String = "") -> void:
 	b.tint_set = true
-	if not _Opt.corpse_faction_tint:
-		return
+	b.faction = faction
+	b.kind = kind
+	_paint_bucket(b)
+
+## ── ПАЛИТРА КУЧИ ТЕЛ (ТЗ 01.11.2026, «оттеночный блицкриг») ─────────────────
+## «Скучное серое пятно» на броде: орда ложится тёмно-зелёным ковром, люди в
+## нём теряются. Палитра — униформы шейдера тел (mm_corpse): у каждого рода
+## три близких подтона (тело берёт свой по хэшу точки), обесцвечивание,
+## яркость и подъём тёмных пикселей к подтону (dead_lift); люди бледнее
+## массы. Цена кадра — ноль: ни бакетов, ни вызовов отрисовки не прибавилось.
+## Индекс 0 — прежний вид (подтон стороны, CORPSE_DIM/CORPSE_DESAT); род без
+## своей записи в палитре рисуется так же.
+## troll — множитель билборда туши тролля (Troll._leave_corpse, своя отрисовка)
+## Переключение в партии — F7 (палитра) и F8 (тень), см. Main._unhandled_input
+const CORPSE_PALETTES := [
+	{"name": "обычная"},
+	# Гибрид раунда 2: «болотный мох», люди бледнее массы
+	{"name": "мох (гибрид)",
+		"goblin": [[Color(0.78, 0.92, 0.66), Color(0.66, 0.80, 0.62), Color(0.86, 0.90, 0.74)], 0.50, 0.90, 0.40],
+		"big": [[Color(0.52, 0.62, 0.56)], 0.55, 0.74, 0.15],
+		"blue": [[Color(0.84, 0.90, 0.98)], 0.75, 1.0, 0.65],
+		"red": [[Color(0.96, 0.86, 0.84)], 0.75, 1.0, 0.65],
+		"troll": Color(0.64, 0.74, 0.66), "water": 0.35},
+	# Итог (на базе 3.3 «выжженная степь»): гоблины — серно-жёлтый, олива и
+	# рыжий; туши чуть светлее троллей; люди — как в обычной (ключей blue/red
+	# нет — _paint_bucket берёт прежний подтон стороны)
+	{"name": "степь 3.3 (итог)",
+		"goblin": [[Color(1.0, 0.92, 0.55), Color(0.80, 0.90, 0.50), Color(0.96, 0.64, 0.44)], 0.25, 1.0, 0.50],
+		"big": [[Color(0.80, 0.70, 0.58)], 0.35, 0.95, 0.35],
+		"troll": Color(0.62, 0.50, 0.40), "water": 0.30},
+]
+## Тень под кучей: [прозрачность центра пятна, множитель размера, имя]; F8
+## идёт по кругу 0 → 4 → 0
+const CORPSE_SHADOWS := [
+	[0.0, 1.0, "нет"],
+	[0.20, 1.5, "еле заметная"],
+	[0.50, 2.1, "слабая"],
+	[0.62, 2.4, "средняя"],
+	[0.75, 2.7, "плотная"],
+]
+const _WATER_MIX_DEFAULT := 0.72
+## Множитель пятна, с которым записаны тени (пересчёт при смене уровня)
+var _shadow_mult: float = 1.0
+
+static func kind_of(unit: Unit) -> String:
+	var id: String = String(unit.stat_id)
+	if id.find("troll") >= 0 or id.find("big") >= 0 or id.find("boss") >= 0:
+		return "big"
+	if int(unit.faction) == Constants.FACTION_GOBLIN:
+		return "goblin"
+	return "blue" if int(unit.faction) == Constants.FACTION_PLAYER else "red"
+
+func _palette() -> Dictionary:
+	return CORPSE_PALETTES[clampi(_Opt.corpse_palette, 0, CORPSE_PALETTES.size() - 1)]
+
+func _paint_bucket(b) -> void:
 	var mat := (b.mm.mesh as QuadMesh).material as ShaderMaterial
 	if mat == null:
 		return
-	mat.set_shader_parameter("dead_dim", CORPSE_DIM)
-	mat.set_shader_parameter("dead_desat", CORPSE_DESAT)
-	mat.set_shader_parameter("dead_tint", CORPSE_TINTS.get(faction, Color(1.0, 0.94, 0.86)))
+	var pal: Dictionary = _palette()
+	var p: Variant = pal.get(b.kind)
+	if p == null:
+		# Прежний вид: подтон стороны (или серо-бурый ковёр без ручки)
+		var on: bool = _Opt.corpse_faction_tint
+		mat.set_shader_parameter("dead_dim", CORPSE_DIM if on else 0.74)
+		mat.set_shader_parameter("dead_desat", CORPSE_DESAT if on else 0.40)
+		mat.set_shader_parameter("dead_tint", CORPSE_TINTS.get(b.faction, Color(1.0, 0.94, 0.86)) if on else Color(1.0, 0.94, 0.86))
+		mat.set_shader_parameter("tint_var", 0.0)
+		mat.set_shader_parameter("dead_lift", 0.0)
+		mat.set_shader_parameter("water_mix", _WATER_MIX_DEFAULT)
+		mat.set_shader_parameter("dead_vivid", float(_Opt.corpse_vivid))
+		return
+	var row: Array = p
+	var t: Array = row[0]
+	mat.set_shader_parameter("dead_tint", t[0])
+	mat.set_shader_parameter("dead_tint2", t[mini(1, t.size() - 1)])
+	mat.set_shader_parameter("dead_tint3", t[mini(2, t.size() - 1)])
+	mat.set_shader_parameter("tint_var", 1.0 if t.size() > 1 else 0.0)
+	mat.set_shader_parameter("dead_desat", float(row[1]))
+	mat.set_shader_parameter("dead_dim", float(row[2]))
+	mat.set_shader_parameter("dead_lift", float(row[3]))
+	mat.set_shader_parameter("water_mix", float(pal.get("water", _WATER_MIX_DEFAULT)))
+	mat.set_shader_parameter("dead_vivid", float(_Opt.corpse_vivid))
+
+## Множитель туши тролля под текущую палитру (Troll._leave_corpse)
+func troll_modulate() -> Color:
+	var cv: Variant = _palette().get("troll")
+	var c: Color = cv if cv != null else _GobCfgCR.TROLL_DEATH_TINT
+	# Сочность (F9) — по множителю: насыщенность и яркость, как у бакетов
+	var v: float = float(_Opt.corpse_vivid)
+	if v == 0.0:
+		return c
+	var l: float = c.r * 0.299 + c.g * 0.587 + c.b * 0.114
+	var g := Color(l, l, l)
+	var m: Color = g.lerp(c, 1.0 + 0.15 * v) * (1.0 + 0.03 * v)
+	return Color(maxf(m.r, 0.0), maxf(m.g, 0.0), maxf(m.b, 0.0), c.a)
+
+func _shadow_row() -> Array:
+	return CORPSE_SHADOWS[clampi(_Opt.corpse_shadow, 0, CORPSE_SHADOWS.size() - 1)]
+
+## Перекрасить всё, что уже лежит, под текущие ручки corpse_palette /
+## corpse_shadow: бакеты тел, туши троллей и слой теней. Зовётся по смене
+## (горячие клавиши), не в кадре
+func apply_palette() -> void:
+	for k in _buckets:
+		var b = _buckets[k]
+		if b.tint_set:
+			_paint_bucket(b)
+	var tm: Color = troll_modulate()
+	var tree := Engine.get_main_loop() as SceneTree
+	if tree != null:
+		for n in tree.get_nodes_in_group(TROLL_CORPSE_GROUP):
+			var mi := n as MeshInstance3D
+			if mi != null and mi.mesh != null and mi.mesh.surface_get_material(0) is ShaderMaterial:
+				(mi.mesh.surface_get_material(0) as ShaderMaterial).set_shader_parameter("modulate", tm)
+	_apply_shadow_level()
+
+const TROLL_CORPSE_GROUP := "troll_corpse"
+
+func _apply_shadow_level() -> void:
+	var sh: Array = _shadow_row()
+	var smat := _Vis.corpse_shadow_mesh().material as StandardMaterial3D
+	if smat != null and smat.albedo_texture is GradientTexture2D:
+		(smat.albedo_texture as GradientTexture2D).gradient.set_color(0, Color(0.0, 0.0, 0.0, float(sh[0])))
+	var m: float = float(sh[1])
+	if is_equal_approx(m, _shadow_mult):
+		return
+	var r: float = m / _shadow_mult
+	_shadow_mult = m
+	if _shadows == null:
+		return
+	for cc in _list:
+		if cc != null and cc.shadow_index >= 0:
+			cc.shadow_size *= r
+			_shadows.write_size(cc.shadow_index, cc.shadow_size * cc.sent)
+	_shadows.flush()
+
+## Горячие клавиши: следующая палитра / следующий уровень тени. Ответ —
+## строка для плашки HUD
+func cycle_palette(step: int = 1) -> String:
+	_Opt.corpse_palette = posmod(_Opt.corpse_palette + step, CORPSE_PALETTES.size())
+	apply_palette()
+	return palette_caption()
+
+func cycle_shadow(step: int = 1) -> String:
+	_Opt.corpse_shadow = posmod(_Opt.corpse_shadow + step, CORPSE_SHADOWS.size())
+	apply_palette()
+	return palette_caption()
+
+## Сочность −2…3 по кругу (F9)
+func cycle_vivid(step: int = 1) -> String:
+	_Opt.corpse_vivid = posmod(_Opt.corpse_vivid + 2 + step, 6) - 2
+	apply_palette()
+	return palette_caption()
+
+func palette_caption() -> String:
+	var pi: int = clampi(_Opt.corpse_palette, 0, CORPSE_PALETTES.size() - 1)
+	var si: int = clampi(_Opt.corpse_shadow, 0, CORPSE_SHADOWS.size() - 1)
+	var v: int = _Opt.corpse_vivid
+	return "Палитра: %d %s [F7] | Тень: ур. %d %s [F8] | Насыщенность: %s [F9]" % [
+		pi + 1, String(CORPSE_PALETTES[pi]["name"]), si, String(CORPSE_SHADOWS[si][2]),
+		("+%d" % v) if v > 0 else str(v)]
 
 static func _bucket_key(sheet: Texture2D, frames: int, pixel_size: float) -> String:
 	return "%d|%d|%.5f" % [sheet.get_rid().get_id(), frames, pixel_size]
@@ -536,6 +694,8 @@ func _get_or_make_shadows(world_root: Node3D) -> ShadowLayer:
 	if _shadows != null:
 		return _shadows
 	var l := ShadowLayer.new()
+	# Уровень тени кучи (ручка corpse_shadow) — с первого же тела
+	_apply_shadow_level()
 	# Меш свой, а МАТЕРИАЛ общий с мини-тенью выделения: пятно и там и здесь
 	# одно и то же, а размер задаётся масштабом в трансформе, не мешем
 	var quad := QuadMesh.new()
@@ -725,7 +885,7 @@ func spawn(unit: Unit, world_root: Node3D, ground_y: float, live: bool = false) 
 			key += "|wet%.2f" % wet
 	var b := _get_or_make_bucket(key, sheet, frames, px, world_root)
 	if not b.tint_set:
-		_set_faction_tint(b, int(unit.faction))
+		_set_faction_tint(b, int(unit.faction), kind_of(unit))
 	if wet > 0.0 and not b.wet_ready:
 		_setup_wet(b, sheet, frames, wet, int(sf[1]))
 	if b.free.is_empty():
@@ -788,7 +948,7 @@ func spawn(unit: Unit, world_root: Node3D, ground_y: float, live: bool = false) 
 		sl.grow(GROW_STEP)
 	c.shadow_index = sl.free.pop_back()
 	var qs: Vector2 = (b.mm.mesh as QuadMesh).size
-	c.shadow_size = minf(qs.x, qs.y) * SHADOW_FRAC
+	c.shadow_size = minf(qs.x, qs.y) * SHADOW_FRAC * _shadow_mult
 	sl.write(c.shadow_index, Vector3(at.x, ground_y + SHADOW_DROP, at.z),
 		c.shadow_size)
 	c.born = _clock
@@ -907,7 +1067,7 @@ func spawn_prop(sheet: Texture2D, frames: int, px: float, at: Vector3,
 		sl.grow(GROW_STEP)
 	c.shadow_index = sl.free.pop_back()
 	var qs: Vector2 = (b.mm.mesh as QuadMesh).size
-	c.shadow_size = minf(qs.x, qs.y) * SHADOW_FRAC
+	c.shadow_size = minf(qs.x, qs.y) * SHADOW_FRAC * _shadow_mult
 	sl.write(c.shadow_index, Vector3(pos.x, ground_y + SHADOW_DROP, pos.z),
 		c.shadow_size)
 	c.born = _clock
@@ -1195,14 +1355,28 @@ func _raisable_list(fac: int) -> Array:
 		i -= 1
 	return arr
 
+## Тело, чей отряд уже в штате, поднимать некуда (GameManager.squad_has_room);
+## ответ по отряду кэшируется на один поиск
+func _no_room(cc: Corpse, memo: Dictionary) -> bool:
+	if cc.squad_id <= 0:
+		return false
+	var v: Variant = memo.get(cc.squad_id)
+	if v == null:
+		v = not GameManager.squad_has_room(cc.squad_id)
+		memo[cc.squad_id] = v
+	return bool(v)
+
 func find_raisable_priority(fac: int, at: Vector3, radius: float,
 	want_id: String, _asker_squad: int = 0):
 	var best_want = null
 	var best_any = null
 	var dw: float = radius * radius
 	var da: float = radius * radius
+	var memo: Dictionary = {}
 	for c in _raisable_list(fac):
 		var cc := c as Corpse
+		if _no_room(cc, memo):
+			continue
 		var dx: float = cc.pos.x - at.x
 		var dz: float = cc.pos.z - at.z
 		var d2: float = dx * dx + dz * dz
@@ -1234,6 +1408,8 @@ static func claimed_by_other(cc, me: int) -> bool:
 func find_raisable_of_squad(fac: int, sid: int, at: Vector3, radius: float, me: int = 0):
 	var best: Corpse = null
 	var bd: float = radius * radius
+	if sid > 0 and not GameManager.squad_has_room(sid):
+		return null
 	for c in _raisable_list(fac):
 		var cc := c as Corpse
 		if cc.squad_id != sid:
@@ -1258,8 +1434,11 @@ func raisable_count_of_squad(fac: int, sid: int) -> int:
 func find_raisable(fac: int, at: Vector3, radius: float):
 	var best: Corpse = null
 	var bd: float = radius * radius
+	var memo: Dictionary = {}
 	for c in _raisable_list(fac):
 		var cc := c as Corpse
+		if _no_room(cc, memo):
+			continue
 		var dx: float = cc.pos.x - at.x
 		var dz: float = cc.pos.z - at.z
 		var d: float = dx * dx + dz * dz

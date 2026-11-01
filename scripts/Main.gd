@@ -250,6 +250,10 @@ const _GoblinAI  := preload("res://scripts/goblin/GoblinAI.gd")
 ## контроллер гноллов (зона ответственности, охота на рабочих)
 var goblin_reserve: Node = null
 var cav_commander: Node = null
+## Походы пней и оживление (ТЗ 31.10.2026; scripts/goblin/LairDirector.gd)
+var lair_director: Node = null
+## Мозг свинобосса (ТЗ 28.10.2026; scripts/entities/bosses/PigBossCommander.gd)
+var pig_boss_cmd: Node = null
 ## Штурм базы игрока по часам (scripts/goblin/GoblinFortressAssaultEvent.gd)
 var assault_event: Node = null
 ## Автосохранение партии по часам (scripts/Autosave.gd, ТЗ 13.10.2026, письмо 7)
@@ -263,6 +267,7 @@ const _TowerS := preload("res://scripts/Tower.gd")
 const _GnollAI := preload("res://scripts/goblin/GnollAI.gd")
 const _GoblinHut := preload("res://scripts/goblin/GoblinHut.gd")
 const _GoblinChiefHut := preload("res://scripts/goblin/GoblinChiefHut.gd")
+const _GobForgeBonus := preload("res://scripts/economy/goblin_forge/GoblinForgeBonus.gd")   # кузница гоблинов (ТЗ 28.10.2026)
 const _Spawn := preload("res://scripts/spawn_config.gd")
 const _TrollLair := preload("res://scripts/goblin/TrollLair.gd")
 const _GobCfg    := preload("res://scripts/goblin/goblin_config.gd")
@@ -459,6 +464,15 @@ func _ready() -> void:
 	cav_commander = load("res://scripts/goblin/CavalryCommander.gd").new()
 	cav_commander.name = "CavalryCommander"
 	add_child(cav_commander)
+	# Походы пней к броду и оживление снесённых (ТЗ 31.10.2026)
+	lair_director = load("res://scripts/goblin/LairDirector.gd").new()
+	lair_director.name = "LairDirector"
+	lair_director.main = self
+	add_child(lair_director)
+	# Мозг свинобосса-полководца (ТЗ 28.10.2026)
+	pig_boss_cmd = load("res://scripts/entities/bosses/PigBossCommander.gd").new()
+	pig_boss_cmd.name = "PigBossCommander"
+	add_child(pig_boss_cmd)
 	# Штурм базы игрока от главной хаты орды по часам партии (ТЗ 13.10.2026)
 	assault_event = load("res://scripts/goblin/GoblinFortressAssaultEvent.gd").new()
 	assault_event.name = "GoblinFortressAssaultEvent"
@@ -477,7 +491,20 @@ func _ready() -> void:
 ## Идёт ли живая партия (не расстановка крепости, не победа и не поражение).
 ## Спрашивает автосохранение
 func is_playing() -> bool:
-	return _phase == Phase.PLAYING or _phase == Phase.PLACING_BUILDING
+	return _phase == Phase.PLAYING or _phase == Phase.PLACING_BUILDING 		or _phase == Phase.VICTORY
+
+## ── ПОБЕДА НЕ ОСТАНАВЛИВАЕТ ПАРТИЮ (ТЗ 29.10.2026, п. 1) ─────────────────────
+## Прежде победа ставила непрозрачный тёмно-зелёный экран поверх мира и
+## блокировала ввод. Теперь мир живёт: игрок добивает гоблинов, строит,
+## командует. Фаза VICTORY — «живая партия после победы» (is_playing,
+## постройка, проверка поражения работают), баннер — HUD.show_victory.
+## Флаг держит победу и тогда, когда расстановка постройки временно
+## переводит фазу в PLACING_BUILDING
+var _victory_won: bool = false
+
+## Фаза, в которую партия возвращается после расстановки постройки
+func _play_phase() -> int:
+	return Phase.VICTORY if _victory_won else Phase.PLAYING
 
 # ═════════════════════════════════════════════════════════════════════════════
 # ТАКТИЧЕСКАЯ ПАУЗА: СТОИТ МИР, А НЕ ИГРА
@@ -519,7 +546,7 @@ func _setup_pause_modes() -> void:
 	# Остальные «мозги» мира — тоже паузуемые (ТЗ 20.10.2026, блок 7): они
 	# дети Main и наследовали его ALWAYS — командир конницы, гноллы и движок
 	# волн штурма тикали на паузе (таймеры выхода волн, горны)
-	for n in [gnoll_ai, cav_commander, assault_event, telemetry]:
+	for n in [gnoll_ai, cav_commander, pig_boss_cmd, assault_event, telemetry]:
 		if n != null and is_instance_valid(n):
 			(n as Node).process_mode = Node.PROCESS_MODE_PAUSABLE
 	if GameManager.fog != null and is_instance_valid(GameManager.fog):
@@ -545,6 +572,9 @@ func start_game() -> void:
 	# Исследования прошлой партии (автозагрузка их переживает): без сброса
 	# заказ прошлой партии висел «В очереди (-1)» (ТЗ 11.10.2026)
 	GameManager.reset_research()
+	# Новая партия — новый полководец орды (признак «пал» — из прошлой)
+	GameManager.pig_boss_fallen = false
+	GameManager.build_unlock = {}
 	GameManager.reset_squads()
 	_victory_timer       = 0.0
 	_castle_placed       = false
@@ -605,6 +635,7 @@ func start_game() -> void:
 	_spawn_gold_mines()
 	_spawn_goblin_mine()
 	_reveal_gold_mines()
+	_spawn_lair_piles()
 	# ── ЗАГРУЗКА ПАРТИИ: ПОСЛЕДНИМ ДЕЛОМ ────────────────────────────────────
 	# Слепок применяется, когда карта уже готова и стартовая расстановка уже
 	# сделана: apply() сносит живое (замки, рабочих, орду) и ставит сохранённое.
@@ -695,9 +726,18 @@ func _setup_reserved_zones() -> void:
 		_reserve(goblin_village_center(), GOBLIN_VILLAGE_CLEAR)
 		# Логово тролля — тоже площадка: дерево и кольцо кольев без леса
 		_reserve(troll_lair_center(), _GobCfg.LAIR_CLEAR)
-		# И второй пень у ИИ (спринт 18) — та же площадка
+		# И второй пень у ИИ (спринт 18) — та же площадка; в секции у кромки
+		# (ТЗ 31.10.2026, lair_layout_v2) — уже, лесные стены секции целы, и
+		# пятачки горы золота и камня за ним
 		if _GobCfg.LAIR_AI_ENABLED:
-			_reserve(troll_lair_center_ai(), _GobCfg.LAIR_CLEAR)
+			if _Opt.lair_layout_v2:
+				var c2: Vector3 = troll_lair_center_ai()
+				_reserve(c2, _GobCfg.LAIR_CLEAR_V2)
+				for o in [_GobCfg.LAIR_PILE_GOLD, _GobCfg.LAIR_PILE_STONE]:
+					_reserve(c2 + Vector3(o.x, 0.0, o.y), 7.0)
+				_reserve(lair_mirror_center(), _GobCfg.LAIR_CLEAR)
+			else:
+				_reserve(troll_lair_center_ai(), _GobCfg.LAIR_CLEAR)
 	# Пятачки под СВОИ кучи руды резервируются ЗДЕСЬ, а не после их спавна.
 	# Порядок вызовов: _ready() → _setup_terrain() сажает лес подковы, и только
 	# потом start_game() ставит кучи. Резерв, выставленный вместе с кучей,
@@ -808,7 +848,7 @@ func _prewarm_art() -> void:
 	for lv in [1, 4, 7]:
 		_BannerArtM.goblin_tongue_texture(lv)
 		_BannerArtM.goblin_tongue_texture(lv, true)
-	_BannerArtM.legend_texture(0, 0)
+	_BannerArtM.legend_texture(0)
 	_MonkM._aura_texture()
 	# Лента лечения монаха: первый такт лечения стоил 3.8 мс (monk_build_vfx)
 	# — это НЕ load() (он кэширован), а BillboardUtil._detect_frame_count:
@@ -888,7 +928,7 @@ func _hide_start_zone() -> void:
 ## free = true — СТАРТОВЫЙ замок: он не стоит ресурсов и ставится в начале
 ## партии, поэтому списывать за него нечего и возвращать при отмене тоже
 func enter_castle_placement(free: bool = false) -> void:
-	if _phase != Phase.PLAYING:
+	if _phase != Phase.PLAYING and _phase != Phase.VICTORY:
 		return
 	# ЗАМОК СТАВИТСЯ БЕСПЛАТНО — и стартовый, и любой следующий (заказ владельца).
 	# Здесь списывалось 300 дерева и 200 золота, причём числами прямо в коде, мимо
@@ -999,6 +1039,26 @@ func _input(event: InputEvent) -> void:
 		# полоска сама живёт от урона до полной починки, у бойцов урон виден
 		# вспышкой и долей жизни на спрайте. API set_hp_bars_forced остался
 		# для стендов
+		# ── F7 / F8 / F9: ПАЛИТРА, ТЕНЬ И СОЧНОСТЬ КУЧИ ТЕЛ (ТЗ 01.11.2026) ─
+		# Подбор контраста вживую: F7 — следующая палитра, F8 — следующий
+		# уровень тени под телами, F9 — сочность −2…3; Shift — назад.
+		# Перекрашивает и уже лежащих
+		var fk: Key = k.keycode if k.keycode != KEY_NONE else k.physical_keycode
+		if (fk == KEY_F7 or fk == KEY_F8 or fk == KEY_F9) \
+				and GameManager.corpses != null:
+			var back: int = -1 if k.shift_pressed else 1
+			var cap: String
+			if fk == KEY_F7:
+				cap = GameManager.corpses.cycle_palette(back)
+			elif fk == KEY_F8:
+				cap = GameManager.corpses.cycle_shadow(back)
+			else:
+				cap = GameManager.corpses.cycle_vivid(back)
+			print(cap)
+			if hud:
+				hud.show_notice(cap)
+			get_viewport().set_input_as_handled()
+			return
 		# ── F3: ТУМБЛЕР СЧЁТЧИКА FPS ────────────────────────────────────────
 		if (k.keycode == KEY_F3 or k.physical_keycode == KEY_F3) and hud:
 			hud.toggle_fps_counter()
@@ -1063,7 +1123,7 @@ func _cancel_or_keep_placing() -> void:
 func _cancel_placement() -> void:
 	if _ghost:
 		_ghost.queue_free(); _ghost = null
-	_phase = Phase.PLAYING
+	_phase = _play_phase()
 	hud.hide_placement_hint()
 	_hide_start_zone()
 
@@ -1089,7 +1149,7 @@ func enter_building_placement(cost: Dictionary, ghost_size: Vector3, build_fn: C
 	# отменяется с возвратом, новый встаёт под курсор
 	if _phase == Phase.PLACING_BUILDING:
 		_refund_and_cancel()
-	if _phase != Phase.PLAYING:
+	if _phase != Phase.PLAYING and _phase != Phase.VICTORY:
 		return
 	_placing_build_fn = build_fn
 	_placing_repeat   = repeat_fn
@@ -1238,12 +1298,12 @@ func _try_place_building(screen_pos: Vector2) -> void:
 	# просто промахнулся мимо зоны, и отбирать у него фантом за это незачем —
 	# пусть подведёт курсор ближе к замку и кликнет ещё раз
 	if not can_build_at(world_pos.x, world_pos.z):
-		hud.show_placement_hint("Здесь туман войны — место не разведано!")
+		hud.show_notice("Здесь туман войны — место не разведано!")
 		return
 	if _ghost:
 		_ghost.queue_free(); _ghost = null
 	_ghost_mats.clear()
-	_phase = Phase.PLAYING
+	_phase = _play_phase()
 	hud.hide_placement_hint()
 	var repeat: Callable = _placing_repeat
 	_placing_repeat = Callable()
@@ -1290,7 +1350,7 @@ func _try_place_castle(screen_pos: Vector2) -> void:
 	world_pos.y   = get_terrain_height(world_pos.x, world_pos.z)
 	# В ТУМАН СТАВИТЬ НЕЛЬЗЯ — то же правило, что у остальных построек
 	if not can_build_at(world_pos.x, world_pos.z):
-		hud.show_placement_hint("Здесь туман войны — место не разведано!")
+		hud.show_notice("Здесь туман войны — место не разведано!")
 		return
 
 	if _ghost:
@@ -1319,7 +1379,7 @@ func _try_place_castle(screen_pos: Vector2) -> void:
 	site.global_position = world_pos
 	site.built.connect(_on_castle_built)
 
-	_phase = Phase.PLAYING
+	_phase = _play_phase()
 	hud.hide_placement_hint()
 	_hide_start_zone()
 
@@ -1495,11 +1555,38 @@ var _cursor_timer: float = 0.0
 var _cursor_on_res: bool = false
 ## Вид текущего курсора (CursorArt.*); −1 — пересоздать при следующем опросе
 var _cursor_kind: int = -1
+## Палец над интерфейсом поверх мечей [A] (см. _update_hover_cursor)
+var _ui_finger: bool = false
+## Цель под курсором, по которой стоит прицел (_update_enemy_hover): боец или
+## постройка; по ней считается досягаемость для оперения стрелы
+var _hover_aim: Node3D = null
 const _CursorArt := preload("res://scripts/CursorArt.gd")
+
+## Овцеферма под курсором при пустом выделении мягко светлеет (ТЗ 31.10.2026)
+var _glow_pen: Building = null
+
+func _update_pen_glow(mouse: Vector2) -> void:
+	var pen: Building = null
+	if selection_manager.selected_units.is_empty():
+		pen = selection_manager.hover_pen(mouse)
+	if pen == _glow_pen:
+		return
+	if _glow_pen != null and is_instance_valid(_glow_pen):
+		_glow_pen.set_hover_glow(false)
+	_glow_pen = pen
+	if pen != null:
+		pen.set_hover_glow(true)
 
 func _update_hover_cursor(delta: float) -> void:
 	_cursor_timer -= delta
-	if _cursor_timer > 0.0:
+	# ── СТРЕЛА БЕЗ ЗАДЕРЖКИ (ТЗ 29.10.2026, п. 2) ─────────────────────────
+	# Пока курсор — стрела (цвет оперения отвечает на «достанут ли»), опрос
+	# идёт каждый кадр: за 80 мс курсор пересекал радиус и ещё несколько
+	# кадров показывал прежний цвет. Прочие виды — прежний опрос CURSOR_POLL
+	var arrow_live: bool = _cursor_kind == _CursorArt.ARROW or _cursor_kind == _CursorArt.ARROW_FAR \
+		or (selection_manager != null and selection_manager.swords_cursor_on \
+			and selection_manager._swords_ranged)
+	if _cursor_timer > 0.0 and not arrow_live:
 		return
 	_cursor_timer = CURSOR_POLL
 	if selection_manager == null or _camera == null:
@@ -1516,6 +1603,7 @@ func _update_hover_cursor(delta: float) -> void:
 	var mouse := get_viewport().get_mouse_position()
 	var hovered: ResourceNode = selection_manager.resource_under_cursor(mouse)
 	_update_hover_highlight(hovered)
+	_update_pen_glow(mouse)
 	var aiming: bool = _update_enemy_hover(mouse, hovered != null)
 	# ── ВИД КУРСОРА (ТЗ 14.10.2026, п. 4) ──────────────────────────────────
 	# Жила под рукой — «рука» сбора; иначе разбор того, что сделает ПКМ:
@@ -1536,16 +1624,43 @@ func _update_hover_cursor(delta: float) -> void:
 			# Только стрелки (лучники, башня с гарнизоном) — стрела; пехота
 			# и смешанное выделение — меч (ТЗ 24.10.2026, второе письмо)
 			var ranged: bool = selection_manager.selection_ranged_only()
-			kind = _CursorArt.ARROW if ranged else _CursorArt.SWORD
+			kind = _arrow_kind_for(mouse, true) if ranged else _CursorArt.SWORD
 		elif kind == _CursorArt.NONE and selection_manager.selection_towers_only() \
 				and selection_manager.selection_has_fire_forts():
 			# Выделены одни башни со стрелками: ПКМ по земле — огонь по врагу
 			# у точки (SelectionManager.TOWER_POINT_PICK_R), курсор — стрела
 			# всюду, не только над чужим (ТЗ 25.10.2026, третье письмо, п. 1)
-			kind = _CursorArt.ARROW
+			kind = _arrow_kind_for(mouse, false)
+	# ── НАД ИНТЕРФЕЙСОМ — ПАЛЕЦ, А НЕ БОЕВОЙ КУРСОР (ТЗ 26.10.2026, блок 4) ─
+	# Боевой вид подменяет роль CURSOR_ARROW, а её показывают и панели, и
+	# меню, и всё, что не кнопка: стрела лучников висела над интерфейсом. В
+	# режиме [A] мечи стоят ещё и на роли POINTING_HAND — то есть и над
+	# кнопками. Над любым контролом, принимающим мышь, — перчатка-указатель
+	# (Cursor_02), над полем — снова боевой вид. Опрос тот же, раз в CURSOR_POLL
+	var over_ui: bool = _Opt.ui_finger_cursor and get_viewport().gui_get_hovered_control() != null
 	# Режим [A]: курсор — скрещённые мечи, его ведёт SelectionManager
 	if selection_manager.swords_cursor_on:
+		if over_ui and not _ui_finger:
+			_ui_finger = true
+			var hand := _UIAssets.cursor(2)
+			if hand != null:
+				Input.set_custom_mouse_cursor(hand, Input.CURSOR_ARROW, _UIAssets.cursor_hotspot(2))
+				Input.set_custom_mouse_cursor(hand, Input.CURSOR_POINTING_HAND, _UIAssets.cursor_hotspot(2))
+		elif not over_ui and _ui_finger:
+			_ui_finger = false
+			selection_manager._apply_attack_cursor(true)
+		elif not over_ui:
+			selection_manager.refresh_attack_cursor()
+			# Скрещённые стрелы [A]: красное оперение и крестик, если цель
+			# под курсором не достать (без цели — зелёные: [A] идёт к точке)
+			if selection_manager.attack_cursor_ranged():
+				var far_x: bool = aiming and _arrow_kind_for(mouse, true) == _CursorArt.ARROW_FAR
+				selection_manager.set_attack_arrows_kind(
+					_CursorArt.ARROWS_X_FAR if far_x else _CursorArt.ARROWS_X)
 		return
+	_ui_finger = false
+	if over_ui:
+		kind = _CursorArt.HAND
 	_cursor_on_res = kind != _CursorArt.NONE
 	if kind == _cursor_kind:
 		return
@@ -1609,9 +1724,25 @@ func _update_enemy_hover(mouse: Vector2, on_resource: bool) -> bool:
 	var foes: Array = selection_manager.enemy_squad_under_cursor(mouse)
 	if foes.is_empty():
 		GameManager.sel_decals.clear_hover()
+		_hover_aim = null
 		return false
 	GameManager.sel_decals.set_hover_units(foes, world_root())
+	_hover_aim = foes[0] as Node3D
 	return true
+
+## Вид курсора-стрелы по досягаемости (ТЗ 27.10.2026, UI/UX, п. 2): ARROW —
+## зелёное оперение, выделенные стрелки/башни достают до цели под курсором
+## (или до точки земли, когда прицела нет — башни по земле); ARROW_FAR —
+## красное, цель за дальностью. Считается при каждом опросе CURSOR_POLL
+## (80 мс), поэтому цвет меняется сразу, как курсор пересёк радиус
+func _arrow_kind_for(mouse: Vector2, aiming: bool) -> int:
+	if not _Opt.arrow_reach_tint:
+		return _CursorArt.ARROW
+	var aim: Node3D = _hover_aim if aiming and _hover_aim != null and is_instance_valid(_hover_aim) else null
+	var pt: Vector3 = aim.global_position if aim != null else selection_manager.ground_under_cursor(mouse)
+	if not pt.is_finite():
+		return _CursorArt.ARROW
+	return _CursorArt.ARROW if selection_manager.selection_reaches(aim, pt) else _CursorArt.ARROW_FAR
 
 const _RES_HL_SHADER := preload("res://shaders/res_highlight.gdshader")
 
@@ -1770,7 +1901,7 @@ func _process_timed(delta: float) -> void:
 		# «волн усиления из воздуха» больше нет — армия только через найм
 		_match_clock += gdt
 		_victory_timer += gdt
-		if _phase == Phase.PLAYING and _victory_timer >= VICTORY_CHECK_INTERVAL:
+		if (_phase == Phase.PLAYING or _phase == Phase.VICTORY) 				and _victory_timer >= VICTORY_CHECK_INTERVAL:
 			_victory_timer = 0.0
 			_check_victory()
 
@@ -1914,10 +2045,19 @@ func _check_victory() -> void:
 			if not ce.is_dead() and ce.is_stronghold():
 				_ai_castle_placed = true
 				break
-	if _ai_beaten():
+	# Победа объявляется ОДИН раз; дальше проверяется только поражение
+	# (недобитая орда ещё может снести базу игрока)
+	if not _victory_won and _ai_beaten():
+		_victory_won = true
 		_phase = Phase.VICTORY
+		hud.close_red_defeated()
 		hud.show_victory()
+	elif _Opt.red_defeat_modal and not _victory_won and not red_defeat_shown and _red_beaten():
+		# Красный разбит, орда жива — партия идёт дальше (ТЗ 30.10.2026)
+		red_defeat_shown = true
+		hud.show_red_defeated()
 	elif _castle_placed and _player_defeated():
+		hud.hide_victory()
 		_phase = Phase.DEFEAT
 		hud.show_defeat()
 
@@ -1985,6 +2125,20 @@ func _victory_buildings(group: String) -> int:
 		if counts_for_victory(b):
 			n += 1
 	return n
+
+## Красный разбит: постройки у него были, ни одной не осталось, живых нет
+var red_defeat_shown: bool = false
+
+func _red_beaten() -> bool:
+	if _victory_buildings(Constants.building_group(Constants.FACTION_ENEMY)) > 0:
+		_red_had_buildings = true
+		return false
+	if not _red_had_buildings:
+		return false
+	for n in get_tree().get_nodes_in_group("enemy_units"):
+		if is_instance_valid(n) and n is Unit and not (n as Unit).is_dead():
+			return false
+	return true
 
 func _ai_beaten() -> bool:
 	var red: int = _victory_buildings(Constants.building_group(Constants.FACTION_ENEMY))
@@ -2349,6 +2503,39 @@ const CLUSTER_LAYOUTS := [
 	],
 ]
 
+## ── ПЛОТНАЯ КУЧА ЗОЛОТА (ТЗ 30.10.2026, скриншот 18:32) ─────────────────
+## Общие шаблоны («Гряда», «Россыпь») растягивали золото облаком искр. Золото
+## ложится навалом: крупные самородки впритык в ядре, средние подпирают их,
+## мелочь осыпалась у подножия. Ручка perf_config.gold_dense_heap
+const GOLD_LAYOUTS := [
+	# «Курган» — пять крупных впритык, средние вокруг, осыпь у подножия
+	[
+		[ 0.00,  0.00, "big"],   [ 0.95,  0.10, "big"],  [-0.95,  0.15, "big"],
+		[ 0.45, -0.70, "big"],   [-0.50, -0.65, "big"],  [ 1.55, -0.55, "mid"],
+		[-1.55, -0.45, "mid"],   [ 0.05,  0.85, "mid"],  [ 1.45,  0.80, "mid"],
+		[-1.40,  0.85, "mid"],   [ 2.10,  0.20, "small"],[-2.05,  0.10, "small"],
+		[ 0.75,  1.35, "small"], [-0.70,  1.40, "small"],[ 0.00, -1.30, "small"],
+	],
+	# «Два холма» — два тесных узла крупных, перемычка из средних
+	[
+		[-0.75,  0.00, "big"],   [-1.45, -0.45, "big"],  [ 0.80,  0.10, "big"],
+		[ 1.40, -0.50, "big"],   [ 0.00, -0.35, "mid"],  [-0.05,  0.55, "mid"],
+		[-1.95,  0.35, "mid"],   [ 2.00,  0.35, "mid"],  [-0.95,  0.95, "small"],
+		[ 0.95,  1.00, "small"], [-2.40, -0.40, "small"],[ 2.45, -0.30, "small"],
+		[ 0.00,  1.25, "small"], [-0.30, -1.15, "small"],[ 0.45, -1.15, "small"],
+	],
+	# «Навал у жилы» — крупные с одного края, осыпь к другому
+	[
+		[-0.60,  0.00, "big"],   [ 0.30,  0.05, "big"],  [-0.15, -0.70, "big"],
+		[ 1.10, -0.40, "mid"],   [-1.40, -0.30, "mid"],  [ 1.05,  0.55, "mid"],
+		[-0.90,  0.80, "mid"],   [ 0.10,  0.85, "small"],[ 1.75,  0.15, "small"],
+		[ 2.20,  0.70, "small"], [-1.95,  0.35, "small"],[ 0.70, -1.15, "small"],
+		[-0.80, -1.20, "small"], [ 1.55,  1.15, "small"],
+	],
+]
+## Размах плотной кучи золота (общие шаблоны — LAYOUT_SPAN_GOLD)
+const LAYOUT_SPAN_GOLD_HEAP := 0.72
+
 ## ── ВАРИАНТ РИСУНКА ПРИВЯЗАН К КЛАССУ ───────────────────────────────────────
 ## Варианты заполняют свой кадр очень по-разному (Gold Stone 1 — 20% высоты,
 ## Gold Stone 6 — 57%; Rock1 — 38%, Rock4 — 61%). Пока вариант брался случайно,
@@ -2615,7 +2802,9 @@ func _spawn_resource_cluster(center: Vector3, res_type: int, ignore_reserved: bo
 	# ── РАСКЛАДКА БЕРЁТСЯ ИЗ ГОТОВОГО ШАБЛОНА (см. CLUSTER_LAYOUTS) ─────────
 	# Разнообразие даёт выбор шаблона, поворот всей композиции и зеркало по X —
 	# но НЕ случайный разброс кусков: именно он и сваливал их в кашу
-	var layout: Array = CLUSTER_LAYOUTS[randi() % CLUSTER_LAYOUTS.size()]
+	var dense: bool = res_type == Constants.RESOURCE_GOLD and _Opt.gold_dense_heap
+	var layouts: Array = GOLD_LAYOUTS if dense else CLUSTER_LAYOUTS
+	var layout: Array = layouts[randi() % layouts.size()]
 	var rot: float = randf() * TAU
 	var mirror: float = -1.0 if randf() < 0.5 else 1.0
 	var ca := cos(rot)
@@ -2625,6 +2814,8 @@ func _spawn_resource_cluster(center: Vector3, res_type: int, ignore_reserved: bo
 	# меняется только её общий размах
 	var span: float = LAYOUT_SPAN_GOLD if res_type == Constants.RESOURCE_GOLD \
 		else LAYOUT_SPAN_STONE
+	if dense:
+		span = LAYOUT_SPAN_GOLD_HEAP
 
 	# ── КУЧА ПОЛУЧАЕТ НОМЕР И ПОПАДАЕТ В РЕЕСТР ─────────────────────────────
 	# Ровно здесь, а не в ResourceNode: только эта функция вообще знает, что
@@ -2782,7 +2973,7 @@ func _spawn_goblin_village() -> void:
 ## сразу, так что вызывающий код — набег, разметка, регистрация — работает
 ## как прежде; опоздавший перенимает у старшего товарища спячку, приказ и
 ## награды отряда. По умолчанию — синхронно (стенды и стартовая раздача)
-var _horde_q: Array = []            # {sid, uid, k, n, base}
+var _horde_q: Array = []            # {sid, uid, k, n, base, entry}
 var _horde_frame: int = -1
 var _horde_frame_n: int = 0
 var horde_spawn_deferred: int = 0    # сколько бойцов родилось очередью
@@ -2803,6 +2994,8 @@ func horde_spawn_pending() -> int:
 	return n
 
 func _physics_process(_delta: float) -> void:
+	if not _entering.is_empty() and not get_tree().paused:
+		_tick_entering()
 	# Растяжка спавна орды — симуляция: на паузе не рожаем (Main — ALWAYS)
 	if _horde_q.is_empty() or get_tree().paused:
 		return
@@ -2821,11 +3014,147 @@ func _physics_process(_delta: float) -> void:
 				ref = m
 				break
 		var k: int = int(e["k"])
-		var u: Unit = _horde_one(scene, sid, k, int(e["n"]), e["base"])
+		var u: Unit = _horde_one(scene, sid, k, int(e["n"]), e["base"], e.get("entry", Vector3.INF))
 		e["k"] = k + 1
 		horde_spawn_deferred += 1
 		left -= 1
 		_horde_late_join(u, sid, ref, e["base"])
+
+## ═════════════════════════════════════════════════════════════════════════════
+## ВХОД ОРДЫ ИЗ-ЗА КРОМКИ КАРТЫ (ТЗ 31.10.2026, ручка horde_edge_entry)
+## ═════════════════════════════════════════════════════════════════════════════
+## Отряд орды рождается не на своей точке (площадка сбора, кольцо пня, место
+## набега), а у кромки карты: на том же берегу, вне обзора игрока, на сухой
+## проходимой земле без леса и без чужих бойцов рядом — из точек, годных
+## по этим правилам, ближайшая к назначению. Оттуда — маршем к своей точке
+## (horde_goal), и там же отряд засыпает, если вожак его усыпил в пути.
+## Охрана рудников, стартовый резерв и спящий резерв лагеря родятся на месте.
+## Не нашлось годной — снимается правило обзора; нет и так — INF, на месте
+var _entering: Array = []            # отряды орды на входе (sid)
+var horde_entered: int = 0           # сколько бойцов вошло из-за кромки (стендам)
+
+func horde_entry_point(goal: Vector3, n: int) -> Vector3:
+	var pad: float = _GobCfg.horde_radius(n) + _Spawn.HORDE_ENTRY_PAD
+	var lx: float = GameManager.map_lim_x - pad
+	var lz: float = GameManager.map_lim_z - pad
+	if lx <= 0.0 or lz <= 0.0:
+		return Vector3.INF
+	var side: int = river_side(goal)
+	# Точки кромки — по дальности от цели (Vector3(d², x, z): sort() упорядочит
+	# по первой компоненте); проверяются по порядку до первой годной — обычно
+	# единицы проверок, а не весь периметр (иначе 9 отрядов в кадр — пик 60+ мс)
+	var step: float = _Spawn.HORDE_ENTRY_STEP
+	var cands: Array = []
+	var nx: int = int(ceil(2.0 * lx / step))
+	var nz: int = int(ceil(2.0 * lz / step))
+	for i in range(nx + 1):
+		var x: float = -lx + 2.0 * lx * float(i) / float(nx)
+		cands.append(Vector3((x - goal.x) * (x - goal.x) + (-lz - goal.z) * (-lz - goal.z), x, -lz))
+		cands.append(Vector3((x - goal.x) * (x - goal.x) + (lz - goal.z) * (lz - goal.z), x, lz))
+	for j in range(1, nz):
+		var z: float = -lz + 2.0 * lz * float(j) / float(nz)
+		cands.append(Vector3((-lx - goal.x) * (-lx - goal.x) + (z - goal.z) * (z - goal.z), -lx, z))
+		cands.append(Vector3((lx - goal.x) * (lx - goal.x) + (z - goal.z) * (z - goal.z), lx, z))
+	cands.sort()
+	for strict in [true, false]:
+		for c in cands:
+			var v: Vector3 = c
+			if _entry_ok(Vector2(v.y, v.z), side, strict):
+				return Vector3(v.y, get_terrain_height(v.y, v.z), v.z)
+	return Vector3.INF
+
+func _entry_ok(p: Vector2, side: int, strict: bool) -> bool:
+	var v := Vector3(p.x, 0.0, p.y)
+	if side != 0:
+		var s: int = river_side(v)
+		if s != 0 and s != side:
+			return false
+	if GameManager.is_water(p.x, p.y) or not GameManager.is_passable(p.x, p.y):
+		return false
+	if GameManager.unit_grid != null \
+			and GameManager.unit_grid.enemy_count(v, _Spawn.HORDE_ENTRY_CLEAR_R, Constants.FACTION_GOBLIN) > 0:
+		return false
+	if strict and fog != null and fog.enabled:
+		var r: float = _Spawn.HORDE_ENTRY_LOOK_R
+		for o in [Vector2.ZERO, Vector2(r, 0.0), Vector2(-r, 0.0), Vector2(0.0, r), Vector2(0.0, -r)]:
+			var q: Vector2 = p + (o as Vector2)
+			if fog.is_lit(q.x, q.y):
+				return false
+	return true
+
+## Сторож входа — ПО ОТРЯДУ, раз в HORDE_ENTRY_TICK физкадров. Поштучно не
+## годится: передние доходят первыми, а задних сплочённость зовёт к медиане,
+## и отряд «терял» вход посреди поля. Дошёл — медиана входящих у точки
+## заказа (в габарите толпы); тогда признак снят, и усыплённый в пути вожаком
+## отряд засыпает весь (sq["entry_sleep"]). Вставший в пути снова отправлен
+## к своей точке. Новый приказ (волна, набег, бой: точка хода далеко и от
+## своей точки, и от медианы, или атака) — вход снят, сон не наступает.
+## Срок HORDE_ENTRY_MAX_SEC — страховка от вечного входа у глухой стены
+func _tick_entering() -> void:
+	if Engine.get_physics_frames() % _Spawn.HORDE_ENTRY_TICK != 0:
+		return
+	var i: int = _entering.size() - 1
+	while i >= 0:
+		var sid: int = int(_entering[i])
+		var raw: Variant = GameManager.squads.get(sid)
+		if raw == null:
+			_entering.remove_at(i)
+			i -= 1
+			continue
+		var sq: Dictionary = raw
+		var ent: Array = []
+		for m in sq["members"]:
+			if m != null and is_instance_valid(m) and not (m as Unit).is_dead() and (m as Unit).horde_entering:
+				ent.append(m)
+		if ent.is_empty():
+			sq.erase("entry_sleep")
+			_entering.remove_at(i)
+			i -= 1
+			continue
+		var xs: Array = []
+		var zs: Array = []
+		for m in ent:
+			xs.append((m as Unit).global_position.x)
+			zs.append((m as Unit).global_position.z)
+		xs.sort()
+		zs.sort()
+		var mx: float = xs[xs.size() / 2]
+		var mz: float = zs[zs.size() / 2]
+		var gc: Vector3 = sq.get("entry_goal", Vector3.INF)
+		var arrive_r: float = _GobCfg.horde_radius(ent.size()) + _Spawn.HORDE_ENTRY_ARRIVE_R
+		var arrived: bool = not gc.is_finite() \
+			or Vector2(mx - gc.x, mz - gc.z).length_squared() <= arrive_r * arrive_r
+		var late: bool = Unit.game_ms() - int(sq.get("entry_ms", 0)) > int(_Spawn.HORDE_ENTRY_MAX_SEC * 1000.0)
+		var reorder: bool = false
+		for m in ent:
+			var u := m as Unit
+			if u.state == Unit.State.ATTACKING:
+				reorder = true
+				break
+			if u.state == Unit.State.MOVING:
+				var pp: Vector3 = u.post_pos
+				var far_own: bool = Vector2(pp.x - u.horde_goal.x, pp.z - u.horde_goal.z).length_squared() > 144.0
+				var far_mid: bool = Vector2(pp.x - mx, pp.z - mz).length_squared() > 144.0
+				if far_own and far_mid:
+					reorder = true
+					break
+		if arrived or reorder or late:
+			var sleep: bool = bool(sq.get("entry_sleep", false)) and not reorder
+			for m in ent:
+				var u := m as Unit
+				u.horde_entering = false
+				if sleep:
+					u.set_attack_target(null)
+					if not u.dormant:
+						u.set_dormant(true)
+			sq.erase("entry_sleep")
+			_entering.remove_at(i)
+		else:
+			for m in ent:
+				var u := m as Unit
+				if u.state == Unit.State.IDLE:
+					u.command_move(GameManager.land_target(u.horde_goal))
+		i -= 1
 
 ## Опоздавший перенимает у старшего товарища то, что отряд успел получить
 ## Медиана точек приказа идущих бойцов отряда (post_pos), запасной ответ —
@@ -2847,6 +3176,12 @@ func _horde_order_centre(sid: int, ref: Unit) -> Vector3:
 
 func _horde_late_join(u: Unit, sid: int, ref: Unit, base: Vector3) -> void:
 	GameManager.apply_squad_bonuses_to(sid, u)
+	# Входящий из-за кромки уже идёт к своей точке; спит, если спит отряд
+	if u.horde_entering:
+		# Отряд уже дошёл и уснул — опоздавший доходит и засыпает тоже
+		if ref != null and ref.dormant:
+			GameManager.squads[sid]["entry_sleep"] = true
+		return
 	if ref == null:
 		return
 	if ref.dormant:
@@ -2876,7 +3211,7 @@ func horde_alive() -> int:
 	return n + horde_spawn_pending()
 
 func spawn_goblin_squad(uid: String, n: int, base: Vector3, staggered: bool = false,
-		cap_bonus: int = 0) -> int:
+		cap_bonus: int = 0, enter: bool = true) -> int:
 	var scene: PackedScene = Building.PRELOAD_SCENES.get(uid)
 	if scene == null or n <= 0:
 		return 0
@@ -2892,6 +3227,9 @@ func spawn_goblin_squad(uid: String, n: int, base: Vector3, staggered: bool = fa
 		horde_cap_refusals += 1
 		return 0
 	var sid: int = GameManager.new_squad(Constants.FACTION_GOBLIN, uid)
+	var entry: Vector3 = horde_entry_point(base, n) if enter and _Opt.horde_edge_entry else Vector3.INF
+	if entry.is_finite():
+		GameManager.squads[sid]["entry"] = entry
 	var now_n: int = n
 	if staggered and _Opt.horde_spawn_stagger:
 		# Хотя бы четверо — сразу: отряд обязан существовать для набега
@@ -2899,12 +3237,66 @@ func spawn_goblin_squad(uid: String, n: int, base: Vector3, staggered: bool = fa
 		if not _horde_q.is_empty():
 			now_n = mini(n, 4)   # очередь уже есть — встать в её конец
 	for k in range(now_n):
-		_horde_one(scene, sid, k, n, base)
+		_horde_one(scene, sid, k, n, base, entry)
 	if now_n < n:
-		_horde_q.append({"sid": sid, "uid": uid, "k": now_n, "n": n, "base": base})
+		_horde_q.append({"sid": sid, "uid": uid, "k": now_n, "n": n, "base": base, "entry": entry})
 	return sid
 
-func _horde_one(scene: PackedScene, sid: int, k: int, n: int, base: Vector3) -> Unit:
+## ── ОТРЯД СВИНОБОССА (ТЗ 28.10.2026) ──────────────────────────────────────
+## Босс + свита наездников (штат — spawn_config.GOBLIN_SQUAD_SIZE["pig_boss"]
+## минус один), свита — ветераны ранга BOSS_ESCORT_VET с наградами тем же
+## путём, что у игрока (grant_squad_veterancy). Тип отряда "pig_boss" —
+## командир конницы его не берёт (он идёт только по "goblin_rider"), ведёт
+## PigBossCommander. Второго живого босса не бывает: покупку держит
+## GoblinAI._new_plan по GameManager.pig_boss_alive. Потолок орды — общий
+func spawn_boss_squad(base: Vector3) -> int:
+	if not _Opt.pig_boss or not GameManager.pig_boss_may_spawn():
+		return 0
+	var boss_scene: PackedScene = Building.PRELOAD_SCENES.get("pig_boss")
+	var rider_scene: PackedScene = Building.PRELOAD_SCENES.get("goblin_rider")
+	if boss_scene == null or rider_scene == null:
+		return 0
+	var n: int = int(_GobCfg.SQUAD_SIZE.get("pig_boss", 31))
+	n = mini(n, _Spawn.horde_cap(_match_clock) - horde_alive())
+	if n <= 0:
+		horde_cap_refusals += 1
+		return 0
+	var sid: int = GameManager.new_squad(Constants.FACTION_GOBLIN, "pig_boss")
+	GameManager.squads[sid]["boss"] = true
+	var entry: Vector3 = horde_entry_point(base, n) if _Opt.horde_edge_entry else Vector3.INF
+	if entry.is_finite():
+		GameManager.squads[sid]["entry"] = entry
+	_horde_one(boss_scene, sid, 0, n, base, entry)
+	for k in range(1, n):
+		_horde_one(rider_scene, sid, k, n, base, entry)
+	grant_squad_veterancy(sid, _GobCfg.BOSS_ESCORT_VET, _GobCfg.BOSS_ESCORT_PICKS,
+		["bonus_attack", "bonus_armor", "bonus_health"])
+	GameManager.refresh_squad_banner(sid)
+	return sid
+
+## Новая свита босса на базе (ТЗ 29.10.2026, 2В): всадники до штата отряда
+## босса, в пределах потолка орды. Ранг — у записи отряда (свита-ветераны).
+## Возвращает число рождённых
+func refill_boss_retinue(sid: int, at: Vector3) -> int:
+	var rider_scene: PackedScene = Building.PRELOAD_SCENES.get("goblin_rider")
+	var sq: Variant = GameManager.squads.get(sid)
+	if rider_scene == null or sq == null:
+		return 0
+	var full: int = int(_GobCfg.SQUAD_SIZE.get("pig_boss", 31))
+	var alive := 0
+	for m in ((sq as Dictionary)["members"] as Array):
+		if is_instance_valid(m) and not (m as Unit).is_dead():
+			alive += 1
+	var n: int = mini(full - alive, _Spawn.horde_cap(_match_clock) - horde_alive())
+	if n <= 0:
+		return 0
+	for k in range(n):
+		_horde_one(rider_scene, sid, alive + k, full, at)
+	GameManager.refresh_squad_banner(sid)
+	return n
+
+func _horde_one(scene: PackedScene, sid: int, k: int, n: int, base: Vector3,
+		entry: Vector3 = Vector3.INF) -> Unit:
 	_horde_budget_left()
 	_horde_frame_n += 1
 	horde_spawn_peak = maxi(horde_spawn_peak, _horde_frame_n)
@@ -2920,9 +3312,34 @@ func _horde_one(scene: PackedScene, sid: int, k: int, n: int, base: Vector3) -> 
 		var ho: Vector2 = _GobCfg.horde_offset(k, n, sid)
 		var ux: float = base.x + ho.x
 		var uz: float = base.z + ho.y
-		u.global_position = Vector3(ux, get_terrain_height(ux, uz), uz)
+		var goal := Vector3(ux, get_terrain_height(ux, uz), uz)
+		if entry.is_finite():
+			# ── ВХОД ИЗ-ЗА КРОМКИ (ТЗ 31.10.2026) ──────────────────────────
+			# Та же толпа, но у кромки вне обзора игрока; к своей точке — маршем
+			var ex: float = entry.x + ho.x
+			var ez: float = entry.z + ho.y
+			var lim: Vector2 = GameManager.clamp_to_map(ex, ez)
+			if not GameManager.is_passable(lim.x, lim.y):
+				var np: Vector2 = GameManager.nearest_passable(lim.x, lim.y)
+				if np.is_finite():
+					lim = np
+			u.global_position = Vector3(lim.x, get_terrain_height(lim.x, lim.y), lim.y)
+		else:
+			u.global_position = goal
 		u.sync_row()
+		# Кузница гоблинов (ТЗ 28.10.2026): запас жизни из «Орочьего допинга» — при рождении
+		_GobForgeBonus.on_born(u)
 		GameManager.add_to_squad(sid, u)
+		if entry.is_finite():
+			u.horde_entering = true
+			u.horde_goal = goal
+			u.command_move(GameManager.land_target(goal))
+			horde_entered += 1
+			var sq: Dictionary = GameManager.squads[sid]
+			if not _entering.has(sid):
+				_entering.append(sid)
+				sq["entry_ms"] = Unit.game_ms()
+			sq["entry_goal"] = base
 		return u
 	return null
 
@@ -3072,7 +3489,7 @@ func _spawn_mine_guard(mine: Node3D, roster: Array) -> int:
 		# (всадники охраны рудника игрока вызволялись у стволов после каждой
 		# побудки, замер qa_campaign/Long 11.10.2026)
 		_clear_trees(base, hr2 + 2.5)
-		var sid: int = spawn_goblin_squad(uid2, n2, base)
+		var sid: int = spawn_goblin_squad(uid2, n2, base, false, 0, false)
 		if sid <= 0:
 			continue
 		made += 1
@@ -3184,7 +3601,8 @@ func _spawn_troll_lair() -> void:
 	lair.set("side_faction", Constants.FACTION_PLAYER)
 	GameManager.register_lair(lair)
 	GameManager.lair_spots[Constants.FACTION_PLAYER] = c
-	lair.call("spawn_guards", _GobCfg.LAIR_START_TROLLS)
+	var gm: int = _TrollLair.guard_mult()
+	lair.call("spawn_guards", _GobCfg.LAIR_START_TROLLS * gm)
 	_dress_lair_glade(c)
 	# ── ВТОРОЙ ПЕНЬ У КРАСНОГО ИИ (спринт 18) ──────────────────────────────
 	# Зеркально первому: на стороне ИИ, перед рекой и внизу карты, чтобы
@@ -3200,8 +3618,24 @@ func _spawn_troll_lair() -> void:
 		lair2.set("side_faction", Constants.FACTION_ENEMY)
 		GameManager.register_lair(lair2)
 		GameManager.lair_spots[Constants.FACTION_ENEMY] = c2
-		lair2.call("spawn_guards", _GobCfg.LAIR_START_TROLLS)
+		lair2.call("spawn_guards", _GobCfg.LAIR_START_TROLLS * gm)
 		_dress_lair_glade(c2)
+		# ── ЗЕРКАЛЬНЫЙ ПЕНЬ НА ПРАВОМ БЕРЕГУ (ТЗ 31.10.2026, lair_layout_v2) ─
+		# Пень «ничей» (side_faction — орда): его походы к броду ведёт
+		# LairDirector, восстановления давлением овец у него нет
+		if _Opt.lair_layout_v2:
+			var c3 := lair_mirror_center()
+			var lair3: Building = _TrollLair.new()
+			lair3.faction = Constants.FACTION_GOBLIN
+			if lair_frozen_at(c3):
+				lair3.call("freeze")
+			_world.add_child(lair3)
+			lair3.global_position = c3
+			lair3.set("side_faction", Constants.FACTION_GOBLIN)
+			GameManager.register_lair(lair3)
+			GameManager.lair_spots[Constants.FACTION_GOBLIN] = c3
+			lair3.call("spawn_guards", _GobCfg.LAIR_START_TROLLS * gm)
+			_dress_lair_glade(c3)
 
 ## ── НА КАКОМ БЕРЕГУ ТОЧКА: +1 справа от русла, −1 слева (ТЗ 19.09.2026) ───
 ## Функции «на каком берегу» в проекте не было; знак — тот же приём, что у
@@ -3321,10 +3755,34 @@ func _dress_lair_glade(c: Vector3) -> void:
 ## а не стоит числом: сдвинутся базы — пень останется посередине
 func troll_lair_center_ai() -> Vector3:
 	var mid: Vector3 = (PLAYER_BASE_ANCHOR + ENEMY_BASE_ANCHOR) * 0.5
-	var o: Vector2 = _GobCfg.LAIR_AI_SPOT
+	var o: Vector2 = _GobCfg.LAIR_AI_SPOT_V2 if _Opt.lair_layout_v2 else _GobCfg.LAIR_AI_SPOT
 	var x: float = clampf(mid.x + o.x, -GEN_HALF_X, GEN_HALF_X)
 	var z: float = clampf(mid.z + o.y, -GEN_HALF_Z, GEN_HALF_Z)
 	return Vector3(x, get_terrain_height(x, z), z)
+
+## Зеркальный пень на правом берегу (ТЗ 31.10.2026) — точка абсолютная
+func lair_mirror_center() -> Vector3:
+	var o: Vector2 = _GobCfg.LAIR_MIRROR_SPOT
+	var x: float = clampf(o.x, -GEN_HALF_X, GEN_HALF_X)
+	var z: float = clampf(o.y, -GEN_HALF_Z, GEN_HALF_Z)
+	return Vector3(x, get_terrain_height(x, z), z)
+
+## Гора золота и камня за левым пнём (ТЗ 31.10.2026, lair_layout_v2).
+## Ставится ПОСЛЕДНЕЙ в генерации: куча берёт общий randi(), и раньше она
+## сдвинула бы жребий рудников
+var lair_piles: int = 0
+func _spawn_lair_piles() -> void:
+	if not (_Opt.goblin_village and _Opt.lair_layout_v2 and _GobCfg.LAIR_AI_ENABLED):
+		return
+	var c2: Vector3 = troll_lair_center_ai()
+	var spots: Array = [[_GobCfg.LAIR_PILE_GOLD, Constants.RESOURCE_GOLD],
+		[_GobCfg.LAIR_PILE_STONE, Constants.RESOURCE_STONE]]
+	for sp in spots:
+		var o: Vector2 = sp[0]
+		var x: float = c2.x + o.x
+		var z: float = c2.z + o.y
+		_spawn_resource_cluster(Vector3(x, get_terrain_height(x, z), z), int(sp[1]), true)
+		lair_piles += 1
 
 ## ВЫДАТЬ ОТРЯДУ РАНГ ПРИ РОЖДЕНИИ И РАЗДАТЬ ЗА НЕГО НАГРАДЫ.
 ##

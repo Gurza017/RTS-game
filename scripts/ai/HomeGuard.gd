@@ -313,9 +313,54 @@ func _process_timed(delta: float) -> void:
 			continue
 		var post: Vector3 = s["post"]
 		if Vector2(c.x - post.x, c.z - post.z).length() <= _AICfg.HOME_GUARD_HOME_R:
-			_set_sleep(sid, true)
-		elif not GameManager.squad_hit_recently(sid) and _home_due(s):
-			_order_home(s)
+			# ── СПАТЬ, КОГДА СОБРАЛИСЬ, А НЕ КОГДА ПРИШЁЛ ЦЕНТР (аудит
+			# 27.10.2026, ручка guard_sleep_gathered). Центр — медиана: при
+			# 33 бойцах на постах и 21, оставшихся IDLE там, где добили
+			# чужого, она уже «дома», и сон замораживал обе кучи в 15 м друг
+			# от друга до конца партии (зонд qa_tz1027d/Diag, отряды 65/67).
+			# Теперь отставшие получают приказ на СВОЁ место поста, и отряд
+			# засыпает, когда каждый ближе HOME_GUARD_GATHER_R к нему; не
+			# собрались за HOME_GUARD_GATHER_SEC (место занято, застряли) —
+			# спят как есть, чтобы охрана не бодрствовала вечно
+			if not _OptSys.guard_sleep_gathered:
+				_set_sleep(sid, true)
+				continue
+			var nms: int = Unit.game_ms()
+			if int(s.get("gather_ms", 0)) <= 0:
+				s["gather_ms"] = nms
+			var stray: Array = _stragglers(s)
+			if stray.is_empty() \
+					or nms - int(s["gather_ms"]) >= int(_AICfg.HOME_GUARD_GATHER_SEC * 1000.0):
+				s["gather_ms"] = 0
+				_set_sleep(sid, true)
+			elif not GameManager.squad_hit_recently(sid) and _home_due(s):
+				_order_spots(s, stray)
+		else:
+			s["gather_ms"] = 0
+			if not GameManager.squad_hit_recently(sid) and _home_due(s):
+				_order_home(s)
+
+## Бойцы отряда охраны, стоящие дальше HOME_GUARD_GATHER_R от своего места
+## поста; ответ — пары [боец, место]
+func _stragglers(s: Dictionary) -> Array:
+	var out: Array = []
+	var ms: Array = _members(int(s["sid"]))
+	var r2: float = _AICfg.HOME_GUARD_GATHER_R * _AICfg.HOME_GUARD_GATHER_R
+	for k in range(ms.size()):
+		var u: Unit = ms[k]
+		var p: Vector3 = post_spot(s, k)
+		if _xz2(u.global_position, p) > r2:
+			out.append([u, p])
+	return out
+
+func _order_spots(s: Dictionary, pairs: Array) -> void:
+	_OptSys.cmd_src = "home_guard"
+	for pr in pairs:
+		var u: Unit = pr[0]
+		var p: Vector3 = pr[1]
+		u.command_move(GameManager.land_target(Vector3(p.x, 0.0, p.z)))
+	_OptSys.cmd_src = ""
+	s["home_ms"] = Unit.game_ms()
 
 ## Пора ли переиздать приказ домой (см. DormantReserve._home_due)
 func _home_due(s: Dictionary) -> bool:

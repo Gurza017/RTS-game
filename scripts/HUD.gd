@@ -239,6 +239,8 @@ const UNIT_ICONS := {
 	# MONK_AVATARS), здесь — запасной вариант для цвета без своего портрета
 	"monk":     "res://assets/factions/humans/units/Human avatar/Monk_blue.png",
 	"troll":    "res://assets/factions/orc/Troll/Troll_Idle.png",
+	# Свинобосс (ТЗ 28.10.2026): первый кадр листа наездника
+	"pig_boss": "res://assets/factions/Goblin/Pig Rider_Idle.png",
 	# ВКЛАДКА КУЗНИЦЫ, А НЕ РОД ВОЙСК (ТЗ 23.09.2026): своего портрета у неё
 	# быть не может, поэтому берётся значок ресурса — он и читается как
 	# «экономика» без подписи
@@ -280,7 +282,7 @@ static func unit_figure_path(uid: String, faction: int) -> String:
 const UNIT_TITLES := {
 	"worker": "Рабочий", "spearman": "Копейщик",
 	"archer": "Лучник",  "warrior": "Мечник", "monk": "Монах",
-	"troll": "Тролль",
+	"troll": "Тролль", "pig_boss": "Свинобосс",
 	"economy": "Экономика: промыслы, найм, стройка",
 }
 ## Иконки, которые на деле являются боевым спрайт-листом (несколько кадров в
@@ -289,6 +291,7 @@ const UNIT_TITLES := {
 const FRAME_SHEET_ICONS := {
 	"res://assets/factions/humans/units/Blue Units/Monk/Idle.png": 192,
 	"res://assets/factions/orc/Troll/Troll_Idle.png": 384,
+	"res://assets/factions/Goblin/Pig Rider_Idle.png": 256,
 }
 
 # Resource labels
@@ -578,6 +581,141 @@ func _ready() -> void:
 	_build_drag_rect()
 	ResourceManager.resources_changed.connect(_on_resources_changed)
 	GameManager.keep_vet_changed.connect(_on_keep_vet_changed)
+	GameManager.research_finished.connect(_on_research_finished)
+	GameManager.squad_members_changed.connect(_on_squad_members_changed)
+	GameManager.build_unlock_changed.connect(_on_build_unlock_changed)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# РЕАКТИВНЫЙ HUD (ТЗ 28.10.2026): кузница и численность — по СОБЫТИЮ, а не по
+# опросу. Оба обработчика сами ничего не рисуют: взводят флаг, рисует один
+# проход в начале _process_timed — сотня смертей за кадр даёт один пересчёт
+# ─────────────────────────────────────────────────────────────────────────────
+## Отряды текущего выделения множеством: обработчик гибели сверяется с ним за
+## O(1), а не обходит _sel_units на каждого павшего по всей карте
+var _sel_sid_set: Dictionary = {}
+var _counts_dirty: bool = false
+var _forge_dirty: bool = false
+
+## Исследование доехало: открытое окно кузницы перерисовать. ОТЛОЖЕННО — к
+## моменту сигнала Smithy ещё не вызвал _start_next(), и следующий заказ
+## очереди становится research_id лишь по возврату из finish_research
+func _on_research_finished(faction: int, _upgrade_id: String) -> void:
+	if not _OptSys.forge_live_refresh or _forge_dirty:
+		return
+	var s: Smithy = null
+	if forge_visible() and _forge_smithy != null and is_instance_valid(_forge_smithy):
+		s = _forge_smithy
+	elif _selected_node is Smithy and is_instance_valid(_selected_node):
+		s = _selected_node as Smithy
+	if s == null or s.faction != faction:
+		return
+	_forge_dirty = true
+	call_deferred("_forge_live_rebuild")
+
+func _forge_live_rebuild() -> void:
+	_forge_dirty = false
+	if forge_visible() and _forge_smithy != null and is_instance_valid(_forge_smithy):
+		_last_research_id = _forge_smithy.research_id
+		_rebuild_forge()
+	elif _selected_node is Smithy and is_instance_valid(_selected_node):
+		_last_research_id = (_selected_node as Smithy).research_id
+		show_selection([_selected_node])
+
+## Состав отряда сменился: если он в выделении — пересчитать цифры в этом кадре
+func _on_squad_members_changed(sid: int) -> void:
+	if _counts_dirty or not _OptSys.hud_live_counts:
+		return
+	if _sel_sid_set.has(sid) or (not _parent_sids.is_empty() and _parent_sids.has(sid)):
+		_counts_dirty = true
+
+## Живые цифры без пересборки панели: бейдж портрета, строка «Отрядов: N — M»,
+## карточки отрядов (число, полоска здоровья, подсказка), счётчики полосы
+## родов. Пропавший отряд/род — пересборка ТОЛЬКО его полосы; полная
+## _refresh_panel не зовётся — она гасит подсказки и мигает кнопками
+func _refresh_live_counts() -> void:
+	_counts_dirty = false
+	if _sel_units.is_empty():
+		return
+	var ids: Array = _selected_squad_ids()
+	var g: Dictionary = _selection_groups()
+	var order: Array = g["order"]
+	var men_by_type: Dictionary = g["men"]
+	var squads_by_type: Dictionary = g["squads"]
+	var live := 0
+	for u in _sel_units:
+		if is_instance_valid(u) and u is Unit and not (u as Unit).is_dead():
+			live += 1
+	# Портрет: на уровне 2 — бойцы развёрнутого рода, иначе — всё выделение
+	if _portrait_count_lbl != null and is_instance_valid(_portrait_count_lbl):
+		if _expanded_type != "" and _expanded_type != WORKER_GROUP:
+			var men: int = int(men_by_type.get(_expanded_type, 0))
+			_portrait_count_lbl.visible = men > 0
+			_portrait_count_lbl.text = str(men)
+		elif not (_selected_node is Building):
+			_portrait_count_lbl.visible = live > 1
+			if live > 1:
+				_portrait_count_lbl.text = str(live)
+			var nsq: int = _army_badge_squads()
+			if nsq > 0:
+				_portrait_count_lbl.visible = true
+				_portrait_count_lbl.text = str(nsq)
+	if info_label != null and is_instance_valid(info_label):
+		if info_label.text.begins_with("Отрядов: "):
+			info_label.text = "Отрядов: %d — %d бойцов" % [ids.size(), live]
+		elif info_label.text.begins_with("Выбрано: "):
+			info_label.text = "Выбрано: %d юнитов" % live
+		elif _expanded_type != "" and _expanded_type != WORKER_GROUP and squads_by_type.has(_expanded_type):
+			info_label.text = "%s  (%d отр.)" % [
+				_squad_title(_expanded_type), int(squads_by_type[_expanded_type])]
+	# Карточки отрядов развёрнутого рода
+	if _squad_strip != null and is_instance_valid(_squad_strip) and _expanded_type != "":
+		var gone := false
+		for c in _squad_strip.get_children():
+			var nm: String = c.name
+			if not nm.begins_with("SquadCard"):
+				continue
+			var sid: int = int(nm.substr(9))
+			if not _squad_alive(sid):
+				gone = true
+				break
+			_update_squad_card(c, sid)
+		if gone:
+			_rebuild_squad_strip()
+	# Полоса родов: число отрядов на иконке и подсказка; род исчез — пересборка
+	if _overbar_row != null and is_instance_valid(_overbar_row) \
+			and _overbar_row.get_child_count() > 0:
+		if _overbar_row.get_child_count() != order.size():
+			_rebuild_overbar(true)
+		else:
+			for t in order:
+				var uid: String = String(t)
+				var slot: Node = _overbar_row.get_node_or_null("GroupSlot_" + uid)
+				if slot == null:
+					_rebuild_overbar(true)
+					break
+				var badge: Label = slot.find_child("GroupCount", true, false) as Label
+				if badge != null:
+					badge.text = str(int(squads_by_type[uid]))
+				var btn: Button = (badge.get_parent() as Button) if badge != null else null
+				if btn != null:
+					btn.tooltip_text = "%s: %d отрядов, %d бойцов. Клик или Tab — отряды рода" % [
+						_squad_title(uid), int(squads_by_type[uid]), int(men_by_type[uid])]
+
+## Обновить карточку отряда на месте (см. _squad_card: имена узлов там)
+func _update_squad_card(card: Node, sid: int) -> void:
+	var alive: int = GameManager.squad_members(sid).size()
+	var frac: float = _squad_strength(sid)
+	var badge: Label = card.find_child("CountBadge", true, false) as Label
+	if badge != null:
+		badge.text = str(alive)
+		var btn: Button = badge.get_parent() as Button
+		if btn != null:
+			btn.tooltip_text = "%s — %d бойцов (%d%%). Клик — выделить только этот отряд" \
+				% [_squad_title_ranked(GameManager.squad_type(sid), GameManager.squad_level(sid)),
+					alive, int(round(frac * 100.0))]
+	var fill: Control = card.find_child("HpFill", true, false) as Control
+	if fill != null:
+		fill.custom_minimum_size = Vector2(maxf(SQUAD_CARD * frac, 1.0), SQUAD_HP_H)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PLACEMENT HINT
@@ -794,6 +932,7 @@ func _rebuild_overbar(force: bool = false) -> void:
 	var sig := "%s|" % _expanded_type
 	for sid in (_parent_sids if not _parent_sids.is_empty() else _selected_squad_ids()):
 		sig += "%d," % int(sid)
+	sig += "w%d" % _group_workers().size()
 	if not force and sig == _overbar_sig and _overbar_row.get_child_count() > 0:
 		return
 	_overbar_sig = sig
@@ -841,9 +980,14 @@ func _selection_groups() -> Dictionary:
 		for s0 in _parent_sids:
 			if _squad_alive(int(s0)):
 				src.append(int(s0))
+	# Рабочие с армией — одной группой WORKER_GROUP (ниже); их одиночные
+	# отряды рода «worker» здесь не считаются, иначе род встал бы дважды
+	var wk: Array = _group_workers()
 	for sid in src:
 		var t: String = GameManager.squad_type(int(sid))
 		if t.is_empty():
+			continue
+		if t == WORKER_GROUP and not wk.is_empty():
 			continue
 		if not squads_by_type.has(t):
 			order.append(t)
@@ -851,7 +995,99 @@ func _selection_groups() -> Dictionary:
 			men_by_type[t] = 0
 		squads_by_type[t] = int(squads_by_type[t]) + 1
 		men_by_type[t] = int(men_by_type[t]) + GameManager.squad_members(int(sid)).size()
+	# Рабочие — свой «род» полосы (ТЗ 30.10.2026, п. 4): у них нет отряда, и
+	# в смешанном выделении они пропадали с панели. Счётчик — число рабочих
+	if not wk.is_empty():
+		order.append(WORKER_GROUP)
+		squads_by_type[WORKER_GROUP] = wk.size()
+		men_by_type[WORKER_GROUP] = wk.size()
+	_sort_types(order)
 	return {"order": order, "squads": squads_by_type, "men": men_by_type}
+
+## ── РАБОЧИЕ В МУЛЬТИ-ВЫБОРЕ (ТЗ 30.10.2026, п. 4, ручка mixed_worker_group) ──
+## Ячейка «worker» в полосе родов: фигура рабочего, число рабочих; клик или
+## Tab — выделены одни рабочие и их обычная панель построек (артель строит
+## вместе), повторный клик — вся армия обратно
+const WORKER_GROUP := "worker"
+const WORKER_GROUP_FIGURE := "res://assets/ui/unit_figures/%s/worker.png"
+var _parent_workers: Array = []
+
+## Свои живые рабочие текущего выделения
+func _selected_workers() -> Array:
+	var out: Array = []
+	if not _OptSys.mixed_worker_group:
+		return out
+	for u in _sel_units:
+		if u != null and is_instance_valid(u) and u is Worker \
+				and (u as Worker).faction == Constants.FACTION_PLAYER and not (u as Worker).is_dead():
+			out.append(u)
+	return out
+
+## Рабочие группы: из родительского набора, если он есть, иначе из выделения.
+## Одни рабочие без армии — не мульти-выбор (у них своя панель артели)
+func _group_workers() -> Array:
+	if not _OptSys.mixed_worker_group:
+		return []
+	var out: Array = []
+	if not _parent_sids.is_empty() or not _parent_workers.is_empty():
+		if not _has_army_squad(_parent_sids):
+			return []
+		for w in _parent_workers:
+			if w != null and is_instance_valid(w) and not (w as Worker).is_dead():
+				out.append(w)
+		return out
+	if not _has_army_squad(_selected_squad_ids()):
+		return []
+	return _selected_workers()
+
+## Есть ли среди отрядов хоть один живой НЕ рабочий (иначе это артель, а не
+## мульти-выбор: у одних рабочих своя панель построек)
+func _has_army_squad(ids: Array) -> bool:
+	for s in ids:
+		if GameManager.squad_type(int(s)) != WORKER_GROUP and _squad_alive(int(s)):
+			return true
+	return false
+
+func _parent_clear() -> void:
+	_parent_sids.clear()
+	_parent_workers.clear()
+
+func _parent_init() -> void:
+	if _parent_sids.is_empty():
+		_parent_sids = _selected_squad_ids()
+		_parent_workers = _selected_workers() if not _parent_sids.is_empty() else []
+
+## ── СТРОГИЙ ПОРЯДОК РОДОВ (ТЗ 27.10.2026, третье письмо, п. 3) ──────────────
+## Копейщик → Лучник → Рыцарь → Монах, прочие — после них в порядке появления.
+## Прежде порядок был «как попались в выделении», и роды прыгали местами от
+## рамки к рамке. Тот же порядок у Tab (cycle_expanded_type)
+const TYPE_ORDER := ["spearman", "archer", "warrior", "monk"]
+
+static func _type_rank(t: String) -> int:
+	var i: int = TYPE_ORDER.find(t)
+	return i if i >= 0 else TYPE_ORDER.size()
+
+static func _sort_types(order: Array) -> void:
+	# Устойчивая сортировка вставкой: роды вне списка сохраняют порядок появления
+	for i in range(1, order.size()):
+		var v: String = String(order[i])
+		var j: int = i - 1
+		while j >= 0 and _type_rank(String(order[j])) > _type_rank(v):
+			order[j + 1] = order[j]
+			j -= 1
+		order[j + 1] = v
+
+## Бейдж портрета армии (ТЗ 30.10.2026): выделено ≥ 2 отрядов одного рода и
+## род не раскрыт — число ОТРЯДОВ, а не бойцов; иначе −1
+func _army_badge_squads() -> int:
+	if not _OptSys.army_count_badge or _expanded_type != "":
+		return -1
+	var g: Dictionary = _selection_groups()
+	var order: Array = g["order"]
+	if order.size() != 1 or String(order[0]) == WORKER_GROUP:
+		return -1
+	var n: int = int((g["squads"] as Dictionary).get(order[0], 0))
+	return n if n >= 2 else -1
 
 ## Сколько разных типов войск сейчас выделено (публичный — для стендов)
 func selection_type_count() -> int:
@@ -887,7 +1123,12 @@ func _selected_squad_ids() -> Array:
 ## headless-замером get_global_rect() после сборки (см. qa в отчёте)
 ## ВДВОЕ МЕНЬШЕ (ТЗ 25.10.2026, UI, п. 3): было 52 — плашка спорила с
 ## мини-картой. Справа от неё — такой же значок рудников (MINE_WIDGET_GAP)
-const IDLE_WIDGET_SIZE := 26.0
+## +50 % (ТЗ 27.10.2026, второе письмо, п. 2): 26 → 39 px — рисунки рабочего
+## и шахты читались точками. Цифры подросли пропорционально (IDLE_COUNT_FONT /
+## MINE_COUNT_FONT), штандарт под плашкой встаёт сам (RelicButton._place)
+const IDLE_WIDGET_SIZE := 39.0
+const IDLE_COUNT_FONT := 14
+const MINE_COUNT_FONT := 13
 const IDLE_WIDGET_TOP  := 50.0
 const IDLE_WIDGET_LEFT := 8.0
 const MINE_WIDGET_GAP  := 4.0
@@ -951,7 +1192,7 @@ func _build_idle_widget() -> void:
 	if not got_icon:
 		# Ассета нет — не оставлять же плашку пустой: подписываем киркой
 		_idle_btn.text = "⛏"
-		_idle_btn.add_theme_font_size_override("font_size", 14)
+		_idle_btn.add_theme_font_size_override("font_size", 20)
 
 	# СЧЁТЧИК — ГОЛАЯ ЦИФРА В УГЛУ ИКОНКИ, БЕЗ ПОДЛОЖКИ.
 	# Раньше цифра сидела в собственном PanelContainer с тёмной заливкой, и на
@@ -965,7 +1206,7 @@ func _build_idle_widget() -> void:
 	_idle_count_label.text = "0"
 	_idle_count_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	# Цифра под вдвое меньшую плашку: читается, но не закрывает рисунок
-	_idle_count_label.add_theme_font_size_override("font_size", 10)
+	_idle_count_label.add_theme_font_size_override("font_size", IDLE_COUNT_FONT)
 	_idle_count_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.95))
 	_idle_count_label.add_theme_constant_override("outline_size", 3)
 	_idle_count_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
@@ -1007,7 +1248,7 @@ func _build_mine_widget() -> void:
 	_mine_count_lbl.text = "0"
 	_mine_count_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	# Цифра — мельче рисунка (жалоба: «двойка» доминировала над шахтой)
-	_mine_count_lbl.add_theme_font_size_override("font_size", 9)
+	_mine_count_lbl.add_theme_font_size_override("font_size", MINE_COUNT_FONT)
 	_mine_count_lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.95))
 	_mine_count_lbl.add_theme_constant_override("outline_size", 3)
 	_mine_count_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
@@ -2274,6 +2515,10 @@ func show_selection(units: Array) -> void:
 	if button_container == null:
 		return
 	_sel_units = units.duplicate()
+	_sel_sid_set.clear()
+	for sid0 in _selected_squad_ids():
+		_sel_sid_set[int(sid0)] = true
+	_counts_dirty = false
 	# ВЫДЕЛЕНИЕ СВОИХ ЗАКРЫВАЕТ РАЗВЕДКУ. Панель одна на двоих, и держать на ней
 	# чужой отряд, пока игрок уже командует своим, значит показывать не тот
 	# объект, которым управляют — самая дорогая ошибка, какую может сделать HUD
@@ -2289,14 +2534,113 @@ func show_selection(units: Array) -> void:
 	# (разворот рода, клик по карточке отряда); иначе — новое выделение
 	if not _parent_sids.is_empty():
 		var cur: Array = _selected_squad_ids()
-		if cur.is_empty():
-			_parent_sids.clear()
+		var cur_w: Array = _selected_workers()
+		var keep_par: bool = not cur.is_empty() or not cur_w.is_empty()
 		for sid in cur:
 			if not _parent_sids.has(int(sid)):
-				_parent_sids.clear()
+				keep_par = false
 				break
+		for w in cur_w:
+			if not _parent_workers.has(w):
+				keep_par = false
+				break
+		if not keep_par:
+			_parent_clear()
 	_rebuild_overbar(not _parent_sids.is_empty())
 	_refresh_panel()
+	_sync_market_panel(units)
+	_sync_goblin_forge_panel(units)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ОКНО РЫНКА (ТЗ 27.10.2026, второе письмо, п. 4)
+# ═════════════════════════════════════════════════════════════════════════════
+## Окно обмена живёт, пока выделен ОДИН свой рынок; стоит над нижней
+## панелью у левого края (scripts/ui/MarketPanel.gd)
+const _MarketPanelS := preload("res://scripts/ui/MarketPanel.gd")
+var _market_panel: Control = null
+
+func _sync_market_panel(units: Array) -> void:
+	var mk: Node = null
+	if units.size() == 1 and is_instance_valid(units[0]) and units[0] is Building 			and String((units[0] as Building).building_id) == "market" 			and int((units[0] as Building).faction) == Constants.FACTION_PLAYER 			and not (units[0] as Building).is_dead():
+		mk = units[0]
+	if mk == null:
+		if _market_panel != null and is_instance_valid(_market_panel):
+			remove_child(_market_panel)
+			_market_panel.queue_free()
+		_market_panel = null
+		return
+	if _market_panel == null or not is_instance_valid(_market_panel):
+		_market_panel = _MarketPanelS.new()
+		add_child(_market_panel)
+	_market_panel.set("market", mk)
+	_market_panel.call("_refresh")
+	_place_market_panel.call_deferred()
+
+## Выделен ровно один свой живой рынок
+func _market_selected(units: Array) -> bool:
+	return units.size() == 1 and is_instance_valid(units[0]) and units[0] is Building \
+		and String((units[0] as Building).building_id) == "market" \
+		and int((units[0] as Building).faction) == Constants.FACTION_PLAYER \
+		and not (units[0] as Building).is_dead()
+
+func _place_market_panel() -> void:
+	if _market_panel == null or not is_instance_valid(_market_panel):
+		return
+	var vs: Vector2 = get_viewport().get_visible_rect().size
+	var ms: Vector2 = _market_panel.get_combined_minimum_size()
+	_market_panel.size = ms
+	# Нижняя панель на время рынка скрыта — окно стоит на её месте, у низа
+	var top: float = vs.y
+	if _bottom_panel != null and is_instance_valid(_bottom_panel) and _bottom_panel.visible:
+		top = _bottom_panel.get_global_rect().position.y
+	var x: float = PANEL_LEFT
+	if _bottom_panel != null and is_instance_valid(_bottom_panel):
+		x = _bottom_panel.get_global_rect().position.x
+	_market_panel.position = Vector2(x, maxf(8.0, top - ms.y - 8.0))
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ОКНО КУЗНИЦЫ ГОБЛИНОВ (ТЗ 28.10.2026): живёт, пока выделена ОДНА своя кузница
+# орды (игра за гоблинов; сейчас — если игрок владеет таким зданием); стенд и
+# отладка открывают окно напрямую (goblin_forge_panel().open_for). Само окно —
+# scripts/economy/goblin_forge/GoblinForgePanel.gd, стоит там же, где рынок
+# ═════════════════════════════════════════════════════════════════════════════
+const _GobForgePanelS := preload("res://scripts/economy/goblin_forge/GoblinForgePanel.gd")
+var _gforge_panel: Control = null
+
+func goblin_forge_panel() -> Control:
+	if _gforge_panel == null or not is_instance_valid(_gforge_panel):
+		_gforge_panel = _GobForgePanelS.new()
+		add_child(_gforge_panel)
+		_gforge_panel.visible = false
+	return _gforge_panel
+
+func _sync_goblin_forge_panel(units: Array) -> void:
+	var fg: Node = null
+	if units.size() == 1 and units[0] is Building \
+			and String((units[0] as Building).building_id) == "goblin_forge" \
+			and (units[0] as Building).faction == Constants.FACTION_PLAYER:
+		fg = units[0]
+	if fg == null:
+		if _gforge_panel != null and is_instance_valid(_gforge_panel) and _gforge_panel.visible:
+			_gforge_panel.call("close")
+		return
+	var p: Control = goblin_forge_panel()
+	p.call("open_for", fg)
+	_place_goblin_forge_panel.call_deferred()
+
+func _place_goblin_forge_panel() -> void:
+	if _gforge_panel == null or not is_instance_valid(_gforge_panel) or not _gforge_panel.visible:
+		return
+	var vs: Vector2 = get_viewport().get_visible_rect().size
+	var ms: Vector2 = _gforge_panel.get_combined_minimum_size()
+	_gforge_panel.size = ms
+	var top: float = vs.y - 200.0
+	if _bottom_panel != null and is_instance_valid(_bottom_panel) and _bottom_panel.visible:
+		top = _bottom_panel.get_global_rect().position.y
+	var x: float = PANEL_LEFT
+	if _bottom_panel != null and is_instance_valid(_bottom_panel):
+		x = _bottom_panel.get_global_rect().position.x
+	_gforge_panel.position = Vector2(x, maxf(8.0, top - ms.y - 8.0))
 
 # ═════════════════════════════════════════════════════════════════════════════
 # ПАНЕЛЬ РАЗВЕДКИ: ЧУЖОЙ ОТРЯД ПОД ЛУПОЙ
@@ -2468,7 +2812,8 @@ func _refresh_panel() -> void:
 		_expanded_type = ""
 
 	# ── УРОВЕНЬ 2: РАЗВЁРНУТА ОДНА ГРУППА ────────────────────────────────────
-	if _expanded_type != "":
+	# (рабочие — не род: у них обычная панель артели, ТЗ 30.10.2026)
+	if _expanded_type != "" and _expanded_type != WORKER_GROUP:
 		if _bottom_panel: _bottom_panel.visible = true
 		_build_type_detail(_expanded_type)
 		_sync_panel_grid_widths()
@@ -2490,6 +2835,12 @@ func _refresh_panel() -> void:
 		# отсюда — см. ЭТАП1 п.4
 		if _bottom_panel: _bottom_panel.visible = false
 		return
+	# ── РЫНОК — ОДНА ПАНЕЛЬ (ТЗ 29.10.2026): карточка здания с текстами снята,
+	# окно обмена (_sync_market_panel) встаёт на место нижней панели
+	if _market_selected(units):
+		_selected_node = units[0]
+		if _bottom_panel: _bottom_panel.visible = false
+		return
 	if _bottom_panel: _bottom_panel.visible = true
 
 	var u = units[0]
@@ -2507,7 +2858,11 @@ func _refresh_panel() -> void:
 		if u is Castle and not (u as Castle).is_stronghold() \
 				and not (u is Barracks) and u.faction == Constants.FACTION_PLAYER:
 			portrait.color = Color(0.16, 0.20, 0.30)
-			_show_garrison(u as Castle)
+			# ОДНА КНОПКА ГАРНИЗОНА (ТЗ 27.10.2026, второе письмо, п. 7): у башни
+			# место на ОДИН отряд, и мини-слот секции «Гарнизон» дублировал
+			# крупную «Выпустить» — секция у башни не строится
+			if not _OptSys.tower_one_garrison_btn:
+				_show_garrison(u as Castle)
 			_garrison_vet_menu(u as Castle)
 			_castle_boost = true
 			# Обзор и гарнизон — второй строкой шапки, а не в info_label: та
@@ -2519,15 +2874,23 @@ func _refresh_panel() -> void:
 				_portrait_wrap.custom_minimum_size = Vector2(
 					CASTLE_PORTRAIT_W, CASTLE_PORTRAIT_W)
 				_portrait_wrap.size_flags_vertical = Control.SIZE_SHRINK_END
+			# Обе кнопки башни — одного размера и с иконкой в рамке
+			# (TOWER_BTN_SIZE, TOWER_ICON_BOOST): прежние 55 px с иконкой ×1.5
+			# торчали крупнее всей панели
+			var tsz: float = TOWER_BTN_SIZE if _OptSys.tower_one_garrison_btn else BTN_SIZE * CASTLE_PANEL_BOOST
+			var tib: float = TOWER_ICON_BOOST if _OptSys.tower_one_garrison_btn else CASTLE_ICON_BOOST
 			if u.has_method("has_garrison") and bool(u.call("has_garrison")):
-				_cmd("Выпустить", Color(0.20, 0.28, 0.16),
+				var g_n: int = (u as Castle).garrison.size()
+				var rb: Button = _cmd("Выпустить", Color(0.20, 0.28, 0.16),
 					func(): _on_tower_release(u as Castle),
 					String(UNIT_ICONS.get("archer", "")), {"title": "Выпустить лучников",
-					"lines": ["Отряд выходит из башни к воротам"]},
-					BTN_SIZE * CASTLE_PANEL_BOOST, CASTLE_ICON_BOOST)
+					"lines": ["Гарнизон: %d/%d" % [g_n, (u as Castle).garrison_limit()],
+						"Отряд выходит из башни к воротам"]},
+					tsz, tib)
+				rb.name = "TowerReleaseBtn"
 			# Укрепление прочности (ТЗ 20.10.2026, блок 4) — у КАЖДОЙ башни
 			if u.has_method("fort_start"):
-				_tower_fort_cmd(u as Castle, BTN_SIZE * CASTLE_PANEL_BOOST)
+				_tower_fort_cmd(u as Castle, tsz, tib)
 
 		elif u is Castle and (u as Castle).is_stronghold() 				and u.faction == Constants.FACTION_PLAYER:
 			# ТОЛЬКО СТОЛИЦА: бараки с 14.09.2026 тоже Castle (крыша для
@@ -2676,13 +3039,27 @@ func _refresh_panel() -> void:
 				"lines": ["Клик — выделить их"]},
 				func(): _select_pen_farmers(pen_b))
 
+		elif u is Building and String(u.building_id) == "market" and u.faction == Constants.FACTION_PLAYER:
+			# РЫНОК (ТЗ 27.10.2026): окно обмена открывается над панелью само
+			# (_sync_market_panel), здесь — подпись
+			portrait.color = Color(0.30, 0.22, 0.14)
+			info_label.text = "%s  %d/%d HP\nОбмен ресурсов — окно над панелью" % [
+				u.display_name, int(u.current_health), int(u.max_health)]
+
+		elif u is Building and String(u.building_id) == "storehouse" and u.faction == Constants.FACTION_PLAYER:
+			portrait.color = Color(0.24, 0.22, 0.16)
+			info_label.text = "%s  %d/%d HP\nРабочие сдают сюда груз — сразу в казну" % [
+				u.display_name, int(u.current_health), int(u.max_health)]
+
 		elif u is Smithy and u.faction == Constants.FACTION_PLAYER:
 			portrait.color = Color(0.24, 0.18, 0.10)
 			_build_smithy_menu(u)
 
 		elif u is Worker and u.faction == Constants.FACTION_PLAYER:
 			portrait.color = Color(0.10, 0.22, 0.12)
-			info_label.text = "Рабочий  %d/%d HP" % [int(u.current_health), int(u.max_health)]
+			# Сеткой (ТЗ 30.10.2026) — без подписи: панель монолитна
+			info_label.text = "" if _OptSys.worker_grid_panel \
+				else "Рабочий  %d/%d HP" % [int(u.current_health), int(u.max_health)]
 			_worker_boost = true
 			_worker_portrait()
 			# ПОРТРЕТ У РАБОЧЕГО ТЕПЕРЬ ТАКОЙ ЖЕ, КАК У ВСЕХ (заказ владельца —
@@ -2856,6 +3233,10 @@ func _update_portrait_badges(units: Array) -> void:
 		_portrait_count_lbl.visible = units.size() > 1
 		if units.size() > 1:
 			_portrait_count_lbl.text = str(units.size())
+		var nsq: int = _army_badge_squads()
+		if nsq > 0:
+			_portrait_count_lbl.visible = true
+			_portrait_count_lbl.text = str(nsq)
 
 	if _portrait_rank_lbl != null and is_instance_valid(_portrait_rank_lbl):
 		var lvl := 0
@@ -2949,7 +3330,10 @@ func _maybe_add_stance_buttons(units: Array) -> void:
 		# Полная раскладка статов с источниками бонусов — отдельной панелью
 		_show_stat_panel(sid, units)
 	else:
-		info_label.text = "Отрядов: %d — %d бойцов" % [ids.size(), units.size()]
+		# ТЗ 30.10.2026: строки «Отрядов: N — M» нет — число отрядов стоит
+		# бейджем на портрете, Tab раскрывает их карточками
+		info_label.text = "" if _OptSys.army_count_badge \
+			else "Отрядов: %d — %d бойцов" % [ids.size(), units.size()]
 		_update_xp_bar(0)
 
 	# ВЫБОР ВЕТЕРАНСКОГО БОНУСА важнее стоек: пока игрок не выбрал улучшение,
@@ -3439,6 +3823,14 @@ func _stance_card(sample: Unit, stance_id: String, active: bool) -> Dictionary:
 ## Сторона групповой иконки уровня 1. Полоса называется «компактной» —
 ## она уменьшена вместе с остальной панелью (было 52)
 const FILTER_SLOT := 34
+## ── ЯЧЕЙКА РОДА ВЫШЕ, ФИГУРКА КРУПНЕЕ, ЧИСЛО РЯДОМ (ТЗ 27.10.2026, третье
+## письмо, п. 3) ─────────────────────────────────────────────────────────────
+## Кнопка FILTER_SLOT_W × FILTER_SLOT_H: фигурка в полный рост занимает левую
+## часть (почти без отступа), число отрядов — компактной цифрой в правой
+## полосе FILTER_NUM_W, рядом с фигуркой, а не поверх её ног
+const FILTER_SLOT_W := 46
+const FILTER_SLOT_H := 54
+const FILTER_NUM_W := 14
 ## Ширина ЯЧЕЙКИ под иконкой — шире самой иконки.
 ## Подпись «32 бойца» в 34 px не влезает и обрезается многоточием («32…»), а
 ## цифра состава — половина смысла слота: сверху на иконке стоит число ОТРЯДОВ,
@@ -3461,7 +3853,7 @@ func _filter_slot(unit_id: String, squads: int, men: int) -> Control:
 	vb.add_theme_constant_override("separation", 0)
 
 	var btn := Button.new()
-	btn.custom_minimum_size = Vector2(FILTER_SLOT, FILTER_SLOT)
+	btn.custom_minimum_size = Vector2(FILTER_SLOT_W, FILTER_SLOT_H)
 	btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	btn.clip_contents = true
 	btn.focus_mode = Control.FOCUS_NONE
@@ -3476,22 +3868,37 @@ func _filter_slot(unit_id: String, squads: int, men: int) -> Control:
 	btn.add_theme_stylebox_override("hover",  sh)
 	btn.add_theme_stylebox_override("pressed", sn)
 	var ipath: String = unit_figure_path(unit_id, Constants.FACTION_PLAYER)
+	if unit_id == WORKER_GROUP:
+		ipath = WORKER_GROUP_FIGURE % String(GameManager.color_of(Constants.FACTION_PLAYER)).capitalize()
+		if not ResourceLoader.exists(ipath):
+			ipath = WORKER_GROUP_FIGURE % "Blue"
 	if ipath and ResourceLoader.exists(ipath):
 		var tex := load(ipath) as Texture2D
 		if tex != null:
-			btn.add_child(_stretched_icon(tex, 3.0))
+			var fig: TextureRect = _stretched_icon(tex, 1.0)
+			fig.name = "GroupFigure"
+			fig.offset_right = -float(FILTER_NUM_W)
+			btn.add_child(fig)
 	else:
 		btn.text = _squad_title(unit_id).get_slice(" ", 0)
 		btn.add_theme_font_size_override("font_size", 11)
 	btn.pressed.connect(func(): _on_type_filter_pressed(unit_id))
-	# Счётчик ОТРЯДОВ в углу иконки
+	# Счётчик ОТРЯДОВ — в правой полосе кнопки, рядом с фигуркой
 	var badge := _add_badge(btn)
+	badge.name = "GroupCount"
 	badge.visible = true
 	badge.text = str(squads)
+	badge.add_theme_font_size_override("font_size", 13)
+	badge.offset_left = float(FILTER_SLOT_W - FILTER_NUM_W)
+	badge.offset_right = -1
+	badge.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	badge.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	vb.add_child(btn)
 
 	btn.tooltip_text = "%s: %d отрядов, %d бойцов. Клик или Tab — отряды рода" % [
 		_squad_title(unit_id), squads, men]
+	if unit_id == WORKER_GROUP:
+		btn.tooltip_text = "Рабочие: %d. Клик или Tab — панель построек" % men
 	return vb
 
 ## Клик по сводному ярлыку: РАЗВЕРНУТЬ группу на нижней панели отдельными
@@ -3507,8 +3914,7 @@ var _parent_sids: Array = []
 
 func _on_type_filter_pressed(unit_id: String) -> void:
 	AudioManager.play_ui("menu_tab")
-	if _parent_sids.is_empty():
-		_parent_sids = _selected_squad_ids()
+	_parent_init()
 	# ПОВТОРНЫЙ КЛИК ПО ТОМУ ЖЕ РОДУ ЗАКРЫВАЕТ ДЕТАЛЬНУЮ ПАНЕЛЬ (ТЗ 10.10.2026)
 	if _expanded_type == unit_id:
 		_restore_parent_selection()
@@ -3517,15 +3923,29 @@ func _on_type_filter_pressed(unit_id: String) -> void:
 
 ## Tab: следующий род родительского набора (или первый)
 func cycle_expanded_type() -> bool:
-	if _parent_sids.is_empty():
-		_parent_sids = _selected_squad_ids()
+	_parent_init()
 	var order: Array = []
+	var gw: Array = _group_workers()
 	for s in _parent_sids:
 		var t: String = GameManager.squad_type(int(s))
+		if t == WORKER_GROUP and not gw.is_empty():
+			continue
 		if t != "" and not order.has(t) and _squad_alive(int(s)):
 			order.append(t)
+	if not gw.is_empty():
+		order.append(WORKER_GROUP)
+	_sort_types(order)
+	# Один род, несколько отрядов (ТЗ 30.10.2026): Tab раскрывает их
+	# карточками, повторный Tab — сворачивает обратно
+	if order.size() == 1 and _OptSys.army_count_badge and _parent_sids.size() >= 2 			and String(order[0]) != WORKER_GROUP:
+		AudioManager.play_ui("menu_tab")
+		if _expanded_type == String(order[0]):
+			_restore_parent_selection()
+		else:
+			_expand_type_from_parent(String(order[0]))
+		return true
 	if order.size() < GROUP_BAR_MIN_TYPES:
-		_parent_sids.clear()
+		_parent_clear()
 		return false
 	AudioManager.play_ui("menu_tab")
 	var i: int = order.find(_expanded_type)
@@ -3545,7 +3965,8 @@ func _squad_alive(sid: int) -> bool:
 ## Вернуть смешанное выделение целиком (детальная панель закрыта)
 func _restore_parent_selection() -> void:
 	var keep: Array = _parent_sids.duplicate()
-	_parent_sids.clear()
+	var keep_w: Array = _parent_workers.duplicate()
+	_parent_clear()
 	_expanded_type = ""
 	var main := GameManager.main
 	if main == null or main.selection_manager == null:
@@ -3559,6 +3980,9 @@ func _restore_parent_selection() -> void:
 			var u := m as Unit
 			if u != null and is_instance_valid(u) and not u.is_dead():
 				sm._select_one(u)
+	for w in keep_w:
+		if w != null and is_instance_valid(w) and not (w as Worker).is_dead():
+			sm._select_one(w)
 	GameManager.on_selection_changed(sm.selected_units)
 
 func _expand_type_from_parent(unit_id: String) -> void:
@@ -3567,6 +3991,24 @@ func _expand_type_from_parent(unit_id: String) -> void:
 	# Разбор по карточкам остаётся: полоса отрядов этого рода разворачивается,
 	# и кликом по карточке выделение сужается дальше, до одного отряда
 	var main := GameManager.main
+	if unit_id == WORKER_GROUP and main != null and main.selection_manager != null:
+		var smw: SelectionManager = main.selection_manager
+		var ws: Array = _group_workers()
+		if not ws.is_empty():
+			var par: Array = _parent_sids.duplicate()
+			var parw: Array = _parent_workers.duplicate()
+			smw._clear_selection()
+			for w in ws:
+				smw._select_one(w)
+			_parent_sids = par
+			_parent_workers = parw
+			GameManager.on_selection_changed(smw.selected_units)
+			_parent_sids = par
+			_parent_workers = parw
+		# Панель — обычная панель артели: детальной панели рода у рабочих нет
+		_expanded_type = unit_id
+		_rebuild_overbar(true)
+		return
 	if main != null and main.selection_manager != null:
 		var sm: SelectionManager = main.selection_manager
 		var keep: Array = []
@@ -3711,6 +4153,7 @@ func _squad_card(sid: int) -> Control:
 		btn.text = _squad_title(uid).get_slice(" ", 0)
 		btn.add_theme_font_size_override("font_size", 10)
 	var badge := _add_badge(btn)
+	badge.name = "CountBadge"
 	badge.visible = true
 	badge.text = str(alive)
 	badge.add_theme_font_size_override("font_size", 13)
@@ -3746,6 +4189,7 @@ func _squad_card(sid: int) -> Control:
 	bg.bg_color = Color(0.18, 0.05, 0.05); _corners(bg, 2)
 	bar_bg.add_theme_stylebox_override("panel", bg)
 	var fill := ColorRect.new()
+	fill.name = "HpFill"
 	fill.color = Color(0.86, 0.16, 0.14)
 	fill.custom_minimum_size = Vector2(maxf(SQUAD_CARD * frac, 1.0), SQUAD_HP_H)
 	fill.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
@@ -5615,6 +6059,7 @@ const MOD_SHORT_LABELS := {
 	"bonus_gather_gold": "ДОБЫЧА ЗОЛОТА", "bonus_gather_food": "РАЗДЕЛКА МЯСА",
 	"bonus_carry_pct": "ГРУЗ, ДОЛЯ", "bonus_walk_pct": "ХОДЬБА, ДОЛЯ",
 	"bonus_walk_loaded_pct": "ХОД С ГРУЗОМ, ДОЛЯ",
+	"bonus_meat_pct": "ВЫХОД МЯСА, ДОЛЯ", "bonus_research_pct": "ТЕМП ИССЛЕДОВАНИЙ, ДОЛЯ",
 	"bonus_hire_cost": "ЦЕНА НАЙМА РАБОЧЕГО", "bonus_train_army": "ОБУЧЕНИЕ ВОЙСК",
 	"bonus_heal_rate": "ТЕМП ЛЕЧЕНИЯ", "bonus_heal_amount": "ОБЪЁМ ЛЕЧЕНИЯ",
 	"bonus_heal_radius": "РАДИУС ЛЕЧЕНИЯ",
@@ -5892,6 +6337,8 @@ const _WORKER_BUILD_COLORS := {
 	"smithy":   Color(0.28, 0.20, 0.10),
 	"mine":     Color(0.28, 0.22, 0.14),
 	"sheep_pen": Color(0.30, 0.26, 0.16),
+	"market":   Color(0.30, 0.22, 0.14),
+	"storehouse": Color(0.24, 0.22, 0.16),
 	"house":    Color(0.26, 0.24, 0.18),
 	"house2":   Color(0.26, 0.24, 0.18),
 	"house3":   Color(0.26, 0.24, 0.18),
@@ -5917,6 +6364,7 @@ func _build_worker_menu(worker: Worker, crew: Array = [], size: float = 0.0,
 	# после переноса в метод обращение по старому имени падало SCRIPT ERROR,
 	# и панель артели оставалась пустой
 	var catalog: Dictionary = GameManager.worker_buildings()
+	var build_btns: Array = []
 	for build_id in catalog:
 		var bid: String = String(build_id)
 		# ОДНА КНОПКА «ДОМ» (ТЗ 11.10.2026): ракурс дома выбирает установка
@@ -5933,12 +6381,28 @@ func _build_worker_menu(worker: Worker, crew: Array = [], size: float = 0.0,
 		# нажимается и отказывает в try_worker_build с подсказкой)
 		var ok0: bool = ResourceManager.can_afford(worker.faction, cost)
 		var col: Color = _build_bg(ok0)
+		# ── ЗАКРЫТАЯ ПОСТРОЙКА (ТЗ 30.10.2026, ступени разблокировки) ─────
+		# Серый фон, приглушённая иконка и полупрозрачный замочек; карточка
+		# говорит, что открыть. Клик — плашка-подсказка (try_worker_build)
+		var locked: bool = not GameManager.build_unlocked(worker.faction, bid)
+		var card: Dictionary = _building_card(bid)
+		if locked:
+			col = BUILD_LOCK_BG
+			card = card.duplicate(true)
+			var inf: Array = card.get("info", [])
+			inf.append(["Закрыто", GameManager.build_unlock_hint(bid)])
+			card["info"] = inf
 		# Иконка берётся из конфига здания; цена и темп стройки — в карточке
 		var icon: String = String(d.get("icon", ""))
 		var btn: Button = _cmd(String(d.get("name", bid)), col,
 			func(): GameManager.try_worker_build(worker, bid, crew),
-			icon, _building_card(bid), size, icon_boost)
-		_watch_build_afford(btn, cost, worker.faction, bid)
+			icon, card, size, icon_boost)
+		btn.name = "Build_" + bid
+		if locked:
+			_lock_build_button(btn)
+		else:
+			_watch_build_afford(btn, cost, worker.faction, bid)
+		build_btns.append(btn)
 	# ── «ОТСТУПИТЬ В ЗАМОК» — ЛИЧНАЯ КОМАНДА РАБОЧЕГО (ТЗ 20.10.2026, блок 5) ─
 	# Выделенные рабочие бегут в ближайшую крепость и прячутся в её общий
 	# слот; колокол тревоги при этом не взводится. Выход — из панели замка
@@ -5953,6 +6417,104 @@ func _build_worker_menu(worker: Worker, crew: Array = [], size: float = 0.0,
 	sb.name = "WorkerShelterBtn"
 	sb.text = ""
 	sb.add_child(_stretched_icon(_castle_door_texture(), BTN_ICON_PAD))
+	if _OptSys.worker_grid_panel:
+		_worker_grid_order(build_btns, sb, size)
+
+## ── ПАНЕЛЬ РАБОЧЕГО СЕТКОЙ (ТЗ 30.10.2026, скриншот 18:17) ─────────────────
+## Постройки — сеткой в WORKER_GRID_COLS колонки, «В замок» — справа в верхнем
+## ряду, ниже него пустые ячейки: сетка на WORKER_GRID_COLS + 1 колонку
+const WORKER_GRID_COLS := 3
+const BUILD_LOCK_BG := Color(0.22, 0.23, 0.26)
+const LOCK_ICON_ALPHA := 0.85
+const LOCK_DIM := Color(0.55, 0.55, 0.58, 0.75)
+
+func _worker_grid_order(build_btns: Array, door: Button, side: float) -> void:
+	var all: Array = build_btns.duplicate()
+	for b in all:
+		button_container.remove_child(b)
+	button_container.remove_child(door)
+	var rows: int = maxi(1, int(ceil(float(all.size()) / float(WORKER_GRID_COLS))))
+	var k := 0
+	for r in range(rows):
+		for _c in range(WORKER_GRID_COLS):
+			if k < all.size():
+				button_container.add_child(all[k])
+			else:
+				button_container.add_child(_grid_spacer(side))
+			k += 1
+		if r == 0:
+			button_container.add_child(door)
+		else:
+			button_container.add_child(_grid_spacer(side))
+
+func _grid_spacer(side: float) -> Control:
+	var c := Control.new()
+	c.name = "GridSpacer"
+	c.custom_minimum_size = Vector2(side, side)
+	c.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	return c
+
+## Замочек поверх закрытой постройки: иконка приглушена, замок в правом
+## нижнем углу — полупрозрачный, без размытия
+func _lock_build_button(btn: Button) -> void:
+	btn.set_meta("locked", true)
+	for ch in btn.get_children():
+		if ch is TextureRect:
+			(ch as TextureRect).modulate = LOCK_DIM
+	var lk := TextureRect.new()
+	lk.name = "LockIcon"
+	lk.texture = _lock_texture()
+	lk.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	lk.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	lk.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	lk.modulate = Color(1, 1, 1, LOCK_ICON_ALPHA)
+	lk.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	var s: float = btn.custom_minimum_size.x
+	lk.offset_left = s * 0.48
+	lk.offset_top = s * 0.44
+	lk.offset_right = -s * 0.06
+	lk.offset_bottom = -s * 0.06
+	btn.add_child(lk)
+
+static var _lock_tex: ImageTexture = null
+
+## Замочек 16×18: дужка и корпус с замочной скважиной, тёмная обводка
+static func _lock_texture() -> Texture2D:
+	if _lock_tex != null:
+		return _lock_tex
+	var w := 16
+	var h := 18
+	var img := Image.create_empty(w, h, false, Image.FORMAT_RGBA8)
+	img.fill(Color(0, 0, 0, 0))
+	var edge := Color(0.10, 0.08, 0.06, 1.0)
+	var metal := Color(0.93, 0.80, 0.42, 1.0)
+	var shade := Color(0.74, 0.58, 0.26, 1.0)
+	# Дужка: кольцо над корпусом
+	for y in range(0, 9):
+		for x in range(0, w):
+			var dx: float = float(x) - 7.5
+			var dy: float = float(y) - 7.5
+			var r: float = sqrt(dx * dx + dy * dy)
+			if y <= 7 and r >= 3.2 and r <= 6.3:
+				img.set_pixel(x, y, edge if (r < 4.1 or r > 5.4) else metal)
+	# Корпус
+	for y in range(7, h):
+		for x in range(1, w - 1):
+			var border: bool = y == 7 or y == h - 1 or x == 1 or x == w - 2
+			img.set_pixel(x, y, edge if border else (shade if y > h - 5 else metal))
+	# Скважина
+	for y in range(10, 15):
+		img.set_pixel(7, y, edge)
+		img.set_pixel(8, y, edge)
+	img.set_pixel(6, 11, edge)
+	img.set_pixel(9, 11, edge)
+	_lock_tex = ImageTexture.create_from_image(img)
+	return _lock_tex
+
+## Ступень выросла — открытая панель рабочего перестраивается
+func _on_build_unlock_changed(_f: int, _stage: int) -> void:
+	if _worker_boost:
+		_reselect_now()
 
 ## Кнопка НАЙМА: цена, время и размер отряда читаются из конфига
 ## (unit_stats_config.TRAINING) — и кнопка, и карточка показывают одни числа
@@ -6390,7 +6952,12 @@ static func _castle_door_texture() -> ImageTexture:
 var _tower_fort_ui: Dictionary = {}
 const TOWER_FORT_COL := Color(0.30, 0.28, 0.22)
 
-func _tower_fort_cmd(tw: Castle, size: float) -> Button:
+## Кнопки башни (ТЗ 27.10.2026, второе письмо, п. 7): «Выпустить» и
+## «Укрепить» одного размера, иконка вписана в рамку без раздува
+const TOWER_BTN_SIZE := 46.0
+const TOWER_ICON_BOOST := 1.0
+
+func _tower_fort_cmd(tw: Castle, size: float, icon_boost: float = CASTLE_ICON_BOOST) -> Button:
 	var f: int = tw.faction
 	var lvl: int = int(tw.get("fort_level"))
 	var mx: int = int(tw.call("fort_max"))
@@ -6421,7 +6988,7 @@ func _tower_fort_cmd(tw: Castle, size: float) -> Button:
 		if not busy:
 			card["cost"] = cost
 	var btn := _cmd("Укрепить башню", TOWER_FORT_COL, func(): _on_tower_fort(tw),
-		"icon_shield.png", card, size, CASTLE_ICON_BOOST)
+		"icon_shield.png", card, size, icon_boost)
 	btn.name = "TowerFortBtn"
 	btn.disabled = nxt.is_empty() or busy
 	if not nxt.is_empty() and not busy:
@@ -7224,6 +7791,7 @@ func _on_forge_node_pressed(node_id: String) -> void:
 	if _forge_smithy == null or not is_instance_valid(_forge_smithy):
 		return
 	if _forge_smithy.research(node_id):
+		_last_research_id = _forge_smithy.research_id
 		_rebuild_forge()
 		_show_forge_tip(node_id)     # окно под курсором должно обновить статус
 
@@ -7488,6 +8056,8 @@ const _BONUS_TITLES := {
 	"bonus_carry_pct": "к грузу за ходку (доля)",
 	"bonus_walk_pct": "к скорости ходьбы рабочего (доля)",
 	"bonus_walk_loaded_pct": "к ходу рабочего с грузом (доля)",
+	"bonus_meat_pct": "к выходу мяса с туши (доля)",
+	"bonus_research_pct": "к темпу исследований Кузницы (доля)",
 	"bonus_hire_cost": "цены найма рабочего долой (доля)",
 	"bonus_train_army": "к темпу обучения боевых отрядов (доля)",
 }
@@ -8136,6 +8706,8 @@ func _process(_delta: float) -> void:
 	_OptSys.sys_add("hud", Time.get_ticks_usec() - _sys_t0)
 
 func _process_timed(_delta: float) -> void:
+	if _counts_dirty:
+		_refresh_live_counts()
 	_check_portrait_hover()
 	_update_top_right(_delta)
 	_update_idle_counter(_delta)
@@ -8184,6 +8756,9 @@ func _process_timed(_delta: float) -> void:
 			# блоке, а info_label общей панели сейчас вообще не показан
 			if _forge_caption != null and is_instance_valid(_forge_caption):
 				_forge_caption.text = hp_text
+		elif _selected_node is Worker and _OptSys.worker_grid_panel:
+			# Панель рабочего сеткой — без подписи (ТЗ 30.10.2026)
+			pass
 		elif not (_selected_node is Spearman) and not (_selected_node is Unit and _selected_node.display_name == "Мечник"):
 			info_label.text = hp_text
 	if not (_selected_node is Building):
@@ -8194,16 +8769,18 @@ func _process_timed(_delta: float) -> void:
 		var cur_id: String = (bld as Smithy).research_id
 		if cur_id != _last_research_id:
 			_last_research_id = cur_id
-			if cur_id.is_empty():
-				# Исследование только что закончилось: изученный узел зеленеет,
-				# зависимые от него открываются. Перестраиваем ДРЕВО, а не всё
-				# выделение — show_selection() пересобрал бы панель целиком
-				# ради одной перекраски
-				if forge_visible():
-					_rebuild_forge()
-				else:
-					show_selection([bld])
-					return
+			# Исследование сменилось: изученный узел зеленеет, зависимые от
+			# него открываются, следующее из очереди получает полосу.
+			# Перестраиваем ДРЕВО, а не всё выделение — show_selection()
+			# пересобрал бы панель целиком ради одной перекраски.
+			# ЛЮБАЯ смена id, а не только на пустой: с очередью id меняется
+			# «a → b» в одном кадре, и пустым не бывает вовсе (ТЗ 28.10.2026;
+			# основной путь — сигнал research_finished, это страховка)
+			if forge_visible():
+				_rebuild_forge()
+			else:
+				show_selection([bld])
+				return
 	# Состав и прогресс очереди рисует отдельная колонка (иконка + шкала +
 	# «В очереди / В ожидании»). Текст в info-колонке остаётся КОРОТКИМ и
 	# постоянной длины — именно его рост раньше раздвигал панель
@@ -8515,7 +9092,7 @@ func _focus_panels() -> Array:
 	# относится
 	for n in [_bottom_panel, _forge_panel, _overbar, _res_panel,
 			_top_right, _idle_widget, _stat_panel, _garrison_strip,
-			_forge_tip, _stat_card, _bonus_tip]:
+			_forge_tip, _stat_card, _bonus_tip, _market_panel, _gforge_panel]:
 		var c := n as Control
 		if c != null and is_instance_valid(c) and c.visible:
 			# Прозрачная (спрятанная до наведения) таблица статов клик не держит
@@ -8578,6 +9155,7 @@ func _unhandled_input(event: InputEvent) -> void:
 	var k := event as InputEventKey
 	if k.keycode == KEY_ESCAPE:
 		if _overlay != null:
+			_red_defeat_open = false
 			get_tree().paused = false
 			AudioManager.set_paused(false)
 			_clear_overlay()
@@ -8612,20 +9190,166 @@ func _unhandled_input(event: InputEvent) -> void:
 			toggle_pause()
 			get_viewport().set_input_as_handled()
 
+## ── БАННЕР ПОБЕДЫ (ТЗ 29.10.2026, п. 1) ─────────────────────────────────────
+## Не оверлей: мир не затеняется и не блокируется, игрок доигрывает
+## песочницу (добивает орду, строит). Сверху по центру — крупное «ПОБЕДА!»,
+## под ним одна строка подсказки и ряд из трёх компактных кнопок. Корень
+## пропускает мышь (MOUSE_FILTER_IGNORE): клики по карте вокруг баннера
+## доходят до игры, ловят их только сами кнопки. Escape и пауза работают
+## как обычно — баннер не числится в _overlay
+var _victory_banner: Control = null
+const VICTORY_BTN_SIZE := Vector2(150, 34)
+const VICTORY_TOP := 64.0
+
 func show_victory() -> void:
-	_clear_overlay()
-	_overlay = _full_overlay(Color(0.02, 0.10, 0.04, 0.92))
-	var vbox := _center_vbox(_overlay)
+	hide_victory()
+	var root := Control.new()
+	root.name = "VictoryBanner"
+	root.set_anchors_and_offsets_preset(Control.PRESET_CENTER_TOP)
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.process_mode = Node.PROCESS_MODE_ALWAYS
+	add_child(root)
+	var vbox := VBoxContainer.new()
+	vbox.name = "VictoryBox"
+	vbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	vbox.add_theme_constant_override("separation", 6)
+	vbox.alignment = BoxContainer.ALIGNMENT_BEGIN
+	root.add_child(vbox)
 	var t := Label.new(); t.text = "ПОБЕДА!"
-	t.add_theme_font_size_override("font_size", 52)
-	t.add_theme_color_override("font_color", Color(0.9, 0.82, 0.15))
-	t.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER; vbox.add_child(t)
-	vbox.add_child(_spacer(20))
-	vbox.add_child(_make_btn("  Играть снова  ", Color(0.14, 0.32, 0.14), func(): GameManager.main.restart_game()))
-	vbox.add_child(_make_btn("  Выход из игры  ", Color(0.30, 0.08, 0.08), func():
-		GameManager.main.quit_game()))
+	t.name = "VictoryTitle"
+	t.add_theme_font_size_override("font_size", 56)
+	t.add_theme_color_override("font_color", Color(0.95, 0.84, 0.18))
+	t.add_theme_color_override("font_outline_color", Color(0.10, 0.06, 0.02))
+	t.add_theme_constant_override("outline_size", 10)
+	t.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	t.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	vbox.add_child(t)
+	var row := HBoxContainer.new()
+	row.name = "VictoryButtons"
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_theme_constant_override("separation", 8)
+	vbox.add_child(row)
+	var specs: Array = [
+		["Играть снова", Color(0.14, 0.32, 0.14), "VictoryRestart",
+			func(): GameManager.main.restart_game()],
+		["Выход", Color(0.25, 0.10, 0.08), "VictoryMenu",
+			func(): GameManager.main.quit_to_menu()],
+		["Выход из игры", Color(0.30, 0.08, 0.08), "VictoryQuit",
+			func(): GameManager.main.quit_game()],
+	]
+	for sp in specs:
+		var b := _make_btn(String(sp[0]), sp[1], sp[3])
+		b.name = String(sp[2])
+		b.custom_minimum_size = VICTORY_BTN_SIZE
+		_MUI.style_button(b, _menu_kind(sp[1]), 14)
+		row.add_child(b)
+	# Ширина считается по содержимому; центрируем по горизонтали
+	var w: float = vbox.get_combined_minimum_size().x
+	vbox.position = Vector2(-w * 0.5, VICTORY_TOP)
+	vbox.size = vbox.get_combined_minimum_size()
+	_victory_banner = root
+
+## ── ОКНО «КРАСНЫЙ ИГРОК РАЗБИТ» (ТЗ 30.10.2026, скриншот 00:44) ──────────────
+## Последний боец и последняя постройка красного пали, а орда ещё жива: партия
+## продолжается. Модальное окно с иллюстрацией (assets/ui/red_defeated.png,
+## tools/make_red_defeat_art.py), игра на паузе, «Продолжить» — снять окно и
+## паузу. Окно в _overlay: Z/пробел его не трогают, Escape закрывает как кнопка
+const RED_DEFEAT_ART := "res://assets/ui/red_defeated.png"
+const RED_DEFEAT_ART_W := 640.0
+var _red_defeat_open: bool = false
+
+func show_red_defeated() -> void:
+	if _overlay != null and is_instance_valid(_overlay):
+		return
+	_overlay = _full_overlay(Color(0.03, 0.02, 0.02, 0.62))
+	_overlay.name = "RedDefeatOverlay"
+	_overlay.process_mode = Node.PROCESS_MODE_ALWAYS
+	var vbox := _modal_frame(_overlay, "Красный игрок разбит")
+	vbox.name = "RedDefeatBox"
+	if ResourceLoader.exists(RED_DEFEAT_ART):
+		var art := TextureRect.new()
+		art.name = "RedDefeatArt"
+		art.texture = load(RED_DEFEAT_ART)
+		art.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		art.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		art.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		var ts: Vector2 = art.texture.get_size()
+		art.custom_minimum_size = Vector2(RED_DEFEAT_ART_W, RED_DEFEAT_ART_W * ts.y / maxf(ts.x, 1.0))
+		art.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		vbox.add_child(art)
+	var msg := Label.new()
+	msg.name = "RedDefeatText"
+	msg.text = "Армия и все постройки красного уничтожены.\nИгра продолжается: на карте ещё орда гоблинов."
+	msg.add_theme_font_size_override("font_size", 17)
+	msg.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	msg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	vbox.add_child(msg)
+	var row := HBoxContainer.new()
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	vbox.add_child(row)
+	var b := _make_btn("Продолжить", Color(0.14, 0.32, 0.14), func(): close_red_defeated())
+	b.name = "RedDefeatContinue"
+	b.custom_minimum_size = Vector2(200, 40)
+	_MUI.style_button(b, _menu_kind(Color(0.14, 0.32, 0.14)), 17)
+	row.add_child(b)
+	_red_defeat_open = true
+	set_paused(true)
+
+func close_red_defeated() -> void:
+	if not _red_defeat_open:
+		return
+	_red_defeat_open = false
+	_clear_overlay()
+	set_paused(false)
+
+func red_defeat_open() -> bool:
+	return _red_defeat_open
+
+## ── УВЕДОМЛЕНИЕ (ТЗ 30.10.2026) ─────────────────────────────────────────────
+## Строка над нижней панелью, как подсказка постройки, но без её префикса и
+## сама гаснет через sec. Сообщения орды и отказы лимита шли через
+## show_placement_hint и висели «Выберите место для постройки: …» до конца партии
+var _notice: Label = null
+const NOTICE_SEC := 6.0
+
+func show_notice(text: String, sec: float = NOTICE_SEC) -> void:
+	if _notice != null and is_instance_valid(_notice):
+		_notice.queue_free()
+	var lbl := Label.new()
+	lbl.name = "Notice"
+	lbl.text = text
+	lbl.add_theme_font_size_override("font_size", HINT_FONT_SIZE)
+	lbl.add_theme_color_override("font_color", Color(0.98, 0.90, 0.62))
+	lbl.add_theme_color_override("font_outline_color", Color(0.04, 0.03, 0.01, 0.9))
+	lbl.add_theme_constant_override("outline_size", 4)
+	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	lbl.anchor_left = 0.0
+	lbl.anchor_right = 1.0
+	lbl.anchor_top = 1.0
+	lbl.anchor_bottom = 1.0
+	lbl.offset_bottom = PANEL_TOP - HINT_LIFT - float(HINT_FONT_SIZE) - 12.0
+	lbl.offset_top = lbl.offset_bottom - float(HINT_FONT_SIZE) - 8.0
+	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(lbl)
+	_notice = lbl
+	# Срок — твином САМОЙ плашки: сменённая следующей плашкой гибнет вместе со
+	# своим твином. Таймер дерева с лямбдой, захватившей метку, срабатывал уже
+	# на освобождённой — «Lambda capture … was freed» в логе .exe на каждую
+	# смену плашки (131 раз за партию 01.11.2026)
+	var tw := lbl.create_tween()
+	tw.set_pause_mode(Tween.TWEEN_PAUSE_PROCESS)
+	tw.tween_interval(sec)
+	tw.tween_callback(lbl.queue_free)
+
+func hide_victory() -> void:
+	if _victory_banner != null and is_instance_valid(_victory_banner):
+		_victory_banner.queue_free()
+	_victory_banner = null
 
 func show_defeat() -> void:
+	hide_victory()
 	_clear_overlay()
 	_overlay = _full_overlay(Color(0.10, 0.02, 0.02, 0.92))
 	var vbox := _center_vbox(_overlay)
@@ -9804,6 +10528,8 @@ const BUILDING_INFO := {
 	"smithy":    ["Исследования", "Улучшения войск и рабочих"],
 	"house":     ["Хозяйство", "Еда, места рабочим и армии"],
 	"sheep_pen": ["Хозяйство", "Овцы для мяса, фермеры разделывают туши"],
+	"market":    ["Торговля", "Обмен дерева, камня, золота и еды по курсу"],
+	"storehouse": ["Хозяйство", "Точка сдачи ресурсов: рабочие несут груз к ближайшему складу"],
 }
 
 func _building_card(build_id: String) -> Dictionary:
@@ -9814,7 +10540,8 @@ func _building_card(build_id: String) -> Dictionary:
 	if hp > 0.0:
 		stats.append({"icon": "icon_heart.png", "label": "Прочность", "value": "%d" % int(hp)})
 	if build_id == "sheep_pen":
-		stats.append({"icon": "icon_hammer.png", "label": "Стройка", "value": "сразу"})
+		stats.append({"icon": "icon_hammer.png", "label": "Стройка",
+			"value": ("%.0f с" % bt) if (_OptSys.pen_construct and bt > 0.0) else "сразу"})
 		stats.append({"icon": "icon_trader.png", "label": "Овец", "value": "%d" % int(_UCfg.SHEEP_PEN_CAPACITY)})
 	elif bt > 0.0:
 		stats.append({"icon": "icon_hammer.png", "label": "Стройка", "value": "%.0f с" % bt})
@@ -9879,6 +10606,8 @@ func _upgrade_card(slot: Dictionary, faction: int) -> Dictionary:
 		"bonus_carry_pct": "грузу за ходку (доля)",
 		"bonus_walk_pct": "скорости ходьбы (доля)",
 		"bonus_walk_loaded_pct": "ходу с грузом (доля)",
+		"bonus_meat_pct": "выходу мяса с туши (доля)",
+		"bonus_research_pct": "темпу исследований Кузницы (доля)",
 		"bonus_hire_cost": "скидке на найм рабочего (доля)",
 		"bonus_train_army": "темпу обучения войск (доля)",
 	}
@@ -10060,8 +10789,17 @@ func _sync_panel_grid_widths() -> void:
 			# укрупнённых кнопок под фактическое число построек
 			var wn: int = button_container.get_child_count()
 			var wbig: float = BTN_SIZE * WORKER_ICON_BOOST
-			button_container.columns = wn
-			_slot_min(Vector2(wn * wbig + float(wn - 1) * BTN_GAP, wbig))
+			if _OptSys.worker_grid_panel and button_container.get_node_or_null("WorkerShelterBtn") != null:
+				# Сетка 3 + «В замок» (ТЗ 30.10.2026): ряды по WORKER_GRID_COLS + 1
+				var gc: int = WORKER_GRID_COLS + 1
+				var gr: int = maxi(1, int(ceil(float(wn) / float(gc))))
+				button_container.columns = gc
+				button_container.add_theme_constant_override("h_separation", BTN_GAP)
+				button_container.add_theme_constant_override("v_separation", BTN_GAP)
+				_slot_min(Vector2(gc * wbig + float(gc - 1) * BTN_GAP, gr * wbig + float(gr - 1) * BTN_GAP))
+			else:
+				button_container.columns = wn
+				_slot_min(Vector2(wn * wbig + float(wn - 1) * BTN_GAP, wbig))
 		elif has_btns and _expanded_type != "":
 			# РАЗВЁРНУТЫЙ РОД (ТЗ 11.10.2026): приёмы отряда — одной строкой
 			# по фактическому числу кнопок, без резерва на BTN_COLS: плашка
@@ -10388,6 +11126,9 @@ func _build_squad_cmd_col(key: String, into: Dictionary) -> Control:
 	var tex: Texture2D = _icon_texture(ipath) if ipath != "" else null
 	if key == "C" and tex == null:
 		tex = _at_ease_icon()
+	# [F1] — та же дверь крепости, что у «В замок» рабочих (ТЗ 30.10.2026)
+	if key == "F1" and _OptSys.army_count_badge:
+		tex = _castle_door_texture()
 	if tex != null:
 		btn.text = ""
 		btn.add_child(_stretched_icon(tex, 3.0))

@@ -53,8 +53,64 @@ static func schedule(pair: bool = _Spawn.ASSAULT_EVENT_PAIR,
 				out.append({"t": t + gap, "kind": KIND_ASSAULT, "comp": halves[1], "label": lbl + " (2/2)", "pair_i": 2})
 			else:
 				out.append({"t": t, "kind": KIND_ASSAULT, "comp": comp.duplicate(), "label": lbl, "pair_i": 0})
+	_late_entries(out, pair, gap)
 	out.sort_custom(func(a, b): return float(a["t"]) < float(b["t"]))
 	return out
+
+const _OptR := preload("res://scripts/perf_config.gd")
+
+## ПОЗДНИЕ РЕЙДЫ И ШТУРМЫ ПОСЛЕ ЧАСА (ТЗ 27.10.2026, второе письмо, п. 1):
+## после 30:00 — рейд каждые LATE_RAID_EVERY_SEC (после часа — чаще и
+## крупнее), после 60:00 — штурм каждые HOUR_ASSAULT_EVERY_SEC. Числа —
+## spawn_config.LATE_RAID_* / HOUR_*
+static func _late_entries(out: Array, pair: bool, gap: float) -> void:
+	if not _OptR.goblin_late_raids:
+		return
+	var assault_t: Array = []
+	if _Spawn.ASSAULT_EVENT_ENABLED:
+		assault_t = (_Spawn.ASSAULT_EVENT_TIMES as Array).duplicate()
+		var comps: Array = _Spawn.ASSAULT_EVENT_WAVES
+		var last: Dictionary = (comps[comps.size() - 1] as Dictionary)
+		var t_last: float = float(assault_t[assault_t.size() - 1]) if not assault_t.is_empty() else _Spawn.HOUR_SURGE_FROM_SEC
+		var k := 1
+		var t: float = t_last + _Spawn.HOUR_ASSAULT_EVERY_SEC
+		while t <= _Spawn.HOUR_ASSAULT_UNTIL_SEC:
+			var comp: Dictionary = {}
+			for key in last:
+				comp[key] = int(ceil(float(last[key]) * _Spawn.LATE_ASSAULT_MULT * (1.0 + _Spawn.HOUR_ASSAULT_GROW * float(k))))
+			assault_t.append(t)
+			var lbl: String = "штурм %d:00" % int(t / 60.0)
+			if pair:
+				var halves: Array = split_comp(comp)
+				out.append({"t": t, "kind": KIND_ASSAULT, "comp": halves[0], "label": lbl + " (1/2)", "pair_i": 1})
+				out.append({"t": t + gap, "kind": KIND_ASSAULT, "comp": halves[1], "label": lbl + " (2/2)", "pair_i": 2})
+			else:
+				out.append({"t": t, "kind": KIND_ASSAULT, "comp": comp, "label": lbl, "pair_i": 0})
+			k += 1
+			t += _Spawn.HOUR_ASSAULT_EVERY_SEC
+	if not _Spawn.RAID_ENABLED:
+		return
+	var n := 0
+	var tr: float = _Spawn.LATE_RAID_FROM_SEC
+	while tr <= _Spawn.LATE_RAID_UNTIL_SEC:
+		var clear := true
+		for ta in assault_t:
+			# Штурм идёт парой сроков: вторая половина — через gap
+			if absf(tr - float(ta)) < _Spawn.LATE_RAID_CLEAR_SEC \
+					or (pair and absf(tr - float(ta) - gap) < _Spawn.LATE_RAID_CLEAR_SEC):
+				clear = false
+				break
+		if clear:
+			var mult: float = 1.0 + _Spawn.LATE_RAID_GROW * float(n)
+			if tr >= _Spawn.HOUR_SURGE_FROM_SEC:
+				mult *= _Spawn.HOUR_RAID_MULT
+			var comp2: Dictionary = {}
+			for key2 in _Spawn.LATE_RAID_COMP:
+				comp2[key2] = maxi(1, int(round(float(_Spawn.LATE_RAID_COMP[key2]) * mult)))
+			out.append({"t": tr, "kind": KIND_RAID, "comp": comp2,
+				"label": "рейд %d:%02d" % [int(tr / 60.0), int(tr) % 60], "pair_i": 0})
+			n += 1
+		tr += _Spawn.HOUR_RAID_EVERY_SEC if tr >= _Spawn.HOUR_SURGE_FROM_SEC else _Spawn.LATE_RAID_EVERY_SEC
 
 ## Состав пополам по каждому роду: первая половина — округление вверх
 ## (голова кулака не слабее хвоста)

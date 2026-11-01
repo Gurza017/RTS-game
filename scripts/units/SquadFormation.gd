@@ -21,6 +21,8 @@ extends RefCounted
 ##
 ## Подключение: const _SqFormation := preload("res://scripts/units/SquadFormation.gd")
 
+const _OptSF := preload("res://scripts/perf_config.gd")
+
 ## Не чаще раза в столько миллисекунд отряд перестраивается после потерь.
 ## В свалке бойцы гибнут пачками, и переиздавать приказ на каждую смерть —
 ## это и лишний расход кадра, и дёрганый строй, который всё время переступает
@@ -81,6 +83,9 @@ static func close_ranks(members: Array, slots: Array,
 		free_men.append(m)
 	if free_men.is_empty():
 		return 0
+	# Цельный кирпичик: неполная последняя шеренга — по центру (см. centred_tail)
+	if _OptSF.formation_centred_tail and alive_n < slots.size():
+		slots = centred_tail(slots, alive_n, course)
 	var moved := 0
 	# ── ПОЗИЦИИ И ШИРИНА ШЕРЕНГИ — ОДИН РАЗ (этап 3, 28.09.2026) ────────────
 	# Обе жадные раздачи ниже на каждую ячейку обходили ВСЕХ свободных с
@@ -119,6 +124,10 @@ static func close_ranks(members: Array, slots: Array,
 	# задними (qa_spear E2 — «дыры уезжают в хвост»); стоящий в хвостовой
 	# ячейке при потерях впереди переезжает вперёд, целый строй по-прежнему
 	# не пересаживается (все живые и так стоят в первых alive_n ячейках)
+	# Под раздачей по рядам (rank_match) закрепляется только стоящий у СВОЕЙ
+	# ячейки (пост = эта ячейка): закрепление любого стоящего у любой ячейки
+	# ломало порядок рядов (qa_tz1031 C1), а без закрепления один выбитый
+	# боец сдвигал каскадом по бойцу в каждой шеренге (qa_reform_idle C2)
 	for si in range(mini(slots.size(), alive_n)):
 		var slot: Vector3 = slots[si]
 		var near := -1
@@ -126,6 +135,10 @@ static func close_ranks(members: Array, slots: Array,
 		for i in range(nm):
 			if taken[i] == 1 or idle[i] == 0:
 				continue
+			if _OptSF.rank_match:
+				var ou = free_men[i]
+				if not ou._post_valid or Vector2(ou.post_pos.x - slot.x, ou.post_pos.z - slot.z).length_squared() > 0.01:
+					continue
 			var dx: float = pxs[i] - slot.x
 			var dz: float = pzs[i] - slot.z
 			var d: float = dx * dx + dz * dz
@@ -140,25 +153,53 @@ static func close_ranks(members: Array, slots: Array,
 		uk.formation_row = si / per_row
 		uk.hold_post(slot, course)
 		slot_taken[si] = 1
-	for si in range(slots.size()):
-		if left <= 0:
-			break
-		if slot_taken[si] == 1:
-			continue
-		var slot: Vector3 = slots[si]
-		var best := -1
-		var best_d := INF
-		for i in range(nm):
-			if taken[i] == 1:
+	# ── РАЗДАЧА ПО РЯДАМ (ТЗ 31.10.2026, ручка rank_match) ────────────────
+	# Жадный разбор «место по порядку → ближайший» сажал передового бойца в
+	# заднюю шеренгу, а заднего — вперёд: строй собирался крест-накрест,
+	# бойцы шли назад сквозь своих (зонд qa_army_front). Теперь передние по
+	# курсу берут передние места, в шеренге — по порядку поперёк курса
+	var pairs: Array = []
+	if _OptSF.rank_match:
+		var free_si: Array = []
+		for si0 in range(slots.size()):
+			if free_si.size() >= left:
+				break
+			if slot_taken[si0] == 0:
+				free_si.append(si0)
+		var free_ui: Array = []
+		for i0 in range(nm):
+			if taken[i0] == 0:
+				free_ui.append(i0)
+		pairs = rank_pairs(pxs, pzs, free_ui, slots, free_si, course, per_row)
+	else:
+		for si in range(slots.size()):
+			if pairs.size() >= left:
+				break
+			if slot_taken[si] == 1:
 				continue
-			var dx: float = pxs[i] - slot.x
-			var dz: float = pzs[i] - slot.z
-			var d: float = dx * dx + dz * dz
-			if d < best_d:
-				best_d = d
-				best = i
-		if best < 0:
-			break
+			var slot0: Vector3 = slots[si]
+			var best := -1
+			var best_d0 := INF
+			for i in range(nm):
+				if taken[i] == 1:
+					continue
+				var dx: float = pxs[i] - slot0.x
+				var dz: float = pzs[i] - slot0.z
+				var d: float = dx * dx + dz * dz
+				if d < best_d0:
+					best_d0 = d
+					best = i
+			if best < 0:
+				break
+			taken[best] = 1
+			pairs.append([si, best])
+	for pr0 in pairs:
+		var si: int = int(pr0[0])
+		var best: int = int(pr0[1])
+		var slot: Vector3 = slots[si]
+		var bdx: float = pxs[best] - slot.x
+		var bdz: float = pzs[best] - slot.z
+		var best_d: float = bdx * bdx + bdz * bdz
 		var u = free_men[best]
 		taken[best] = 1
 		left -= 1
@@ -205,6 +246,79 @@ static func close_ranks(members: Array, slots: Array,
 			extra.command_move(p, slow, course)
 			k += 1
 	return moved
+
+## ── ЦЕЛЬНЫЙ КИРПИЧИК (ТЗ 27.10.2026, третье письмо, п. 6) ──────────────────
+## «Отряд — комната без окон и дверей: правильный прямоугольник; при потерях
+## — цельный кирпичик без огрызков, лишние позиции смещаются к хвосту или
+## центру». Смыкание сажает выживших на ПЕРВЫЕ n мест разметки, и неполная
+## последняя шеренга ложилась от ЛЕВОГО края — огрызком сбоку. Здесь первые
+## n мест берутся как есть, а места неполной последней шеренги сдвигаются
+## поперёк курса так, чтобы её центр совпал с центром шеренги разметки:
+## пустоты уходят поровну на оба фланга хвоста. Ручка
+## perf_config.formation_centred_tail
+static func centred_tail(slots: Array, n: int, course: Vector3) -> Array:
+	if n <= 0 or slots.is_empty():
+		return []
+	if n >= slots.size():
+		return slots
+	var out: Array = slots.slice(0, n)
+	var pr: int = maxi(_per_row(slots, course), 1)
+	var full: int = (n / pr) * pr
+	var rem: int = n - full
+	if rem <= 0:
+		return out
+	var side := Vector3(-course.z, 0.0, course.x)
+	if side.length_squared() < 1e-6:
+		return out
+	side = side.normalized()
+	var row_end: int = mini(full + pr, slots.size())
+	var c_row := 0.0
+	for i in range(full, row_end):
+		c_row += (slots[i] as Vector3).dot(side)
+	c_row /= float(row_end - full)
+	var c_part := 0.0
+	for i2 in range(full, n):
+		c_part += (slots[i2] as Vector3).dot(side)
+	c_part /= float(rem)
+	var shift: Vector3 = side * (c_row - c_part)
+	for i3 in range(full, n):
+		out[i3] = (slots[i3] as Vector3) + shift
+	return out
+
+## Раздача мест по рядам: units — индексы бойцов (точки px/pz), slot_idx —
+## индексы мест (по порядку разметки, шеренга = индекс / per_row). Самые
+## передние по курсу бойцы — первой из шеренг списка, в шеренге пары по
+## порядку поперёк курса. Ответ — [[индекс места, индекс бойца], ...]
+static func rank_pairs(px: PackedFloat32Array, pz: PackedFloat32Array, units: Array,
+		slots: Array, slot_idx: Array, course: Vector3, per_row: int) -> Array:
+	var out: Array = []
+	var n: int = mini(units.size(), slot_idx.size())
+	if n <= 0:
+		return out
+	var c := Vector3(course.x, 0.0, course.z)
+	if c.length_squared() < 1e-6:
+		c = Vector3.FORWARD
+	c = c.normalized()
+	var side := Vector3(-c.z, 0.0, c.x)
+	var us: Array = units.duplicate()
+	us.sort_custom(func(a, b):
+		return px[int(a)] * c.x + pz[int(a)] * c.z > px[int(b)] * c.x + pz[int(b)] * c.z)
+	var pr: int = maxi(per_row, 1)
+	var k := 0
+	while k < n:
+		var row: int = int(slot_idx[k]) / pr
+		var ss: Array = []
+		while k < n and int(slot_idx[k]) / pr == row:
+			ss.append(int(slot_idx[k]))
+			k += 1
+		var uu: Array = us.slice(k - ss.size(), k)
+		ss.sort_custom(func(a, b):
+			return (slots[int(a)] as Vector3).dot(side) < (slots[int(b)] as Vector3).dot(side))
+		uu.sort_custom(func(a, b):
+			return px[int(a)] * side.x + pz[int(a)] * side.z < px[int(b)] * side.x + pz[int(b)] * side.z)
+		for j in range(ss.size()):
+			out.append([ss[j], uu[j]])
+	return out
 
 ## Сколько бойцов в одной шеренге. Считается по самой разметке: подряд идущие
 ## места одной шеренги лежат ПОПЕРЁК курса, а первое место следующей шеренги

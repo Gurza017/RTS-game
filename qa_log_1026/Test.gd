@@ -173,6 +173,10 @@ func _block_a() -> void:
 # ─────────────────────────────────────────────────────────────────────────────
 func _block_b() -> void:
 	print("\n═════ B. ПОВОДОК ПОГОНИ — ОДНО РЕШЕНИЕ НА ОТРЯД ═════")
+	# Разворот ТЗ 31.10.2026 (lock_chase): под замком игрока поводок 7 м
+	# погоню больше не снимает — блок мерит сам поводок, ручку выключает
+	var lc0: bool = _Opt.lock_chase
+	_Opt.lock_chase = false
 	var at := Vector3(-40, 0, -30)
 	_clear(at, 60.0)
 	await pframes(5)
@@ -257,6 +261,7 @@ func _block_b() -> void:
 	print("    через %.0f с: худший отрыв от медианы отряда %.1f м, дальше %.0f м — %d" % [RETURN_SEC, worst, SPLIT_R, far])
 	verdict("B2 отряд не порван погоней (никто дальше %.0f м от медианы)" % SPLIT_R, far == 0,
 		"%d бойцов, худший %.1f м" % [far, worst])
+	_Opt.lock_chase = lc0
 	for m in men:
 		if is_instance_valid(m): m.queue_free()
 	for f in foes:

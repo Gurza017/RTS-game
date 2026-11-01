@@ -359,6 +359,9 @@ func absorb_unit(u: Unit) -> void:
 	# ПРИНУДИТЕЛЬНО: отход кончился ПО ФАКТУ — боец у ворот, дальше идти некуда.
 	# Обычный вызов отбился бы о замок времени (см. Unit.end_retreat)
 	u.end_retreat(true)      # дошёл — режим отхода больше не нужен
+	# Призрак «последнего выжившего» дошёл — мигание и невидимость для чужих
+	# сняты здесь же (ТЗ 28.10.2026, блок 3); внутри его и так не видно
+	u.end_last_stand()
 	u.visible = false
 	# ОБЯЗАТЕЛЬНО вместе с visible: картинка бойца — слот в общем MultiMesh, а он
 	# не под узлом бойца и скрытием узла не гасится (см. Unit.leave_render)
@@ -476,6 +479,8 @@ func release_garrison(squad_id: int) -> bool:
 func _release_members(squad_id: int) -> void:
 	GameManager.squad_note_healed(squad_id)
 	_tm("garrison_release", squad_id, {"men": GameManager.squad_members(squad_id).size()})
+	if GameManager.probes != null:
+		GameManager.probes.watch_release(squad_id)
 	var gate := _gate_position()
 	var exit_dir := spawn_offset
 	exit_dir.y = 0.0
@@ -813,6 +818,9 @@ func _process_garrison(delta: float) -> void:
 ## Доукомплектовать отряд одной моделью. Новобранец сразу получает все
 ## ветеранские награды отряда — иначе пополнение было бы слабее ветеранов
 func _revive_one(squad_id: int, unit_type: String) -> void:
+	# Пополнение отряда полководца — свитой, не вторым Свинобоссом
+	if unit_type == "pig_boss":
+		unit_type = "goblin_rider"
 	var scene: PackedScene = PRELOAD_SCENES.get(unit_type)
 	if scene == null:
 		return

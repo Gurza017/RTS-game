@@ -31,7 +31,7 @@ const _Opt := preload("res://scripts/perf_config.gd")
 const _FormPanel := preload("res://scripts/FormationPanel.gd")
 ## Окошко строя над картой (ТЗ 11.10.2026): высота и зазор до карты
 const FORM_H := 40.0
-const FORM_GAP := 3.0
+const FORM_GAP := 4.0
 var formation_panel: Control = null
 
 ## Размер картинки = размер на экране (без растяжения): карта 450 × 253 м.
@@ -43,8 +43,9 @@ const MAP_H := 95
 const MARGIN := 6.0
 const MARGIN_BOTTOM := 4.0
 const BORDER := 3.0
-## Зазор между картой и пристыкованной к ней нижней панелью
-const DOCK_GAP := 6.0
+## Зазор между картой и пристыкованной к ней нижней панелью — тот же, что над
+## картой (FORM_GAP) и под ней (MARGIN_BOTTOM): симметрия, ТЗ 30.10.2026
+const DOCK_GAP := 4.0
 
 ## Правый край карты в координатах экрана + зазор: отсюда начинается нижняя
 ## панель выделенного (HUD). Считается из констант, а не из прямоугольника

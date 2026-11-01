@@ -170,6 +170,9 @@ static func _capture_meta(main: Node) -> Dictionary:
 		# должно прийти второй раз
 		"ai_reinforced": bool(main.enemy_ai.reinforced) \
 			if (main.enemy_ai != null and is_instance_valid(main.enemy_ai)) else false,
+		# Свинобосс пал — после загрузки орда нового не нанимает
+		"pig_boss_fallen": bool(GameManager.pig_boss_fallen),
+		"build_unlock": int(GameManager.build_unlock.get(Constants.FACTION_PLAYER, 0)),
 	}
 
 static func _capture_resources() -> Dictionary:
@@ -255,9 +258,12 @@ static func _capture_squads() -> Array:
 			"elite": bool(sq.get("elite", false)),
 			# Уровень элиты — римская цифра штандарта (ТЗ 22.10.2026)
 			"elite_lvl": int(sq.get("elite_lvl", 0)),
-			# Лычки сверх легенды и мини-флажки на древке (ТЗ 25.10.2026)
+			# Ступень престижа легенды (ТЗ 25.10.2026; хвост — ТЗ 28.10.2026)
 			"legend_extra": int(sq.get("legend_extra", 0)),
-			"legend_flags": int(sq.get("legend_flags", 0)),
+			# Шкала ветеранства 9 + легенда (ТЗ 30.10.2026): без ключа — старая, 7 ступеней
+			"vet_scale": _UCfg.LEGEND_TIER,
+			# Отряд свинобосса — знамя полководца (ТЗ 28.10.2026)
+			"boss": bool(sq.get("boss", false)),
 		})
 	return out
 
@@ -300,6 +306,7 @@ static func _capture_buildings(main: Node) -> Array:
 				"frozen": bool(bld.get("frozen")) or bool(bld.get("thawing")),
 				"vt": int(bld.get("virt_trolls")), "vg": int(bld.get("virt_gnoll_squads")),
 				"vb": int(bld.get("virt_big_squads")), "vs": int(bld.get("virt_sheep")),
+				"sealed": bool(bld.get("sealed")),
 			}
 		out.append(rec)
 	return out
@@ -512,6 +519,13 @@ static func apply(main: Node, state: Dictionary) -> void:
 	var meta: Dictionary = state.get("meta", {})
 	if main.has_method("set_game_clock"):
 		main.set_game_clock(float(meta.get("clock", 0.0)))
+	# После _wipe_live_world: тот убивает живого босса смертью и ставил бы
+	# признак сам — здесь он берётся из файла
+	GameManager.pig_boss_fallen = bool(meta.get("pig_boss_fallen", false))
+	# Ступень разблокировки; старый файл без ключа — всё открыто (партия шла
+	# без ступеней, запирать её постройки задним числом нельзя)
+	GameManager.build_unlock = {Constants.FACTION_PLAYER:
+		int(meta.get("build_unlock", GameManager.BUILD_UNLOCK_ALL))}
 	if main.enemy_ai != null and is_instance_valid(main.enemy_ai):
 		main.enemy_ai.reinforced = bool(meta.get("ai_reinforced", false))
 		# Часы ИИ едут за часами партии — иначе подкрепление и час штурма
@@ -606,6 +620,9 @@ static func _restore_squads(src: Array) -> Dictionary:
 		var sq: Dictionary = GameManager.squads[sid]
 		sq["kills"]   = int(d.get("kills", 0))
 		sq["level"]   = int(d.get("level", 0))
+		# Старая шкала (7-я ступень — легенда): легенда остаётся легендой
+		if int(d.get("vet_scale", 7)) < _UCfg.LEGEND_TIER and int(sq["level"]) >= int(d.get("vet_scale", 7)):
+			sq["level"] = _UCfg.LEGEND_TIER
 		sq["pending"] = int(d.get("pending", 0))
 		sq["chosen"]  = (d.get("chosen", []) as Array).duplicate()
 		sq["bonuses"] = (d.get("bonuses", {}) as Dictionary).duplicate()
@@ -619,8 +636,10 @@ static func _restore_squads(src: Array) -> Dictionary:
 			sq["elite"] = true
 			sq["elite_lvl"] = maxi(1, int(d.get("elite_lvl", 1)))
 		if int(d.get("legend_extra", 0)) > 0:
-			sq["legend_extra"] = int(d.get("legend_extra", 0))
-			sq["legend_flags"] = int(d.get("legend_flags", 0))
+			# Старые файлы с 7 ступенями — потолок LEGEND_EXTRA_MAX
+			sq["legend_extra"] = mini(int(d.get("legend_extra", 0)), _UCfg.LEGEND_EXTRA_MAX)
+		if bool(d.get("boss", false)):
+			sq["boss"] = true
 		map[int(d["id"])] = sid
 	return map
 
@@ -641,6 +660,11 @@ static func _restore_buildings(main: Node, src: Array) -> Array:
 		# в очередь позже, чем очередь _ready)
 		if not lair.is_empty() and bool(lair.get("frozen", false)) and b.has_method("freeze"):
 			b.call("freeze")
+		# Пень из слепка: его стая уже в слепке (TrollLair._start_gnoll_pack),
+		# оживший — снова запечатан (ТЗ 31.10.2026)
+		if not lair.is_empty():
+			b.set("from_save", true)
+			b.set("sealed", bool(lair.get("sealed", false)))
 		main.world_add(b)
 		b.global_position = d["pos"] as Vector3
 		# Запас жизни ставится ПОСЛЕ входа в дерево: _ready() здания сам берёт
@@ -675,6 +699,9 @@ static func _make_building(id: String) -> Building:
 		"goblin_hut": return load("res://scripts/goblin/GoblinHut.gd").new()
 		"goblin_chief_hut": return load("res://scripts/goblin/GoblinChiefHut.gd").new()
 		"troll_lair": return load("res://scripts/goblin/TrollLair.gd").new()
+		"market":     return load("res://scripts/Market.gd").new()
+		"storehouse": return load("res://scripts/Storehouse.gd").new()
+		"goblin_forge": return load("res://scripts/economy/goblin_forge/GoblinForge.gd").new()
 	# Три дома — один скрипт, картинка по ключу (House.variant_id)
 	if _UCfg.is_house(id):
 		var h: Building = load("res://scripts/House.gd").new()

@@ -170,13 +170,15 @@ func _cloth_rect(tex: Texture2D, cloth_pred: Callable) -> Rect2i:
 func _a_banners() -> void:
 	print("\n═════ A. БОРДОВЫЙ ШТАНДАРТ ЭЛИТЫ ═════")
 	_BannerArtT.clear_cache()
-	var yellow := 0
+	# РАЗВОРОТ (ТЗ 30.10.2026): пятак ранга СИНИЙ, лычки цвета ступени —
+	# жёлтого на штандарте нет вовсе ниже золотых лычек (7-я ступень)
+	var yellow_lo := 0
 	for e in [1, 2, 3]:
-		for v in range(0, 8):
-			yellow += maxi(_yellow_px(_BannerArtT.elite_texture(e, v)), 0)
+		for v in range(0, 7):
+			yellow_lo += maxi(_yellow_px(_BannerArtT.elite_texture(e, v)), 0)
 	var relic_y: int = _yellow_px(GameManager.relic_mgr().relic_texture())
-	verdict("A1 на штандарте элиты и реликвии нет жёлтого", yellow == 0 and relic_y == 0,
-		"жёлтых пикселей %d, у реликвии %d" % [yellow, relic_y])
+	verdict("A1 жёлтого на штандарте нет ниже золотых лычек (и у реликвии)",
+		yellow_lo == 0 and relic_y == 0, "жёлтых %d, у реликвии %d" % [yellow_lo, relic_y])
 	# Размер: полотнище против прежнего штандарта (_render_vexillum)
 	var red_cloth := func(c: Color) -> bool: return c.a > 0.5 and c.r > 0.25 and c.g < 0.12 and c.b < 0.2
 	var old_r: Rect2i = _cloth_rect(_BannerArtT._render_vexillum(1), red_cloth)
@@ -184,20 +186,24 @@ func _a_banners() -> void:
 	verdict("A2 полотнище крупнее прежнего (~+20 % высоты) и шире",
 		float(new_r.size.y) >= float(old_r.size.y) * 1.15 and float(new_r.size.x) >= float(old_r.size.x) * 1.2,
 		"было %dx%d, стало %dx%d" % [old_r.size.x, old_r.size.y, new_r.size.x, new_r.size.y])
-	# Лычки: «Опытные» — белые полосы без синего, «Ветераны» — синяя плашка
-	var low := Rect2i(_BannerArtT.ELITE_POLE_X - 16, _BannerArtT.ELITE_TOP + _BannerArtT.ELITE_H - 30, 36, 30)
+	# Лычки (ТЗ 28.10.2026): пятак всегда жёлтый, «Опытные» — красные лычки,
+	# «Ветераны» — синие лычки, синей плашки-фона нет
+	var low := Rect2i(_BannerArtT.ELITE_POLE_X - 18, _BannerArtT.ELITE_TOP + _BannerArtT.ELITE_H - 34, 40, 34)
 	var white := func(c: Color) -> bool: return c.a > 0.5 and c.r > 0.9 and c.g > 0.9 and c.b > 0.85
-	var blue := func(c: Color) -> bool: return c.a > 0.5 and c.b > 0.4 and c.b > c.r + 0.2
+	var UC = preload("res://scripts/unit_stats_config.gd")
+	var near := func(c: Color, t: Color) -> bool: return c.a > 0.5 and absf(c.r - t.r) < 0.04 and absf(c.g - t.g) < 0.04 and absf(c.b - t.b) < 0.04
+	var plate := func(c: Color) -> bool: return near.call(c, _BannerArtT.ELITE_PLATE)
 	var t2: Texture2D = _BannerArtT.elite_texture(1, 2)
 	var t5: Texture2D = _BannerArtT.elite_texture(1, 5)
-	var t0: Texture2D = _BannerArtT.elite_texture(1, 0)
-	var w2: int = _count_px(t2, low, white)
-	var b2: int = _count_px(t2, low, blue)
-	var b5: int = _count_px(t5, low, blue)
-	var w0: int = _count_px(t0, low, white)
-	verdict("A3 «Опытные» — белые лычки внизу, «Ветераны» — синяя плашка",
-		w2 > w0 + 20 and b2 == 0 and b5 > 60,
-		"белых у Опытных %d (без ранга %d), синих у Опытных %d, у Ветеранов %d" % [w2, w0, b2, b5])
+	var t8: Texture2D = _BannerArtT.elite_texture(1, 8)
+	var p2: int = _count_px(t2, low, plate)
+	var w2: int = _count_px(t2, low, func(c): return near.call(c, UC.CHEV_WHITE))
+	var r5: int = _count_px(t5, low, func(c): return near.call(c, UC.CHEV_RED))
+	var g8: int = _count_px(t8, low, func(c): return near.call(c, UC.CHEV_ORANGE))
+	var r2: int = _count_px(t2, low, func(c): return near.call(c, UC.CHEV_RED))
+	verdict("A3 пятак синий; лычки белые у Опытных, красные у Ветеранов, оранжевые у Элиты (ТЗ 31.10)",
+		p2 > 100 and w2 > 30 and r5 > 30 and g8 > 30 and r2 == 0,
+		"синий пятак %d, белых %d, красных %d (у Опытных %d), оранжевых %d" % [p2, w2, r5, r2, g8])
 	# Римская цифра: I и II — разный рисунок середины
 	var mid := Rect2i(_BannerArtT.ELITE_POLE_X - 14, _BannerArtT.ELITE_TOP + 10, 30, 30)
 	var wi: int = _count_px(_BannerArtT.elite_texture(1, 0), mid, white)

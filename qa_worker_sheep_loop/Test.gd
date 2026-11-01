@@ -14,8 +14,10 @@ extends Node
 ##   B БРИГАДА   — четверо доедают свои туши у одного склада и РАЗХОДЯТСЯ по
 ##                 новым овцам, а не встают толпой.
 ##   C ОВЦА      — спрайт мельче прежнего ровно на 20 %.
-##   D ЗАГОН     — вдвое меньше, пропорция считается ПО ЭКРАНУ, стадии стройки
-##                 нет вовсе: ресурсы списаны, ограда встала готовой.
+##   D ЗАГОН     — вдвое меньше, пропорция считается ПО ЭКРАНУ. РАЗВОРОТ
+##                 30.10.2026 (ручка pen_construct): «Овцеферму» игрок строит
+##                 рабочими — заказ ставит площадку; ИИ по-прежнему ставит
+##                 готовую (instant_build). Ресурсы списаны в момент заказа.
 ##
 ## Числа — из конфигов (правило 10), ожидание — физкадрами (правило 11).
 ## Запуск: godot --headless --path . res://qa_worker_sheep_loop/Test.tscn
@@ -340,13 +342,13 @@ func _d_pen() -> void:
 		"%.3f против %.3f" % [on_screen, 192.0 / 256.0])
 	verdict("D3 по земле глубина БОЛЬШЕ ширины — иначе рисунок сплющен",
 		size.z > size.x, "%.1f против %.1f м" % [size.z, size.x])
-	verdict("D4 стадии стройки нет вовсе",
+	verdict("D4 у игрока стадия стройки есть, ИИ ставит готовую (разворот 30.10)",
 		bool(cfg.get("instant_build", false))
-			and absf(float(cfg.get("build_time", 1.0))) < 0.001,
+			and float(cfg.get("build_time", 0.0)) > 0.0,
 		"instant=%s, время %.1f с" % [str(cfg.get("instant_build", false)),
 			float(cfg.get("build_time", -1.0))])
 
-	# ── И ПОВЕДЕНЧЕСКИ: ЗАКАЗ СРАЗУ СТАВИТ ГОТОВУЮ ОГРАДУ ──────────────────
+	# ── И ПОВЕДЕНЧЕСКИ: ЗАКАЗ ИГРОКА СТАВИТ ПЛОЩАДКУ ОВЦЕФЕРМЫ ─────────────
 	var w: Worker = _spawn_worker(_castle.global_position + Vector3(-24.0, 0.0, 8.0))
 	await pframes(4)
 	var cost: Dictionary = GameManager.worker_buildings()["sheep_pen"].get("cost", {})
@@ -371,16 +373,16 @@ func _d_pen() -> void:
 	var pens: Array = get_tree().get_nodes_in_group("sheep_pens")
 	print("  загонов было %d, стало %d; стройплощадок было %d, стало %d" % [
 		pens0, pens.size(), sites0, _count_sites()])
-	verdict("D6 загон встал ГОТОВЫМ тем же кадром", pens.size() == pens0 + 1,
+	verdict("D6 готовой овцефермы тем же кадром нет", pens.size() == pens0,
 		"загонов %d" % pens.size())
-	verdict("D7 стройплощадка при этом не заводилась",
-		_count_sites() == sites0, "площадок %d" % _count_sites())
-	if pens.size() > pens0:
-		var pen = pens[pens.size() - 1]
-		verdict("D8 и это настоящий загон своей стороны, а не фундамент",
-			pen.has_method("accept_sheep")
-				and int(pen.get("faction")) == Constants.FACTION_PLAYER,
-			"принимает овец=%s" % str(pen.has_method("accept_sheep")))
+	verdict("D7 заведена площадка стройки",
+		_count_sites() == sites0 + 1, "площадок %d" % _count_sites())
+	var pen_site: Node = null
+	for b in get_tree().get_nodes_in_group(Constants.building_group(Constants.FACTION_PLAYER)):
+		if is_instance_valid(b) and b is _CSite and String(b.get("target_id")) == "sheep_pen":
+			pen_site = b
+	verdict("D8 и это площадка овцефермы своей стороны",
+		pen_site != null and int(pen_site.get("faction")) == Constants.FACTION_PLAYER)
 	_clear(w)
 
 # ═════════════════════════════════════════════════════════════════════════════
